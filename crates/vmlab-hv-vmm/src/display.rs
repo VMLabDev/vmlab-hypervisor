@@ -146,6 +146,61 @@ struct Input {
     shared: Weak<VmShared>,
     pointer: Mutex<vmlab_hv_devices::usb::PointerEvent>,
 }
+
+fn pointer_message(pointer: &mut vmlab_hv_devices::usb::PointerEvent, message: Message) {
+    pointer.wheel = 0;
+    match message {
+        Message::PointerAbs {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            pointer.x =
+                ((x as u64 * 32767) / width.saturating_sub(1).max(1) as u64).min(32767) as u16;
+            pointer.y =
+                ((y as u64 * 32767) / height.saturating_sub(1).max(1) as u64).min(32767) as u16;
+        }
+        Message::Buttons { mask } => {
+            pointer.buttons = ((mask & 0x19) | ((mask & 2) << 1) | ((mask & 4) >> 1)) as u8
+        }
+        Message::Scroll { dy, .. } => pointer.wheel = -dy.clamp(-127, 127) as i8,
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_buttons_and_scroll_match_usb_hid_conventions() {
+        let mut pointer = vmlab_hv_devices::usb::PointerEvent::default();
+        pointer_message(&mut pointer, Message::Buttons { mask: 2 });
+        assert_eq!(pointer.buttons, 4);
+        pointer_message(&mut pointer, Message::Buttons { mask: 4 });
+        assert_eq!(pointer.buttons, 2);
+        pointer_message(&mut pointer, Message::Scroll { dx: 0, dy: 1 });
+        assert_eq!(pointer.wheel, -1);
+        pointer_message(
+            &mut pointer,
+            Message::Scroll {
+                dx: 0,
+                dy: i32::MIN,
+            },
+        );
+        assert_eq!(pointer.wheel, 127);
+        pointer_message(
+            &mut pointer,
+            Message::PointerAbs {
+                x: 400,
+                y: 300,
+                width: 801,
+                height: 601,
+            },
+        );
+        assert_eq!((pointer.x, pointer.y, pointer.wheel), (16383, 16383, 0));
+    }
+}
 impl InputSink for Input {
     fn input(&self, message: Message) {
         let Some(shared) = self.shared.upgrade() else {
@@ -168,23 +223,7 @@ impl InputSink for Input {
             | Message::Buttons { .. }
             | Message::Scroll { .. }) => {
                 let mut pointer = self.pointer.lock();
-                pointer.wheel = 0;
-                match message {
-                    Message::PointerAbs {
-                        x,
-                        y,
-                        width,
-                        height,
-                    } => {
-                        pointer.x = ((x as u64 * 32767) / width.saturating_sub(1).max(1) as u64)
-                            .min(32767) as u16;
-                        pointer.y = ((y as u64 * 32767) / height.saturating_sub(1).max(1) as u64)
-                            .min(32767) as u16;
-                    }
-                    Message::Buttons { mask } => pointer.buttons = (mask & 31) as u8,
-                    Message::Scroll { dy, .. } => pointer.wheel = dy.clamp(-127, 127) as i8,
-                    _ => unreachable!(),
-                }
+                pointer_message(&mut pointer, message);
                 if let Some(xhci) = shared.xhci.lock().as_ref()
                     && let Err(e) = xhci.lock().inject_pointer(*pointer)
                 {
