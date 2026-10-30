@@ -16,6 +16,8 @@ diff = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(diff)
 import hv_capture
 import aml
+import capture
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
@@ -270,6 +272,32 @@ class DiffTests(unittest.TestCase):
 
 
 class HvCaptureTests(unittest.TestCase):
+    def test_modern_seabios_disk_boot_matches_production_profile_argv(self):
+        class Assets:
+            bios_disk = Path("/assets/bios-disk.img")
+        with tempfile.TemporaryDirectory(prefix="hwref-argv-") as tmp:
+            run = Path(tmp)
+            paths = capture.RunPaths(run, run, 1)
+            cfg = capture.CONFIGS["q35-seabios-linux-modern"]
+            with patch.object(capture, "sh"):
+                argv = capture.build_argv(cfg, paths, Assets(), run, "q35-seabios-linux-modern")
+            self.assertEqual(argv, [
+                "-name", "vmlab:hwref/q35-seabios-linux-modern",
+                "-machine", "q35", "-accel", "kvm", "-cpu", capture.CPU_HOST,
+                "-smp", "2", "-m", "4096M", "-display", "none",
+                "-vnc", f"unix:{paths.vnc_sock},share=ignore",
+                "-qmp", f"unix:{paths.qmp_sock},server=on,wait=off", "-monitor", "none",
+                "-serial", f"file:{run / 'serial.log'}",
+                "-chardev", f"socket,id=vagent0,path={paths.agent_sock},server=on,wait=off",
+                "-device", "virtio-serial-pci",
+                "-device", "virtserialport,chardev=vagent0,name=vmlab.agent.0",
+                "-blockdev", f"driver=qcow2,node-name=disk0,file.driver=file,file.filename={run / 'disk0.qcow2'}",
+                "-device", "virtio-blk-pci,drive=disk0,bootindex=50",
+                "-netdev", f"stream,id=net0,server=off,addr.type=unix,addr.path={paths.nic_sock[0]}",
+                "-device", "virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01",
+                "-device", "virtio-vga", "-usb", "-device", "usb-tablet", "-S",
+            ])
+
     def test_resume_uses_control_handshake_and_waits_past_events(self):
         with tempfile.TemporaryDirectory(prefix="hwref-control-test-") as tmp:
             path = Path(tmp) / "control.sock"

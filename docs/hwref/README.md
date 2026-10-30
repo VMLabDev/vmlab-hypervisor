@@ -14,14 +14,19 @@ Existing results for the selected configuration are replaced.
 
 ## Run the P2 differential
 
+The 2a reference is `q35-seabios-linux-modern`: disk boot, SeaBIOS, 2 vCPUs,
+4 GiB and virtio-vga, matching the Ubuntu 26.04 and AlmaLinux 10 templates.
+`q35-seabios-linux-generic` remains a historical direct-kernel fixture because
+firmware and transport regression tests consume its raw observations.
+
 Capture into fresh directories to preserve the reference data:
 
 ```sh
-python3 scripts/hwref/capture.py --output .scratch/hwref-a q35-seabios-linux-generic
-python3 scripts/hwref/capture.py --output .scratch/hwref-b q35-seabios-linux-generic
+python3 scripts/hwref/capture.py --output .scratch/hwref-a q35-seabios-linux-modern
+python3 scripts/hwref/capture.py --output .scratch/hwref-b q35-seabios-linux-modern
 python3 scripts/hwref/capture.py diff \
-  .scratch/hwref-a/q35-seabios-linux-generic \
-  .scratch/hwref-b/q35-seabios-linux-generic --no-allow-list
+  .scratch/hwref-a/q35-seabios-linux-modern \
+  .scratch/hwref-b/q35-seabios-linux-modern --no-allow-list
 ```
 
 An empty report and exit 0 mean the normalized observations match. Exit 1
@@ -37,7 +42,7 @@ python3 scripts/hwref/capture.py --backend vmlab-hv \
   --binary target/debug/vmlab-hv --machine /path/to/machine.json \
   --output .scratch/hwref-hv
 python3 scripts/hwref/capture.py diff \
-  .scratch/hwref-a/q35-seabios-linux-generic .scratch/hwref-hv
+  .scratch/hwref-a/q35-seabios-linux-modern .scratch/hwref-hv
 ```
 
 The description must select `machine = "q35"` and `boot.kind = "firmware"`.
@@ -60,10 +65,11 @@ and exit 0. A known rejection of q35 or `Boot::Firmware` also skips, with
 and incomplete archives fail. A skipped output has no `guest/` and cannot
 pass the diff command.
 
-New SeaBIOS captures boot the probe from a Syslinux FAT32 disk. They use
-SeaBIOS and SeaVGABIOS, disable the vapic ROM and NIC ROMs, and do not load
-QEMU's linuxboot ROMs. The checked-in Linux reference used direct-kernel boot.
-Its extra fw_cfg boot blobs remain visible differences against disk boots.
+New SeaBIOS captures boot the probe from a Syslinux FAT32 disk. The modern
+reference preserves production QEMU defaults, including its option ROMs;
+those ROMs are observations, never firmware supplied to vmlab-hv. The other
+capture configurations disable vapic and NIC ROMs. Disk boot needs no
+direct-kernel linuxboot ROM or fw_cfg boot blobs.
 OVMF captures use the same kernel and initramfs in a UKI. The unsigned probe
 requires setup-mode VARS, as in the checked-in OVMF references.
 

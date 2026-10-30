@@ -1,0 +1,29 @@
+== 00:00 ==
+PNP0303
+state = active
+io 0x60-0x60
+io 0x64-0x64
+irq 1
+== 00:01 ==
+PNP0f13
+state = active
+irq 12
+== 00:02 ==
+PNP0400
+state = active
+io 0x378-0x37f
+irq 7
+== 00:03 ==
+PNP0501
+state = active
+io 0x3f8-0x3ff
+irq 4
+== 00:04 ==
+PNP0b00
+state = active
+io 0x70-0x77
+irq 8
+== 00:05 ==
+PNP0c01
+state = active
+mem 0xb0000000-0xbfffffff window

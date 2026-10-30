@@ -1,0 +1,10 @@
+Bus 003 Device 001: ID 1d6b:0001 Linux 6.12.114-0-virt uhci_hcd UHCI Host Controller
+Bus 001 Device 001: ID 1d6b:0002 Linux 6.12.114-0-virt ehci_hcd EHCI Host Controller
+Bus 001 Device 002: ID 0627:0001 QEMU QEMU USB Tablet
+Bus 004 Device 001: ID 1d6b:0001 Linux 6.12.114-0-virt uhci_hcd UHCI Host Controller
+Bus 002 Device 001: ID 1d6b:0001 Linux 6.12.114-0-virt uhci_hcd UHCI Host Controller
+== /sys/bus/usb/devices/1-1 QEMU QEMU USB Tablet [0627:0001]
+== /sys/bus/usb/devices/usb1 Linux 6.12.114-0-virt ehci_hcd EHCI Host Controller [1d6b:0002]
+== /sys/bus/usb/devices/usb2 Linux 6.12.114-0-virt uhci_hcd UHCI Host Controller [1d6b:0001]
+== /sys/bus/usb/devices/usb3 Linux 6.12.114-0-virt uhci_hcd UHCI Host Controller [1d6b:0001]
+== /sys/bus/usb/devices/usb4 Linux 6.12.114-0-virt uhci_hcd UHCI Host Controller [1d6b:0001]

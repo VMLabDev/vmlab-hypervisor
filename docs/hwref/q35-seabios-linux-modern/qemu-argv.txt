@@ -1,0 +1,50 @@
+# QEMU argv (argv[0] then one argument per line), a mirror of
+# vmlab's src/qemu/cmdline.rs build_args() for this profile shape.
+/usr/bin/qemu-system-x86_64
+-name
+vmlab:hwref/q35-seabios-linux-modern
+-machine
+q35
+-accel
+kvm
+-cpu
+host,vmx=off,svm=off
+-smp
+2
+-m
+4096M
+-display
+none
+-vnc
+unix:/tmp/hwref-2qlsry_3/vnc.sock,share=ignore
+-qmp
+unix:/tmp/hwref-2qlsry_3/qmp.sock,server=on,wait=off
+-monitor
+none
+-serial
+file:/tmp/p2-machine-check.csabWd/qemu-modern2/q35-seabios-linux-modern/serial.log
+-chardev
+socket,id=vagent0,path=/tmp/hwref-2qlsry_3/agent.sock,server=on,wait=off
+-device
+virtio-serial-pci
+-device
+virtserialport,chardev=vagent0,name=vmlab.agent.0
+-blockdev
+driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-2qlsry_3/disk0.qcow2
+-device
+virtio-blk-pci,drive=disk0,bootindex=50
+-netdev
+stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-2qlsry_3/nic0.sock
+-device
+virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01
+-device
+virtio-vga
+-usb
+-device
+usb-tablet
+-S
+
+# boots the probe kernel and initrd from a Syslinux FAT32 disk.
+
+# one line:
+/usr/bin/qemu-system-x86_64 -name vmlab:hwref/q35-seabios-linux-modern -machine q35 -accel kvm -cpu host,vmx=off,svm=off -smp 2 -m 4096M -display none -vnc unix:/tmp/hwref-2qlsry_3/vnc.sock,share=ignore -qmp unix:/tmp/hwref-2qlsry_3/qmp.sock,server=on,wait=off -monitor none -serial file:/tmp/p2-machine-check.csabWd/qemu-modern2/q35-seabios-linux-modern/serial.log -chardev socket,id=vagent0,path=/tmp/hwref-2qlsry_3/agent.sock,server=on,wait=off -device virtio-serial-pci -device virtserialport,chardev=vagent0,name=vmlab.agent.0 -blockdev driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-2qlsry_3/disk0.qcow2 -device virtio-blk-pci,drive=disk0,bootindex=50 -netdev stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-2qlsry_3/nic0.sock -device virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01 -device virtio-vga -usb -device usb-tablet -S

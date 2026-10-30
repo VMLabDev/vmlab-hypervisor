@@ -611,9 +611,11 @@ class RunPaths:
 
 def build_argv(cfg: dict, p: RunPaths, assets: Assets, run: Path, cfg_name: str) -> list[str]:
     a: list[str] = []
-    a.extend(["-global", "kvm-apic.vapic=false"])
-    if cfg["machine"] == "q35" and "firmware" not in cfg:
-        arg(a, "bios", "/usr/share/qemu/bios-256k.bin")
+    exact_profile = cfg.get("exact_profile", False)
+    if not exact_profile:
+        a.extend(["-global", "kvm-apic.vapic=false"])
+        if cfg["machine"] == "q35" and "firmware" not in cfg:
+            arg(a, "bios", "/usr/share/qemu/bios-256k.bin")
     arg(a, "name", f"vmlab:hwref/{cfg_name}")                    # cmdline.rs:439
     arg(a, "machine", cfg["machine"])                            # :448
     arg(a, "accel", "kvm")                                       # :471
@@ -684,7 +686,8 @@ def build_argv(cfg: dict, p: RunPaths, assets: Assets, run: Path, cfg_name: str)
 
     for i, (model, mac) in enumerate(cfg["nics"]):               # :719-745
         arg(a, "netdev", f"stream,id=net{i},server=off,addr.type=unix,addr.path={p.nic_sock[i]}")
-        arg(a, "device", f"{model},netdev=net{i},mac={mac},romfile=")
+        rom = "" if exact_profile else ",romfile="
+        arg(a, "device", f"{model},netdev=net{i},mac={mac}{rom}")
     if not cfg["nics"]:
         a.extend(["-nic", "none"])
 
@@ -694,7 +697,7 @@ def build_argv(cfg: dict, p: RunPaths, assets: Assets, run: Path, cfg_name: str)
         arg(a, "device", "tpm-tis,tpmdev=tpm0")
 
     display = cfg["display"]
-    if display == "VGA":
+    if display == "VGA" and not exact_profile:
         display += ",romfile=/usr/share/qemu/vgabios-stdvga.bin"
     arg(a, "device", display)                                    # :815-818
     a.extend(["-usb"])                                           # :859-865 (default input)
@@ -713,6 +716,15 @@ def build_argv(cfg: dict, p: RunPaths, assets: Assets, run: Path, cfg_name: str)
 
 
 CONFIGS: dict[str, dict] = {
+    "q35-seabios-linux-modern": {
+        "title": "q35 + SeaBIOS disk boot, linux-modern template configuration",
+        "profile": "linux-modern with firmware = seabios (Ubuntu 26.04 / AlmaLinux 10)",
+        "machine": "q35", "smp": 2, "mem": 4096, "cpu": CPU_HOST,
+        "agent": "virtio",
+        "nics": [("virtio-net-pci", "52:54:00:00:00:01")],
+        "display": "virtio-vga", "usb": False,
+        "boot": "bios-disk", "stream": "agent", "exact_profile": True,
+    },
     # (a) linux-generic: q35 + SeaBIOS + virtio — vmlab's conservative Linux
     # profile. Default input devices: `-usb` (the ICH9 UHCI/EHCI set on q35)
     # plus usb-tablet. The requested capture also sets usb=true for xHCI.
@@ -1094,9 +1106,19 @@ def write_config_readme(cfg_name: str, cfg: dict, ok: bool, reason: str) -> None
     else:
         notes += [
             "- Boots the same probe kernel and initramfs from a Syslinux FAT32 disk",
-            "  through SeaBIOS. QEMU linuxboot and kvmvapic option ROMs are disabled.",
-            "  The checked-in direct-kernel reference has additional fw_cfg boot blobs.",
+            "  through SeaBIOS, with no direct-kernel fw_cfg boot blobs.",
         ]
+        if cfg.get("exact_profile"):
+            notes += [
+                "- Uses linux-modern's production argv with the templates' SeaBIOS",
+                "  override: 2 vCPUs, 4 GiB, virtio-vga, default PS/2 input and",
+                "  ICH9 USB tablet. No ROM, BIOS, CPU or USB argument overrides.",
+                "  Socket paths, lab/VM name, MAC and probe disk path are run inputs.",
+                "- The probe's linux-virt kernel has no virtio_gpu module; PCI config",
+                "  still records the virtio-vga device and firmware-selected BARs.",
+            ]
+        else:
+            notes.append("- QEMU linuxboot and kvmvapic option ROMs are disabled.")
     if cfg_name == "q35-ovmf-win11-secureboot":
         notes += [
             "- **Secure boot is captured in setup mode, not enforcing.** The booted",
