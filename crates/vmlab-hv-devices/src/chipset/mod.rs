@@ -6,5 +6,8 @@
 //! across snapshot restore; only guest-visible state is serialized.
 
 pub mod hpet;
+pub mod isa;
 pub mod lpc;
+pub mod ps2;
 pub mod rtc;
+pub mod smbus;
