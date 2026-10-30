@@ -1016,6 +1016,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vmlab-hv-firmware"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vm-memory",
+ "vmlab-hv-devices",
+]
+
+[[package]]
 name = "vmlab-hv-proto"
 version = "0.1.0"
 dependencies = [
