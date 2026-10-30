@@ -1,10 +1,12 @@
 import importlib.util
+import io
 import re
 import shutil
 import struct
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 
@@ -14,6 +16,18 @@ SPEC.loader.exec_module(capture)
 
 
 class ParserTests(unittest.TestCase):
+    def test_qmp_closes_failed_connections_and_the_command_stream(self):
+        failed, connected, stream = Mock(), Mock(), Mock()
+        failed.connect.side_effect = ConnectionRefusedError()
+        connected.makefile.return_value = stream
+        stream.readline.side_effect = [b'{"QMP": {}}\n', b'{"return": {}}\n', b'{"return": {}}\n']
+        with patch.object(capture.socket, "socket", side_effect=[failed, connected]), \
+             patch.object(capture.time, "sleep"):
+            capture.qmp_cont(Path("unused.sock"), io.BytesIO())
+        failed.close.assert_called_once()
+        stream.close.assert_called_once()
+        connected.close.assert_called_once()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="hwref-test-")
         self.addCleanup(self.tmp.cleanup)

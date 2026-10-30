@@ -892,33 +892,39 @@ def qmp_cont(sock: Path, log) -> None:
     deadline = time.time() + 20
     last: Exception | None = None
     while time.time() < deadline:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.settimeout(2)
             s.connect(str(sock))
             break
         except OSError as e:
+            s.close()
             last = e
             time.sleep(0.1)
     else:
         raise RuntimeError(f"QMP socket never came up: {last}")
-    s.settimeout(10)
-    f = s.makefile("rwb")
-    log.write(f.readline())  # greeting
-    for cmd in ("qmp_capabilities", "cont"):
-        f.write(json.dumps({"execute": cmd}).encode() + b"\n")
-        f.flush()
-        while True:
-            line = f.readline()
-            if not line:
-                raise RuntimeError(f"QMP closed during {cmd}")
-            log.write(line)
-            msg = json.loads(line)
-            if "return" in msg or "error" in msg:
-                if "error" in msg:
-                    raise RuntimeError(f"QMP {cmd}: {msg['error']}")
-                break
-    s.close()
+    try:
+        s.settimeout(10)
+        f = s.makefile("rwb")
+        try:
+            log.write(f.readline())  # greeting
+            for cmd in ("qmp_capabilities", "cont"):
+                f.write(json.dumps({"execute": cmd}).encode() + b"\n")
+                f.flush()
+                while True:
+                    line = f.readline()
+                    if not line:
+                        raise RuntimeError(f"QMP closed during {cmd}")
+                    log.write(line)
+                    msg = json.loads(line)
+                    if "return" in msg or "error" in msg:
+                        if "error" in msg:
+                            raise RuntimeError(f"QMP {cmd}: {msg['error']}")
+                        break
+        finally:
+            f.close()
+    finally:
+        s.close()
 
 
 def decode_stream(raw: bytes) -> bytes | None:
