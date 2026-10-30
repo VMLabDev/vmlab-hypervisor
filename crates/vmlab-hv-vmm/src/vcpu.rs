@@ -77,8 +77,14 @@ impl VcpuThread {
 /// The KVM_RUN loop of one vCPU. The fd is locked across the ioctl only, so
 /// the snapshot path can hold it while this thread is parked.
 fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
+    let mut pending_completion = false;
     loop {
-        if !shared.should_run() {
+        let running = shared.should_run();
+        // KVM_EXIT_IO/MMIO finish on the next KVM_RUN. Their pending state
+        // is not included in GET_REGS or migration state (KVM API section 5).
+        // Complete before parking, without executing another instruction.
+        // A split MMIO access can exit again, so keep dispatching until done.
+        if !running && !pending_completion {
             if shared.exited() {
                 return;
             }
@@ -89,11 +95,18 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
         // the dispatch; nothing else takes this mutex while the thread runs
         // (the snapshot path waits for the thread to park first).
         let mut guard = vcpu.lock();
-        guard.set_kvm_immediate_exit(0);
+        guard.set_kvm_immediate_exit(u8::from(!running));
         let run_ptr = guard.get_kvm_run() as *const kvm_bindings::kvm_run;
         let permit = shared.enter_kvm();
         let result = guard.run();
         drop(permit);
+        pending_completion = matches!(
+            &result,
+            Ok(VcpuExit::IoIn(..)
+                | VcpuExit::IoOut(..)
+                | VcpuExit::MmioRead(..)
+                | VcpuExit::MmioWrite(..))
+        );
         let width = if matches!(&result, Ok(VcpuExit::IoIn(..) | VcpuExit::IoOut(..))) {
             // SAFETY: KVM_EXIT_IO selects this union member. run_ptr names
             // the stable vCPU mmap; size is metadata disjoint from the I/O
@@ -132,6 +145,7 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                         return;
                     }
                     guard.set_kvm_immediate_exit(0);
+                    pending_completion = false;
                     if let Err(e) = guard.smi() {
                         shared.request_exit(crate::vm::ExitReason::Error(format!("KVM_SMI: {e}")));
                         return;
