@@ -8,6 +8,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vmlab_hv_sail_ir::parse(&document.to_string())?.definitions,
         document.definitions
     );
+    let canonical = vmlab_hv_sail_ir::format(&document.definitions);
+    assert_eq!(
+        vmlab_hv_sail_ir::parse(&canonical)?.definitions,
+        document.definitions
+    );
     println!(
         "{} bytes, {} definitions, {:?}",
         source.len(),

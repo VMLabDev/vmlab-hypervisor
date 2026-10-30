@@ -7,5 +7,10 @@ libfuzzer_sys::fuzz_target!(|bytes: &[u8]| {
         assert_eq!(source, rendered);
         let reparsed = vmlab_hv_sail_ir::parse(&rendered).unwrap();
         assert_eq!(document.definitions, reparsed.definitions);
+        let canonical = vmlab_hv_sail_ir::format(&document.definitions);
+        assert_eq!(
+            document.definitions,
+            vmlab_hv_sail_ir::parse(&canonical).unwrap().definitions
+        );
     }
 });

@@ -1,6 +1,8 @@
 //! Textual Jib syntax. Identifiers retain Sail's mangling; widths are not truncated.
 use serde::{Deserialize, Serialize};
 use std::fmt;
+mod format;
+pub use format::format;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Type {
@@ -735,6 +737,10 @@ mod tests {
         assert_eq!(doc.to_string(), source);
         assert_eq!(
             parse(&doc.to_string()).unwrap().definitions,
+            doc.definitions
+        );
+        assert_eq!(
+            parse(&format(&doc.definitions)).unwrap().definitions,
             doc.definitions
         );
     }
