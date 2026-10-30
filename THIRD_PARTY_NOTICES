@@ -3,4 +3,10 @@ Third-party code included in this repository
 Each entry names the file or directory, its origin, and its licence. The licence
 text of each origin follows its entry.
 
-(none yet)
+crates/vmlab-hv-devices/src/virtio/gpu/renderer.rs adapts command dispatch,
+resource operations and fence-ring tracking from crosvm's
+devices/src/virtio/gpu/mod.rs and virtio_gpu.rs at revision
+ad804a6ecf1d3c4337f18b56092fc54d8ca574fa, Copyright 2018 The ChromiumOS
+Authors. BSD-3-Clause; the complete licence is in LICENSE.crosvm.
+
+rutabaga_gfx 0.1.80 and magma-gpu 0.1.80 are dependencies, not copied code.
