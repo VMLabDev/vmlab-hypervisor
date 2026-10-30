@@ -1018,6 +1018,8 @@ dependencies = [
  "libpulse-binding",
  "parking_lot",
  "pipewire",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "vhost",

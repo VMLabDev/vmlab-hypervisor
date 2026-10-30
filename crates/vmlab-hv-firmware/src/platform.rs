@@ -131,7 +131,7 @@ pub fn ancillary_files(
         bootorder.push(0);
     }
     let smbios = smbios::generate_fw_cfg(platform, &options.smbios)?;
-    Ok(vec![
+    let mut files = vec![
         ("etc/e820".into(), e820),
         ("bootorder".into(), bootorder),
         (
@@ -145,5 +145,10 @@ pub fn ancillary_files(
         ("etc/smbios/smbios-anchor".into(), smbios.anchor),
         ("etc/smbios/smbios-tables".into(), smbios.tables),
         ("bios-geometry".into(), Vec::new()),
-    ])
+    ];
+    if platform.tpm {
+        files.push(("etc/tpm/config".into(), vec![0, 0x50, 0xd4, 0xfe, 2, 1]));
+        files.push(("etc/tpm/log".into(), vec![0; 0x10000]));
+    }
+    Ok(files)
 }

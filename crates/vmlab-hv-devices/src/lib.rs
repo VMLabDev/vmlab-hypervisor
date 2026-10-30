@@ -16,6 +16,7 @@ pub mod display;
 pub mod hda;
 pub mod pflash;
 pub mod serial;
+pub mod tpm;
 pub mod usb;
 pub mod virtio;
 
