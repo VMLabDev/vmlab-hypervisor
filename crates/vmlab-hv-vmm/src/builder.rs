@@ -464,24 +464,41 @@ pub fn build(
     }
 
     let vga = if let Some(display) = &desc.display {
-        if display.device != vmlab_hv_proto::machine::DisplayDevice::StdVga {
-            return Err(VmmError::InvalidMachine(
-                "virtio-vga requires phase 2c".into(),
-            ));
-        }
+        let virtio = display.device == vmlab_hv_proto::machine::DisplayDevice::VirtioVga;
         let path = display
             .rom
             .as_deref()
-            .unwrap_or(std::path::Path::new("/usr/share/qemu/vgabios-stdvga.bin"));
+            .unwrap_or(std::path::Path::new(if virtio {
+                "/usr/share/qemu/vgabios-virtio.bin"
+            } else {
+                "/usr/share/qemu/vgabios-stdvga.bin"
+            }));
         let rom = std::fs::read(path)
             .map_err(|e| VmmError::Other(format!("reading VGA ROM {}: {e}", path.display())))?;
-        let vga = Arc::new(Mutex::new(
-            vmlab_hv_devices::display::StandardVga::new("vga", &rom)
+        Some(if virtio {
+            let transport = wiring(Some(display.pci), 3, false)?;
+            let vga = Arc::new(Mutex::new(
+                vmlab_hv_devices::display::virtio_vga::VirtioVga::new(
+                    "vga",
+                    &rom,
+                    ram.mem.clone(),
+                    Some(transport.msi),
+                    transport.intx,
+                )
                 .map_err(|e| VmmError::Other(e.to_string()))?,
-        ));
-        place(vga.clone(), Some(display.pci))?;
-        snap_nodes.push(DeviceNode::Plain(vga.clone()));
-        Some(vga)
+            ));
+            place(vga.clone(), Some(display.pci))?;
+            snap_nodes.push(DeviceNode::Plain(vga.clone()));
+            crate::display::Video::Virtio(vga)
+        } else {
+            let vga = Arc::new(Mutex::new(
+                vmlab_hv_devices::display::StandardVga::new("vga", &rom)
+                    .map_err(|e| VmmError::Other(e.to_string()))?,
+            ));
+            place(vga.clone(), Some(display.pci))?;
+            snap_nodes.push(DeviceNode::Plain(vga.clone()));
+            crate::display::Video::Standard(vga)
+        })
     } else {
         None
     };
@@ -659,10 +676,11 @@ pub fn build(
                 .map(|(device, function)| vmlab_hv_firmware::PciDevice {
                     device,
                     function,
-                    vga: desc
-                        .display
-                        .as_ref()
-                        .is_some_and(|d| d.pci.device == device && d.pci.function == function),
+                    vga: desc.display.as_ref().is_some_and(|d| {
+                        d.device == vmlab_hv_proto::machine::DisplayDevice::StdVga
+                            && d.pci.device == device
+                            && d.pci.function == function
+                    }),
                 })
                 .collect(),
             ecam_base: 0xb0000000,

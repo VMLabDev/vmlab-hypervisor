@@ -95,7 +95,7 @@ pub struct VmShared {
     snapshot_op: Mutex<()>,
     pub(crate) mch: Mutex<Option<Arc<Mutex<crate::q35::Mch>>>>,
     pub(crate) chipset: Mutex<Option<Arc<crate::chipset::Chipset>>>,
-    pub(crate) vga: Mutex<Option<Arc<Mutex<vmlab_hv_devices::display::StandardVga>>>>,
+    pub(crate) vga: Mutex<Option<crate::display::Video>>,
     pub(crate) xhci: Mutex<Option<Arc<Mutex<vmlab_hv_devices::usb::XhciController>>>>,
 }
 
@@ -404,7 +404,7 @@ impl VmShared {
         if matches!(port, 0x3b0..=0x3df | 0x1ce..=0x1d0)
             && let Some(vga) = self.vga.lock().as_ref()
         {
-            vga.lock().io_read(port, data);
+            vga.io_read(port, data);
             return;
         }
         if let Some(chipset) = self.chipset.lock().as_ref()
@@ -431,7 +431,7 @@ impl VmShared {
         if matches!(port, 0x3b0..=0x3df | 0x1ce..=0x1d0)
             && let Some(vga) = self.vga.lock().as_ref()
         {
-            vga.lock().io_write(port, data);
+            vga.io_write(port, data);
             return;
         }
         let handled = self
@@ -472,7 +472,7 @@ impl VmShared {
         if (0xa0000..0xc0000).contains(&addr)
             && let Some(vga) = self.vga.lock().as_ref()
         {
-            vga.lock().legacy_read(addr - 0xa0000, data);
+            vga.legacy_read(addr - 0xa0000, data);
             return;
         }
         if let Some(offset) = self.ecam_offset(addr) {
@@ -493,7 +493,7 @@ impl VmShared {
         if (0xa0000..0xc0000).contains(&addr)
             && let Some(vga) = self.vga.lock().as_ref()
         {
-            vga.lock().legacy_write(addr - 0xa0000, data);
+            vga.legacy_write(addr - 0xa0000, data);
             return;
         }
         if let Some(offset) = self.ecam_offset(addr) {
@@ -534,7 +534,7 @@ impl VmShared {
         let address = root
             .addresses()
             .into_iter()
-            .find(|&(slot, function)| root.config_read(0, slot, function, 0) == 0x11111234);
+            .find(|&(slot, function)| root.config_read(0, slot, function, 0) == vga.pci_id());
         let base = address.and_then(|(slot, function)| {
             let decoded = root.config_read(0, slot, function, 1) & 2 != 0;
             root.save_bar_states()
@@ -545,7 +545,7 @@ impl VmShared {
                     decoded
                         && !sizing
                         && *base >= 0x80000000
-                        && *base + vmlab_hv_devices::display::VRAM_SIZE as u64 <= 0xfec00000
+                        && *base + vga.framebuffer_size() as u64 <= 0xfec00000
                 })
                 .map(|(base, _)| base)
         });
@@ -553,14 +553,14 @@ impl VmShared {
         let base = base.filter(|base| {
             self.ecam_offset(*base).is_none()
                 && self
-                    .ecam_offset(*base + vmlab_hv_devices::display::VRAM_SIZE as u64 - 1)
+                    .ecam_offset(*base + vga.framebuffer_size() as u64 - 1)
                     .is_none()
         });
         let mut mapped = self.vga_mapping.lock();
         if *mapped == base {
             return Ok(());
         }
-        let memory = vga.lock().linear_framebuffer();
+        let memory = vga.linear_framebuffer();
         let host = memory
             .get_host_address(GuestAddress(0))
             .map_err(|e| VmmError::Memory(e.to_string()))? as u64;
@@ -578,7 +578,7 @@ impl VmShared {
                 let region = kvm_bindings::kvm_userspace_memory_region {
                     slot: address_space | 128,
                     guest_phys_addr: base,
-                    memory_size: vmlab_hv_devices::display::VRAM_SIZE as u64,
+                    memory_size: vga.framebuffer_size() as u64,
                     userspace_addr: host,
                     flags: kvm_bindings::KVM_MEM_LOG_DIRTY_PAGES,
                 };
@@ -597,7 +597,7 @@ impl VmShared {
             && [128, (1 << 16) | 128].into_iter().any(|slot| {
                 self.kvm
                     .vm
-                    .get_dirty_log(slot, vmlab_hv_devices::display::VRAM_SIZE)
+                    .get_dirty_log(slot, self.vga.lock().as_ref().unwrap().framebuffer_size())
                     .map_or(true, |bits| bits.into_iter().any(|word| word != 0))
             })
     }
@@ -634,6 +634,11 @@ impl VmShared {
             if let Some(display) = self.display.lock().as_ref() {
                 if let Err(e) = display.publish() {
                     eprintln!("display frame: {e}");
+                }
+                if let Some(vga) = self.vga.lock().as_ref()
+                    && let Err(e) = display.set_cursor(vga.cursor())
+                {
+                    eprintln!("display cursor: {e}");
                 }
                 if let Some(chipset) = self.chipset.lock().as_ref() {
                     display.set_leds(chipset.ps2.lock().leds() as u32);
@@ -842,7 +847,7 @@ impl Vm {
             drop(root);
             if let Some(vga) = self.shared.vga.lock().as_ref() {
                 let mut text = [0; 4000];
-                vga.lock().legacy_read(0x18000, &mut text);
+                vga.legacy_read(0x18000, &mut text);
                 let text: Vec<_> = text
                     .iter()
                     .step_by(2)

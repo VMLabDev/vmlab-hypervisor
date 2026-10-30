@@ -97,7 +97,7 @@ fn q35_seabios_banner_through_control_socket() {
         log.push_str(&String::from_utf8_lossy(&serial.lock()));
         if let Some(vga) = handle.shared().vga.lock().as_ref() {
             let mut text = [0; 4000];
-            vga.lock().legacy_read(0x18000, &mut text);
+            vga.legacy_read(0x18000, &mut text);
             log.push_str(&String::from_utf8_lossy(
                 &text.iter().step_by(2).copied().collect::<Vec<_>>(),
             ));

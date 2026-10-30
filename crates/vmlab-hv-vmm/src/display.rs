@@ -10,6 +10,90 @@ use vmlab_hv_display::{DisplayServer, Frame, FrameSource, InputSink, Message, Pi
 
 use crate::{error::VmmError, vm::VmShared};
 
+#[derive(Clone)]
+pub(crate) enum Video {
+    Standard(Arc<Mutex<vmlab_hv_devices::display::StandardVga>>),
+    Virtio(Arc<Mutex<vmlab_hv_devices::display::virtio_vga::VirtioVga>>),
+}
+
+impl Video {
+    pub(crate) fn io_read(&self, port: u16, data: &mut [u8]) -> () {
+        match self {
+            Self::Standard(device) => device.lock().io_read(port, data),
+            Self::Virtio(device) => device.lock().io_read(port, data),
+        }
+    }
+    pub(crate) fn io_write(&self, port: u16, data: &[u8]) -> () {
+        match self {
+            Self::Standard(device) => device.lock().io_write(port, data),
+            Self::Virtio(device) => device.lock().io_write(port, data),
+        }
+    }
+    pub(crate) fn legacy_read(&self, offset: u64, data: &mut [u8]) -> () {
+        match self {
+            Self::Standard(device) => device.lock().legacy_read(offset, data),
+            Self::Virtio(device) => device.lock().legacy_read(offset, data),
+        }
+    }
+    pub(crate) fn legacy_write(&self, offset: u64, data: &[u8]) -> () {
+        match self {
+            Self::Standard(device) => device.lock().legacy_write(offset, data),
+            Self::Virtio(device) => device.lock().legacy_write(offset, data),
+        }
+    }
+    pub(crate) fn frame(&self) -> vmlab_hv_devices::display::Frame {
+        match self {
+            Self::Standard(device) => device.lock().frame(),
+            Self::Virtio(device) => device.lock().frame(),
+        }
+    }
+    pub(crate) fn linear_framebuffer(&self) -> vmlab_hv_devices::GuestMemory {
+        match self {
+            Self::Standard(device) => device.lock().linear_framebuffer(),
+            Self::Virtio(device) => device.lock().linear_framebuffer(),
+        }
+    }
+    pub(crate) fn mark_framebuffer_dirty(&self) -> () {
+        match self {
+            Self::Standard(device) => device.lock().mark_framebuffer_dirty(),
+            Self::Virtio(device) => device.lock().mark_framebuffer_dirty(),
+        }
+    }
+    pub(crate) fn framebuffer_size(&self) -> usize {
+        match self {
+            Self::Standard(_) => 16 << 20,
+            Self::Virtio(_) => 8 << 20,
+        }
+    }
+    pub(crate) fn pci_id(&self) -> u32 {
+        match self {
+            Self::Standard(_) => 0x11111234,
+            Self::Virtio(_) => 0x10501af4,
+        }
+    }
+    pub(crate) fn cursor(&self) -> vmlab_hv_display::Cursor {
+        let Self::Virtio(device) = self else {
+            return Default::default();
+        };
+        let c = device.lock().cursor();
+        vmlab_hv_display::Cursor {
+            width: c.width,
+            height: c.height,
+            hot_x: c.hot_x,
+            hot_y: c.hot_y,
+            argb: c.pixels,
+            x: c.x.min(i32::MAX as u32) as i32,
+            y: c.y.min(i32::MAX as u32) as i32,
+            visible: c.visible,
+        }
+    }
+    pub(crate) fn request_size(&self, width: u32, height: u32) {
+        if let Self::Virtio(device) = self {
+            let _ = device.lock().request_size(width, height);
+        }
+    }
+}
+
 struct Source(Weak<VmShared>);
 impl FrameSource for Source {
     fn frame(&self) -> io::Result<Frame> {
@@ -24,7 +108,6 @@ impl FrameSource for Source {
             .ok_or_else(|| io::Error::other("machine has no VGA"))?;
         let dirty = shared.vga_framebuffer_dirty();
         let frame = {
-            let mut vga = vga.lock();
             if dirty {
                 vga.mark_framebuffer_dirty();
             }
@@ -74,6 +157,11 @@ impl InputSink for Input {
                     && let Err(e) = chipset.ps2.lock().inject_key(&qcode, down)
                 {
                     eprintln!("display key: {e}");
+                }
+            }
+            Message::RequestSize { width, height } => {
+                if let Some(vga) = shared.vga.lock().as_ref() {
+                    vga.request_size(width, height);
                 }
             }
             message @ (Message::PointerAbs { .. }

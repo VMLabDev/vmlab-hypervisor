@@ -47,7 +47,7 @@ fn boot_template(
         return;
     }
     if !Path::new("/usr/share/qemu/bios-256k.bin").is_file()
-        || !Path::new("/usr/share/qemu/vgabios-stdvga.bin").is_file()
+        || !Path::new("/usr/share/qemu/vgabios-virtio.bin").is_file()
     {
         eprintln!("skipping {name}: SeaBIOS or SeaVGABIOS is not installed");
         return;
@@ -74,7 +74,7 @@ fn boot_template(
         "disks":[{"id":"disk0", "pci":{"bus":0,"device":2,"function":0}, "path":disk,"format":"qcow2","read_only":false,"vmstate":true}],
         "console_pci":{"bus":0,"device":1,"function":0},
         "ahci_pci":{"bus":0,"device":31,"function":2},
-        "display":{"device":"std-vga","pci":{"bus":0,"device":4,"function":0},"rom":null},
+        "display":{"device":"virtio-vga","pci":{"bus":0,"device":4,"function":0},"rom":null},
         "tablet":{"bus":0,"device":5,"function":0},
         "ports":[{"name":"vmlab.agent.0", "socket":agent}], "nics":[],"serial_log":serial
     });
