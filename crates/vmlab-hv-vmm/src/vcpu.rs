@@ -99,13 +99,13 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
         // the dispatch; nothing else takes this mutex while the thread runs
         // (the snapshot path waits for the thread to park first).
         let mut guard = vcpu.lock();
-        if running
-            && !pending_completion
-            && shared.take_pending_smi(id)
-            && let Err(e) = crate::smm::inject_smi(&guard)
-        {
-            shared.request_exit(crate::vm::ExitReason::Error(e.to_string()));
-            return;
+        if running && !pending_completion && shared.has_pending_smi(id) {
+            if let Err(e) = crate::smm::inject_smi(&guard) {
+                shared.request_exit(crate::vm::ExitReason::Error(e.to_string()));
+                return;
+            }
+            shared.take_pending_smi(id);
+            shared.wait_smi_delivery();
         }
         guard.set_kvm_immediate_exit(u8::from(!running));
         let run_ptr = guard.get_kvm_run() as *const kvm_bindings::kvm_run;
@@ -158,11 +158,15 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                     }
                     guard.set_kvm_immediate_exit(0);
                     pending_completion = false;
-                    if shared.dispatch_smi(id)
-                        && let Err(e) = guard.smi()
-                    {
-                        shared.request_exit(crate::vm::ExitReason::Error(format!("KVM_SMI: {e}")));
-                        return;
+                    if shared.dispatch_smi(id) {
+                        if let Err(e) = guard.smi() {
+                            shared.request_exit(crate::vm::ExitReason::Error(format!(
+                                "KVM_SMI: {e}"
+                            )));
+                            return;
+                        }
+                        shared.take_pending_smi(id);
+                        shared.wait_smi_delivery();
                     }
                 }
             }

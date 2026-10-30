@@ -171,7 +171,7 @@ fn boot_template(
         "tablet":{"bus":0,"device":5,"function":0},
         "ports":[{"name":"vmlab.agent.0", "socket":agent}], "nics":[],"serial_log":serial
     });
-    if windows {
+    if windows || secure {
         description["vcpus"] = 4.into();
         description["memory_mib"] = 8192.into();
         description["hyperv"] = serde_json::json!([
@@ -440,6 +440,24 @@ fn boot_template(
             )
             .unwrap();
         assert_eq!(keys.exit_code, 0, "enrolled secure-boot keys: {keys:?}");
+        let enumeration = guest
+            .exec(
+                &[
+                    "/bin/sh",
+                    "-ec",
+                    "for attempt in $(seq 1 20); do \
+                     umount /sys/firmware/efi/efivars; \
+                     mount -t efivarfs efivarfs /sys/firmware/efi/efivars; \
+                     if ! test -s /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c || \
+                     ! test -s /sys/firmware/efi/efivars/BootOrder-8be4df61-93ca-11d2-aa0d-00e098032b8c; then \
+                     echo EFI enumeration failed at attempt $attempt; \
+                     ls /sys/firmware/efi/efivars; dmesg | tail -60; exit 1; fi; \
+                     done",
+                ],
+                Duration::from_secs(120),
+            )
+            .unwrap();
+        assert_eq!(enumeration.exit_code, 0, "EFI enumeration: {enumeration:?}");
     }
     if matches!(display_test, DisplayTest::Screenshot(_)) {
         crate::display_acceptance::screenshots_after_unobserved_boot(&native, &mut guest);
