@@ -111,6 +111,20 @@ pub trait Snapshot {
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError>;
 }
 
+/// Layered snapshot access to a PCI function: the function's own state and
+/// the state of the device it wraps, as separate sections. The VMM saves
+/// and restores the function's state first: a virtio transport's restore
+/// re-activates the wrapped device with the restored queues, so the wrapped
+/// device's own state lands after it.
+pub trait PciSnapshot: Send {
+    /// Stable id of this function instance, keying its snapshot sections.
+    fn snapshot_id(&self) -> String;
+    fn save_function_state(&self) -> Result<Vec<u8>, DeviceError>;
+    fn save_wrapped_state(&self) -> Result<Vec<u8>, DeviceError>;
+    fn restore_function_state(&mut self, state: &[u8]) -> Result<(), DeviceError>;
+    fn restore_wrapped_state(&mut self, state: &[u8]) -> Result<(), DeviceError>;
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceError {
     #[error("io: {0}")]
