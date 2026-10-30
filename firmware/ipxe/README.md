@@ -10,6 +10,15 @@ The first build needs network access to GitHub. Later builds use
 enables COM1 output alongside the firmware console. No QEMU-built ROM is an
 input.
 
+The local `general.h` enables upstream `EFI_DOWNGRADE_UX`. OVMF registers
+its native IPv4 and IPv6 boot options through SNP, without an additional
+iPXE LoadFile boot option. A black-box QEMU comparison with the same OVMF
+configuration verifies identical `Boot####` and `BootOrder` variables:
+
+```sh
+HWREF_RECAPTURE=1 python -m unittest discover -s scripts/hwref -p test_p2.py -k own_ipxe
+```
+
 ## Outputs
 
 All outputs are under `target/ipxe/`:
