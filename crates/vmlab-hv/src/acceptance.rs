@@ -90,13 +90,38 @@ fn boot_template(
         "template {} does not exist",
         template.display()
     );
+    let firmware_root = std::env::var_os("VMLAB_HV_FIRMWARE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "/home/wil/dev/vmlab/guest/dist/firmware/x86_64".into());
+    let secure = firmware == Firmware::SecureOvmf;
+    if firmware != Firmware::SeaBios {
+        for file in if secure {
+            ["OVMF_CODE_4M.secboot.fd", "OVMF_VARS_4M.ms.fd"]
+        } else {
+            ["OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd"]
+        } {
+            if !firmware_root.join(file).is_file() {
+                eprintln!("skipping {name}: {file} is absent; set VMLAB_HV_FIRMWARE_DIR");
+                return;
+            }
+        }
+    }
+    let windows = name.starts_with("windows-");
+    let tpm = name == "windows-server-2022";
+    if tpm
+        && !Command::new("swtpm")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping {name}: swtpm is unavailable");
+        return;
+    }
     let mut dir = tempfile::Builder::new().prefix("hv-p1-").tempdir().unwrap();
     if std::env::var_os("VMLAB_HV_ACCEPTANCE_KEEP").is_some() {
         dir.disable_cleanup(true);
         eprintln!("{name} acceptance artifacts: {}", dir.path().display());
     }
-    let windows = name.starts_with("windows-");
-    let tpm = name == "windows-server-2022";
     let spawn_tpm = || {
         let socket = dir.path().join("tpm.sock");
         let state = dir.path().join("tpm");
@@ -156,19 +181,21 @@ fn boot_template(
             "frequencies",
             "reset",
             "tlbflush",
-            "ipi",
-            "avic"
+            "ipi"
         ]);
+        if vmlab_hv_vmm::hyperv::host_apic_virtualization() {
+            description["hyperv"]
+                .as_array_mut()
+                .unwrap()
+                .push("avic".into());
+        }
     }
     if tpm {
         description["tpm"] = serde_json::json!({"socket":dir.path().join("tpm.sock")});
     }
     if firmware != Firmware::SeaBios {
-        let root = std::env::var_os("VMLAB_HV_FIRMWARE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| "/home/wil/dev/vmlab/guest/dist/firmware/x86_64".into());
+        let root = firmware_root;
         let vars = dir.path().join("OVMF_VARS.fd");
-        let secure = firmware == Firmware::SecureOvmf;
         let template_vars = template
             .ancestors()
             .skip(1)
