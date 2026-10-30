@@ -56,6 +56,8 @@ pub struct VmShared {
     io_trace: Option<Mutex<std::collections::VecDeque<String>>>,
     pub(crate) display: Mutex<Option<Arc<vmlab_hv_display::DisplayServer>>>,
     pub(crate) display_generation: std::sync::atomic::AtomicU64,
+    pub(crate) display_clients: Arc<std::sync::atomic::AtomicUsize>,
+    vga_mapping: Mutex<Option<u64>>,
     last_frame: Mutex<std::time::Instant>,
     memory_gate: Mutex<MemoryGate>,
     memory_cv: Condvar,
@@ -113,6 +115,8 @@ impl VmShared {
                 .map(|_| Mutex::new(std::collections::VecDeque::new())),
             display: Mutex::new(None),
             display_generation: std::sync::atomic::AtomicU64::new(0),
+            display_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            vga_mapping: Mutex::new(None),
             last_frame: Mutex::new(std::time::Instant::now()),
             memory_gate: Mutex::new(MemoryGate::default()),
             memory_cv: Condvar::new(),
@@ -443,6 +447,11 @@ impl VmShared {
             }
         }
         self.io_bus.lock().write(port, data);
+        if _memory_update.is_some() {
+            if let Err(error) = self.sync_vga_mapping() {
+                self.request_exit(ExitReason::Error(error.to_string()));
+            }
+        }
         if let Some(chipset) = self.chipset.lock().as_ref() {
             chipset.sync_pirqs();
         }
@@ -487,6 +496,9 @@ impl VmShared {
             let _memory_update = self.memory_update();
             use vmlab_hv_devices::BusDevice;
             crate::pci::PciEcam::new(self.pci_root.clone()).write(offset, data);
+            if let Err(error) = self.sync_vga_mapping() {
+                self.request_exit(ExitReason::Error(error.to_string()));
+            }
             if let Some(chipset) = self.chipset.lock().as_ref() {
                 chipset.sync_pirqs();
             }
@@ -509,6 +521,83 @@ impl VmShared {
         (b32 <= addr && addr < e32) || (b64 <= addr && addr < e64)
     }
 
+    pub(crate) fn sync_vga_mapping(&self) -> Result<(), VmmError> {
+        use vm_memory::{GuestAddress, GuestMemoryBackend};
+        let Some(vga) = self.vga.lock().clone() else {
+            return Ok(());
+        };
+        let mut root = self.pci_root.lock();
+        let address = root
+            .addresses()
+            .into_iter()
+            .find(|&(slot, function)| root.config_read(0, slot, function, 0) == 0x11111234);
+        let base = address.and_then(|(slot, function)| {
+            let decoded = root.config_read(0, slot, function, 1) & 2 != 0;
+            root.save_bar_states()
+                .into_iter()
+                .find(|(devfn, _)| *devfn == (slot << 3 | function))
+                .and_then(|(_, bars)| bars.first().copied())
+                .filter(|(base, sizing)| {
+                    decoded
+                        && !sizing
+                        && *base >= 0x80000000
+                        && *base + vmlab_hv_devices::display::VRAM_SIZE as u64 <= 0xfec00000
+                })
+                .map(|(base, _)| base)
+        });
+        drop(root);
+        let base = base.filter(|base| {
+            self.ecam_offset(*base).is_none()
+                && self
+                    .ecam_offset(*base + vmlab_hv_devices::display::VRAM_SIZE as u64 - 1)
+                    .is_none()
+        });
+        let mut mapped = self.vga_mapping.lock();
+        if *mapped == base {
+            return Ok(());
+        }
+        let memory = vga.lock().linear_framebuffer();
+        let host = memory
+            .get_host_address(GuestAddress(0))
+            .map_err(|e| VmmError::Memory(e.to_string()))? as u64;
+        for address_space in [0, 1 << 16] {
+            if mapped.is_some() {
+                let region = kvm_bindings::kvm_userspace_memory_region {
+                    slot: address_space | 128,
+                    ..Default::default()
+                };
+                // SAFETY: the caller has excluded all vCPUs through memory_update.
+                unsafe { self.kvm.vm.set_user_memory_region(region) }
+                    .map_err(|e| VmmError::ioctl("removing VGA framebuffer", e))?;
+            }
+            if let Some(base) = base {
+                let region = kvm_bindings::kvm_userspace_memory_region {
+                    slot: address_space | 128,
+                    guest_phys_addr: base,
+                    memory_size: vmlab_hv_devices::display::VRAM_SIZE as u64,
+                    userspace_addr: host,
+                    flags: kvm_bindings::KVM_MEM_LOG_DIRTY_PAGES,
+                };
+                // SAFETY: VGA owns this page-aligned mapping for the VM lifetime;
+                // all host accesses use volatile guest-memory operations.
+                unsafe { self.kvm.vm.set_user_memory_region(region) }
+                    .map_err(|e| VmmError::ioctl("mapping VGA framebuffer", e))?;
+            }
+        }
+        *mapped = base;
+        Ok(())
+    }
+
+    pub(crate) fn vga_framebuffer_dirty(&self) -> bool {
+        self.vga_mapping.lock().is_some()
+            && [128, (1 << 16) | 128].into_iter().any(|slot| {
+                self.kvm
+                    .vm
+                    .get_dirty_log(slot, vmlab_hv_devices::display::VRAM_SIZE)
+                    .map_or(true, |bits| bits.into_iter().any(|word| word != 0))
+            })
+    }
+
     fn ecam_offset(&self, addr: u64) -> Option<u64> {
         let mch = self.mch.lock();
         let (base, size) = mch.as_ref()?.lock().ecam_window()?;
@@ -528,7 +617,16 @@ impl VmShared {
     }
 
     fn poll_chipset(&self) {
-        if self.last_frame.lock().elapsed() >= std::time::Duration::from_millis(16) {
+        let publish = {
+            let last = self.last_frame.lock();
+            last.elapsed() >= std::time::Duration::from_millis(16)
+        };
+        if publish
+            && self
+                .display_clients
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != 0
+        {
             if let Some(display) = self.display.lock().as_ref() {
                 if let Err(e) = display.publish() {
                     eprintln!("display frame: {e}");

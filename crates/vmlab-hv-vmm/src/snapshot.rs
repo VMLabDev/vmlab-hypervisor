@@ -549,6 +549,9 @@ fn restore(
     shared
         .restore_pci_bars(pci_bars)
         .map_err(SnapshotError::Internal)?;
+    shared
+        .sync_vga_mapping()
+        .map_err(|e| SnapshotError::Internal(e.to_string()))?;
     Ok(header.run_state)
 }
 

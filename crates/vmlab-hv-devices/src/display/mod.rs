@@ -3,7 +3,8 @@
 //! Route PCI configuration and BARs through `PciDevice`. Route ports 0x3b0..=0x3df
 //! and 0x1ce..=0x1d0 through `io_read`/`io_write` using absolute port numbers.
 //! Route 0xa0000..0xc0000 through `legacy_read`/`legacy_write` with offsets
-//! relative to 0xa0000. All access and frame publication require the same lock.
+//! relative to 0xa0000. Serialize registers and frame publication with one lock.
+//! Direct BAR0 mappings use the volatile storage returned by `linear_framebuffer`.
 //! BAR0 is prefetchable, as reported by config space. `BarKind::Mmio32` cannot
 //! express that flag. The PCI root must preserve bit 3 when synthesizing BAR0.
 //! `ROM_BAR` is an expansion ROM at config offset 0x30, not a normal BAR at
@@ -19,6 +20,7 @@ mod font;
 mod tests;
 
 use crate::{BarInfo, BarKind, DeviceError, PciDevice, Snapshot};
+use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
 pub const VRAM_SIZE: usize = 16 * 1024 * 1024;
 pub const ROM_SIZE: usize = 128 * 1024;
@@ -59,7 +61,7 @@ pub struct StandardVga {
     config: [u8; 256],
     regs: [u8; REG_SIZE],
     dispi: [u16; 16],
-    vram: Vec<u8>,
+    vram: GuestMemoryMmap,
     rom: Vec<u8>,
     seq_index: u8,
     gc_index: u8,
@@ -78,6 +80,7 @@ pub struct StandardVga {
     status: u8,
     big_endian: bool,
     dirty: bool,
+    cached_pixels: Option<Vec<u8>>,
 }
 
 impl StandardVga {
@@ -92,7 +95,8 @@ impl StandardVga {
             config: [0; 256],
             regs: [0; REG_SIZE],
             dispi: [0; 16],
-            vram: vec![0; VRAM_SIZE],
+            vram: GuestMemoryMmap::from_ranges(&[(GuestAddress(0), VRAM_SIZE)])
+                .map_err(|e| DeviceError::Memory(e.to_string()))?,
             rom: vec![0xff; ROM_SIZE],
             seq_index: 0,
             gc_index: 0,
@@ -111,6 +115,7 @@ impl StandardVga {
             status: 0,
             big_endian: false,
             dirty: true,
+            cached_pixels: None,
         };
         dev.rom[..rom.len()].copy_from_slice(rom);
         dev.config[..4].copy_from_slice(&[0x34, 0x12, 0x11, 0x11]);
@@ -141,7 +146,7 @@ impl StandardVga {
         dev.regs[DAC + 6 * 3 + 1] = 21;
         for ch in 0..256 {
             for y in 0..16 {
-                dev.vram[(ch * 32 + y) * 4 + 2] = font::row(ch as u8, y);
+                dev.set_byte((ch * 32 + y) * 4 + 2, font::row(ch as u8, y));
             }
         }
         Ok(dev)
@@ -200,7 +205,9 @@ impl StandardVga {
             self.dispi[8] = 0;
             self.dispi[9] = 0;
             if value & 0x80 == 0 {
-                self.vram.fill(0);
+                self.vram
+                    .write_slice(&vec![0; VRAM_SIZE], GuestAddress(0))
+                    .unwrap();
             }
         }
         if index == 6 && value < self.dispi[1] {
@@ -377,7 +384,7 @@ impl StandardVga {
             };
             if self.enabled() && self.dispi[3] != 4 {
                 if off < 65536 {
-                    *byte = self.vram[self.dispi[5] as usize * 65536 + off as usize];
+                    *byte = self.byte(self.dispi[5] as usize * 65536 + off as usize);
                 }
                 continue;
             }
@@ -385,7 +392,9 @@ impl StandardVga {
                 continue;
             };
             let (addr, mask) = self.address(off, false);
-            self.latch.copy_from_slice(&self.vram[addr..addr + 4]);
+            self.vram
+                .read_slice(&mut self.latch, GuestAddress(addr as u64))
+                .unwrap();
             if self.regs[GC + 5] & 8 != 0 {
                 let mut result = 0xff;
                 for p in 0..4 {
@@ -419,7 +428,7 @@ impl StandardVga {
             };
             if self.enabled() && self.dispi[3] != 4 {
                 if off < 65536 {
-                    self.vram[self.dispi[5] as usize * 65536 + off as usize] = value;
+                    self.set_byte(self.dispi[5] as usize * 65536 + off as usize, value);
                     self.dirty = true;
                 }
                 continue;
@@ -467,7 +476,7 @@ impl StandardVga {
                     3 => rotated & self.regs[GC + 8],
                     _ => self.regs[GC + 8],
                 };
-                self.vram[addr + p] = (source & mask) | (self.latch[p] & !mask);
+                self.set_byte(addr + p, (source & mask) | (self.latch[p] & !mask));
             }
             self.dirty = true;
         }
@@ -528,7 +537,22 @@ impl StandardVga {
     }
 
     fn byte(&self, addr: usize) -> u8 {
-        self.vram.get(addr).copied().unwrap_or(0)
+        self.vram.read_obj(GuestAddress(addr as u64)).unwrap_or(0)
+    }
+
+    fn set_byte(&self, addr: usize, value: u8) {
+        let _ = self.vram.write_obj(value, GuestAddress(addr as u64));
+    }
+
+    /// Page-aligned BAR0 storage, accessed with volatile guest-memory operations.
+    /// The VMM may map this region directly while PCI memory decoding is enabled.
+    pub fn linear_framebuffer(&self) -> GuestMemoryMmap {
+        self.vram.clone()
+    }
+
+    /// Direct guest mappings bypass BAR callbacks; notify scanout of their writes.
+    pub fn mark_framebuffer_dirty(&mut self) {
+        self.dirty = true;
     }
 
     fn vbe_pixel(&self, x: usize, y: usize) -> [u8; 4] {
@@ -629,6 +653,15 @@ impl StandardVga {
     /// The caller may retain the returned pixels across subsequent device writes.
     pub fn frame(&mut self) -> Frame {
         let mode = self.mode();
+        if !self.dirty
+            && let Some(pixels) = &self.cached_pixels
+        {
+            return Frame {
+                mode,
+                pixels: pixels.clone(),
+                dirty: false,
+            };
+        }
         let mut pixels = vec![0; mode.stride as usize * mode.height as usize];
         let blank =
             !self.enabled() && (self.regs[SEQ + 1] & 0x20 != 0 || self.attr_index & 0x20 == 0);
@@ -645,6 +678,7 @@ impl StandardVga {
                 }
             }
         }
+        self.cached_pixels = Some(pixels.clone());
         Frame {
             mode,
             pixels,
@@ -749,8 +783,16 @@ impl PciDevice for StandardVga {
             }
             return;
         }
+        if bar == 0 {
+            for (i, byte) in data.iter_mut().enumerate() {
+                *byte = offset
+                    .checked_add(i as u64)
+                    .and_then(|v| usize::try_from(v).ok())
+                    .map_or(0xff, |addr| self.byte(addr));
+            }
+            return;
+        }
         let source = match bar {
-            0 => &self.vram,
             ROM_BAR => &self.rom,
             _ => return,
         };
@@ -772,9 +814,9 @@ impl PciDevice for StandardVga {
                     if let Some(dest) = offset
                         .checked_add(i as u64)
                         .and_then(|v| usize::try_from(v).ok())
-                        .and_then(|v| self.vram.get_mut(v))
+                        .filter(|v| *v < VRAM_SIZE)
                     {
-                        *dest = *byte;
+                        self.set_byte(dest, *byte);
                         self.dirty = true;
                     }
                 }
@@ -835,7 +877,11 @@ impl Snapshot for StandardVga {
         ]);
         state.extend_from_slice(&self.dispi_index.to_le_bytes());
         state.extend_from_slice(&self.latch);
-        state.extend_from_slice(&self.vram);
+        let start = state.len();
+        state.resize(start + VRAM_SIZE, 0);
+        self.vram
+            .read_slice(&mut state[start..], GuestAddress(0))
+            .map_err(|e| DeviceError::Memory(e.to_string()))?;
         Ok(state)
     }
 
@@ -884,7 +930,9 @@ impl Snapshot for StandardVga {
         self.big_endian = scalar[13] != 0;
         self.dispi_index = u16::from_le_bytes([scalar[14], scalar[15]]);
         self.latch.copy_from_slice(&scalar[16..20]);
-        self.vram.copy_from_slice(&state[header + 20..]);
+        self.vram
+            .write_slice(&state[header + 20..], GuestAddress(0))
+            .map_err(|e| DeviceError::Memory(e.to_string()))?;
         self.dirty = true;
         Ok(())
     }

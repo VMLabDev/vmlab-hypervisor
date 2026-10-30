@@ -22,7 +22,14 @@ impl FrameSource for Source {
             .lock()
             .clone()
             .ok_or_else(|| io::Error::other("machine has no VGA"))?;
-        let frame = vga.lock().frame();
+        let dirty = shared.vga_framebuffer_dirty();
+        let frame = {
+            let mut vga = vga.lock();
+            if dirty {
+                vga.mark_framebuffer_dirty();
+            }
+            vga.frame()
+        };
         Ok(Frame {
             generation: shared.display_generation.load(Ordering::SeqCst),
             width: frame.mode.width,
@@ -136,11 +143,29 @@ pub(crate) fn serve(shared: &Arc<VmShared>, directory: &Path) -> Result<(), VmmE
         (rfb_listener, true, "display-rfb"),
     ] {
         let server = server.clone();
+        let clients = shared.display_clients.clone();
         std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
-                if let Err(e) = server.serve(listener, rfb) {
-                    eprintln!("{name}: {e}");
+                for stream in listener.incoming() {
+                    let stream = match stream {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            eprintln!("{name}: {error}");
+                            break;
+                        }
+                    };
+                    let server = server.clone();
+                    let clients = clients.clone();
+                    clients.fetch_add(1, Ordering::Relaxed);
+                    std::thread::spawn(move || {
+                        let _ = if rfb {
+                            server.serve_rfb(stream)
+                        } else {
+                            server.serve_native(stream)
+                        };
+                        clients.fetch_sub(1, Ordering::Relaxed);
+                    });
                 }
             })
             .map_err(|e| VmmError::Other(format!("spawning {name}: {e}")))?;
