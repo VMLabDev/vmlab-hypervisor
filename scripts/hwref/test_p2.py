@@ -9,7 +9,7 @@ import unittest
 
 
 HERE = Path(__file__).resolve().parent
-CONFIG = "q35-seabios-linux-generic"
+CONFIG = "q35-seabios-linux-modern"
 
 
 @unittest.skipUnless(os.environ.get("HWREF_RECAPTURE") == "1",

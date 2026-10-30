@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from aml import omit_pci_functions, omit_asl_functions, relocate_loader
+import d6
 
 DEFAULT_ALLOW = Path(__file__).with_name("approved-differences.json")
 BDF = r"(?:[0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]"
@@ -141,6 +142,7 @@ def normalize_text(name: str, text: str) -> str:
         text = "\n".join(l for l in text.splitlines() if l.startswith(("processor", "siblings", "cpu cores"))) + "\n"
     if name == "interrupts.txt":
         text = re.sub(r"(?m)^(\s*\S+:)(?:\s+\d+)+", r"\1 <counts>", text)
+        text = re.sub(r"(?m)^\s*\d+:(?=.*\bPCI-MSI)", "<irq>:", text)
     if name == "serial16550.txt":
         text = re.sub(r"\b(tx|rx):\d+", r"\1:<count>", text)
     if name == "proc-pci-devices.txt":
@@ -161,9 +163,11 @@ def normalize_text(name: str, text: str) -> str:
         text = re.sub(r"(?m)^clocksource: Long readout interval, skipping watchdog check:.*\n?", "", text)
         text = re.sub(r"\baudit\(\d+\.\d+:\d+\)", "audit(<time>)", text)
         text = re.sub(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", "<time>", text)
-        text = re.sub(r"0x[0-9a-f]{6,16}\b", "<address>", text)
+        text = re.sub(r"0x[0-9a-fA-F]{6,16}\b", "<address>", text)
         text = re.sub(r"\b[0-9a-f]{8,16}\b", "<address>", text)
-        text = re.sub(r"\b\d+\.\d+\b", "<measurement>", text)
+        text = re.sub(r"(?<![:0-9a-fA-F])\b\d+\.\d+\b(?![.:0-9a-fA-F])", "<measurement>", text)
+        text = re.sub(r"(?m)^sched_clock: Marking stable .*", "sched_clock: Marking stable <time>", text)
+        text = re.sub(r"(/input/input)\d+\b", r"\1<index>", text)
         text = re.sub(r"(Memory: )\d+K/", r"\1<available>K/", text)
         text = re.sub(r"\b\d+K reserved\b", "<reserved>K reserved", text)
         text = re.sub(r"(efi: Freeing EFI boot services memory: )\d+K", r"\1<allocation>K", text)
@@ -233,6 +237,19 @@ def allocation_map(guest: Path) -> dict[int, str]:
         size = end - start + 1
         for value, suffix in ((start, "start"), (end, "end"), (start-1, "before"), (end+1, "after")):
             result.setdefault(value, f"<{role}:{size:#x}:{suffix}>")
+    path = guest / "lspci-nnnvvvxxxx.txt"
+    if path.exists():
+        for block in re.split(rf"(?=^{BDF} )", path.read_text(), flags=re.M):
+            slot = re.match(BDF, block)
+            if not slot:
+                continue
+            for bar in re.finditer(r"Region (\d+): (?:Memory|I/O ports) at ([0-9a-f]+).*?\[size=(\d+)([KMG]?)\]", block):
+                start = int(bar[2], 16)
+                size = int(bar[3]) << (10 * (" KMG".index(bar[4]) if bar[4] else 0))
+                if start:
+                    role = f"pci-{slot[0].removeprefix('0000:')}-bar{bar[1]}:{size:#x}"
+                    result.setdefault(start, f"<{role}:start>")
+                    result.setdefault(start + size - 1, f"<{role}:end>")
     return result
 
 
@@ -241,13 +258,17 @@ def mask_boundaries(name: str, data: bytes, allocations: dict[int, str]) -> byte
         text = data.decode()
         text = re.sub(r"0x[0-9a-f]+", lambda m: allocations.get(int(m[0], 16), m[0]), text)
         return text.encode()
-    if name == "iomem.txt":
+    if name in ("iomem.txt", "ioports.txt"):
         text = data.decode()
         def region(match):
             start = allocations.get(int(match[2], 16), match[2])
             end = allocations.get(int(match[3], 16), match[3])
             return f"{match[1]}{start}-{end} :"
         return re.sub(r"(?m)^(\s*)([0-9a-f]+)-([0-9a-f]+) :", region, text).encode()
+    if name == "dmesg.txt":
+        def io_bar(match):
+            return re.sub(r"0x[0-9a-f]+", lambda m: allocations.get(int(m[0], 16), m[0]), match[0])
+        return re.sub(rf"(?m)^.*pci {BDF}: BAR \d+ \[io .*?$", io_bar, data.decode()).encode()
     return data
 
 
@@ -277,7 +298,7 @@ def load_capture(root: Path) -> dict[str, str]:
     return result
 
 
-def approved_pci(left: dict[str, str], right: dict[str, str], rules: dict) -> set[str]:
+def approved_pci(left: dict[str, str], right: dict[str, str], rules: dict) -> tuple[set[str], set[str]]:
     """D6 is directional: reference USB functions may disappear, xHCI may appear.
 
     Remove only whole functions whose identity matches. Never permit edits to
@@ -337,7 +358,8 @@ def approved_pci(left: dict[str, str], right: dict[str, str], rules: dict) -> se
             captures["usb.txt"] = "".join(
                 line for line in captures["usb.txt"].splitlines(True)
                 if not any(driver in line and "Host Controller" in line for driver in drivers))
-    return removed
+        d6.observations(captures, slots)
+    return removed, added
 
 
 def approved_aml(left: dict[str, str], right: dict[str, str], reference: Path, removed: set[str]) -> None:
@@ -416,6 +438,33 @@ def approved_artifacts(left: dict[str, str], right: dict[str, str], rules: dict)
             capture["fwcfg/listing.txt"] = "\n".join(lines) + "\n"
 
 
+def approved_platform(left: dict[str, str], right: dict[str, str], rules: dict) -> None:
+    devices = {entry["device"] for entry in rules.get("platform_omissions", [])}
+    if "vmport/vmmouse" in devices:
+        original = "input: VirtualPS/2 VMware VMMouse as /devices/platform/i8042/serio1/input/input<index>\n"
+        replacement = "input: ImExPS/2 Generic Explorer Mouse as /devices/platform/i8042/serio1/input/input<index>\n"
+        if left.get("dmesg.txt", "").count(original) == 2 and right.get("dmesg.txt", "").count(replacement) == 1:
+            left["dmesg.txt"] = left["dmesg.txt"].replace(original, "")
+            right["dmesg.txt"] = right["dmesg.txt"].replace(replacement, "")
+    # These two initialized legacy ROM copies have distinct observed sizes.
+    # Their BARs and every other legacy ROM remain compared.
+    sizes = set()
+    if "fwcfg/blobs/genroms/kvmvapic.bin" in left and "fwcfg/blobs/genroms/kvmvapic.bin" not in right and any(entry.get("decision") == "D14" and entry["pattern"] == "fwcfg/blobs/genroms/kvmvapic.bin"
+           for entry in rules.get("artifact_omissions", [])):
+        sizes.add(9216)
+    nic = r"(?m)^00:[0-9a-f]{2}\.[0-7] .*\[1af4:1000\].*$"
+    if "virtio-net-pxe-rom" in devices and re.findall(nic, left.get("lspci-nn.txt", "")) == re.findall(nic, right.get("lspci-nn.txt", "")) and re.search(nic, left.get("lspci-nn.txt", "")):
+        sizes.add(3584)
+    pattern = r"(?m)^([0-9a-f]+)-([0-9a-f]+) : Adapter ROM\n"
+    for size in sizes:
+        a = [m for m in re.finditer(pattern, left.get("iomem.txt", ""))
+             if int(m[2], 16) - int(m[1], 16) + 1 == size and 0xc0000 <= int(m[1], 16) < int(m[2], 16) < 0xe0000]
+        b = [m for m in re.finditer(pattern, right.get("iomem.txt", ""))
+             if int(m[2], 16) - int(m[1], 16) + 1 == size]
+        if len(a) == 1 and not b:
+            left["iomem.txt"] = left["iomem.txt"].replace(a[0][0], "")
+
+
 def compare(reference: Path, candidate: Path, allow: Path | None = DEFAULT_ALLOW) -> str:
     left, right = load_capture(reference), load_capture(candidate)
     if allow:
@@ -440,8 +489,15 @@ def compare(reference: Path, candidate: Path, allow: Path | None = DEFAULT_ALLOW
         if not isinstance(omissions, list) or not all(metadata(entry) and isinstance(entry.get("pattern"), str)
                                                      and entry["pattern"].startswith("fwcfg/blobs/") for entry in omissions):
             raise ValueError("invalid artifact omission category, reason, or pattern")
-        removed = approved_pci(left, right, rules)
+        platform_omissions = rules.get("platform_omissions", [])
+        if not isinstance(platform_omissions, list) or not all(metadata(entry) and entry.get("device") in
+                ("vmport/vmmouse", "virtio-net-pxe-rom") for entry in platform_omissions):
+            raise ValueError("invalid platform omission device, category, or reason")
+        removed, added = approved_pci(left, right, rules)
         approved_aml(left, right, reference, removed)
+        approved_aml(right, left, candidate, added)
+        d6.workspace(left, right, removed)
+        approved_platform(left, right, rules)
         approved_artifacts(left, right, rules)
     report = []
     for name in sorted(left.keys() | right.keys()):

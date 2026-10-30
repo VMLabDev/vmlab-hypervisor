@@ -17,6 +17,7 @@ SPEC.loader.exec_module(diff)
 import hv_capture
 import aml
 import capture
+import d6
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +25,98 @@ REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_pci_resource_maps_move_but_sizes_and_bars_remain_exact(self):
+        with tempfile.TemporaryDirectory(prefix="hwref-bars-") as tmp:
+            root = Path(tmp)
+            def normalized(base, size="32"):
+                (root / "lspci-nnnvvvxxxx.txt").write_text(
+                    f"00:1f.2 AHCI [8086:2922]\n\tRegion 4: I/O ports at {base:x} [size={size}]\n")
+                text = f"  {base:04x}-{base+31:04x} : 0000:00:1f.2\n    {base:04x}-{base+31:04x} : ahci\n"
+                return diff.mask_boundaries("ioports.txt", text.encode(), diff.allocation_map(root))
+            self.assertEqual(normalized(0xc180), normalized(0xc120))
+            self.assertNotEqual(normalized(0xc180), normalized(0xc120, "64"))
+
+    def test_d6_workspace_requires_the_exact_four_page_change(self):
+        removed = {"00:1d.0", "00:1d.1", "00:1d.2", "00:1d.7"}
+        left = {"e820-memmap.txt": "3 0x100000 0x7ffd7fff System RAM\n4 0x7ffd8000 0x7fffffff Reserved\n",
+                "dmesg.txt": "Total pages: 1048438\nMemory: <available>K/4193752K available\nOn node 0, zone Normal: 40 pages in unavailable ranges\n"}
+        right = {"e820-memmap.txt": left["e820-memmap.txt"].replace("7ffd7fff", "7ffdbfff").replace("7ffd8000", "7ffdc000"),
+                 "dmesg.txt": left["dmesg.txt"].replace("1048438", "1048442").replace("4193752", "4193768").replace(": 40 pages", ": 36 pages")}
+        changed = dict(left)
+        d6.workspace(changed, right, removed)
+        self.assertEqual(changed, right)
+        for key, before, after in (("e820-memmap.txt", "7ffdc000", "7ffdd000"),
+                                   ("e820-memmap.txt", "7fffffff", "8fffffff"),
+                                   ("dmesg.txt", "1048442", "1048443")):
+            bad = dict(right)
+            bad[key] = bad[key].replace(before, after)
+            changed = dict(left)
+            d6.workspace(changed, bad, removed)
+            self.assertNotEqual(changed, bad)
+        changed = dict(left)
+        d6.workspace(changed, right, set())
+        self.assertEqual(changed, left)
+
+    def test_d6_controller_logs_keep_errors_and_unrelated_devices(self):
+        data = {"dmesg.txt": "pci 0000:00:05.0: [1b36:000d] endpoint\n"
+                "xhci_hcd 0000:00:05.0: xHCI Host Controller\n"
+                "xhci_hcd 0000:00:05.0: controller failed\n"
+                "pci 0000:00:05.0: BAR 0 can't claim\n"
+                "pci 0000:00:06.0: unrelated device\n"}
+        d6.observations(data, {"00:05.0"})
+        self.assertNotIn("endpoint", data["dmesg.txt"])
+        self.assertNotIn("Host Controller", data["dmesg.txt"])
+        self.assertIn("controller failed", data["dmesg.txt"])
+        self.assertIn("can't claim", data["dmesg.txt"])
+        self.assertIn("unrelated device", data["dmesg.txt"])
+
+    def test_d6_keeps_a_gsi_used_by_another_function(self):
+        text = "ACPI: \\_SB_.GSIB: Enabled at IRQ 17\n"
+        data = {"dmesg.txt": text,
+                "lspci-nnnvvvxxxx.txt": "00:1f.3 SMBus [8086:2930]\n\tInterrupt: pin B routed to IRQ 17\n"}
+        d6.observations(data, {"00:1d.1"})
+        self.assertEqual(data["dmesg.txt"], text)
+        data.pop("lspci-nnnvvvxxxx.txt")
+        d6.observations(data, {"00:1d.1"})
+        self.assertEqual(data["dmesg.txt"], "")
+
+    def test_pending_mouse_and_rom_rules_are_narrow_and_directional(self):
+        rules = json.loads(diff.DEFAULT_ALLOW.read_text())
+        mouse = "input: VirtualPS/2 VMware VMMouse as /devices/platform/i8042/serio1/input/input<index>\n"
+        generic = "input: ImExPS/2 Generic Explorer Mouse as /devices/platform/i8042/serio1/input/input<index>\n"
+        nic = "00:03.0 Class [0200]: Device [1af4:1000]\n"
+        left = {"dmesg.txt": mouse * 2 + "other mouse changed\n", "lspci-nn.txt": nic,
+                "iomem.txt": "000c9000-000c9dff : Adapter ROM\n000ca000-000cc3ff : Adapter ROM\n000d0000-000d0fff : Adapter ROM\n",
+                "fwcfg/blobs/genroms/kvmvapic.bin": "captured blob"}
+        right = {"dmesg.txt": generic + "other mouse changed\n", "lspci-nn.txt": nic, "iomem.txt": "000d0000-000d0fff : Adapter ROM\n"}
+        diff.approved_platform(left, right, rules)
+        self.assertEqual(left["dmesg.txt"], right["dmesg.txt"])
+        self.assertEqual(left["iomem.txt"], right["iomem.txt"])
+        bad = {"dmesg.txt": generic.replace("ImEx", "Other")}
+        left = {"dmesg.txt": mouse * 2}
+        diff.approved_platform(left, bad, rules)
+        self.assertEqual(left["dmesg.txt"], mouse * 2)
+        left = {"iomem.txt": "000c9000-000c9eff : Adapter ROM\n", "lspci-nn.txt": nic}
+        diff.approved_platform(left, right, rules)
+        self.assertIn("000c9eff", left["iomem.txt"])
+
+    def test_pci_log_addresses_survive_measurement_normalization(self):
+        text = "pci 0000:00:05.0: BAR 0 [mem 0xFEB00000-0xFEB03FFF]\n"
+        normalized = diff.normalize_text("dmesg.txt", text)
+        self.assertIn("0000:00:05.0", normalized)
+        self.assertNotIn("FEB00000", normalized)
+        self.assertNotEqual(normalized, diff.normalize_text("dmesg.txt", text.replace("05.0", "06.0")))
+
+    def test_virtual_msi_irq_numbers_move_but_gsi_and_vectors_remain_exact(self):
+        text = " 25: 1 2 PCI-MSIX-0000:00:01.0 1-edge virtio0-virtqueues\n"
+        self.assertEqual(diff.normalize_text("interrupts.txt", text),
+                         diff.normalize_text("interrupts.txt", text.replace("25:", "42:")))
+        for changed in (text.replace(" 1-edge", " 2-edge"), text.replace("01.0", "02.0")):
+            self.assertNotEqual(diff.normalize_text("interrupts.txt", text),
+                                diff.normalize_text("interrupts.txt", changed))
+        self.assertNotEqual(diff.normalize_text("interrupts.txt", " 9: 1 IO-APIC 9-fasteoi acpi\n"),
+                            diff.normalize_text("interrupts.txt", "10: 1 IO-APIC 10-fasteoi acpi\n"))
+
     def test_d6_aml_parser_removes_only_exact_pci_address_devices(self):
         original = (REFERENCE / "guest/acpi/DSDT").read_bytes()
         slots = {"00:1d.0", "00:1d.1", "00:1d.2", "00:1d.7"}
@@ -45,6 +138,9 @@ class NormalizeTests(unittest.TestCase):
         reduced = aml.omit_asl_functions(source, slots)
         self.assertNotIn("Device (SE8)", reduced)
         self.assertIn("Device (S28)", reduced)
+        xhci_omitted, cuts = aml.omit_pci_functions(original, {"00:05.0"})
+        self.assertEqual(len(original) - len(xhci_omitted), 17)
+        self.assertEqual(len(cuts), 1)
         source = source.replace("Name (_ADR, 0x001D0000)",
                                 "Name (_ADR, 0x001D0000)\nMethod (TEST) { Return (One) }")
         self.assertIn("Device (SE8)", aml.omit_asl_functions(source, slots))

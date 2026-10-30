@@ -111,6 +111,35 @@ adjusted for those removed bytes. Other AML and loader fields remain compared.
 IRQ routing and other boot-log differences remain visible for review. The
 allow-list does not suppress arbitrary USB-related lines.
 
+For identity-checked D6 omissions, the filter also removes the corresponding
+controller enumeration, root-hub topology and IRQ rows. Controller errors
+remain failures. Tablet paths name the replacement controller; tablet identity
+and descriptors remain compared. Unused GSI activation lines are omitted only
+when no remaining PCI function uses that route. Candidate-only xHCI AML nodes
+and their table-loader offsets receive the same structural checks as omitted
+ICH9 nodes.
+
+Two QEMU disk boots at 4 GiB, differing only by the D6 controller substitution,
+confirmed SeaBIOS reserves four fewer pages without the four ICH9 functions:
+low RAM ends at `0x7ffdbfff` instead of `0x7ffd7fff`, with the same
+`0x7fffffff` reservation ceiling. The filter permits only this exact 16-KiB
+adjacent boundary change and the matching four-page/16-KiB Linux totals.
+Unexpected page counts, other reservations and RAM ceilings remain failures.
+
+PCI resource maps name assigned BAR boundaries by function, BAR index and size,
+including driver subranges and I/O BAR boot logs. MSI virtual IRQ labels and
+input-device indices are run allocations; MSI vectors, GSI numbers and device
+paths remain exact. ACPI log relocation masking handles uppercase hexadecimal
+addresses too. Clock stabilization timestamps are masked. PCI function numbers
+are preserved when normalizing decimal measurements.
+
+Two further omissions are **pending owner decision**, as directed by the
+orchestrator: VMware's vmport/vmmouse interface and the virtio-net PXE ROM
+from `qemu-common`. The filter permits only the observed VMware-to-Explorer
+PS/2 enumeration substitution and the 3584-byte initialized PXE ROM copy.
+D14 also permits the 9216-byte initialized kvmvapic ROM copy. Other ROM sizes
+and mouse models remain failures.
+
 The 2a gate also records category and reason metadata for two temporary groups:
 `etc/smi/*` and `etc/tpm/*` are **deferred to 2c** and must be removed from the
 allow-list when 2c lands. `genroms/kvmvapic.bin` and
