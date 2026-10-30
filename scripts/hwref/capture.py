@@ -176,7 +176,7 @@ hwref-cpuid > cpuid.txt 2>&1 || echo "hwref-cpuid failed" > cpuid.txt
 
 # Memory map, IRQ/MSI routing
 dmesg > dmesg.txt 2>&1
-grep -i e820 dmesg.txt > e820-dmesg.txt
+grep -iw e820 dmesg.txt > e820-dmesg.txt
 { for m in /sys/firmware/memmap/*; do
     printf '%s %s %s %s\n' "${m##*/}" "$(cat "$m/start" 2>/dev/null)" \
       "$(cat "$m/end" 2>/dev/null)" "$(cat "$m/type" 2>/dev/null)"

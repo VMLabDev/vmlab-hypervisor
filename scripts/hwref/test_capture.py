@@ -38,6 +38,17 @@ class ParserTests(unittest.TestCase):
                          "Memory at fe000000 (64-bit, prefetchable) [size=4K]")
         self.assertEqual(rows[1]["bars"], "Expansion ROM at ff000000 [disabled] [size=64K]")
 
+    def test_e820_collection_does_not_match_a_pci_allocation_address(self):
+        lines = ("[0.0] BIOS-e820: [mem 0x0-0x9ffff] usable\n"
+                 "[1.0] ata3: SATA abar m4096@0xfebe8000 port 0xfebe8200 irq 26\n"
+                 "[2.0] PCI: Using E820 reservations for host bridge windows\n")
+        (self.root / "dmesg.txt").write_text(lines)
+        command = next(line for line in capture.INIT_SH.splitlines()
+                       if line.endswith("> e820-dmesg.txt"))
+        subprocess.run(["sh", "-c", command], cwd=self.root, check=True)
+        self.assertEqual((self.root / "e820-dmesg.txt").read_text(),
+                         lines.splitlines(True)[0] + lines.splitlines(True)[2])
+
     def test_pci_short_bdf_and_unprefixed_bar(self):
         line = "00:01.0 Ethernet controller [0200]: Test NIC [1af4:1000]\n"
         (self.root / "lspci-nn.txt").write_text(line)
