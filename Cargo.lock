@@ -1221,7 +1221,7 @@ name = "vmlab-hv-lockstep"
 version = "0.1.0"
 dependencies = [
  "libc",
- "thiserror",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1239,7 +1239,7 @@ name = "vmlab-hv-sail-ir"
 version = "0.1.0"
 dependencies = [
  "serde",
- "thiserror",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1250,7 +1250,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "parking_lot",
- "thiserror",
+ "thiserror 2.0.21",
  "vmlab-hv-lockstep",
  "vmlab-hv-sail-ir",
  "vmlab-hv-tcg-ir",
@@ -1274,7 +1274,7 @@ name = "vmlab-hv-tcg-ir"
 version = "0.1.0"
 dependencies = [
  "serde",
- "thiserror",
+ "thiserror 2.0.21",
  "vmlab-hv-sail-ir",
 ]
 
