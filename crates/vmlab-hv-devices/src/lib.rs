@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+pub mod ahci;
 pub mod audio;
 pub mod chipset;
 pub mod display;
