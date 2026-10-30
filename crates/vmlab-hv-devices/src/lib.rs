@@ -71,8 +71,10 @@ pub trait VirtioInterrupt: Send + Sync {
     fn notify_config(&self);
 }
 
-/// A virtio device behind a transport.
-pub trait VirtioDevice: Send {
+/// A virtio device behind a transport. Virtio devices hold guest-visible
+/// state (queues, features), so they implement [`Snapshot`]; the transport
+/// saves its own state and the VMM snapshots the device through it.
+pub trait VirtioDevice: Snapshot + Send {
     /// Virtio device id (2 = block, 1 = net, 3 = console, 26 = fs).
     fn device_type(&self) -> u32;
     /// Maximum size of each queue; the length is the queue count.
@@ -81,6 +83,13 @@ pub trait VirtioDevice: Send {
     fn ack_features(&mut self, features: u64);
     fn read_config(&self, offset: u64, data: &mut [u8]);
     fn write_config(&mut self, offset: u64, data: &[u8]);
+    /// Bytes of device-specific configuration readable at offset 0. The
+    /// virtio-pci transport reports this as the device-configuration
+    /// capability length.
+    fn config_len(&self) -> u64 {
+        0
+    }
+
     /// The driver set DRIVER_OK: start using the queues.
     fn activate(
         &mut self,

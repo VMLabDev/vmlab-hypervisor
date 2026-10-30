@@ -382,7 +382,7 @@ mod tests {
         let state = s.save_state().unwrap();
 
         // Diverge: drain the FIFO and change the registers.
-        let _ = s.read(0, &mut [0]);
+        s.read(0, &mut [0]);
         reg_write(&mut s, 7, 0x00);
         reg_write(&mut s, 1, 0x00);
         assert!(!level(&rec));
