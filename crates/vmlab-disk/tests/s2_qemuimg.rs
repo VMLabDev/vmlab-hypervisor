@@ -842,3 +842,230 @@ fn s2_large_unaligned_io() {
     qemu_check(&path);
     let _ = std::io::stdout().flush();
 }
+
+/// Deterministic per-chunk pattern used by `vmlab-disk bench` (kept in
+/// sync with `bench_fill` in src/bin/vmlab-disk.rs).
+fn bench_fill(buf: &mut [u8], chunk_index: u64, seed: u8) {
+    let mut x = seed.wrapping_add((chunk_index % 251) as u8);
+    for b in buf.iter_mut() {
+        x = x.wrapping_mul(31).wrapping_add(17);
+        *b = x;
+    }
+}
+
+#[test]
+fn s2_snapshot_apply_then_write_same_handle() {
+    require_qemu_img!();
+    let dir = tmpdir("apply-write");
+    let path = dir.join("disk.qcow2");
+    let amount = 4 * 1024 * 1024;
+    ops::create_qcow2(&path, amount as u64, None, None).unwrap();
+    let original = vec![0x31; amount];
+    let changed = vec![0x72; amount];
+    {
+        let mut img = vmlab_disk::open(&path, Format::Qcow2, false).unwrap();
+        img.write_at(0, &original).unwrap();
+        img.write_vmstate(0, &vec![0x55; 128 * 1024]).unwrap();
+        img.snapshot_create("saved", 128 * 1024, 0).unwrap();
+        img.write_at(0, &changed).unwrap();
+        img.snapshot_apply("saved").unwrap();
+        qemu_check(&path);
+        let mut vmstate = vec![0; 128 * 1024];
+        img.read_vmstate(0, &mut vmstate).unwrap();
+        assert_eq!(vmstate, vec![0x55; 128 * 1024]);
+        let mut restored = vec![0; amount];
+        img.read_at(0, &mut restored).unwrap();
+        assert_eq!(restored, original);
+        img.write_at(0, &changed).unwrap();
+        img.flush().unwrap();
+    }
+    qemu_check(&path);
+    assert_eq!(read_all(&path, Format::Qcow2), changed);
+    let expected = dir.join("expected.raw");
+    std::fs::write(&expected, &changed).unwrap();
+    qemu_img(&[
+        "compare",
+        "-f",
+        "qcow2",
+        "-F",
+        "raw",
+        &path.to_string_lossy(),
+        &expected.to_string_lossy(),
+    ]);
+    ops::snapshot_apply(&path, "saved").unwrap();
+    qemu_check(&path);
+    assert_eq!(read_all(&path, Format::Qcow2), original);
+}
+
+/// Holes freed by an earlier session are reused by a later process: fill,
+/// snapshot, overwrite (the snapshot pins the old clusters), delete the
+/// snapshot and discard the active range, then write the same amount from a separate `vmlab-disk`
+/// process. The file must not grow beyond a little metadata, and
+/// `qemu-img check` stays clean.
+#[test]
+fn s2_freed_clusters_reused_across_processes() {
+    require_qemu_img!();
+    let dir = tmpdir("reuse");
+    let path = dir.join("r.qcow2");
+    ops::create_qcow2(&path, 64 * 1024 * 1024, None, None).unwrap();
+    let amount = 4 * 1024 * 1024;
+    write_pattern(&path, Format::Qcow2, 0, &pattern(amount, 1));
+    ops::snapshot_create(&path, "s").unwrap();
+    qemu_check(&path);
+    write_pattern(&path, Format::Qcow2, amount as u64, &pattern(amount, 2));
+    {
+        let mut img = vmlab_disk::open(&path, Format::Qcow2, false).unwrap();
+        img.discard(0, amount as u64).unwrap();
+        img.flush().unwrap();
+    }
+    ops::snapshot_delete(&path, "s").unwrap();
+    qemu_check(&path);
+    let len_freed = std::fs::metadata(&path).unwrap().len();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_vmlab-disk"))
+        .args([
+            "bench",
+            &path.to_string_lossy(),
+            "write",
+            &amount.to_string(),
+            "--chunk",
+            "1048576",
+            "--seed",
+            "90",
+        ])
+        .output()
+        .expect("spawn vmlab-disk bench");
+    assert!(
+        out.status.success(),
+        "vmlab-disk bench failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    println!("{}", String::from_utf8_lossy(&out.stdout).trim());
+
+    let len_after = std::fs::metadata(&path).unwrap().len();
+    assert!(
+        len_after <= len_freed + 2 * 65536,
+        "freed holes were not reused across processes: file grew \
+         {len_freed} -> {len_after}"
+    );
+    qemu_check(&path);
+
+    // The other process's data reads back through the crate.
+    let content = read_all(&path, Format::Qcow2);
+    let mut expect = vec![0u8; 1024 * 1024];
+    for (i, chunk) in content[..amount].chunks(1024 * 1024).enumerate() {
+        bench_fill(&mut expect, i as u64, 90);
+        assert_eq!(chunk, &expect[..], "bench chunk {i} differs");
+    }
+    let _ = std::io::stdout().flush();
+}
+
+/// Long churn across reopen cycles: each cycle writes a stripe into the
+/// filled area, records vmstate, takes a snapshot and deletes it, then
+/// reopens — so every cycle's free map is rebuilt from disk. The file
+/// stays bounded and every cycle remains checkable.
+#[test]
+fn s2_reuse_churn_across_reopens() {
+    require_qemu_img!();
+    let dir = tmpdir("churn-reuse");
+    let path = dir.join("c.qcow2");
+    ops::create_qcow2(&path, 64 * 1024 * 1024, None, None).unwrap();
+    write_pattern(&path, Format::Qcow2, 0, &pattern(8 * 1024 * 1024, 7));
+    let len_start = std::fs::metadata(&path).unwrap().len();
+    let mut prev_len = len_start;
+    for round in 0..10u64 {
+        {
+            let mut img = vmlab_disk::open(&path, Format::Qcow2, false).unwrap();
+            // A 1 MiB stripe rotating inside the filled area: in-place.
+            let offset = (round % 8) * 1024 * 1024;
+            img.write_at(offset, &pattern(1024 * 1024, round as u8))
+                .unwrap();
+            let vm = pattern(128 * 1024, round as u8 + 50);
+            img.write_vmstate(0, &vm).unwrap();
+            img.snapshot_create(&format!("t{round}"), vm.len() as u64, 0)
+                .unwrap();
+            img.snapshot_delete(&format!("t{round}")).unwrap();
+            img.flush().unwrap();
+        }
+        let len = std::fs::metadata(&path).unwrap().len();
+        // Round 0 legitimately builds the first vmstate structures (the
+        // L2 past the guest area, two data clusters, a snapshot L1 and
+        // table, the punch COW); every later round must reuse them.
+        let slack = if round == 0 { 8 * 65536 } else { 65536 };
+        assert!(
+            len <= prev_len + slack,
+            "round {round}: file grew {prev_len} -> {len}: freed holes \
+             were not reused across the reopen"
+        );
+        prev_len = len;
+        qemu_check(&path);
+    }
+    assert!(
+        prev_len <= len_start + 8 * 65536,
+        "churn grew the file {len_start} -> {prev_len}"
+    );
+
+    // The churn left the right bytes behind: stripe k was last written by
+    // round k+8 for k in 0..2 (the wrap) and round k for k in 2..8.
+    let content = read_all(&path, Format::Qcow2);
+    for k in 0..8u64 {
+        let last = if k < 2 { k + 8 } else { k };
+        let stripe = &content[(k * 1024 * 1024) as usize..][..1024 * 1024];
+        assert_eq!(stripe, &pattern(1024 * 1024, last as u8)[..], "stripe {k}");
+    }
+    let _ = std::io::stdout().flush();
+}
+
+/// Sequential throughput baseline: write then read 1 GiB through
+/// `DiskImage` in 1 MiB chunks, printing MB/s so later virtio-blk work has
+/// a number to compare against. Ignored by default: it needs 1 GiB of
+/// scratch and tens of seconds.
+#[test]
+#[ignore = "slow: 1 GiB throughput baseline (run with cargo test -- --ignored)"]
+fn s2_sequential_throughput_1gib() {
+    require_qemu_img!();
+    let dir = tmpdir("throughput");
+    let path = dir.join("t.qcow2");
+    ops::create_qcow2(&path, 2 * 1024 * 1024 * 1024, None, None).unwrap();
+    let chunk = 1024 * 1024;
+    let chunks = 1024u64; // 1 GiB
+    let mut buf = vec![0u8; chunk];
+    let mut expect = vec![0u8; chunk];
+
+    let t0 = std::time::Instant::now();
+    {
+        let mut img = vmlab_disk::open(&path, Format::Qcow2, false).unwrap();
+        for i in 0..chunks {
+            bench_fill(&mut buf, i, 1);
+            img.write_at(i * chunk as u64, &buf).unwrap();
+        }
+        img.flush().unwrap();
+    }
+    let write_secs = t0.elapsed().as_secs_f64();
+
+    let t1 = std::time::Instant::now();
+    {
+        let mut img = vmlab_disk::open(&path, Format::Qcow2, true).unwrap();
+        for i in 0..chunks {
+            bench_fill(&mut expect, i, 1);
+            img.read_at(i * chunk as u64, &mut buf).unwrap();
+            assert_eq!(buf, expect, "chunk {i} differs");
+        }
+    }
+    let read_secs = t1.elapsed().as_secs_f64();
+
+    let total = (chunks as usize * chunk) as f64;
+    println!(
+        "sequential 1 GiB through DiskImage: write {:.0} MB/s, read {:.0} MB/s \
+         (write {write_secs:.2}s, read {read_secs:.2}s)",
+        total / 1e6 / write_secs,
+        total / 1e6 / read_secs,
+    );
+    assert!(
+        write_secs < 120.0 && read_secs < 120.0,
+        "pathologically slow: write {write_secs:.2}s read {read_secs:.2}s"
+    );
+    qemu_check(&path);
+    let _ = std::io::stdout().flush();
+}

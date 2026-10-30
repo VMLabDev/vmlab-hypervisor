@@ -31,7 +31,8 @@ commands:
   snapshot <path> --list | --create <name> | --apply <name> | --delete <name>
   commit <path>
   read <path> <offset> <len>
-  write <path> <offset> <hex-bytes>";
+  write <path> <offset> <hex-bytes>
+  bench <path> <write|read> <total-bytes> [--chunk <bytes>] [--seed <n>]";
 
 fn run(args: &[String]) -> Result<(), String> {
     let cmd = args.first().ok_or_else(|| USAGE.to_string())?;
@@ -50,6 +51,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "--snapshot",
         "--create",
         "--apply",
+        "--chunk",
+        "--seed",
         "--delete",
     ];
     let mut positional: Vec<String> = Vec::new();
@@ -156,6 +159,20 @@ fn run(args: &[String]) -> Result<(), String> {
             let hex = positional.get(2).ok_or("write needs hex bytes")?;
             write_cmd(&path, offset, hex)
         }
+        "bench" => {
+            let path = path.ok_or("bench needs a path")?;
+            let mode = positional.get(1).ok_or("bench needs write|read")?;
+            let total = parse_u64(positional.get(2).ok_or("bench needs a total")?)?;
+            let chunk = match flag("--chunk") {
+                Some(c) => parse_u64(&c)?,
+                None => 1024 * 1024,
+            };
+            let seed = match flag("--seed") {
+                Some(s) => parse_u64(&s)?,
+                None => 1,
+            } as u8;
+            bench_cmd(&path, mode, total, chunk, seed)
+        }
         _ => Err(USAGE.to_string()),
     }
 }
@@ -212,6 +229,55 @@ fn read_cmd(path: &Path, offset: u64, len: u64) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Sequential write or read of `total` bytes through `DiskImage`,
+/// printing throughput. `read` verifies the pattern `write` laid down.
+/// The pattern is deterministic so tests can check the bytes (see the
+/// `bench_fill` copy in tests/s2_qemuimg.rs).
+fn bench_cmd(path: &Path, mode: &str, total: u64, chunk: u64, seed: u8) -> Result<(), String> {
+    let write = match mode {
+        "write" => true,
+        "read" => false,
+        _ => return Err("bench mode must be write or read".into()),
+    };
+    let chunk = chunk.clamp(512, 8 * 1024 * 1024) as usize;
+    let mut buf = vec![0u8; chunk];
+    let mut expect = vec![0u8; chunk];
+    let t0 = std::time::Instant::now();
+    let mut img = open_any(path, !write)?;
+    let mut done = 0u64;
+    while done < total {
+        let n = chunk.min((total - done) as usize);
+        bench_fill(&mut expect[..n], done / chunk as u64, seed);
+        if write {
+            img.write_at(done, &expect[..n]).map_err(str_err)?;
+        } else {
+            img.read_at(done, &mut buf[..n]).map_err(str_err)?;
+            if buf[..n] != expect[..n] {
+                return Err(format!("bench read mismatch at offset {done}"));
+            }
+        }
+        done += n as u64;
+    }
+    if write {
+        img.flush().map_err(str_err)?;
+    }
+    let secs = t0.elapsed().as_secs_f64();
+    println!(
+        "bench {mode} {total} bytes in {secs:.3}s: {:.1} MB/s",
+        total as f64 / 1e6 / secs.max(f64::MIN_POSITIVE),
+    );
+    Ok(())
+}
+
+/// Deterministic per-chunk pattern for `bench`.
+fn bench_fill(buf: &mut [u8], chunk_index: u64, seed: u8) {
+    let mut x = seed.wrapping_add((chunk_index % 251) as u8);
+    for b in buf.iter_mut() {
+        x = x.wrapping_mul(31).wrapping_add(17);
+        *b = x;
+    }
 }
 
 fn write_cmd(path: &Path, offset: u64, hex: &str) -> Result<(), String> {
