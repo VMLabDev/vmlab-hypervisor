@@ -1069,6 +1069,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vmlab-hv-lockstep"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror",
+]
+
+[[package]]
 name = "vmlab-hv-proto"
 version = "0.1.0"
 dependencies = [
