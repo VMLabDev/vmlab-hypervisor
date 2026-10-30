@@ -8,8 +8,32 @@
 //! - metadata regions (L1, refcount table, snapshot L1, snapshot table) are
 //!   contiguous runs of whole clusters.
 
+use std::collections::BTreeSet;
+
 use super::{OFFSET_MASK, Qcow2Image};
 use crate::{Error, Result};
+
+/// Free host clusters the allocator may hand out, plus the cursor of the
+/// lazy scan that feeds the set.
+///
+/// qcow2 has no on-disk free list: a cluster is free exactly when its
+/// refcount is zero. The set is therefore derived from the refblocks and
+/// rebuilt lazily — at open it is empty and `scan_next` is 0, refblocks are
+/// read only as the set drains (bounded per pass), so opening a large image
+/// costs nothing until it first allocates. Every refcount write keeps the
+/// set exact (zero inserts, non-zero removes), which is what makes holes
+/// freed by an earlier session reusable: the scan classifies them from the
+/// refblocks the same way this session's own frees do.
+#[derive(Default)]
+pub(crate) struct FreeClusters {
+    set: BTreeSet<u64>,
+    /// First cluster index the scan has not classified yet.
+    scan_next: u64,
+}
+
+/// Free clusters a bounded scan pass collects before it stops early;
+/// later passes continue from `scan_next` as the set drains.
+const FREE_SCAN_TARGET: usize = 4096;
 
 /// Read one refcount of `width` bits out of a refcount block.
 fn bits_get(buf: &[u8], index: u64, width: u32) -> u64 {
@@ -79,7 +103,12 @@ impl Qcow2Image {
         let host = self.refblock_host(table_index)?;
         let mut buf = vec![0u8; self.cluster_size as usize];
         self.read_file(host, &mut buf)?;
-        self.refblock_cache.put(table_index, buf, false);
+        // Dirty evictees must reach the disk before their clusters can be
+        // handed out again.
+        for (index, block) in self.refblock_cache.put(table_index, buf, false) {
+            let host = self.refblock_host(index)?;
+            self.write_file(host, &block)?;
+        }
         Ok(())
     }
 
@@ -116,13 +145,10 @@ impl Qcow2Image {
         self.refblock_get(cluster_idx / rbe, cluster_idx % rbe)
     }
 
-    /// Like [`Self::get_refcount`] but for the free-hint scan, where a
-    /// missing refblock is simply an all-zero region.
-    fn try_get_refcount(&mut self, cluster_idx: u64) -> u64 {
-        self.get_refcount(cluster_idx).unwrap_or(0)
-    }
-
-    /// Set a cluster's refcount, allocating its refblock if needed.
+    /// Set a cluster's refcount, allocating its refblock if needed. The
+    /// free map follows the refcount: zero puts the cluster on the free
+    /// list, non-zero takes it off, so the map can never hand out a
+    /// cluster twice.
     pub(crate) fn set_cluster_refcount(&mut self, cluster_idx: u64, value: u64) -> Result<()> {
         let rbe = self.refblock_entries();
         let table_index = cluster_idx / rbe;
@@ -130,7 +156,13 @@ impl Qcow2Image {
         if self.refcount_table[table_index as usize] & OFFSET_MASK == 0 {
             self.alloc_refblock(table_index)?;
         }
-        self.refblock_set(table_index, cluster_idx % rbe, value)
+        self.refblock_set(table_index, cluster_idx % rbe, value)?;
+        if value == 0 {
+            self.free.set.insert(cluster_idx);
+        } else {
+            self.free.set.remove(&cluster_idx);
+        }
+        Ok(())
     }
 
     /// Grow the in-memory refcount table (entries) so index `len` is
@@ -168,12 +200,9 @@ impl Qcow2Image {
                 reason: format!("refcount underflow at cluster {cluster_idx}"),
             });
         }
-        self.set_cluster_refcount(cluster_idx, rc - 1)?;
-        if rc == 1 {
-            // Free clusters go back on the front of the search.
-            self.free_hint = self.free_hint.min(cluster_idx);
-        }
-        Ok(())
+        // Hitting zero returns the cluster to the free map inside
+        // set_cluster_refcount.
+        self.set_cluster_refcount(cluster_idx, rc - 1)
     }
 
     /// Reallocate the refcount table file region to `clusters` clusters.
@@ -222,17 +251,21 @@ impl Qcow2Image {
     /// Allocate and install a refcount block for `table_index`.
     fn alloc_refblock(&mut self, table_index: u64) -> Result<()> {
         let rbe = self.refblock_entries();
-        // Where the refblock would like to live if coverage is full: the
-        // first cluster beyond current coverage.
-        let beyond = self.refcount_table.len() as u64 * rbe;
-        let host_idx = match self.find_free_in_coverage(1) {
+        // A hole inside coverage hosts the block; with none it bootstraps
+        // at the first cluster beyond coverage, where it can cover its own
+        // cluster once the table has been extended for it.
+        self.refill_free_map(false)?;
+        let host_idx = match self.take_mapped_run(1) {
             Some(idx) => idx,
-            None => beyond, // bootstrap: the block may cover itself below
+            None => self.refcount_table.len() as u64 * rbe,
         };
         let host = host_idx * self.cluster_size;
+        self.l2_cache.remove(host);
         // Install the table entry first so refblock_set can resolve it.
         self.refcount_table[table_index as usize] = host;
         self.refcount_table_dirty = true;
+        // A previous scan may have skipped this previously uncovered range.
+        self.free.scan_next = self.free.scan_next.min(table_index * rbe);
         // Zero the block on disk before anything can read it.
         let zeros = vec![0u8; self.cluster_size as usize];
         self.write_file(host, &zeros)?;
@@ -242,68 +275,13 @@ impl Qcow2Image {
         Ok(())
     }
 
-    /// First free cluster strictly inside existing refcount coverage,
-    /// starting at the free hint. Never allocates coverage.
-    fn find_free_in_coverage(&mut self, count: u64) -> Option<u64> {
-        let rbe = self.refblock_entries();
-        let covered = self.refcount_table.len() as u64 * rbe;
-        let mut idx = self.free_hint;
-        'outer: while idx + count <= covered {
-            let ti = idx / rbe;
-            let start = idx % rbe;
-            if self
-                .refcount_table
-                .get(ti as usize)
-                .is_none_or(|e| e & OFFSET_MASK == 0)
-            {
-                // No refblock: the whole region reads as zero (free), but
-                // taking from it would need coverage allocation which this
-                // helper must not do.
-                idx = (ti + 1) * rbe;
-                continue 'outer;
-            }
-            let run = self.scan_refblock_run(ti, start, count);
-            match run {
-                Some(hit) => return Some(hit),
-                None => {
-                    idx = (ti + 1) * rbe;
-                }
-            }
-        }
-        None
-    }
-
-    /// Find a run of `count` zero entries in refblock `ti` starting at
-    /// `start_in_block`; returns the absolute cluster index.
-    fn scan_refblock_run(&mut self, ti: u64, start_in_block: u64, count: u64) -> Option<u64> {
-        let rbe = self.refblock_entries();
-        if start_in_block + count > rbe {
-            return None;
-        }
-        if self.refblock_get(ti, start_in_block).is_err() {
-            return None;
-        }
-        let mut run = 0u64;
-        let mut idx = start_in_block;
-        while idx < rbe {
-            if self.try_get_refcount(ti * rbe + idx) == 0 {
-                run += 1;
-                if run >= count {
-                    return Some(ti * rbe + idx + 1 - count);
-                }
-            } else {
-                run = 0;
-            }
-            idx += 1;
-        }
-        None
-    }
-
     /// Allocate one free cluster (rc 0 -> 1) and return its host offset.
     pub(crate) fn alloc_cluster(&mut self) -> Result<u64> {
         let idx = self.find_free(1)?;
+        // A freed cluster may retain a cached L2 from its previous owner.
+        // Discard it before the storage is used for a new allocation.
+        self.l2_cache.remove(idx * self.cluster_size);
         self.set_cluster_refcount(idx, 1)?;
-        self.free_hint = idx + 1;
         Ok(idx * self.cluster_size)
     }
 
@@ -311,33 +289,112 @@ impl Qcow2Image {
     pub(crate) fn alloc_clusters_contiguous(&mut self, count: u64) -> Result<u64> {
         let first = self.find_free(count)?;
         for idx in first..first + count {
+            self.l2_cache.remove(idx * self.cluster_size);
             self.set_cluster_refcount(idx, 1)?;
         }
-        self.free_hint = first + count;
         Ok(first * self.cluster_size)
     }
 
-    /// Find `count` contiguous free clusters, extending refcount coverage as
-    /// needed. Refblocks allocated along the way never break a candidate run
-    /// (the search restarts past them).
+    /// Find `count` contiguous free clusters, preferring holes freed
+    /// earlier — by this session or a previous one — lowest first, and
+    /// extending refcount coverage when coverage holds no run.
     fn find_free(&mut self, count: u64) -> Result<u64> {
+        let count = count.max(1);
         loop {
-            if let Some(hit) = self.find_free_in_coverage(count) {
-                return Ok(hit);
+            // Bounded pass first: cheap when holes sit near the scan cursor.
+            self.refill_free_map(false)?;
+            if let Some(first) = self.take_mapped_run(count) {
+                return Ok(first);
             }
-            // Extend coverage: allocate a refblock for the first table index
-            // that has none. If the table itself is exhausted, grow it.
-            let rbe = self.refblock_entries();
-            let next_region = self.refcount_table.len() as u64; // table entries are dense
-            self.ensure_refcount_table_len(next_region + 1)?;
-            let missing = (0..self.refcount_table.len() as u64)
-                .find(|ti| self.refcount_table[*ti as usize] & OFFSET_MASK == 0)
-                .ok_or_else(|| {
-                    Error::Unsupported("no free clusters and no room to grow coverage".into())
-                })?;
-            self.alloc_refblock(missing)?;
-            let _ = rbe;
+            // The bounded pass may have stopped early short of a run; a
+            // full pass decides whether coverage really holds none before
+            // it is grown.
+            self.refill_free_map(true)?;
+            if let Some(first) = self.take_mapped_run(count) {
+                return Ok(first);
+            }
+            self.grow_coverage()?;
         }
+    }
+
+    /// Extend refcount coverage by allocating the refblock for the first
+    /// table index without one, growing the table region first if needed.
+    /// The new region is one large free run for the next scan pass.
+    fn grow_coverage(&mut self) -> Result<()> {
+        self.ensure_refcount_table_len(self.refcount_table.len() as u64 + 1)?;
+        let missing = (0..self.refcount_table.len() as u64)
+            .find(|ti| self.refcount_table[*ti as usize] & OFFSET_MASK == 0)
+            .ok_or_else(|| {
+                Error::Unsupported("no free clusters and no room to grow coverage".into())
+            })?;
+        self.alloc_refblock(missing)
+    }
+
+    /// Advance the lazy scan, adding free clusters of covered regions to
+    /// the free map. `to_end` forces the pass to the end of coverage; a
+    /// bounded pass that collects nothing has already scanned to the end,
+    /// so an empty map afterwards means coverage really is full.
+    fn refill_free_map(&mut self, to_end: bool) -> Result<()> {
+        let rbe = self.refblock_entries();
+        let covered = self.refcount_table.len() as u64 * rbe;
+        while self.free.scan_next < covered {
+            let ti = self.free.scan_next / rbe;
+            if self
+                .refcount_table
+                .get(ti as usize)
+                .is_none_or(|e| e & OFFSET_MASK == 0)
+            {
+                // No refblock: the region reads as free but is not usable
+                // without coverage, which the growth path allocates.
+                self.free.scan_next = (ti + 1) * rbe;
+                continue;
+            }
+            self.load_refblock(ti)?;
+            let buf = {
+                let (b, _) = self.refblock_cache.get(ti).expect("loaded");
+                b.clone()
+            };
+            for i in self.free.scan_next % rbe..rbe {
+                if bits_get(&buf, i, self.refcount_bits) == 0 {
+                    self.free.set.insert(ti * rbe + i);
+                }
+                self.free.scan_next = ti * rbe + i + 1;
+                if !to_end && self.free.set.len() >= FREE_SCAN_TARGET {
+                    return Ok(());
+                }
+            }
+            self.free.scan_next = (ti + 1) * rbe;
+            if !to_end && self.free.set.len() >= FREE_SCAN_TARGET {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Take the lowest run of `count` adjacent free clusters out of the
+    /// free map.
+    fn take_mapped_run(&mut self, count: u64) -> Option<u64> {
+        let count = count.max(1);
+        let mut start = 0u64;
+        let mut len = 0u64;
+        let mut found = None;
+        for &c in &self.free.set {
+            if len > 0 && c == start + len {
+                len += 1;
+            } else {
+                start = c;
+                len = 1;
+            }
+            if len == count {
+                found = Some(start);
+                break;
+            }
+        }
+        let first = found?;
+        for idx in first..first + count {
+            self.free.set.remove(&idx);
+        }
+        Some(first)
     }
 
     /// Ensure the on-disk L1 region holds at least `needed` entries and the
@@ -427,30 +484,5 @@ impl Qcow2Image {
         } else {
             self.dec_refcount(cluster_idx)
         }
-    }
-
-    /// Rewrite the free hint from the refcount structures (used at open).
-    pub(crate) fn recompute_free_hint_from_tables(&mut self) {
-        let rbe = self.refblock_entries();
-        let width = self.refcount_bits;
-        let indexes: Vec<u64> = (0..self.refcount_table.len() as u64)
-            .filter(|ti| self.refcount_table[*ti as usize] & OFFSET_MASK != 0)
-            .collect();
-        let mut hint = 1u64;
-        for ti in indexes {
-            if self.load_refblock(ti).is_err() {
-                continue;
-            }
-            let buf = {
-                let (b, _) = self.refblock_cache.get(ti).expect("loaded");
-                b.clone()
-            };
-            for i in 0..rbe {
-                if bits_get(&buf, i, width) > 0 {
-                    hint = ti * rbe + i + 1;
-                }
-            }
-        }
-        self.free_hint = hint;
     }
 }
