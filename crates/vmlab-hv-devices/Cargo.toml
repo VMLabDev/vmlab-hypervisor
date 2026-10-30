@@ -10,9 +10,11 @@ rust-version.workspace = true
 libc = "0.2"
 parking_lot = "0.12"
 thiserror.workspace = true
+vhost = { version = "0.18.0", features = ["vhost-user-frontend"] }
 virtio-queue = "0.18"
 vm-memory.workspace = true
 vm-superio = "0.8"
+vmm-sys-util = "0.15"
 vmlab-disk.workspace = true
 
 [lints]

@@ -4,10 +4,12 @@
 //! §4.1 virtio-pci transport: one 64-bit memory BAR carries the common
 //! configuration, notification, ISR status, device-specific configuration and
 //! MSI-X structures, and legacy INTx is available for guests that prefer it.
-//! [`block`] is virtio-blk over the disk-format seam.
+//! [`block`] is virtio-blk over the disk-format seam, and [`fs`] is the
+//! vhost-user-fs front-end whose queues an external virtiofsd serves.
 
 pub mod block;
 pub mod console;
+pub mod fs;
 pub mod net;
 pub mod pci;
 
