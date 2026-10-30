@@ -43,6 +43,20 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
     }
     MemLayout::new(desc.memory_mib).map_err(VmmError::InvalidMachine)?;
     crate::clock::rtc_base(desc.rtc_base.as_deref())?;
+    for disk in &desc.disks {
+        if (disk.path.is_none() && !(disk.bus == DiskBus::Ahci && disk.cdrom))
+            || disk
+                .path
+                .as_ref()
+                .is_some_and(|path| path.as_os_str().is_empty())
+            || (disk.cdrom && disk.vmstate)
+        {
+            return Err(VmmError::InvalidMachine(format!(
+                "disk `{}` requires an image path; only a non-vmstate AHCI CD-ROM may be empty",
+                disk.id
+            )));
+        }
+    }
     if desc.machine == Machine::Microvm
         && (desc.display.is_some()
             || desc.tablet.is_some()
@@ -499,6 +513,14 @@ pub fn build(
     };
     for disk in &desc.disks {
         if disk.bus == DiskBus::Ahci {
+            if disk.cdrom && disk.path.is_none() {
+                ahci.as_ref()
+                    .unwrap()
+                    .lock()
+                    .attach_cdrom(disk.port.unwrap() as usize, None)
+                    .map_err(|e| VmmError::Other(format!("empty AHCI CD-ROM {}: {e}", disk.id)))?;
+                continue;
+            }
             let image =
                 crate::factory::open_image(disk).map_err(|e| VmmError::DeviceUnavailable {
                     device: e.device,
@@ -776,7 +798,7 @@ mod tests {
             port: Some(0),
             cdrom: false,
             id: "disk0".into(),
-            path: "/disk".into(),
+            path: Some("/disk".into()),
             format: DiskFormat::Raw,
             read_only: false,
             vmstate: false,
@@ -786,6 +808,52 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("machine=q35")
+        );
+    }
+
+    #[test]
+    fn only_ahci_cdroms_can_omit_the_image_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut machine = desc();
+        machine.machine = Machine::Q35;
+        machine.boot = Boot::Firmware {
+            firmware: FirmwareKind::Seabios,
+            code: tiny_bzimage(dir.path()),
+            vars: None,
+            secure_boot: false,
+            bootorder: vec![],
+        };
+        machine.ahci_pci = Some(PciAddress {
+            bus: 0,
+            device: 31,
+            function: 2,
+        });
+        machine.disks.push(Disk {
+            pci: None,
+            bus: DiskBus::Ahci,
+            port: Some(2),
+            cdrom: true,
+            id: "cdrom0".into(),
+            path: None,
+            format: DiskFormat::Raw,
+            read_only: true,
+            vmstate: false,
+        });
+        validate(&machine).unwrap();
+        machine.disks[0].cdrom = false;
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("requires an image path")
+        );
+        machine.disks[0].cdrom = true;
+        machine.disks[0].vmstate = true;
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("requires an image path")
         );
     }
 
@@ -856,7 +924,7 @@ mod tests {
             port: None,
             cdrom: false,
             id: "rootfs".into(),
-            path: "/disk.raw".into(),
+            path: Some("/disk.raw".into()),
             format: DiskFormat::Raw,
             read_only: true,
             vmstate: false,

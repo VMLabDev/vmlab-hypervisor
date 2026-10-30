@@ -58,7 +58,7 @@ fn sample_machine() -> MachineDescription {
                 port: None,
                 cdrom: false,
                 id: "rootfs".to_owned(),
-                path: PathBuf::from("/var/lib/vmlab/web-1/rootfs.squashfs"),
+                path: Some(PathBuf::from("/var/lib/vmlab/web-1/rootfs.squashfs")),
                 format: DiskFormat::Raw,
                 read_only: true,
                 vmstate: false,
@@ -69,7 +69,7 @@ fn sample_machine() -> MachineDescription {
                 port: None,
                 cdrom: false,
                 id: "scratch".to_owned(),
-                path: PathBuf::from("/var/lib/vmlab/web-1/scratch.qcow2"),
+                path: Some(PathBuf::from("/var/lib/vmlab/web-1/scratch.qcow2")),
                 format: DiskFormat::Qcow2,
                 read_only: false,
                 vmstate: true,
@@ -131,6 +131,20 @@ fn pinned_firmware_boot() {
 
 #[test]
 fn q35_devices_and_policy_wire_contract() {
+    wire(
+        &Disk {
+            pci: None,
+            bus: DiskBus::Ahci,
+            port: Some(2),
+            cdrom: true,
+            id: "cdrom0".into(),
+            path: None,
+            format: DiskFormat::Raw,
+            read_only: true,
+            vmstate: false,
+        },
+        r#"{"bus":"ahci","port":2,"cdrom":true,"id":"cdrom0","format":"raw","read_only":true,"vmstate":false}"#,
+    );
     use vmlab_hv_proto::machine::*;
     wire(
         &PciAddress {
@@ -147,7 +161,7 @@ fn q35_devices_and_policy_wire_contract() {
             port: Some(3),
             cdrom: true,
             id: "installer".into(),
-            path: "/install.iso".into(),
+            path: Some("/install.iso".into()),
             format: DiskFormat::Raw,
             read_only: true,
             vmstate: false,

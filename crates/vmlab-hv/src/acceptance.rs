@@ -86,6 +86,13 @@ fn boot_template(
         description["disks"][0]["bus"] = "ahci".into();
         description["disks"][0]["port"] = 0.into();
     }
+    description["disks"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "cdrom0", "bus": "ahci", "port": 2, "cdrom": true,
+            "format": "raw", "read_only": true
+        }));
     let machine = dir.path().join("machine.json");
     std::fs::write(&machine, serde_json::to_vec(&description).unwrap()).unwrap();
     let binary = std::env::var_os("VMLAB_HV_BINARY")

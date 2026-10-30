@@ -7,7 +7,6 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::Arc;
 
-use vmlab_disk::Format;
 use vmlab_hv_devices::serial::{Serial, SerialOut};
 use vmlab_hv_devices::virtio::block::Block;
 use vmlab_hv_devices::virtio::console::{Console, PortConfig};
@@ -15,9 +14,9 @@ use vmlab_hv_devices::virtio::fs::{Fs, FsConfig};
 use vmlab_hv_devices::virtio::net::{Net, NetConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
 use vmlab_hv_devices::{GuestMemory, IrqLine, VirtioDevice};
-use vmlab_hv_proto::machine::{Disk, DiskFormat, FsShare, Nic, NicAttachment, SerialPort};
+use vmlab_hv_proto::machine::{Disk, FsShare, Nic, NicAttachment, SerialPort};
 use vmlab_hv_vmm::DeviceUnavailable;
-use vmlab_hv_vmm::factory::{BuiltBlk, BuiltPci, BuiltSerial, SharedDisk, SharedImage};
+use vmlab_hv_vmm::factory::{BuiltBlk, BuiltPci, BuiltSerial, SharedDisk};
 
 /// The device set the binary ships.
 #[derive(Debug, Default)]
@@ -85,25 +84,10 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         mem: &GuestMemory,
         msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltBlk, DeviceUnavailable> {
-        let format = match disk.format {
-            DiskFormat::Raw => Format::Raw,
-            DiskFormat::Qcow2 => Format::Qcow2,
-        };
         // One open image shared by the device and the VMM's snapshot
         // orchestration (D14): the block device runs on a SharedDisk
         // forwarding to the same handle the registry keeps.
-        let image: SharedImage = Arc::new(Mutex::new(
-            vmlab_disk::open(&disk.path, format, disk.read_only).map_err(|e| {
-                DeviceUnavailable::new(
-                    "virtio-blk",
-                    format!(
-                        "cannot open disk {} (id `{}`): {e}",
-                        disk.path.display(),
-                        disk.id
-                    ),
-                )
-            })?,
-        ));
+        let image = vmlab_hv_vmm::factory::open_image(disk)?;
         let pci = self.wrap(
             disk.id.clone(),
             Box::new(Block::new(

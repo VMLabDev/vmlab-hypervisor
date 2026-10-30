@@ -130,7 +130,9 @@ pub struct Disk {
     pub cdrom: bool,
     /// Stable id; also the snapshot node name (e.g. `rootfs`, `scratch`, `disk0`).
     pub id: String,
-    pub path: PathBuf,
+    /// Absent only for an AHCI CD-ROM drive with no inserted medium.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
     pub format: DiskFormat,
     pub read_only: bool,
     /// The disk whose snapshot carries RAM and device state. Exactly one

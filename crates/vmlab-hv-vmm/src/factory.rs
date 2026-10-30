@@ -33,18 +33,21 @@ use crate::error::DeviceUnavailable;
 pub type SharedImage = Arc<Mutex<Box<dyn DiskImage>>>;
 
 pub fn open_image(disk: &Disk) -> Result<SharedImage, DeviceUnavailable> {
+    let path = disk.path.as_ref().ok_or_else(|| {
+        DeviceUnavailable::new("disk", format!("disk `{}` requires an image path", disk.id))
+    })?;
     let format = match disk.format {
         vmlab_hv_proto::machine::DiskFormat::Raw => vmlab_disk::Format::Raw,
         vmlab_hv_proto::machine::DiskFormat::Qcow2 => vmlab_disk::Format::Qcow2,
     };
-    vmlab_disk::open(&disk.path, format, disk.read_only)
+    vmlab_disk::open(path, format, disk.read_only)
         .map(|image| Arc::new(Mutex::new(image)))
         .map_err(|e| {
             DeviceUnavailable::new(
                 "disk",
                 format!(
                     "cannot open disk {} (id `{}`): {e}",
-                    disk.path.display(),
+                    path.display(),
                     disk.id
                 ),
             )
