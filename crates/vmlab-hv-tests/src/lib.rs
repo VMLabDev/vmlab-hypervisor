@@ -138,32 +138,29 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Locate the hypervisor binary: an explicit override, then the debug and
-/// release builds cargo leaves in the target dir. When none exists yet (a
-/// bare `cargo test -p vmlab-hv-tests`), build it, so the suite is
-/// self-sufficient.
+/// Use an explicit binary override, or ask Cargo for a current debug build
+/// once per test process. An existing executable may predate a merge.
 pub fn hv_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("VMLAB_HV_BIN") {
         let path = PathBuf::from(path);
         assert!(path.is_file(), "VMLAB_HV_BIN={path:?} does not exist");
         return path;
     }
-    let debug = target_dir().join("debug/vmlab-hv");
-    if debug.is_file() {
-        return debug;
-    }
-    let release = target_dir().join("release/vmlab-hv");
-    if release.is_file() {
-        return release;
-    }
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Command::new(cargo)
-        .args(["build", "-p", "vmlab-hv"])
-        .current_dir(workspace_root())
-        .status()
-        .expect("spawn cargo to build vmlab-hv");
-    assert!(status.success(), "cargo build -p vmlab-hv failed");
-    debug
+    static BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let status = Command::new(cargo)
+                .args(["build", "-p", "vmlab-hv"])
+                .current_dir(workspace_root())
+                .status()
+                .expect("spawn cargo to build vmlab-hv");
+            assert!(status.success(), "cargo build -p vmlab-hv failed");
+            let debug = target_dir().join("debug/vmlab-hv");
+            assert!(debug.is_file(), "cargo did not produce {}", debug.display());
+            debug
+        })
+        .clone()
 }
 
 // ---- the machine ------------------------------------------------------------
