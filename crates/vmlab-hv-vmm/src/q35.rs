@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 use vmlab_hv_devices::{BarInfo, BusDevice, DeviceError, PciDevice, Snapshot};
 
-use crate::{error::VmmError, layout::MemLayout};
+use crate::error::VmmError;
 
 const ALIAS: u64 = 0xc0000;
 const ALIAS_SIZE: usize = 0x40000;
@@ -242,7 +242,7 @@ pub struct Mch {
 }
 
 impl Mch {
-    pub fn new(layout: &MemLayout, pam: Arc<Mutex<Pam>>) -> Self {
+    pub fn new(pam: Arc<Mutex<Pam>>) -> Self {
         let mut config = [0; 4096];
         config[..4].copy_from_slice(&0x29c0_8086u32.to_le_bytes());
         config[4] = 0x03;
@@ -252,14 +252,6 @@ impl Mch {
         config[0x50..0x52].copy_from_slice(&64u16.to_le_bytes());
         config[0x9d] = 0x02;
         config[0x9e] = 0x38;
-        let low = layout.low_ram_top();
-        config[0xa0..0xa2].copy_from_slice(&((layout.ram >> 26) as u16).to_le_bytes());
-        config[0xa2..0xa4]
-            .copy_from_slice(&((layout.ram_top().max(1 << 32) >> 20) as u16).to_le_bytes());
-        for reg in [0xa4, 0xa8, 0xac] {
-            config[reg..reg + 4].copy_from_slice(&(low as u32).to_le_bytes());
-        }
-        config[0xb0..0xb2].copy_from_slice(&((low >> 16) as u16).to_le_bytes());
         Self {
             config,
             pam,
@@ -285,6 +277,9 @@ impl Mch {
 
 impl PciDevice for Mch {
     fn config_read(&mut self, reg: usize) -> u32 {
+        if reg >= 64 {
+            return u32::MAX;
+        }
         self.config
             .get(reg * 4..reg * 4 + 4)
             .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
@@ -295,7 +290,7 @@ impl PciDevice for Mch {
         for (index, byte) in data.iter().enumerate() {
             let pos = start + index;
             let mask = match pos {
-                4 => 0x03,
+                4 => 0x07,
                 5 => 0x01,
                 0x60 => 0x07,
                 0x63 => 0xfc,
@@ -487,7 +482,7 @@ mod tests {
 
     fn mch() -> Mch {
         let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
-        Mch::new(&MemLayout::q35(8192).unwrap(), Arc::new(Mutex::new(pam)))
+        Mch::new(Arc::new(Mutex::new(pam)))
     }
 
     #[test]
@@ -496,8 +491,10 @@ mod tests {
         assert_eq!(mch.config_read(0), 0x29c0_8086);
         assert_eq!(mch.config_read(2), 0x0600_0000);
         assert_eq!(mch.config_read(0x2c / 4), 0x1100_1af4);
-        assert_eq!(mch.config_read(0xb0 / 4) & 0xffff, 0x8000);
-        assert_eq!(mch.config_read(0xa0 / 4), 0x2800_0080);
+        assert_eq!(mch.config_read(0xb0 / 4), 0);
+        assert_eq!(mch.config_read(0xa0 / 4), 0);
+        mch.config_write(0xb0 / 4, 0, &0x8000u16.to_le_bytes());
+        assert_eq!(mch.config_read(0xb0 / 4), 0x8000);
         mch.config_write(0, 0, &[0; 4]);
         assert_eq!(mch.config_read(0), 0x29c0_8086);
         assert_eq!(mch.config[0x9d], 2);
@@ -570,5 +567,42 @@ mod tests {
         }
         assert_eq!(pirq(32, 1), None);
         assert_eq!(pirq(1, 0), None);
+    }
+
+    #[test]
+    fn shared_pirq_levels_and_lpc_route_changes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Line(AtomicBool);
+        impl vmlab_hv_devices::IrqLine for Line {
+            fn set_level(&self, high: bool) {
+                self.0.store(high, Ordering::SeqCst);
+            }
+        }
+        let lines: [Arc<Line>; 24] =
+            std::array::from_fn(|_| Arc::new(Line(AtomicBool::new(false))));
+        let router = PirqRouter::new(std::array::from_fn(|i| {
+            lines[i].clone() as Arc<dyn vmlab_hv_devices::IrqLine>
+        }));
+        let address = |device| vmlab_hv_proto::machine::PciAddress {
+            bus: 0,
+            device,
+            function: 0,
+        };
+        let a = PirqRouter::line(&router, address(2), 1).unwrap();
+        let b = PirqRouter::line(&router, address(6), 1).unwrap();
+        router.lock().set_route(6, 10);
+        a.set_level(true);
+        b.set_level(true);
+        a.set_level(false);
+        assert!(lines[22].0.load(Ordering::SeqCst));
+        assert!(lines[10].0.load(Ordering::SeqCst));
+        router.lock().set_route(6, 11);
+        assert!(!lines[10].0.load(Ordering::SeqCst));
+        assert!(lines[11].0.load(Ordering::SeqCst));
+        router.lock().set_route(6, 0x80);
+        assert!(!lines[11].0.load(Ordering::SeqCst));
+        assert!(lines[22].0.load(Ordering::SeqCst));
+        b.set_level(false);
+        assert!(!lines[22].0.load(Ordering::SeqCst));
     }
 }

@@ -377,7 +377,7 @@ pub fn build(
         mmio_bus
             .register(0xc0000, 0x40000, pam.clone())
             .map_err(VmmError::Other)?;
-        let mch = Arc::new(Mutex::new(crate::q35::Mch::new(&layout, pam)));
+        let mch = Arc::new(Mutex::new(crate::q35::Mch::new(pam)));
         pci_root
             .lock()
             .add_device_at(0, 0, mch.clone())
