@@ -25,6 +25,26 @@ REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_setup_data_splits_do_not_change_usable_ram_coverage(self):
+        with tempfile.TemporaryDirectory(prefix="hwref-setup-ram-") as tmp:
+            root = Path(tmp)
+            def normalize(start, size, gap=0, kind="System RAM", ceiling=0x7fffff):
+                end = start + size - 1
+                (root / "dmesg.txt").write_text(
+                    f"e820: update [mem {start:#x}-{end:#x}] usable ==> usable\n")
+                data = (f"00100000-{start-1:08x} : System RAM\n"
+                        "  00100000-001fffff : Kernel code\n"
+                        f"{start+gap:08x}-{end:08x} : {kind}\n"
+                        f"{end+1:08x}-{ceiling:08x} : System RAM\n").encode()
+                return diff.mask_boundaries("iomem.txt", data, diff.allocation_map(root))
+            first = normalize(0x300000, 0x1000)
+            self.assertEqual(first, normalize(0x500000, 0x2000))
+            self.assertNotEqual(first, normalize(0x500000, 0x2000, gap=1))
+            self.assertNotEqual(first, normalize(0x500000, 0x2000, kind="Reserved"))
+            self.assertNotEqual(first, normalize(0x500000, 0x2000, ceiling=0x8fffff))
+            unrelated = b"00100000-003fffff : System RAM\n00400000-007fffff : System RAM\n"
+            self.assertEqual(diff.mask_boundaries("iomem.txt", unrelated, {}), unrelated)
+
     def test_efi_descriptor_indices_are_run_dependent(self):
         line = "efi: Remove mem125: MMIO range=[0xffc00000-0xffffffff] (4MB) from e820 map\n"
         for artifact in ("dmesg.txt", "e820-dmesg.txt"):

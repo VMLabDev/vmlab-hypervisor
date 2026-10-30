@@ -289,6 +289,23 @@ def mask_boundaries(name: str, data: bytes, allocations: dict[int, str]) -> byte
         return text.encode()
     if name in ("iomem.txt", "ioports.txt"):
         text = data.decode()
+        if name == "iomem.txt":
+            blocks = []
+            for line in text.splitlines(True):
+                match = re.fullmatch(r"([0-9a-f]+)-([0-9a-f]+) : System RAM\n", line)
+                if match and blocks:
+                    start, end = int(match[1], 16), int(match[2], 16)
+                    previous = re.fullmatch(r"([0-9a-f]+)-([0-9a-f]+) : System RAM\n", blocks[-1][0])
+                    role = allocations.get(start, "")
+                    if (previous and int(previous[2], 16) + 1 == start
+                            and role.startswith("<setup-") and "-usable:" in role):
+                        blocks[-1][0] = f"{previous[1]}-{end:08x} : System RAM\n"
+                        continue
+                if line.startswith(" ") and blocks:
+                    blocks[-1].append(line)
+                else:
+                    blocks.append([line])
+            text = "".join(line for block in blocks for line in block)
         def region(match):
             start = allocations.get(int(match[2], 16), match[2])
             end = allocations.get(int(match[3], 16), match[3])
