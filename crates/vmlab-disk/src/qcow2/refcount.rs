@@ -252,12 +252,11 @@ impl Qcow2Image {
     fn alloc_refblock(&mut self, table_index: u64) -> Result<()> {
         let rbe = self.refblock_entries();
         // A hole inside coverage hosts the block; with none it bootstraps
-        // at the first cluster beyond coverage, where it can cover its own
-        // cluster once the table has been extended for it.
+        // at the start of its own range, so it covers its own cluster.
         self.refill_free_map(false)?;
         let host_idx = match self.take_mapped_run(1) {
             Some(idx) => idx,
-            None => self.refcount_table.len() as u64 * rbe,
+            None => table_index * rbe,
         };
         let host = host_idx * self.cluster_size;
         self.l2_cache.remove(host);
@@ -321,12 +320,21 @@ impl Qcow2Image {
     /// table index without one, growing the table region first if needed.
     /// The new region is one large free run for the next scan pass.
     fn grow_coverage(&mut self) -> Result<()> {
-        self.ensure_refcount_table_len(self.refcount_table.len() as u64 + 1)?;
-        let missing = (0..self.refcount_table.len() as u64)
-            .find(|ti| self.refcount_table[*ti as usize] & OFFSET_MASK == 0)
-            .ok_or_else(|| {
-                Error::Unsupported("no free clusters and no room to grow coverage".into())
-            })?;
+        let missing = match self
+            .refcount_table
+            .iter()
+            .position(|entry| entry & OFFSET_MASK == 0)
+        {
+            Some(index) => index as u64,
+            None => {
+                let index = self.refcount_table.len() as u64;
+                self.ensure_refcount_table_len(index + 1)?;
+                if self.refcount_table[index as usize] & OFFSET_MASK != 0 {
+                    return Ok(());
+                }
+                index
+            }
+        };
         self.alloc_refblock(missing)
     }
 

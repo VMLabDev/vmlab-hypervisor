@@ -79,6 +79,45 @@ fn scratch_directories_are_isolated_across_processes() {
     assert_eq!(std::fs::read(&marker).unwrap(), b"parent");
 }
 
+#[test]
+fn s2_vmstate_grows_refcount_coverage_without_recursive_table_growth() {
+    if !qemu_img_available() {
+        eprintln!("skipping S2: qemu-img is unavailable");
+        return;
+    }
+    let dir = tmpdir("refcount-growth");
+    for size in [512 << 10, 10 << 20] {
+        let path = dir.path().join(format!("disk-{size}.qcow2"));
+        qemu_img(&[
+            "create",
+            "-f",
+            "qcow2",
+            "-o",
+            "cluster_size=512",
+            path.to_str().unwrap(),
+            "8M",
+        ]);
+        let data = pattern(size, 37);
+        let mut image = vmlab_disk::open(&path, Format::Qcow2, false).unwrap();
+        image.write_vmstate(0, &data).unwrap();
+        image
+            .snapshot_create("growth", data.len() as u64, 0)
+            .unwrap();
+        image.flush().unwrap();
+        drop(image);
+        qemu_check(&path);
+        let mut image = vmlab_disk::open(&path, Format::Qcow2, false).unwrap();
+        image.snapshot_apply("growth").unwrap();
+        let mut restored = vec![0; data.len()];
+        image.read_vmstate(0, &mut restored).unwrap();
+        assert_eq!(restored, data);
+        image.flush().unwrap();
+        drop(image);
+        qemu_check(&path);
+        assert!(std::fs::metadata(&path).unwrap().len() < 2 * size as u64);
+    }
+}
+
 fn run(bin: &str, args: &[&str]) -> std::process::Output {
     let out = Command::new(bin).args(args).output().expect(bin);
     assert!(
