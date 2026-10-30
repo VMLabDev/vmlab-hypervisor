@@ -705,6 +705,15 @@ impl PciDevice for VirtioPciDevice {
                     self.bar4 as u32 & 0xFFFF_FFF0 | BAR64_PREFETCHABLE
                 }
             }
+            0x40 => {
+                // The MSI-X capability header: id and next pointer from the
+                // static config, the message-control word live. Linux ends
+                // its MSI-X setup with a read-modify-write of MASKALL; a
+                // stale enable bit there turns MSI-X off again and silently
+                // drops every virtio interrupt the guest will ever wait for.
+                let header = u16::from_le_bytes([self.config[0x40], self.config[0x41]]);
+                (header as u32) | (self.msix_control() as u32) << 16
+            }
             0x24 => {
                 if self.bar4 >> 32 == 0xFFFF_FFFF {
                     // The BAR is smaller than 4 GiB, so the upper dword of
