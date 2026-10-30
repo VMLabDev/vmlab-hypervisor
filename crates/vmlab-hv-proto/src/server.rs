@@ -111,12 +111,8 @@ fn serve_connection<H: FnMut(Command) -> Outcome>(
     lock(&shared.writers).push(Arc::downgrade(&writer));
     let mut reader = BufReader::new(stream);
     let mut phase = Phase::AwaitingHello;
-    loop {
-        let msg = match codec::read_client_msg(&mut reader)? {
-            Some(msg) => msg,
-            // Peer closed; nothing to answer.
-            None => break,
-        };
+    // EOF means the peer closed; nothing to answer.
+    while let Some(msg) = codec::read_client_msg(&mut reader)? {
         match respond(shared, &mut phase, msg) {
             Response::Send(msg) => write_to(&writer, &msg)?,
             Response::SendThenClose(msg) => {

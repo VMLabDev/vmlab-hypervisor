@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use vmlab_hv_proto::control::{
     Capability, ClientMsg, Command, ErrorCode, Event, Outcome, RunState, ServerMsg, ShutdownReason,
 };
