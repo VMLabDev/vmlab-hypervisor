@@ -42,6 +42,16 @@ pub struct VmShared {
     exit_cv: Condvar,
     kicks: Mutex<Vec<libc::pthread_t>>,
     event_sink: Mutex<Option<EventSink>>,
+    /// vCPU file descriptors, shared with the snapshot path: the owning
+    /// thread holds each mutex across KVM_RUN, snapshots take it while the
+    /// thread is parked.
+    vcpus: Mutex<Vec<(u8, Arc<Mutex<VcpuFd>>)>>,
+    /// How many vCPU threads are parked (out of KVM_RUN and waiting on
+    /// `state_cv`); a snapshot waits for this to reach the vCPU count.
+    parked: Mutex<usize>,
+    parked_cv: Condvar,
+    /// Guest RAM, shared with the snapshot path and later vhost-user.
+    ram: Mutex<Option<Arc<GuestRam>>>,
 }
 
 impl VmShared {
@@ -72,6 +82,10 @@ impl VmShared {
             exit_cv: Condvar::new(),
             kicks: Mutex::new(Vec::new()),
             event_sink: Mutex::new(None),
+            vcpus: Mutex::new(Vec::new()),
+            parked: Mutex::new(0),
+            parked_cv: Condvar::new(),
+            ram: Mutex::new(None),
         })
     }
 
@@ -127,12 +141,46 @@ impl VmShared {
     }
 
     /// Block until the machine runs again or exits; called by parked vCPU
-    /// threads.
+    /// threads. Parking is counted in `parked` so a snapshot can wait for
+    /// every vCPU to leave KVM_RUN before it reads machine state.
     pub(crate) fn park(&self) {
+        {
+            let mut parked = self.parked.lock();
+            *parked += 1;
+            self.parked_cv.notify_all();
+        }
         let mut state = self.state.lock();
         while *state != RunState::Running && self.exit.lock().is_none() {
             self.state_cv.wait(&mut state);
         }
+        drop(state);
+        let mut parked = self.parked.lock();
+        *parked -= 1;
+        self.parked_cv.notify_all();
+    }
+
+    /// Wait until every vCPU thread has parked, or the machine exits.
+    /// Errors after `timeout` so a wedged guest cannot hang the caller.
+    pub(crate) fn wait_quiesced(&self, timeout: std::time::Duration) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut parked = self.parked.lock();
+        loop {
+            let total = self.vcpus.lock().len();
+            if self.exit.lock().is_some() || *parked >= total {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "only {parked} of {total} vCPUs quiesced within {timeout:?}"
+                ));
+            }
+            self.parked_cv.wait_until(&mut parked, deadline);
+        }
+    }
+
+    /// Guest RAM, when the machine is assembled.
+    pub(crate) fn ram(&self) -> Option<Arc<GuestRam>> {
+        self.ram.lock().clone()
     }
 
     /// Whether the machine has an exit reason.
@@ -224,7 +272,6 @@ impl VmShared {
         }
         self.mmio_bus.lock().read(addr, data);
     }
-
     pub(crate) fn mmio_write(&self, addr: u64, data: &[u8]) {
         if self.in_pci_window(addr) {
             let mut root = self.pci_root.lock();
@@ -246,7 +293,7 @@ pub struct Vm {
     shared: Arc<VmShared>,
     vcpus: Vec<VcpuThread>,
     /// Guest RAM, kept for snapshot orchestration and later vhost-user.
-    pub ram: GuestRam,
+    pub ram: Arc<GuestRam>,
 }
 
 impl Vm {
@@ -255,7 +302,14 @@ impl Vm {
         vcpu_fds: Vec<(u8, VcpuFd)>,
         ram: GuestRam,
     ) -> Result<Self, VmmError> {
-        let vcpus = vcpu_fds
+        let ram = Arc::new(ram);
+        *shared.ram.lock() = Some(ram.clone());
+        let fds: Vec<(u8, Arc<Mutex<VcpuFd>>)> = vcpu_fds
+            .into_iter()
+            .map(|(id, fd)| (id, Arc::new(Mutex::new(fd))))
+            .collect();
+        *shared.vcpus.lock() = fds.clone();
+        let vcpus = fds
             .into_iter()
             .map(|(id, fd)| VcpuThread::spawn(id, fd, shared.clone()))
             .collect::<std::io::Result<Vec<_>>>()
