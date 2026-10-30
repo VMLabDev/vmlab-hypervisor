@@ -99,6 +99,8 @@ struct State {
     native: bool,
     scanout_generation: u64,
     dirty: bool,
+    cached_frame: Option<Frame>,
+    flushes: Vec<Rect>,
     cursor: Cursor,
     mem: Option<GuestMemory>,
     interrupt: Option<Arc<dyn VirtioInterrupt>>,
@@ -119,13 +121,15 @@ impl Gpu {
             id: id.into(),
             state: Arc::new(Mutex::new(State {
                 acked: 0,
-                preferred: (1024, 768),
+                preferred: (1280, 800),
                 events: 0,
                 resources: BTreeMap::new(),
                 scanout: None,
                 native: false,
                 scanout_generation: 0,
                 dirty: true,
+                cached_frame: None,
+                flushes: Vec::new(),
                 cursor: Cursor::default(),
                 mem: None,
                 interrupt: None,
@@ -167,11 +171,31 @@ impl Gpu {
     pub fn frame(&self) -> Option<Frame> {
         let mut s = self.state.lock();
         let mode = s.mode()?;
-        let mut pixels = vec![0; mode.stride as usize * mode.height as usize];
+        if !s.dirty
+            && let Some(frame) = &s.cached_frame
+            && frame.mode == mode
+        {
+            return Some(frame.unchanged());
+        }
+        let previous = s.cached_frame.as_ref().filter(|f| f.mode == mode);
+        let mut pixels = previous
+            .map(|f| f.pixels.clone())
+            .unwrap_or_else(|| vec![0; mode.stride as usize * mode.height as usize]);
         if let Some((id, r)) = s.scanout {
             let resource = &s.resources[&id];
+            let full = previous.is_none() || s.flushes.is_empty();
             for y in 0..r.h {
                 for x in 0..r.w {
+                    if !full
+                        && !s.flushes.iter().any(|f| {
+                            x + r.x >= f.x
+                                && x + r.x < f.x + f.w
+                                && y + r.y >= f.y
+                                && y + r.y < f.y + f.h
+                        })
+                    {
+                        continue;
+                    }
                     let src = ((y + r.y) * resource.width + x + r.x) as usize * 4;
                     let dst = (y * r.w + x) as usize * 4;
                     let p = resource.pixel(src);
@@ -179,11 +203,11 @@ impl Gpu {
                 }
             }
         }
-        Some(Frame {
-            mode,
-            pixels,
-            dirty: std::mem::replace(&mut s.dirty, false),
-        })
+        let frame = Frame::compare(mode, pixels, previous, (16, 16));
+        s.cached_frame = Some(frame.clone());
+        s.flushes.clear();
+        s.dirty = false;
+        Some(frame)
     }
 
     /// Runtime surface generation, including same-size replacement and reset.
@@ -251,8 +275,9 @@ impl State {
                 }
                 d.u32()?;
                 out.resize(1032, 0);
-                out[..4].copy_from_slice(&128u32.to_le_bytes());
-                out[8..136].copy_from_slice(&edid(self.preferred.0, self.preferred.1));
+                let edid = edid(self.preferred.0, self.preferred.1);
+                out[..4].copy_from_slice(&(edid.len() as u32).to_le_bytes());
+                out[8..8 + edid.len()].copy_from_slice(&edid);
                 0x1104
             }
             0x101 => {
@@ -299,6 +324,8 @@ impl State {
                     self.scanout = None;
                     self.scanout_generation = self.scanout_generation.wrapping_add(1);
                     self.dirty = true;
+                    self.cached_frame = None;
+                    self.flushes.clear();
                 }
                 NODATA
             }
@@ -321,6 +348,8 @@ impl State {
                 self.native = true;
                 if previous != (self.native, self.scanout) {
                     self.scanout_generation = self.scanout_generation.wrapping_add(1);
+                    self.cached_frame = None;
+                    self.flushes.clear();
                 }
                 self.dirty = true;
                 NODATA
@@ -338,6 +367,14 @@ impl State {
                     .is_some_and(|(i, s)| i == id && rect.overlaps(s))
                 {
                     self.dirty = true;
+                    // Bound queued damage even if the guest flushes faster than
+                    // the host samples. A full update includes all pending pixels.
+                    if self.flushes.len() < 256 {
+                        self.flushes.push(rect);
+                    } else if let Some((_, scanout)) = self.scanout {
+                        self.flushes.clear();
+                        self.flushes.push(scanout);
+                    }
                 }
                 NODATA
             }
@@ -619,6 +656,8 @@ impl VirtioDevice for Gpu {
         s.native = false;
         s.scanout_generation = s.scanout_generation.wrapping_add(1);
         s.dirty = true;
+        s.cached_frame = None;
+        s.flushes.clear();
         let generation = s.cursor.generation.wrapping_add(1);
         s.cursor = Cursor {
             generation,
@@ -662,19 +701,15 @@ impl<'a> Decoder<'a> {
     }
 }
 
-/// EDID 1.4 with a preferred 60 Hz detailed timing and no extensions.
-fn edid(w: u32, h: u32) -> [u8; 128] {
-    let mut e = [0; 128];
-    e[..8].copy_from_slice(&[0, 255, 255, 255, 255, 255, 255, 0]);
-    e[8..18].copy_from_slice(&[0x59, 0xac, 1, 0, 0, 0, 0, 0, 1, 36]);
-    e[18..25].copy_from_slice(&[1, 4, 0x80, 0, 0, 120, 0x06]);
-    // sRGB chromaticities, in EDID's 10-bit fixed-point representation.
-    let chroma = [655u16, 338, 307, 614, 154, 61, 320, 337];
-    for (i, value) in chroma.iter().enumerate() {
-        e[25 + i / 4] |= ((value & 3) as u8) << (6 - (i % 4) * 2);
-        e[27 + i] = (value >> 2) as u8;
+/// QEMU's default monitor, captured through the Ubuntu guest's DRM connector.
+pub(crate) fn edid(w: u32, h: u32) -> [u8; 256] {
+    let mut e =
+        *include_bytes!("../../../../../docs/hwref/ubuntu-26.04-display/guest/drm/Virtual-1.edid");
+    if (w, h) == (1280, 800) {
+        return e;
     }
-    e[38..54].fill(1);
+    // Size requests replace the preferred detailed timing; the monitor identity
+    // and secondary modes remain those of the captured monitor.
     let hb = 160u32;
     let vb = 35u32;
     let clock = ((w + hb) * (h + vb) * 60 / 10000) as u16;
@@ -687,9 +722,6 @@ fn edid(w: u32, h: u32) -> [u8; 128] {
     e[61] = ((h >> 8) << 4) as u8;
     e[62..66].copy_from_slice(&[48, 32, 0x35, 0]);
     e[71] = 0x1a;
-    e[72..90].copy_from_slice(b"\0\0\0\xfc\0vmlab screen\n");
-    e[90..108].copy_from_slice(b"\0\0\0\xff\0vmlab-hv\n    ");
-    e[108..113].copy_from_slice(&[0, 0, 0, 0x10, 0]);
     e[127] = 0u8.wrapping_sub(e[..127].iter().fold(0u8, |a, b| a.wrapping_add(*b)));
     e
 }

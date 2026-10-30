@@ -4,7 +4,9 @@ use super::*;
 fn edid_has_valid_checksum_and_preferred_timing() {
     for (w, h) in [(1024, 768), (1920, 1080), (3840, 2160)] {
         let e = edid(w, h);
-        assert_eq!(e.iter().fold(0u8, |a, b| a.wrapping_add(*b)), 0);
+        for block in e.as_chunks::<128>().0 {
+            assert_eq!(block.iter().fold(0u8, |a, b| a.wrapping_add(*b)), 0);
+        }
         assert_eq!(u32::from(e[56]) | (u32::from(e[58] >> 4) << 8), w);
         assert_eq!(u32::from(e[59]) | (u32::from(e[61] >> 4) << 8), h);
         assert_eq!(&e[..8], &[0, 255, 255, 255, 255, 255, 255, 0]);
@@ -12,25 +14,35 @@ fn edid_has_valid_checksum_and_preferred_timing() {
 }
 
 #[test]
-fn edid_passes_external_decoder_when_available() {
+fn edid_external_decoder_matches_qemu_reference_when_available() {
     use std::process::Command;
     if Command::new("edid-decode").arg("--help").output().is_err() {
         eprintln!("SKIP EDID conformance: edid-decode missing");
         return;
     }
-    for (w, h) in [(1024, 768), (1920, 1080), (3840, 2160)] {
+    let decode = |bytes: &[u8]| {
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(&edid(w, h)).unwrap();
-        let result = Command::new("edid-decode")
+        file.write_all(bytes).unwrap();
+        Command::new("edid-decode")
             .arg("--check")
             .arg(file.path())
             .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stdout)
-        );
+            .unwrap()
+    };
+    let reference = decode(&edid(1280, 800));
+    let reference_text = String::from_utf8(reference.stdout).unwrap();
+    // The captured QEMU CTA block lacks a VCDB. D30 preserves that byte-for-byte;
+    // resized timings must not add decoder failures to the reference's failures.
+    eprintln!("QEMU reference EDID decoder status: {}", reference.status);
+    let failures = |text: &str| {
+        text.split_once("\nFailures:\n")
+            .map(|(_, errors)| errors.to_owned())
+    };
+    for (w, h) in [(1024, 768), (1920, 1080), (3840, 2160)] {
+        let result = decode(&edid(w, h));
+        let output = String::from_utf8(result.stdout).unwrap();
+        assert_eq!(result.status, reference.status, "{output}");
+        assert_eq!(failures(&output), failures(&reference_text), "{output}");
     }
 }
 

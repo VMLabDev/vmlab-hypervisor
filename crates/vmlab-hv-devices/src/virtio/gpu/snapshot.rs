@@ -244,6 +244,8 @@ impl Gpu {
         s.resources = resources;
         s.cursor = cursor;
         s.dirty = true;
+        s.cached_frame = None;
+        s.flushes.clear();
         if s.mem.is_some() {
             s.queues = queues;
         } else {

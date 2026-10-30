@@ -170,6 +170,27 @@ impl DisplayServer {
         let frame = self.shared.source.frame()?;
         frame.validate()?;
         let mut state = self.shared.state.lock().unwrap();
+        let previous = &state.frame;
+        if frame.damage.is_empty()
+            && (
+                frame.generation,
+                frame.width,
+                frame.height,
+                frame.stride,
+                frame.drm_fourcc,
+                frame.modifier,
+            ) == (
+                previous.generation,
+                previous.width,
+                previous.height,
+                previous.stride,
+                previous.drm_fourcc,
+                previous.modifier,
+            )
+            && std::mem::discriminant(&frame.pixels) == std::mem::discriminant(&previous.pixels)
+        {
+            return Ok(());
+        }
         state.frame = Arc::new(frame);
         state.seq += 1;
         self.shared.changed.notify_all();
@@ -187,6 +208,9 @@ impl DisplayServer {
             .encode()?,
         )?;
         let mut state = self.shared.state.lock().unwrap();
+        if state.cursor == cursor {
+            return Ok(());
+        }
         state.cursor = cursor;
         state.cursor_seq += 1;
         self.shared.changed.notify_all();
@@ -194,6 +218,9 @@ impl DisplayServer {
     }
     pub fn set_leds(&self, mask: u32) {
         let mut state = self.shared.state.lock().unwrap();
+        if state.leds == mask & 7 {
+            return;
+        }
         state.leds = mask & 7;
         state.led_seq += 1;
         self.shared.changed.notify_all();

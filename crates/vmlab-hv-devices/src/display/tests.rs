@@ -5,6 +5,23 @@ fn device() -> StandardVga {
     StandardVga::new("vga0", &[0x55, 0xaa, 1]).unwrap()
 }
 
+#[test]
+fn standard_vga_mmio_edid_matches_the_captured_default_monitor() {
+    let mut dev = device();
+    let mut bytes = [0xff; 1024];
+    dev.bar_read(2, 0, &mut bytes);
+    assert_eq!(
+        &bytes[..256],
+        include_bytes!("../../../../docs/hwref/ubuntu-26.04-display/guest/drm/Virtual-1.edid")
+    );
+    assert_eq!(&bytes[256..], &[0; 768]);
+    dev.bar_write(2, 0, &[0; 256]);
+    let mut tail = [0xff; 8];
+    dev.bar_read(2, 252, &mut tail);
+    assert_eq!(&tail[..4], &bytes[252..256]);
+    assert_eq!(&tail[4..], &[0; 4]);
+}
+
 fn indexed(dev: &mut StandardVga, port: u16, index: u8, value: u8) {
     dev.io_write(port, &[index, value]);
 }
@@ -51,6 +68,86 @@ fn text_mode(dev: &mut StandardVga) {
     indexed(dev, 0x3d4, 0x12, 0x8f);
     indexed(dev, 0x3d4, 0x13, 40);
     indexed(dev, 0x3d4, 0x0a, 0x20);
+}
+
+#[test]
+fn unchanged_vram_and_register_writes_do_not_damage_scanout() {
+    let mut dev = device();
+    text_mode(&mut dev);
+    dev.legacy_write(0x18000, &[b'A', 0x1f]);
+    dev.frame();
+    dev.legacy_write(0x18000, &[b'A', 0x1f]);
+    indexed(&mut dev, 0x3d4, 0x0a, 0x20);
+    dev.mark_framebuffer_dirty();
+    assert!(!dev.frame().dirty);
+}
+
+#[test]
+fn text_character_attribute_and_cursor_damage_stays_in_changed_cells() {
+    let mut dev = device();
+    text_mode(&mut dev);
+    dev.legacy_write(0x18000, &[b'A', 0x1f, b'B', 0x1f]);
+    dev.frame();
+    dev.legacy_write(0x18002, &[b'C', 0x1f]);
+    let frame = dev.frame();
+    assert_eq!(
+        frame.damage,
+        vec![Damage {
+            x: 8,
+            y: 0,
+            width: 8,
+            height: 16
+        }]
+    );
+    dev.legacy_write(0x18003, &[0x2f]);
+    assert_eq!(dev.frame().damage, frame.damage);
+    indexed(&mut dev, 0x3d4, 0x0a, 14);
+    indexed(&mut dev, 0x3d4, 0x0b, 15);
+    assert_eq!(
+        dev.frame().damage,
+        vec![Damage {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 16
+        }]
+    );
+    indexed(&mut dev, 0x3d4, 0x0f, 1);
+    assert_eq!(
+        dev.frame().damage,
+        vec![Damage {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16
+        }]
+    );
+    indexed(&mut dev, 0x3d4, 0x0a, 0x20);
+    assert_eq!(dev.frame().damage, frame.damage);
+    assert!(dev.frame().damage.is_empty());
+}
+
+#[test]
+fn graphics_damage_tracks_visible_tiles_and_ignores_hidden_vram() {
+    let mut dev = device();
+    vbe(&mut dev, 35, 19, 32);
+    dev.frame();
+    dev.bar_write(0, (18 * 35 + 34) * 4, &[1, 2, 3, 0]);
+    assert_eq!(
+        dev.frame().damage,
+        vec![Damage {
+            x: 32,
+            y: 16,
+            width: 3,
+            height: 3
+        }]
+    );
+    dev.bar_write(0, 100000, &[1, 2, 3, 0]);
+    assert!(!dev.frame().dirty);
+    for _ in 0..100 {
+        dev.mark_framebuffer_dirty();
+        assert!(!dev.frame().dirty);
+    }
 }
 
 #[test]
