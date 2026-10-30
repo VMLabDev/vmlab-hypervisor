@@ -119,6 +119,16 @@ fn p4_tpm2_log_relocation_and_namespace_match_ovmf_capture() {
         blob,
         u32_at(&installed["etc/acpi/rsdp"].data, 16) as usize - base,
     );
+    let signatures: Vec<_> = rsdt[36..]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|entry| &read_table(blob, u32_at(entry, 0) as usize - base)[..4])
+        .collect();
+    assert_eq!(
+        signatures,
+        [b"FACP", b"APIC", b"HPET", b"TPM2", b"MCFG", b"WAET"]
+    );
     let tpm = rsdt[36..]
         .as_chunks::<4>()
         .0

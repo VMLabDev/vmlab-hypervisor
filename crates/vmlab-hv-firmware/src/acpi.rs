@@ -105,14 +105,7 @@ pub fn generate(platform: &Platform) -> Result<AcpiTables, String> {
     checksum(&mut tables, &mut loader, madt);
     let hpet = append(&mut tables, HPET);
     checksum(&mut tables, &mut loader, hpet);
-    let mut mcfg = table(*b"MCFG", 1, 24);
-    put(&mut mcfg, 44, platform.ecam_base, 8);
-    mcfg[55] = 255;
-    let mcfg = append(&mut tables, &mcfg);
-    checksum(&mut tables, &mut loader, mcfg);
-    let waet = append(&mut tables, WAET);
-    checksum(&mut tables, &mut loader, waet);
-    let mut entries = vec![fadt, madt, hpet, mcfg, waet];
+    let mut entries = vec![fadt, madt, hpet];
     if platform.tpm {
         let mut tpm = table(*b"TPM2", 4, 40);
         put(&mut tpm, 48, 6, 4);
@@ -122,6 +115,14 @@ pub fn generate(platform: &Platform) -> Result<AcpiTables, String> {
         checksum(&mut tables, &mut loader, tpm);
         entries.push(tpm);
     }
+    let mut mcfg = table(*b"MCFG", 1, 24);
+    put(&mut mcfg, 44, platform.ecam_base, 8);
+    mcfg[55] = 255;
+    let mcfg = append(&mut tables, &mcfg);
+    checksum(&mut tables, &mut loader, mcfg);
+    let waet = append(&mut tables, WAET);
+    checksum(&mut tables, &mut loader, waet);
+    entries.extend([mcfg, waet]);
     let mut rsdt = table(*b"RSDT", 1, entries.len() * 4);
     for (index, address) in entries.iter().enumerate() {
         put(&mut rsdt, 36 + index * 4, *address as u64, 4);
