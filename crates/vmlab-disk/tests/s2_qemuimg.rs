@@ -837,6 +837,37 @@ fn s2_read_only_never_modifies() {
 /// Discard frees clusters, reads as zeros (or backing), and keeps the image
 /// checkable.
 #[test]
+fn s2_subcluster_discard_preserves_neighboring_metadata() {
+    require_qemu_img!();
+    let temp = tmpdir("partial-discard");
+    let path = temp.path().join("active.qcow2");
+    let reference = temp.path().join("qemu.qcow2");
+    ops::create_qcow2(&path, 1 << 20, None, None).unwrap();
+    write_pattern(&path, Format::Qcow2, 0, &vec![0x77; 1 << 20]);
+    std::fs::copy(&path, &reference).unwrap();
+    run(
+        QEMU_IO,
+        &[
+            "-f",
+            "qcow2",
+            "-c",
+            "discard 512 512",
+            reference.to_str().unwrap(),
+        ],
+    );
+    {
+        let mut image = vmlab_disk::open(&path, Format::Qcow2, false).unwrap();
+        image.discard(512, 512).unwrap();
+        image.flush().unwrap();
+    }
+    let actual = read_all(&path, Format::Qcow2);
+    assert!(actual[..512].iter().all(|b| *b == 0x77));
+    assert!(actual[1024..].iter().all(|b| *b == 0x77));
+    assert_eq!(actual, read_all(&reference, Format::Qcow2));
+    qemu_check(&path);
+}
+
+#[test]
 fn s2_discard_and_zero_semantics() {
     require_qemu_img!();
     let temp = tmpdir("discard");
