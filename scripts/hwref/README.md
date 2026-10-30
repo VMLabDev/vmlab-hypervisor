@@ -20,6 +20,8 @@ python3 scripts/hwref/capture.py            # all four configs
 python3 scripts/hwref/capture.py --list
 python3 scripts/hwref/capture.py pc-seabios-legacy
 python3 scripts/hwref/capture.py --summarize   # regenerate docs/hwref/tables.md
+python3 scripts/hwref/capture.py --output .scratch/hwref-run q35-seabios-linux-generic
+python3 scripts/hwref/capture.py diff REFERENCE_DIR CANDIDATE_DIR
 uv run --no-project python -m unittest discover -s scripts/hwref -p 'test_*.py'
 ```
 
@@ -28,6 +30,15 @@ First run downloads ~90 MB from dl-cdn.alpinelinux.org into `.cache/`
 blank guest media. Results land in `docs/hwref/<config>/`; each capture
 records its exact QEMU argv (`qemu-argv.txt`), the swtpm argv, and the host
 facts (QEMU version, CPU, KVM parameters, firmware hashes).
+
+New SeaBIOS captures boot a Syslinux FAT32 probe disk. They use the same
+kernel and initramfs as the OVMF UKI, without QEMU linuxboot or kvmvapic ROMs.
+The Syslinux package is cached with the Alpine probe packages.
+`--output` requires a fresh directory and leaves the checked-in captures alone.
+The full P2 workflow, `vmlab-hv` machine-description requirements, normalization
+rules, and D6 allow-list are documented in `docs/hwref/README.md`.
+Set `HWREF_RECAPTURE=1` when running the Python suite to exercise two real
+QEMU boots and the diff command.
 
 Requirements: `/usr/bin/qemu-system-x86_64`, `qemu-img`, `/dev/kvm`,
 `gcc`, `cpio`, `xorriso`, mtools, `sfdisk`, `objcopy`,

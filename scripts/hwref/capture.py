@@ -25,6 +25,7 @@ dl-cdn.alpinelinux.org on first run (assets cache under .cache/).
 from __future__ import annotations
 
 import base64
+import argparse
 import gzip
 import hashlib
 import io
@@ -65,6 +66,7 @@ DOWNLOADS = [
     f"{ALPINE_BASE}/main/x86_64/dmidecode-3.6-r0.apk",
     f"{ALPINE_BASE}/main/x86_64/iasl-20230628-r0.apk",
     f"{ALPINE_BASE}/main/x86_64/linux-virt-6.12.114-r0.apk",
+    f"{ALPINE_BASE}/main/x86_64/syslinux-6.04_pre1-r16.apk",
 ]
 KVER = "6.12.114-0-virt"
 
@@ -117,6 +119,17 @@ if [ -f /etc/hwref-modules ]; then
 fi
 [ -d /sys/firmware/efi ] && mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>>/out/modprobe.log
 sleep 2
+# USB enumeration and HID binding are asynchronous. Wait for the tablet before
+# taking dmesg, otherwise a capture can miss events visible in the later USB dump.
+for attempt in $(seq 1 100); do
+  ready=
+  for tablet in /sys/bus/hid/devices/0003:0627:0001.*; do
+    [ -L "$tablet/driver" ] && ready=yes
+  done
+  [ "$ready" = yes ] && break
+  sleep 0.1
+done
+[ "$ready" = yes ] || echo 'USB tablet did not bind before capture' >>/out/modprobe.log
 
 cd /out
 { uname -a; cat /proc/version; cat /proc/cmdline; } > uname.txt 2>&1
@@ -367,6 +380,8 @@ class Assets:
         self.esp = CACHE / "esp.raw"
         self.iso = CACHE / "cd0.iso"
         self.floppy = CACHE / "floppy.img"
+        self.bios_disk = CACHE / "bios.raw"
+        self.legacy_disk = CACHE / "bios-legacy.raw"
 
     def ensure(self) -> None:
         if not STUB.exists():
@@ -396,6 +411,8 @@ class Assets:
             self.build_uki()
             uki_stamp.write_text(stamp_of(self.initrd, KERNEL, STUB))
         self.build_esp()
+        self.build_bios_disk()
+        self.build_bios_disk(self.legacy_disk, "/dev/ttyS1")
         if not self.iso.exists():
             self.build_iso()
         if not self.floppy.exists():
@@ -538,6 +555,30 @@ class Assets:
         sh(["xorriso", "-as", "mkisofs", "-quiet", "-volid", "HWREF",
             "-o", str(self.iso), str(tmp)])
 
+    def build_bios_disk(self, target: Path | None = None, channel: str = "/dev/vport0p1") -> None:
+        """Boot the probe through SeaBIOS and Syslinux, without QEMU ROMs."""
+        target = target or self.bios_disk
+        with target.open("wb") as disk:
+            disk.truncate(96 * 1024 * 1024)
+        sh(["sfdisk", "--quiet", str(target)],
+           input="label: dos\nstart=2048, type=0x0c, bootable\n")
+        image = f"{target}@@1M"
+        sh(["mformat", "-i", image, "-F", "-v", "HWREF", "::"])
+        for source, dest in ((KERNEL, "vmlinuz"), (self.initrd, "initrd.gz")):
+            sh(["mcopy", "-i", image, str(source), f"::/{dest}"])
+        config = CACHE / "src" / "syslinux.cfg"
+        config.write_text("DEFAULT probe\nPROMPT 0\nTIMEOUT 1\nLABEL probe\n"
+                          "  KERNEL vmlinuz\n  INITRD initrd.gz\n"
+                          "  APPEND console=ttyS0 loglevel=7 panic=-1 reboot=t "
+                          f"hwref.out={channel}\n")
+        sh(["mcopy", "-i", image, str(config), "::/syslinux.cfg"])
+        syslinux = self.rootfs / "usr/bin/syslinux"
+        sh([str(self.rootfs / "lib/ld-musl-x86_64.so.1"), str(syslinux),
+            "--install", "--offset", "1048576", str(target)])
+        mbr = next(self.rootfs.rglob("mbr.bin"))
+        with target.open("r+b") as disk:
+            disk.write(mbr.read_bytes()[:440])
+
     def build_floppy(self) -> None:
         print("building blank floppy ...")
         with open(self.floppy, "wb") as f:
@@ -570,6 +611,9 @@ class RunPaths:
 
 def build_argv(cfg: dict, p: RunPaths, assets: Assets, run: Path, cfg_name: str) -> list[str]:
     a: list[str] = []
+    a.extend(["-global", "kvm-apic.vapic=false"])
+    if cfg["machine"] == "q35" and "firmware" not in cfg:
+        arg(a, "bios", "/usr/share/qemu/bios-256k.bin")
     arg(a, "name", f"vmlab:hwref/{cfg_name}")                    # cmdline.rs:439
     arg(a, "machine", cfg["machine"])                            # :448
     arg(a, "accel", "kvm")                                       # :471
@@ -610,13 +654,17 @@ def build_argv(cfg: dict, p: RunPaths, assets: Assets, run: Path, cfg_name: str)
     # disks (:632-661): explicit blockdev node names, addressed slots
     disk0 = run / "disk0.qcow2"
     if cfg.get("ide_disk"):                                      # pc: (bus, unit) = (slot/2, slot%2)
-        sh([QEMU_IMG, "create", "-q", "-f", "qcow2", str(disk0), "64M"])
+        sh([QEMU_IMG, "convert", "-q", "-O", "qcow2", str(assets.legacy_disk), str(disk0)])
         arg(a, "blockdev", f"driver=qcow2,node-name=disk0,file.driver=file,file.filename={disk0}")
         arg(a, "device", "ide-hd,drive=disk0,bus=ide.0,unit=0,bootindex=50")
     elif cfg["boot"] == "esp":                                   # OVMF: no bootindex
         sh([QEMU_IMG, "convert", "-q", "-O", "qcow2", str(assets.esp), str(disk0)])
         arg(a, "blockdev", f"driver=qcow2,node-name=disk0,file.driver=file,file.filename={disk0}")
         arg(a, "device", "virtio-blk-pci,drive=disk0")
+    elif cfg["boot"] == "bios-disk":
+        sh([QEMU_IMG, "convert", "-q", "-O", "qcow2", str(assets.bios_disk), str(disk0)])
+        arg(a, "blockdev", f"driver=qcow2,node-name=disk0,file.driver=file,file.filename={disk0}")
+        arg(a, "device", "virtio-blk-pci,drive=disk0,bootindex=50")
     else:                                                        # SeaBIOS: bootindex 50+
         sh([QEMU_IMG, "create", "-q", "-f", "qcow2", str(disk0), "64M"])
         arg(a, "blockdev", f"driver=qcow2,node-name=disk0,file.driver=file,file.filename={disk0}")
@@ -636,7 +684,7 @@ def build_argv(cfg: dict, p: RunPaths, assets: Assets, run: Path, cfg_name: str)
 
     for i, (model, mac) in enumerate(cfg["nics"]):               # :719-745
         arg(a, "netdev", f"stream,id=net{i},server=off,addr.type=unix,addr.path={p.nic_sock[i]}")
-        arg(a, "device", f"{model},netdev=net{i},mac={mac}")
+        arg(a, "device", f"{model},netdev=net{i},mac={mac},romfile=")
     if not cfg["nics"]:
         a.extend(["-nic", "none"])
 
@@ -645,7 +693,10 @@ def build_argv(cfg: dict, p: RunPaths, assets: Assets, run: Path, cfg_name: str)
         arg(a, "tpmdev", "emulator,id=tpm0,chardev=chrtpm")
         arg(a, "device", "tpm-tis,tpmdev=tpm0")
 
-    arg(a, "device", cfg["display"])                             # :815-818
+    display = cfg["display"]
+    if display == "VGA":
+        display += ",romfile=/usr/share/qemu/vgabios-stdvga.bin"
+    arg(a, "device", display)                                    # :815-818
     a.extend(["-usb"])                                           # :859-865 (default input)
     if cfg.get("usb"):
         arg(a, "device", "qemu-xhci,id=usbx")
@@ -771,23 +822,33 @@ class ChanReader(threading.Thread):
         self.path = path
         self.data = bytearray()
         self.connected = False
+        self.stopped = threading.Event()
+        self.connection = None
+
+    def close(self) -> None:
+        self.stopped.set()
+        if self.connection is not None:
+            self.connection.close()
 
     def run(self) -> None:
         deadline = time.time() + 30
         s = None
-        while time.time() < deadline:
+        while time.time() < deadline and not self.stopped.is_set():
             try:
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 s.settimeout(2)
                 s.connect(str(self.path))
                 break
             except OSError:
+                s.close()
+                s = None
                 time.sleep(0.1)
         if s is None:
             return
         self.connected = True
+        self.connection = s
         s.settimeout(1.0)
-        while True:
+        while not self.stopped.is_set():
             try:
                 chunk = s.recv(65536)
             except socket.timeout:
@@ -797,6 +858,7 @@ class ChanReader(threading.Thread):
             if not chunk:
                 break
             self.data += chunk
+        s.close()
 
 
 def qmp_cont(sock: Path, log) -> None:
@@ -869,7 +931,9 @@ def run_capture(cfg_name: str, cfg: dict, assets: Assets) -> bool:
             "# appends qemu_args in this position and boots a real guest disk.\n"
             if cfg["boot"] == "kernel" else
             "# boots from disk0.qcow2 (a FAT32 ESP carrying an unsigned UKI\n"
-            "# at \\EFI\\BOOT\\BOOTX64.EFI) — no probe additions to the argv.\n")
+            "# at \\EFI\\BOOT\\BOOTX64.EFI) — no probe additions to the argv.\n"
+            if cfg["boot"] == "esp" else
+            "# boots the probe kernel and initrd from a Syslinux FAT32 disk.\n")
         (out_dir / "qemu-argv.txt").write_text(
             "# QEMU argv (argv[0] then one argument per line), a mirror of\n"
             "# vmlab's src/qemu/cmdline.rs build_args() for this profile shape.\n"
@@ -962,6 +1026,9 @@ def run_capture(cfg_name: str, cfg: dict, assets: Assets) -> bool:
         if proc and proc.poll() is None:
             proc.kill()
             proc.wait()
+        if reader:
+            reader.close()
+            reader.join(timeout=2)
         for s in sinks:
             s.close()
         if swtpm_proc and swtpm_proc.poll() is None:
@@ -1016,13 +1083,19 @@ def write_config_readme(cfg_name: str, cfg: dict, ok: bool, reason: str) -> None
             "  preserve disk bootindex 50. The legacy CD uses index 1 instead of",
             "  vmlab's 0 because QEMU direct-kernel boot reserves index 0.",
         ]
-    else:
+    elif cfg["boot"] == "esp":
         notes += [
             "- Boots as a real UEFI disk boot: disk0.qcow2 carries an MBR + FAT32",
             "  partition with an unsigned UKI (systemd stub + the same kernel and",
             "  initramfs) at `\\EFI\\BOOT\\BOOTX64.EFI`. No `-kernel`, so the fw_cfg",
             "  file list has no direct-kernel probe additions; the guest is Linux,",
             "  not Windows.",
+        ]
+    else:
+        notes += [
+            "- Boots the same probe kernel and initramfs from a Syslinux FAT32 disk",
+            "  through SeaBIOS. QEMU linuxboot and kvmvapic option ROMs are disabled.",
+            "  The checked-in direct-kernel reference has additional fw_cfg boot blobs.",
         ]
     if cfg_name == "q35-ovmf-win11-secureboot":
         notes += [
@@ -1250,28 +1323,75 @@ This package provides QEMU reference data; it does not change S1 or S2 behaviour
 ## QEMU version
 
 """
-    (DOCS / "README.md").write_text(intro + "\n".join(versions) + "\n\n" + "\n".join(lines))
+    readme = DOCS / "README.md"
+    if readme.exists():
+        header = readme.read_text().split("<!-- Generated by scripts/hwref/capture.py --summarize;")[0]
+    else:
+        header = intro + "\n".join(versions) + "\n\n"
+    readme.write_text(header + "\n".join(lines))
     print(f"wrote {DOCS / 'tables.md'}")
 
 
 def main() -> int:
-    args = sys.argv[1:]
-    if args and args[0] == "--list":
+    if sys.argv[1:2] == ["diff"]:
+        from diff import main as diff_main
+        del sys.argv[1]
+        return diff_main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("configs", nargs="*", choices=None)
+    parser.add_argument("--list", action="store_true")
+    parser.add_argument("--summarize", action="store_true")
+    parser.add_argument("--output", type=Path, help="fresh capture root; never replaces references")
+    parser.add_argument("--backend", choices=("qemu", "vmlab-hv"), default="qemu")
+    parser.add_argument("--binary", type=Path, default=HERE.parent.parent / "target/debug/vmlab-hv")
+    parser.add_argument("--machine", type=Path, help="q35 firmware machine JSON; disk id hwref-probe is replaced")
+    args = parser.parse_args()
+    if args.list:
         for name, cfg in CONFIGS.items():
             print(f"{name:32} {cfg['title']}")
         return 0
-    if args and args[0] == "--summarize":
+    if args.summarize:
         summarize()
         return 0
-    assets = Assets()
-    assets.ensure()
-    wanted = args or list(CONFIGS)
+    wanted = args.configs or list(CONFIGS)
     bad = [w for w in wanted if w not in CONFIGS]
     if bad:
         print(f"unknown config(s): {bad}", file=sys.stderr)
         return 2
-    failed = [c for c in wanted if not run_capture(c, CONFIGS[c], assets)]
-    summarize()
+    if args.backend == "vmlab-hv":
+        from hv_capture import capture_hv
+        try:
+            return capture_hv(args, Assets())
+        except (ValueError, OSError, KeyError) as error:
+            print(f"vmlab-hv capture: {error}", file=sys.stderr)
+            return 2
+    global DOCS
+    if args.output:
+        DOCS = args.output.resolve()
+        if DOCS.exists() and any(DOCS.iterdir()):
+            parser.error("--output must be empty or absent")
+    if not os.access("/dev/kvm", os.R_OK | os.W_OK):
+        print("SKIP: /dev/kvm is unavailable")
+        return 0
+    required = [Path(QEMU), Path(QEMU_IMG), KERNEL, STUB,
+                Path("/usr/share/qemu/bios-256k.bin"), Path("/usr/share/qemu/vgabios-stdvga.bin")]
+    for name in wanted:
+        required.extend(FIRMWARE / filename for filename in CONFIGS[name].get("firmware", ())[:2])
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        print("SKIP: missing probe/firmware prerequisites: " + ", ".join(missing))
+        return 0
+    assets = Assets()
+    assets.ensure()
+    configs = {c: dict(CONFIGS[c]) for c in wanted}
+    # New q35 SeaBIOS captures use a disk boot. Direct kernel boot relies on
+    # QEMU's linuxboot option ROM, which is outside the clean-room contract.
+    for cfg in configs.values():
+        if cfg["boot"] == "kernel":
+            cfg["boot"] = "bios-disk"
+    failed = [c for c in wanted if not run_capture(c, configs[c], assets)]
+    if not args.output:
+        summarize()
     return 1 if failed else 0
 
 
