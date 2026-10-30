@@ -48,19 +48,25 @@ fn template(name: &str, variable: &str) -> Option<PathBuf> {
     })
 }
 
+enum DisplayTest {
+    None,
+    Stream,
+    Screenshot(&'static str),
+}
+
 fn boot_template(
     name: &str,
     variable: &str,
     snapshot: bool,
     bus: vmlab_hv_proto::machine::DiskBus,
-    display_test: bool,
+    display_test: DisplayTest,
     firmware: Firmware,
 ) {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("skipping {name}: /dev/kvm is unavailable");
         return;
     }
-    if display_test
+    if !matches!(display_test, DisplayTest::None)
         && !Command::new("tesseract")
             .arg("--version")
             .output()
@@ -189,7 +195,10 @@ fn boot_template(
             description["memory_mib"] = 2048.into();
         }
     }
-    if display_test {
+    if let DisplayTest::Screenshot(device) = display_test {
+        description["display"]["device"] = device.into();
+    }
+    if !matches!(display_test, DisplayTest::None) {
         description["display"]["socket"] = serde_json::to_value(&native).unwrap();
         description["display"]["vnc_socket"] = serde_json::to_value(&rfb).unwrap();
     }
@@ -267,8 +276,9 @@ fn boot_template(
         );
         std::thread::sleep(Duration::from_millis(20));
     };
-    let display = display_test.then(|| crate::display_acceptance::Observer::connect(&native));
-    if display_test {
+    let display = matches!(display_test, DisplayTest::Stream)
+        .then(|| crate::display_acceptance::Observer::connect(&native));
+    if !matches!(display_test, DisplayTest::None) {
         assert!(!dir.path().join("display.sock").exists());
         assert!(!dir.path().join("vnc.sock").exists());
     }
@@ -379,6 +389,9 @@ fn boot_template(
             secure
         );
     }
+    if matches!(display_test, DisplayTest::Screenshot(_)) {
+        crate::display_acceptance::screenshots_after_unobserved_boot(&native, &mut guest);
+    }
     if let Some(display) = &display {
         display.exercise(&mut guest, &rfb);
     }
@@ -469,7 +482,7 @@ fn ubuntu_26_04_firmware_agent_and_snapshot() {
         "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
         true,
         vmlab_hv_proto::machine::DiskBus::Virtio,
-        false,
+        DisplayTest::None,
         Firmware::SeaBios,
     );
 }
@@ -481,7 +494,7 @@ fn almalinux_10_firmware_agent() {
         "VMLAB_HV_TEMPLATE_ALMALINUX_10",
         false,
         vmlab_hv_proto::machine::DiskBus::Virtio,
-        false,
+        DisplayTest::None,
         Firmware::SeaBios,
     );
 }
@@ -493,7 +506,7 @@ fn ubuntu_26_04_ahci_firmware_agent() {
         "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
         false,
         vmlab_hv_proto::machine::DiskBus::Ahci,
-        false,
+        DisplayTest::None,
         Firmware::SeaBios,
     );
 }
@@ -505,7 +518,7 @@ fn ubuntu_26_04_native_display_input_and_rfb() {
         "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
         false,
         vmlab_hv_proto::machine::DiskBus::Virtio,
-        true,
+        DisplayTest::Stream,
         Firmware::SeaBios,
     );
 }
@@ -517,7 +530,7 @@ fn debian_13_ovmf_agent() {
         "VMLAB_HV_TEMPLATE_DEBIAN_13",
         false,
         vmlab_hv_proto::machine::DiskBus::Virtio,
-        false,
+        DisplayTest::None,
         Firmware::Ovmf,
     );
 }
@@ -529,7 +542,7 @@ fn ubuntu_24_04_secure_ovmf_agent() {
         "VMLAB_HV_TEMPLATE_UBUNTU_24_04",
         false,
         vmlab_hv_proto::machine::DiskBus::Virtio,
-        false,
+        DisplayTest::None,
         Firmware::SecureOvmf,
     );
 }
@@ -541,7 +554,7 @@ fn ubuntu_24_04_ovmf_agent() {
         "VMLAB_HV_TEMPLATE_UBUNTU_24_04",
         false,
         vmlab_hv_proto::machine::DiskBus::Virtio,
-        false,
+        DisplayTest::None,
         Firmware::Ovmf,
     );
 }
@@ -553,7 +566,7 @@ fn windows_10_ovmf_agent_and_snapshot() {
         "VMLAB_HV_TEMPLATE_WINDOWS_10",
         true,
         vmlab_hv_proto::machine::DiskBus::Virtio,
-        false,
+        DisplayTest::None,
         Firmware::Ovmf,
     );
 }
@@ -565,7 +578,21 @@ fn windows_server_2022_ovmf_tpm_agent() {
         "VMLAB_HV_TEMPLATE_WINDOWS_SERVER_2022",
         false,
         vmlab_hv_proto::machine::DiskBus::Virtio,
-        false,
+        DisplayTest::None,
         Firmware::Ovmf,
     );
+}
+
+#[test]
+fn ubuntu_26_04_first_screenshot_after_unobserved_boot() {
+    for device in ["std-vga", "virtio-vga"] {
+        boot_template(
+            "ubuntu-26.04",
+            "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
+            false,
+            vmlab_hv_proto::machine::DiskBus::Virtio,
+            DisplayTest::Screenshot(device),
+            Firmware::SeaBios,
+        );
+    }
 }

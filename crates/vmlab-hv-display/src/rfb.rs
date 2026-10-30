@@ -88,6 +88,7 @@ impl DisplayServer {
         }
         stream.write_all(&0u32.to_be_bytes())?;
         read::<1>(&mut stream)?;
+        self.publish()?;
         let (frame, ..) = self.snapshot();
         stream.write_all(&(frame.width as u16).to_be_bytes())?;
         stream.write_all(&(frame.height as u16).to_be_bytes())?;

@@ -111,8 +111,9 @@ framebuffer pixels and may be negative.
 ### CpuCopy, kind 7
 
 Payload: `surface_id: u64 @0`. Total length 16. No fds. Client to server.
-The ID must name the latest configure. The server performs synchronized CPU
-readback through `FrameSource::readback`, sends a shm configure, and publishes
+The ID must name the latest configure. The server captures the current source,
+performs synchronized CPU readback through `FrameSource::readback` for dma-buf,
+sends a shm configure when needed, and publishes
 a full frame. The connection then remains in CPU mode. Other clients retain
 their independently negotiated transport. A readback failure closes only
 the affected connection. Clients without dmabuf_ok receive CPU frames directly.
@@ -180,7 +181,11 @@ The producer retains each allocation without rewriting it while any Arc to
 the published Frame exists. For dma-buf this includes consumer completion.
 `DisplayServer::publish()` captures the source and replaces the latest frame.
 It acquires no client lock and performs no socket I/O. Publication errors leave
-the previous frame intact. The producer calls publish once per completed frame.
+the previous frame intact. Source capture and publication are serialized so
+concurrent requests cannot replace a newer capture with an older one.
+The producer calls publish once per completed frame, even without clients.
+The q35 adapter polls at 16 ms intervals and uses VGA dirty state and KVM's
+framebuffer dirty log to avoid rendering unchanged VGA pixels.
 
 Each client retains at most three frames. Held buffers cannot be reused.
 When no buffer is available, the worker waits while publications continue.
@@ -198,6 +203,8 @@ The machine adapter routes keys to PS/2 and pointer input to the xHCI tablet.
 disconnect or error. Each uses a separate input reader. The caller controls
 binding, permissions, socket timeouts, and worker lifetime. Shutting down the
 stream terminates both connection workers. A socket error cannot block publish.
+Both capture the current source during connection setup before sending pixels.
+Native connections without the frames capability do not capture the source.
 `serve(UnixListener, rfb: bool)` accepts connections and starts one worker per
 connection until the listener fails. It does not remove socket paths.
 

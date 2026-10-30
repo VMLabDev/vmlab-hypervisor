@@ -100,6 +100,7 @@ pub(crate) struct State {
     pub led_seq: u64,
 }
 struct Shared {
+    capture: Mutex<()>,
     state: Mutex<State>,
     changed: Condvar,
     source: Arc<dyn FrameSource>,
@@ -115,6 +116,7 @@ impl DisplayServer {
         frame.validate()?;
         Ok(Self {
             shared: Arc::new(Shared {
+                capture: Mutex::new(()),
                 state: Mutex::new(State {
                     frame: Arc::new(frame),
                     seq: 1,
@@ -131,6 +133,8 @@ impl DisplayServer {
     }
     /// Capture the source once. No socket or client lock is acquired here.
     pub fn publish(&self) -> io::Result<()> {
+        // Keep capture order and publication order identical for dirty sources.
+        let _capture = self.shared.capture.lock().unwrap();
         let frame = self.shared.source.frame()?;
         frame.validate()?;
         let mut state = self.shared.state.lock().unwrap();
@@ -211,6 +215,9 @@ impl DisplayServer {
             return Err(invalid("expected display v1 Hello"));
         };
         let caps = Capabilities(capabilities.0 & Capabilities::ALL.0);
+        if caps.has(Capabilities::FRAMES) {
+            self.publish()?;
+        }
         send(
             &stream,
             &Message::Hello {
@@ -259,6 +266,7 @@ impl DisplayServer {
                     if s.surface != surface_id {
                         return Err(invalid("CpuCopy names stale surface"));
                     }
+                    self.publish()?;
                     s.cpu_copy = true;
                 }
                 Message::Key { .. }
@@ -295,11 +303,11 @@ impl DisplayServer {
         let mut led_seen = 0;
         let mut cpu_mode = !caps.has(Capabilities::DMABUF_OK);
         loop {
-            let (frame, seq, cursor, cs, leds, ls) = self.snapshot();
             let (closed, cpu_copy) = {
                 let s = local.lock().unwrap();
                 (s.closed, s.cpu_copy)
             };
+            let (frame, seq, cursor, cs, leds, ls) = self.snapshot();
             if closed {
                 return Ok(());
             }
