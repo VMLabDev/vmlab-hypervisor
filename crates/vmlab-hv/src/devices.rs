@@ -168,10 +168,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
             },
         )
         .map_err(|e| {
-            DeviceUnavailable::new(
-                "vhost-user-fs",
-                format!("share `{}`: {e}", share.tag),
-            )
+            DeviceUnavailable::new("vhost-user-fs", format!("share `{}`: {e}", share.tag))
         })?;
         self.wrap(id, Box::new(fs), mem, msi)
     }

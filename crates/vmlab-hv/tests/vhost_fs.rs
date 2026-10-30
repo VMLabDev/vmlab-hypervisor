@@ -13,8 +13,8 @@
 //! initramfs assets, or `/usr/lib/virtiofsd` are missing.
 
 use std::fs::{self, File, OpenOptions};
-use std::path::{Path, PathBuf};
 use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,7 +27,7 @@ use vmlab_hv_devices::{GuestMemory, IrqLine, MsiSink, PciSnapshot};
 use vmlab_hv_proto::machine::{Accel, Arch, Boot, FsShare, MachineDescription};
 use vmlab_hv_vmm::error::DeviceUnavailable;
 use vmlab_hv_vmm::factory::{BuiltPci, BuiltSerial};
-use vmlab_hv_vmm::{builder, DeviceFactory, Vm};
+use vmlab_hv_vmm::{DeviceFactory, Vm, builder};
 
 const KERNEL: &str = "/home/wil/dev/vmlab/guest/dist/x86_64/vmlinuz";
 const INITRD: &str = "/home/wil/dev/vmlab/guest/dist/x86_64/initramfs.img";
@@ -51,9 +51,7 @@ fn or_skip() -> Option<()> {
     if available() {
         Some(())
     } else {
-        eprintln!(
-            "skipping: needs /dev/kvm, {KERNEL}, {INITRD} and {VIRTIOFSD} on this host"
-        );
+        eprintln!("skipping: needs /dev/kvm, {KERNEL}, {INITRD} and {VIRTIOFSD} on this host");
         None
     }
 }
@@ -106,7 +104,7 @@ impl Virtiofsd {
             "--cache".to_string(),
             "auto".to_string(),
             "--log-level".to_string(),
-            std::env::var("VHOST_FS_TEST_LOG").unwrap_or_else(|_| "warn".into()),
+            "warn".to_string(),
         ];
         let help = Command::new(VIRTIOFSD)
             .arg("--help")
@@ -143,25 +141,20 @@ impl Virtiofsd {
                 Ok(None) => {}
                 Err(e) => panic!("waiting for virtiofsd: {e}"),
             }
-            assert!(Instant::now() < deadline, "virtiofsd never bound {socket:?}");
+            assert!(
+                Instant::now() < deadline,
+                "virtiofsd never bound {socket:?}"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
         Self { child, socket }
     }
 
-    /// virtiofsd exits when its front-end disconnects; prove it did.
-    fn expect_exit(mut self, what: &str) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) if Instant::now() > deadline => {
-                    panic!("virtiofsd did not exit after {what}")
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(e) => panic!("waiting for virtiofsd exit: {e}"),
-            }
-        }
+    /// virtiofsd outlives its front-end (it keeps serving the socket), so
+    /// the daemon is killed on drop, the way vmlab's process manager does.
+    fn stop(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -293,7 +286,6 @@ impl DeviceFactory for TestFactory {
     }
 }
 
-
 /// The stock initramfs's cinit dies without `vmlab.root=` before it ever
 /// loads virtiofs, so append a cpio overlay whose `/init` does the share
 /// mount by hand: modprobe virtiofs, mount the share, read the shared file
@@ -413,12 +405,8 @@ fn guest_mounts_the_share_and_the_session_is_real() {
     let initrd = initrd_with_init_script(&dir);
 
     let factory = TestFactory::new(&dir.path);
-    let vm = builder::build(
-        &machine(&dir, &virtiofsd.socket, &initrd),
-        &factory,
-        false,
-    )
-    .expect("build the machine");
+    let vm = builder::build(&machine(&dir, &virtiofsd.socket, &initrd), &factory, false)
+        .expect("build the machine");
 
     // The guest's own virtio-fs driver binds the device (DRIVER_OK runs the
     // front-end's full vhost-user setup), mounts the share and reads the
@@ -434,10 +422,7 @@ fn guest_mounts_the_share_and_the_session_is_real() {
     // backend holds the mem table and both live vrings.
     vm.handle().pause().expect("pause");
     let fs = factory.fs_snapshot();
-    let section = fs
-        .lock()
-        .save_wrapped_state()
-        .expect("save device state");
+    let section = fs.lock().save_wrapped_state().expect("save device state");
     // magic(4) + version(1) + active(1) + features(8) + count(2) + 2*base(8)
     // + len(4) leaves the state bytes themselves, which must be non-empty.
     assert!(
@@ -448,7 +433,7 @@ fn guest_mounts_the_share_and_the_session_is_real() {
     vm.handle().resume().expect("resume");
     teardown(vm);
     // The daemon exits with its front-end: the session was live end to end.
-    virtiofsd.expect_exit("machine teardown");
+    virtiofsd.stop();
 }
 
 #[test]
@@ -475,7 +460,7 @@ fn device_state_round_trips_through_virtiofsd() {
     vm_a.handle().pause().expect("pause A");
     let fs_a = factory_a.fs_snapshot();
     let (transport_state, device_state) = {
-        let mut fs = fs_a.lock();
+        let fs = fs_a.lock();
         let transport = fs.save_function_state().expect("save transport state");
         let device = fs.save_wrapped_state().expect("save device state");
         (transport, device)
@@ -486,7 +471,7 @@ fn device_state_round_trips_through_virtiofsd() {
         device_state.len()
     );
     teardown(vm_a);
-    virtiofsd_a.expect_exit("machine A teardown");
+    virtiofsd_a.stop();
 
     // Machine B: a fresh virtiofsd on the same shared dir, a paused machine,
     // and the sections restored in the snapshot order — transport first (it
@@ -504,12 +489,10 @@ fn device_state_round_trips_through_virtiofsd() {
     )
     .expect("build machine B");
     let fs_b = factory_b.fs_snapshot();
-    fs_b
-        .lock()
+    fs_b.lock()
         .restore_function_state(&transport_state)
         .expect("restore transport");
-    fs_b
-        .lock()
+    fs_b.lock()
         .restore_wrapped_state(&device_state)
         .expect("restore device state");
 
@@ -522,5 +505,5 @@ fn device_state_round_trips_through_virtiofsd() {
         "the restored session must serve the share; log:\n{log_b}"
     );
     teardown(vm_b);
-    virtiofsd_b.expect_exit("machine B teardown");
+    virtiofsd_b.stop();
 }

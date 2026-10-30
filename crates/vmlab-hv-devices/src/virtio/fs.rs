@@ -23,21 +23,21 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
+use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
 use parking_lot::Mutex;
 use vhost::vhost_user::message::{
-    VhostUserHeaderFlag, VhostUserProtocolFeatures, VhostUserVirtioFeatures,
-    VhostTransferStateDirection, VhostTransferStatePhase,
+    VhostTransferStateDirection, VhostTransferStatePhase, VhostUserHeaderFlag,
+    VhostUserProtocolFeatures, VhostUserVirtioFeatures,
 };
 use vhost::vhost_user::{Frontend, VhostUserFrontend};
 use vhost::{VhostBackend, VhostUserMemoryRegionInfo, VringConfigData};
 use virtio_queue::Queue;
 use vm_memory::{Address, GuestMemoryBackend, GuestMemoryRegion, MemoryRegionAddress};
 use vmm_sys_util::eventfd::EventFd;
-use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
 
 /// Virtio device id of virtio-fs (VIRTIO 1.2 §5.11).
 pub const FS_DEVICE_TYPE: u32 = 26;
@@ -265,9 +265,9 @@ impl Inner {
     fn enable_vrings(&mut self) -> Result<(), DeviceError> {
         for (index, vring) in self.vrings.iter().enumerate() {
             if vring.is_some() {
-                self.vu.set_vring_enable(index, true).map_err(|e| {
-                    DeviceError::Other(format!("vhost-user SET_VRING_ENABLE: {e}"))
-                })?;
+                self.vu
+                    .set_vring_enable(index, true)
+                    .map_err(|e| DeviceError::Other(format!("vhost-user SET_VRING_ENABLE: {e}")))?;
             }
         }
         Ok(())
@@ -295,9 +295,11 @@ impl Inner {
                 .file()
                 .try_clone()
                 .map_err(|e| DeviceError::Other(format!("cloning the guest RAM memfd: {e}")))?;
-            let host = region.get_host_address(MemoryRegionAddress(0)).map_err(|e| {
-                DeviceError::Memory(format!("guest RAM region has no host mapping: {e}"))
-            })?;
+            let host = region
+                .get_host_address(MemoryRegionAddress(0))
+                .map_err(|e| {
+                    DeviceError::Memory(format!("guest RAM region has no host mapping: {e}"))
+                })?;
             regions.push(VhostUserMemoryRegionInfo {
                 guest_phys_addr: region.start_addr().raw_value(),
                 memory_size: region.len(),
@@ -305,11 +307,7 @@ impl Inner {
                 mmap_offset: file_offset.start(),
                 mmap_handle: file.as_raw_fd(),
             });
-            published.push((
-                region.start_addr().raw_value(),
-                region.len(),
-                host as u64,
-            ));
+            published.push((region.start_addr().raw_value(), region.len(), host as u64));
             keep_open.push(file);
         }
         self.vu
@@ -407,8 +405,7 @@ impl Inner {
             return Ok(());
         };
         let stop = Arc::new(AtomicBool::new(false));
-        let wake = EventFd::new(0)
-            .map_err(|e| DeviceError::Other(format!("eventfd: {e}")))?;
+        let wake = EventFd::new(0).map_err(|e| DeviceError::Other(format!("eventfd: {e}")))?;
         let calls: Vec<Option<Arc<EventFd>>> = self
             .vrings
             .iter()
@@ -467,10 +464,7 @@ fn call_worker(
                 continue;
             }
             if let Some(call) = call {
-                let count = call.read().unwrap_or(0);
-                if std::env::var_os("VHOST_FS_TRACE").is_some() {
-                    eprintln!("vhost-fs: call fd {index} fired ({count})");
-                }
+                let _ = call.read();
                 interrupt.notify_queue(index as u16);
             }
         }
@@ -557,11 +551,9 @@ impl VirtioDevice for Fs {
                 desc: state.desc_table,
                 avail: state.avail_ring,
                 used: state.used_ring,
-                kick: EventFd::new(0)
-                    .map_err(|e| DeviceError::Other(format!("eventfd: {e}")))?,
+                kick: EventFd::new(0).map_err(|e| DeviceError::Other(format!("eventfd: {e}")))?,
                 call: Arc::new(
-                    EventFd::new(0)
-                        .map_err(|e| DeviceError::Other(format!("eventfd: {e}")))?,
+                    EventFd::new(0).map_err(|e| DeviceError::Other(format!("eventfd: {e}")))?,
                 ),
             });
         }
@@ -570,10 +562,7 @@ impl VirtioDevice for Fs {
             .map(|p| p.bases.clone())
             .unwrap_or_else(|| vec![0; inner.vrings.len()]);
         for index in 0..inner.vrings.len() {
-            if let Err(e) = inner.arm_vring(index, bases.get(index).copied().unwrap_or(0)) {
-                eprintln!("vhost-fs: arming vring {index} failed: {e}");
-                return Err(e);
-            }
+            inner.arm_vring(index, bases.get(index).copied().unwrap_or(0))?;
         }
         // The state transfer wants the device stopped: load before enabling.
         if let Some(pending) = &pending
@@ -664,8 +653,7 @@ impl Snapshot for Fs {
 
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
         let bad = || DeviceError::State(format!("{}: bad vhost-user-fs state", self.id));
-        if state.len() < 16
-            || u32::from_le_bytes(state[0..4].try_into().unwrap()) != SNAPSHOT_MAGIC
+        if state.len() < 16 || u32::from_le_bytes(state[0..4].try_into().unwrap()) != SNAPSHOT_MAGIC
         {
             return Err(bad());
         }
@@ -900,9 +888,10 @@ mod tests {
         let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
         while !cmsg.is_null() {
             // SAFETY: cmsg points inside the control buffer written above.
-            let (level, kind, len) = unsafe { ((*cmsg).cmsg_level, (*cmsg).cmsg_type, (*cmsg).cmsg_len) };
+            let (level, kind, len) =
+                unsafe { ((*cmsg).cmsg_level, (*cmsg).cmsg_type, (*cmsg).cmsg_len) };
             if level == libc::SOL_SOCKET && kind == libc::SCM_RIGHTS {
-                let data_len = len as usize - std::mem::size_of::<libc::cmsghdr>();
+                let data_len = len - std::mem::size_of::<libc::cmsghdr>();
                 let count = data_len / std::mem::size_of::<RawFd>();
                 // SAFETY: CMSG_DATA points at `count` raw fds in the buffer.
                 let data = unsafe { libc::CMSG_DATA(cmsg) }.cast::<RawFd>();
@@ -981,24 +970,19 @@ mod tests {
                     log.lock().set_features.push(u64_payload(&received));
                 }
                 req::GET_PROTOCOL_FEATURES => {
-                    send_u64_reply(
-                        &mut stream,
-                        req::GET_PROTOCOL_FEATURES,
-                        protocol.bits(),
-                    );
+                    send_u64_reply(&mut stream, req::GET_PROTOCOL_FEATURES, protocol.bits());
                     continue;
                 }
                 req::SET_PROTOCOL_FEATURES => {
                     log.lock().protocol_features = Some(u64_payload(&received));
                 }
                 req::SET_MEM_TABLE => {
-                    let count = u32::from_le_bytes(received.payload[0..4].try_into().unwrap())
-                        as usize;
+                    let count =
+                        u32::from_le_bytes(received.payload[0..4].try_into().unwrap()) as usize;
                     let mut guard = log.lock();
                     guard.mem_fd_count = received.fds.len();
                     for i in 0..count {
-                        let region =
-                            &received.payload[8 + i * 32..8 + (i + 1) * 32];
+                        let region = &received.payload[8 + i * 32..8 + (i + 1) * 32];
                         let field =
                             |k: usize| u64::from_le_bytes(region[k..k + 8].try_into().unwrap());
                         guard.mem_regions.push((field(0), field(8), field(24)));
@@ -1007,8 +991,7 @@ mod tests {
                 req::SET_VRING_NUM => {
                     let index =
                         u32::from_le_bytes(received.payload[0..4].try_into().unwrap()) as usize;
-                    let num =
-                        u32::from_le_bytes(received.payload[4..8].try_into().unwrap()) as u16;
+                    let num = u32::from_le_bytes(received.payload[4..8].try_into().unwrap()) as u16;
                     log.lock().vring_num.insert(index, num);
                 }
                 req::SET_VRING_ADDR => {
@@ -1017,13 +1000,14 @@ mod tests {
                     let field = |k: usize| {
                         u64::from_le_bytes(received.payload[k..k + 8].try_into().unwrap())
                     };
-                    log.lock().vring_addr.insert(index, (field(8), field(24), field(16)));
+                    log.lock()
+                        .vring_addr
+                        .insert(index, (field(8), field(24), field(16)));
                 }
                 req::SET_VRING_BASE => {
                     let index =
                         u32::from_le_bytes(received.payload[0..4].try_into().unwrap()) as usize;
-                    let num =
-                        u32::from_le_bytes(received.payload[4..8].try_into().unwrap()) as u16;
+                    let num = u32::from_le_bytes(received.payload[4..8].try_into().unwrap()) as u16;
                     log.lock().vring_base.insert(index, num);
                 }
                 req::SET_VRING_KICK => {
@@ -1050,8 +1034,7 @@ mod tests {
                     }
                 }
                 req::GET_VRING_BASE => {
-                    let index =
-                        u32::from_le_bytes(received.payload[0..4].try_into().unwrap());
+                    let index = u32::from_le_bytes(received.payload[0..4].try_into().unwrap());
                     let mut body = Vec::with_capacity(8);
                     body.extend_from_slice(&index.to_le_bytes());
                     body.extend_from_slice(&FAKE_VRING_BASE.to_le_bytes());
@@ -1123,7 +1106,11 @@ mod tests {
         // SAFETY: memfd_create(2) with a NUL-terminated name; the return is
         // either a valid fd or -1 with errno set.
         let fd = unsafe {
-            libc::syscall(libc::SYS_memfd_create, c"fs-test-ram".as_ptr(), 1 /* CLOEXEC */)
+            libc::syscall(
+                libc::SYS_memfd_create,
+                c"fs-test-ram".as_ptr(),
+                1, /* CLOEXEC */
+            )
         };
         assert!(fd >= 0, "memfd_create: {}", std::io::Error::last_os_error());
         // SAFETY: the fd is fresh and owned from here on.
@@ -1236,7 +1223,7 @@ mod tests {
     #[test]
     fn tag_longer_than_the_config_is_rejected() {
         let backend = FakeBackend::new("longtag");
-    let long = "x".repeat(37);
+        let long = "x".repeat(37);
         let config = FsConfig {
             tag: long,
             socket: backend.socket.clone(),
@@ -1271,7 +1258,8 @@ mod tests {
             Ok(_) => panic!("a backend without DEVICE_STATE must be refused"),
         };
         assert!(
-            err.to_string().contains("VHOST_USER_PROTOCOL_F_DEVICE_STATE"),
+            err.to_string()
+                .contains("VHOST_USER_PROTOCOL_F_DEVICE_STATE"),
             "{err}"
         );
     }
@@ -1310,9 +1298,10 @@ mod tests {
         // addresses, translated through the region's host mapping.
         let host_base = {
             use vm_memory::GuestMemoryBackend;
-            mem.iter().next().map(|r| {
-                r.get_host_address(MemoryRegionAddress(0)).unwrap() as u64
-            }).unwrap()
+            mem.iter()
+                .next()
+                .map(|r| r.get_host_address(MemoryRegionAddress(0)).unwrap() as u64)
+                .unwrap()
         };
         for (queue, (desc, avail, used)) in &log.vring_addr {
             let base = host_base + 0x1000 + *queue as u64 * 0x10000;
@@ -1382,10 +1371,10 @@ mod tests {
             assert_eq!(enables, 4, "re-armed after save: {log:?}");
         }
         assert!(
-    section
-        .windows(b"virtiofsd-state-bytes".len())
-        .any(|w| w == b"virtiofsd-state-bytes")
-);
+            section
+                .windows(b"virtiofsd-state-bytes".len())
+                .any(|w| w == b"virtiofsd-state-bytes")
+        );
 
         // Restore into a fresh device on a fresh backend: inactive at first,
         // so the state applies at the next activation.
