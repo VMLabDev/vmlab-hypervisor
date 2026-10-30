@@ -88,20 +88,15 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         // orchestration (D14): the block device runs on a SharedDisk
         // forwarding to the same handle the registry keeps.
         let image = vmlab_hv_vmm::factory::open_image(disk)?;
-        let pci = self.wrap(
-            disk.id.clone(),
-            Box::new(
-                Block::new(disk.id.clone(), Box::new(SharedDisk(image.clone())))
-                    .with_num_queues(if msi.transitional {
-                        msi.msix_vectors.saturating_sub(1)
-                    } else {
-                        1
-                    })
-                    .map_err(|e| DeviceUnavailable::new("virtio-blk", e.to_string()))?,
-            ),
-            mem,
-            msi,
-        )?;
+        let block = Block::new(disk.id.clone(), Box::new(SharedDisk(image.clone())));
+        let block = if msi.transitional {
+            block
+                .with_num_queues(msi.msix_vectors.saturating_sub(1))
+                .map_err(|e| DeviceUnavailable::new("virtio-blk", e.to_string()))?
+        } else {
+            block
+        };
+        let pci = self.wrap(disk.id.clone(), Box::new(block), mem, msi)?;
         Ok(BuiltBlk { pci, disk: image })
     }
 
@@ -181,4 +176,51 @@ fn parse_mac(mac: &str) -> Result<[u8; 6], DeviceUnavailable> {
         .try_into()
         .map_err(|_| DeviceUnavailable::new("virtio-net", format!("bad MAC {mac:?}")))?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vmlab_hv_vmm::DeviceFactory;
+
+    struct Msi;
+    impl vmlab_hv_devices::MsiSink for Msi {
+        fn signal(&self, _: vmlab_hv_devices::MsiMessage) {}
+    }
+
+    #[test]
+    fn block_multiqueue_policy_preserves_container_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("disk.raw");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(65536)
+            .unwrap();
+        let disk: Disk = serde_json::from_value(serde_json::json!({
+            "id":"test", "path":path, "format":"raw", "read_only":false
+        }))
+        .unwrap();
+        let mem = GuestMemory::new();
+        for (transitional, expected) in [(false, 0u16), (true, 2)] {
+            let built = DeviceSet
+                .virtio_blk(
+                    &disk,
+                    &mem,
+                    vmlab_hv_vmm::factory::PciWiring {
+                        msi: Arc::new(Msi),
+                        intx: None,
+                        transitional,
+                        msix_vectors: 3,
+                    },
+                )
+                .unwrap();
+            let mut count = [0; 2];
+            built.pci.function.lock().bar_read(
+                4,
+                if transitional { 0x2022 } else { 0x3022 },
+                &mut count,
+            );
+            assert_eq!(u16::from_le_bytes(count), expected);
+        }
+    }
 }
