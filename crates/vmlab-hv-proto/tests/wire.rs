@@ -61,6 +61,7 @@ fn fs_share_socket_and_path_are_alternatives() {
         tag: "share0".into(),
         socket: Some("/run/vmlab/web-1/virtiofs.sock".into()),
         path: None,
+        read_only: false,
     };
     wire(
         &socket,
@@ -79,18 +80,23 @@ fn fs_share_socket_and_path_are_alternatives() {
         tag: "share0".into(),
         socket: None,
         path: Some("/srv/web-1".into()),
+        read_only: false,
     };
     wire(
         &path,
         r#"{"pci":{"bus":0,"device":5,"function":0},"tag":"share0","path":"/srv/web-1"}"#,
     );
-    assert_eq!(path.backing(), Some(FsBacking::Directory("/srv/web-1".into())));
+    assert_eq!(
+        path.backing(),
+        Some(FsBacking::Directory("/srv/web-1".into()))
+    );
     // Both or neither leave the backing unresolved; the builder rejects them.
     let both = FsShare {
         socket: Some("/sock".into()),
         path: Some("/srv".into()),
         ..path.clone()
     };
+    assert!(!both.read_only);
     assert_eq!(both.backing(), None);
     let neither = FsShare {
         socket: None,
@@ -163,6 +169,7 @@ fn sample_machine() -> MachineDescription {
             tag: "share0".to_owned(),
             socket: Some(PathBuf::from("/run/vmlab/web-1/virtiofs.sock")),
             path: None,
+            read_only: false,
         }],
         audio: Some(Audio {
             pci: None,

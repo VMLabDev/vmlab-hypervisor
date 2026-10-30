@@ -715,7 +715,7 @@ pub fn build(
     for share in &desc.shares {
         let built = add_pci(
             &pci_root,
-            factory.vhost_user_fs(share, &ram.mem, wiring(share.pci, 2, false)?),
+            factory.fs_share(share, &ram.mem, wiring(share.pci, 2, false)?),
             format!("share `{}`", share.tag),
         )?;
         place(built.function.clone(), share.pci)?;

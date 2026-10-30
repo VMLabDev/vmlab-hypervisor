@@ -10,11 +10,11 @@ use std::sync::Arc;
 use vmlab_hv_devices::serial::{Serial, SerialOut};
 use vmlab_hv_devices::virtio::block::Block;
 use vmlab_hv_devices::virtio::console::{Console, PortConfig};
-use vmlab_hv_devices::virtio::fs::{Fs, FsConfig};
+use vmlab_hv_devices::virtio::fs::{Fs, FsConfig, InProcessFs, InProcessFsConfig};
 use vmlab_hv_devices::virtio::net::{Net, NetConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
 use vmlab_hv_devices::{GuestMemory, IrqLine, VirtioDevice};
-use vmlab_hv_proto::machine::{Disk, FsShare, Nic, NicAttachment, SerialPort};
+use vmlab_hv_proto::machine::{Disk, FsBacking, FsShare, Nic, NicAttachment, SerialPort};
 use vmlab_hv_vmm::DeviceUnavailable;
 use vmlab_hv_vmm::factory::{BuiltBlk, BuiltPci, BuiltSerial, SharedDisk};
 
@@ -155,34 +155,51 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         self.wrap(id, Box::new(net), mem, msi, nic.rom.as_deref())
     }
 
-    fn vhost_user_fs(
+    fn fs_share(
         &self,
         share: &FsShare,
         mem: &GuestMemory,
         msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let id = format!("fs-{}", share.tag);
-        let Some(vmlab_hv_proto::machine::FsBacking::Socket(socket)) = share.backing() else {
-            return Err(DeviceUnavailable::new(
+        match share.backing() {
+            // An external virtiofsd over vhost-user.
+            Some(FsBacking::Socket(socket)) => {
+                let fs = Fs::new(
+                    id.clone(),
+                    FsConfig {
+                        tag: share.tag.clone(),
+                        socket,
+                    },
+                )
+                .map_err(|e| {
+                    DeviceUnavailable::new("vhost-user-fs", format!("share `{}`: {e}", share.tag))
+                })?;
+                self.wrap(id, Box::new(fs), mem, msi, None)
+            }
+            // The in-process device rooted at the host directory.
+            Some(FsBacking::Directory(path)) => {
+                let fs = InProcessFs::new(
+                    id.clone(),
+                    InProcessFsConfig {
+                        tag: share.tag.clone(),
+                        path,
+                        read_only: share.read_only,
+                    },
+                )
+                .map_err(|e| {
+                    DeviceUnavailable::new("virtio-fs", format!("share `{}`: {e}", share.tag))
+                })?;
+                self.wrap(id, Box::new(fs), mem, msi, None)
+            }
+            None => Err(DeviceUnavailable::new(
                 "virtio-fs",
                 format!(
-                    "share `{}` is not served by an external virtiofsd; \
-                     the in-process device model has not landed yet",
+                    "share `{}` must set exactly one of `socket` and `path`",
                     share.tag
                 ),
-            ));
-        };
-        let fs = Fs::new(
-            id.clone(),
-            FsConfig {
-                tag: share.tag.clone(),
-                socket,
-            },
-        )
-        .map_err(|e| {
-            DeviceUnavailable::new("vhost-user-fs", format!("share `{}`: {e}", share.tag))
-        })?;
-        self.wrap(id, Box::new(fs), mem, msi, None)
+            )),
+        }
     }
 }
 

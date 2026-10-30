@@ -197,6 +197,11 @@ pub struct FsShare {
     /// virtio-fs device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
+    /// Serve the share read-only: every mutating operation is refused with
+    /// EROFS. The in-process device enforces it; an external virtiofsd is
+    /// started read-only by its owner.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 /// Where a share's contents come from, resolved from an [`FsShare`].
