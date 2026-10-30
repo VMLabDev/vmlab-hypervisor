@@ -337,7 +337,6 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
     let launched = Instant::now();
     let dir = temp_dir(&spec.name);
     std::fs::create_dir_all(&dir).expect("create test dir");
-    let dir = PathBuf::from(dir);
 
     let scratch = dir.join("scratch.qcow2");
     vmlab_disk::ops::create_qcow2(&scratch, SCRATCH_SIZE, None, None)
@@ -379,17 +378,17 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
                 vmstate: true,
             },
         ],
-        nics: (spec.nics > 0)
-            .then(|| {
-                vec![Nic {
-                    mac: mac_string(TEST_MAC),
-                    mtu: None,
-                    attachment: NicAttachment::Stream {
-                        socket: switch_sock.clone().expect("bound above"),
-                    },
-                }]
-            })
-            .unwrap_or_default(),
+        nics: if spec.nics > 0 {
+            vec![Nic {
+                mac: mac_string(TEST_MAC),
+                mtu: None,
+                attachment: NicAttachment::Stream {
+                    socket: switch_sock.clone().expect("bound above"),
+                },
+            }]
+        } else {
+            Vec::new()
+        },
         serial_log: dir.join("serial.log"),
         ports: vec![
             SerialPort {

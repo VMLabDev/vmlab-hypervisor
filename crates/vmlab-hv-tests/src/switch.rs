@@ -243,7 +243,7 @@ fn parse_dhcp(frame: &[u8]) -> Option<DhcpRequest> {
         return None;
     }
     let bootp = &udp[8..];
-    if &bootp[236..240] != &[0x63, 0x82, 0x53, 0x63] {
+    if bootp[236..240] != [0x63, 0x82, 0x53, 0x63] {
         return None;
     }
     let mut message_type = 0u8;
