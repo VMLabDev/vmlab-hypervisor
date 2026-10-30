@@ -254,6 +254,16 @@ fn writable_disks(reg: &SnapshotRegistry) -> impl Iterator<Item = &DiskNode> {
 pub fn save(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
     let shared = handle.shared();
     let _op = shared.begin_snapshot();
+    if shared
+        .vga
+        .lock()
+        .as_ref()
+        .is_some_and(|vga| vga.accelerated())
+    {
+        return Err(SnapshotError::Unsupported(
+            "online snapshots are unavailable with an accelerated GPU".into(),
+        ));
+    }
     // Refuse what cannot work before touching the run state.
     let reg = registry(handle)?;
     let vmstate_disk = vmstate_disk(&reg)?;
@@ -435,6 +445,16 @@ fn save_kernel_state(
 pub fn load(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
     let shared = handle.shared();
     let _op = shared.begin_snapshot();
+    if shared
+        .vga
+        .lock()
+        .as_ref()
+        .is_some_and(|vga| vga.accelerated())
+    {
+        return Err(SnapshotError::Unsupported(
+            "online snapshots are unavailable with an accelerated GPU".into(),
+        ));
+    }
     // Refuse what cannot work before touching the run state.
     let reg = registry(handle)?;
     let vmstate_disk = vmstate_disk(&reg)?;

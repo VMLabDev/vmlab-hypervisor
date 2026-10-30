@@ -217,3 +217,13 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
 ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Crosvm renderer adaptation:
+
+crates/vmlab-hv-devices/src/virtio/gpu/renderer.rs adapts command dispatch,
+resource operations and fence-ring tracking from crosvm's
+devices/src/virtio/gpu/mod.rs and virtio_gpu.rs at revision
+ad804a6ecf1d3c4337f18b56092fc54d8ca574fa, Copyright 2018 The ChromiumOS
+Authors. BSD-3-Clause; the complete licence is in LICENSE.crosvm.
+
+rutabaga_gfx 0.1.80 and magma-gpu 0.1.80 are dependencies, not copied code.

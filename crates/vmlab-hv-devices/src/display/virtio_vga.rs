@@ -26,6 +26,7 @@ pub struct VirtioVga {
     gpu: Gpu,
     transport: VirtioPciDevice,
     config: [u8; 256],
+    accelerated: bool,
 }
 
 impl VirtioVga {
@@ -82,7 +83,39 @@ impl VirtioVga {
             gpu,
             transport,
             config,
+            accelerated: false,
         })
+    }
+
+    pub fn enable_3d(
+        &mut self,
+        mode: crate::virtio::gpu::GpuMode,
+        node: std::path::PathBuf,
+        mapper: Arc<dyn crate::virtio::gpu::BlobMapper>,
+    ) -> Result<(), DeviceError> {
+        self.gpu.enable_3d(mode, node, mapper)?;
+        self.accelerated = true;
+        self.config[0x34] = 0xa4;
+        self.config[0x9c..0xa0].copy_from_slice(&0x4002u32.to_le_bytes());
+        self.config[0xa0..0xa4].copy_from_slice(&0x4802u32.to_le_bytes());
+        self.config[0xa4..0xac].copy_from_slice(&[9, 0x98, 24, 8, 4, 1, 0, 0]);
+        self.config[0xb8..0xbc].copy_from_slice(&1u32.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn has_3d_contexts(&self) -> bool {
+        self.gpu.has_3d_contexts()
+    }
+    pub fn accelerated(&self) -> bool {
+        self.accelerated
+    }
+
+    pub fn dma_frame(&self) -> Result<Option<crate::virtio::gpu::DmaFrame>, DeviceError> {
+        self.gpu.dma_frame()
+    }
+
+    pub fn set_aperture_base(&self, base: Option<u64>) -> Result<(), DeviceError> {
+        self.gpu.set_aperture_base(base)
     }
 
     pub fn io_read(&mut self, port: u16, data: &mut [u8]) {
@@ -222,7 +255,7 @@ impl PciDevice for VirtioVga {
         }
     }
     fn bars(&self) -> Vec<BarInfo> {
-        vec![
+        let mut bars = vec![
             BarInfo {
                 index: 0,
                 size: VGA_SIZE,
@@ -243,9 +276,26 @@ impl PciDevice for VirtioVga {
                 size: ROM_SIZE as u64,
                 kind: BarKind::Mmio32,
             },
-        ]
+        ];
+        if self.accelerated {
+            bars[1].size = 0x8000;
+            bars[2] = BarInfo {
+                index: 4,
+                size: crate::virtio::gpu::APERTURE_SIZE,
+                kind: BarKind::Mmio64 { prefetchable: true },
+            };
+        }
+        bars
     }
     fn bar_read(&mut self, bar: u8, offset: u64, data: &mut [u8]) {
+        if self.accelerated && bar == 2 && (0x4000..0x5000).contains(&offset) {
+            self.transport.bar_read(4, offset, data);
+            return;
+        }
+        if self.accelerated && bar == 4 {
+            data.fill(0xff);
+            return;
+        }
         data.fill(0xff);
         if bar == ROM_BAR
             || (bar == 0
@@ -270,6 +320,13 @@ impl PciDevice for VirtioVga {
         }
     }
     fn bar_write(&mut self, bar: u8, offset: u64, data: &[u8]) {
+        if self.accelerated && bar == 2 && (0x4000..0x5000).contains(&offset) {
+            self.transport.bar_write(4, offset, data);
+            return;
+        }
+        if self.accelerated && bar == 4 {
+            return;
+        }
         if bar == 0
             && offset
                 .checked_add(data.len() as u64)
