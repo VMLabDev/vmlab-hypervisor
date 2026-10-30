@@ -106,9 +106,12 @@ pub fn generate(platform: &Platform) -> Result<AcpiTables, String> {
     checksum(&mut tables, &mut loader, waet);
     let mut entries = vec![fadt, madt, hpet, mcfg, waet];
     if platform.tpm {
+        loader.allocate("etc/tpm/log", 1, Zone::High);
         let mut tpm = table(*b"TPM2", 4, 40);
         put(&mut tpm, 48, 6, 4);
+        put(&mut tpm, 64, 0x10000, 4);
         let tpm = append(&mut tables, &tpm);
+        loader.add_pointer(TABLES_FILE, "etc/tpm/log", (tpm + 68) as u32, 8);
         checksum(&mut tables, &mut loader, tpm);
         entries.push(tpm);
     }

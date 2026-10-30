@@ -29,6 +29,7 @@ impl DeviceSet {
         device: Box<dyn VirtioDevice>,
         mem: &GuestMemory,
         msi: vmlab_hv_vmm::factory::PciWiring,
+        rom: Option<&Path>,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let transport = if msi.transitional {
             VirtioPciDevice::new_transitional(
@@ -42,6 +43,16 @@ impl DeviceSet {
             .map_err(|e| DeviceUnavailable::new("virtio-pci", e.to_string()))?
         } else {
             VirtioPciDevice::new(id, device, mem.clone(), Some(msi.msi), msi.intx)
+        };
+        let transport = if let Some(path) = rom {
+            let image = std::fs::read(path).map_err(|e| {
+                DeviceUnavailable::new("virtio-net ROM", format!("{}: {e}", path.display()))
+            })?;
+            transport
+                .with_option_rom(&image)
+                .map_err(|e| DeviceUnavailable::new("virtio-net ROM", e.to_string()))?
+        } else {
+            transport
         };
         let dev = Arc::new(Mutex::new(transport));
         Ok(BuiltPci {
@@ -96,7 +107,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         } else {
             block
         };
-        let pci = self.wrap(disk.id.clone(), Box::new(block), mem, msi)?;
+        let pci = self.wrap(disk.id.clone(), Box::new(block), mem, msi, None)?;
         Ok(BuiltBlk { pci, disk: image })
     }
 
@@ -119,7 +130,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
                 format!("cannot listen on port sockets: {e}"),
             )
         })?;
-        self.wrap("console0".into(), Box::new(console), mem, msi)
+        self.wrap("console0".into(), Box::new(console), mem, msi, None)
     }
 
     fn virtio_net(
@@ -141,7 +152,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         };
         let net = Net::new(config)
             .map_err(|e| DeviceUnavailable::new("virtio-net", format!("cannot connect: {e}")))?;
-        self.wrap(id, Box::new(net), mem, msi)
+        self.wrap(id, Box::new(net), mem, msi, nic.rom.as_deref())
     }
 
     fn vhost_user_fs(
@@ -161,7 +172,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         .map_err(|e| {
             DeviceUnavailable::new("vhost-user-fs", format!("share `{}`: {e}", share.tag))
         })?;
-        self.wrap(id, Box::new(fs), mem, msi)
+        self.wrap(id, Box::new(fs), mem, msi, None)
     }
 }
 

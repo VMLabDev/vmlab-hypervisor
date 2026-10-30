@@ -221,6 +221,7 @@ pub fn build(
 ) -> Result<Vm, VmmError> {
     validate(desc)?;
     let kvm = KvmVm::new()?;
+    crate::hyperv::configure_vm(&kvm.kvm, &kvm.vm, &desc.hyperv)?;
     if desc.vcpus as usize > kvm.max_vcpus() {
         return Err(VmmError::InvalidMachine(format!(
             "vcpus {} exceeds the host KVM limit {}",
@@ -369,9 +370,9 @@ pub fn build(
     let mut snap_disks = Vec::new();
     let mut snap_nodes = Vec::new();
     let mch = if let Boot::Firmware { firmware, code, .. } = &desc.boot {
-        if *firmware != FirmwareKind::Seabios || !desc.hyperv.is_empty() || desc.tpm.is_some() {
+        if *firmware != FirmwareKind::Seabios || desc.tpm.is_some() {
             return Err(VmmError::InvalidMachine(
-                "OVMF, TPM and Hyper-V require phase 2c".into(),
+                "OVMF and TPM require phase 2c".into(),
             ));
         }
         let image = std::fs::read(code)
@@ -747,6 +748,7 @@ pub fn build(
         let mut vcpu = shared
             .kvm
             .create_vcpu_with_policy(id as u8, desc.vcpus, desc.cpu)?;
+        crate::hyperv::configure_vcpu(&shared.kvm.kvm, &vcpu, &desc.hyperv)?;
         if id == 0
             && let Some(boot) = &boot
         {

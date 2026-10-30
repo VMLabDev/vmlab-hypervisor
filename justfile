@@ -17,6 +17,11 @@ workspace-build:
 workspace-test:
 	cargo test --workspace
 
+# Build the pinned legacy and EFI virtio-net option ROMs
+[group('dev')]
+firmware-ipxe-build:
+	uv run python firmware/ipxe/build.py
+
 # Pin the Alpine minirootfs the S1 rootfs builds from
 alpine_url := "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.1-x86_64.tar.gz"
 alpine_sha := "0e5cc5702ad72a4e151f219976ba946d50161c3acce210ef3b122a529aba1270"

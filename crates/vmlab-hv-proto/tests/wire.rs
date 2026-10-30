@@ -31,6 +31,28 @@ fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(val
     assert_eq!(&serde_json::from_str::<T>(&encoded).unwrap(), value);
 }
 
+#[test]
+fn nic_option_rom_wire() {
+    let mut nic = Nic {
+        rom: Some("/firmware/virtio-net.rom".into()),
+        pci: None,
+        mac: "52:54:00:12:34:56".into(),
+        mtu: None,
+        attachment: NicAttachment::Stream {
+            socket: "/switch.sock".into(),
+        },
+    };
+    wire(
+        &nic,
+        r#"{"rom":"/firmware/virtio-net.rom","mac":"52:54:00:12:34:56","mtu":null,"attachment":{"kind":"stream","socket":"/switch.sock"}}"#,
+    );
+    nic.rom = None;
+    wire(
+        &nic,
+        r#"{"mac":"52:54:00:12:34:56","mtu":null,"attachment":{"kind":"stream","socket":"/switch.sock"}}"#,
+    );
+}
+
 fn sample_machine() -> MachineDescription {
     MachineDescription {
         machine: Default::default(),
@@ -76,6 +98,7 @@ fn sample_machine() -> MachineDescription {
             },
         ],
         nics: vec![Nic {
+            rom: None,
             pci: None,
             mac: "52:54:00:12:34:56".to_owned(),
             mtu: None,

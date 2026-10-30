@@ -8,6 +8,7 @@ import difflib
 import fnmatch
 import json
 import re
+import struct
 import sys
 from pathlib import Path
 
@@ -192,7 +193,31 @@ def normalize_text(name: str, text: str) -> str:
     return "\n".join(l.rstrip() for l in text.splitlines() if l.strip()) + ("\n" if text.strip() else "")
 
 
+def pci_rom_identity(data: bytes) -> str:
+    """Keep PCI identity and image types; executable code is independently built."""
+    offset = 0
+    identities = []
+    while True:
+        if len(data) - offset < 0x1a or data[offset:offset+2] != b"\x55\xaa":
+            raise ValueError("invalid PCI expansion ROM signature")
+        pointer = struct.unpack_from("<H", data, offset + 0x18)[0]
+        pcir = offset + pointer
+        if pcir + 0x18 > len(data) or data[pcir:pcir+4] != b"PCIR":
+            raise ValueError("invalid PCI expansion ROM data structure")
+        vendor, device = struct.unpack_from("<HH", data, pcir + 4)
+        size = struct.unpack_from("<H", data, pcir + 0x10)[0] * 512
+        if size < pointer + 0x18 or offset + size > len(data):
+            raise ValueError("invalid PCI expansion ROM image length")
+        kind, last = data[pcir + 0x14:pcir + 0x16]
+        identities.append(f"{vendor:04x}:{device:04x} code={kind:02x}\n")
+        offset += size
+        if last & 0x80:
+            return "".join(identities)
+
+
 def normalize_artifact(name: str, data: bytes) -> str:
+    if name.startswith("pci-roms/") and name.endswith(".rom"):
+        return pci_rom_identity(data)
     if name.startswith("acpi/") and not name.endswith((".dsl", ".log", ".pre")):
         return hex_dump(acpi(data))
     if name == "fwcfg/blobs/etc/acpi/rsdp":
@@ -452,9 +477,6 @@ def approved_platform(left: dict[str, str], right: dict[str, str], rules: dict) 
     if "fwcfg/blobs/genroms/kvmvapic.bin" in left and "fwcfg/blobs/genroms/kvmvapic.bin" not in right and any(entry.get("decision") == "D14" and entry["pattern"] == "fwcfg/blobs/genroms/kvmvapic.bin"
            for entry in rules.get("artifact_omissions", [])):
         sizes.add(9216)
-    nic = r"(?m)^00:[0-9a-f]{2}\.[0-7] .*\[1af4:1000\].*$"
-    if "virtio-net-pxe-rom" in devices and re.findall(nic, left.get("lspci-nn.txt", "")) == re.findall(nic, right.get("lspci-nn.txt", "")) and re.search(nic, left.get("lspci-nn.txt", "")):
-        sizes.add(3584)
     pattern = r"(?m)^([0-9a-f]+)-([0-9a-f]+) : Adapter ROM\n"
     for size in sizes:
         a = [m for m in re.finditer(pattern, left.get("iomem.txt", ""))
