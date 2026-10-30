@@ -17,8 +17,6 @@
     {"device": "virtio-net-pxe-rom", "decision": "D16", "reason": "Own upstream iPXE build: compare presence, ROM BAR size and PCI ROM identity, not executable bytes"}
   ],
   "artifact_omissions": [
-    {"pattern": "fwcfg/blobs/etc/smi/*", "category": "deferred to 2c", "reason": "SPEC.md places SMI negotiation in 2c; remove this entry when 2c lands"},
-    {"pattern": "fwcfg/blobs/etc/tpm/*", "category": "deferred to 2c", "reason": "SPEC.md places TPM firmware files in 2c; remove this entry when 2c lands"},
     {"pattern": "fwcfg/blobs/genroms/kvmvapic.bin", "category": "approved", "decision": "D14", "reason": "QEMU-built ROMs not shipped (D14)"},
     {"pattern": "fwcfg/blobs/genroms/linuxboot_dma.bin", "category": "approved", "decision": "D14", "reason": "QEMU-built ROMs not shipped (D14)"}
   ]

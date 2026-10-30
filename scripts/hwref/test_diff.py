@@ -343,17 +343,16 @@ class DiffTests(unittest.TestCase):
         path.write_bytes(changed)
         self.assertIn("=== acpi/DSDT ===", diff.compare(REFERENCE, self.root))
 
-    def test_phase_2a_omissions_have_categories_and_preserve_other_failures(self):
+    def test_approved_rom_omissions_preserve_other_failures(self):
         rules = json.loads(diff.DEFAULT_ALLOW.read_text())
         self.assertEqual({entry["category"] for entry in rules["artifact_omissions"]},
-                         {"deferred to 2c", "approved"})
-        names = {"etc/smi/features-ok", "etc/smi/requested-features", "etc/smi/supported-features",
-                 "etc/tpm/log", "genroms/kvmvapic.bin", "genroms/linuxboot_dma.bin"}
+                         {"approved"})
+        names = {"genroms/kvmvapic.bin", "genroms/linuxboot_dma.bin"}
         for name in names:
             (self.root / "guest/fwcfg/blobs" / name).unlink()
         # A missing blob whose sysfs name still exists is a failed capture,
         # not an approved missing firmware interface.
-        self.assertIn("fwcfg/blobs/etc/smi/features-ok: reference only", diff.compare(REFERENCE, self.root))
+        self.assertIn("fwcfg/blobs/genroms/kvmvapic.bin: reference only", diff.compare(REFERENCE, self.root))
         for filename in ("files.txt", "sizes.txt"):
             path = self.root / "guest/fwcfg" / filename
             path.write_text("".join(line for line in path.read_text().splitlines(True)
@@ -365,13 +364,23 @@ class DiffTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incomplete fw_cfg blob etc/e820"):
             diff.compare(REFERENCE, self.root)
 
-    def test_deferred_file_changes_and_new_files_remain_failures(self):
+    def test_smi_file_changes_and_new_files_remain_failures(self):
         path = self.root / "guest/fwcfg/blobs/etc/smi/features-ok"
         path.write_bytes(b"\0")
         self.assertIn("=== fwcfg/blobs/etc/smi/features-ok ===", diff.compare(REFERENCE, self.root))
         path = self.root / "guest/fwcfg/blobs/etc/smi/new-feature"
         path.write_bytes(b"\1")
         self.assertIn("etc/smi/new-feature: candidate only", diff.compare(REFERENCE, self.root))
+
+    def test_smi_and_tpm_omissions_are_no_longer_deferred(self):
+        for name in ("etc/smi/features-ok", "etc/tpm/log"):
+            with self.subTest(name=name):
+                path = self.root / "guest/fwcfg/blobs" / name
+                data = path.read_bytes()
+                path.unlink()
+                self.assertIn(f"fwcfg/blobs/{name}: reference only",
+                              diff.compare(REFERENCE, self.root))
+                path.write_bytes(data)
 
     def test_missing_capture_and_missing_or_new_artifact(self):
         (self.root / "guest/cpuid.txt").unlink()
