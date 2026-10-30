@@ -22,10 +22,14 @@ const SECTOR_SIZE: u64 = 512;
 /// Maximum virtqueue size offered to the driver.
 const QUEUE_MAX_SIZE: u16 = 128;
 
-// Device feature bits (device-relative numbering, VIRTIO 1.2 §5.2.3).
-const F_RO: u64 = 1 << (32 + 5);
-const F_FLUSH: u64 = 1 << (32 + 9);
-const F_DISCARD: u64 = 1 << (32 + 13);
+// Device feature bits (VIRTIO 1.2 §5.2.3). These are low-word device
+// features — bits 5, 9 and 13 — NOT transport features: shifting them into
+// the high word makes F_FLUSH land on bit 41, which is VIRTIO_F_ADMIN_VQ,
+// and the Linux driver then demands the 1.2-sized common config (the real
+// guest rejects the device with -EINVAL exactly there).
+const F_RO: u64 = 1 << 5;
+const F_FLUSH: u64 = 1 << 9;
+const F_DISCARD: u64 = 1 << 13;
 // Transport features the device opts into (VIRTIO 1.2 §6).
 const F_RING_EVENT_IDX: u64 = 1 << 29;
 
@@ -49,10 +53,11 @@ const S_UNSUPP: u8 = 2;
 const CONFIG_LEN: usize = 68;
 /// Offset of `capacity` within the configuration.
 const OFF_CAPACITY: usize = 0;
-/// Offset of `writeback` within the configuration.
-const OFF_WRITEBACK: usize = 40;
-/// Offset of `max_discard_sect` within the configuration.
-const OFF_DISCARD: usize = 44;
+/// Offset of `writeback` (the `wce` field) within the configuration.
+const OFF_WRITEBACK: usize = 32;
+/// Offset of `max_discard_sectors` within the configuration, followed by
+/// `max_discard_seg`.
+const OFF_DISCARD: usize = 36;
 /// Length of the device serial returned by `VIRTIO_BLK_T_GET_ID`.
 const SERIAL_LEN: usize = 20;
 
