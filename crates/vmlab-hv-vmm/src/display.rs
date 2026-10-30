@@ -17,25 +17,25 @@ pub(crate) enum Video {
 }
 
 impl Video {
-    pub(crate) fn io_read(&self, port: u16, data: &mut [u8]) -> () {
+    pub(crate) fn io_read(&self, port: u16, data: &mut [u8]) {
         match self {
             Self::Standard(device) => device.lock().io_read(port, data),
             Self::Virtio(device) => device.lock().io_read(port, data),
         }
     }
-    pub(crate) fn io_write(&self, port: u16, data: &[u8]) -> () {
+    pub(crate) fn io_write(&self, port: u16, data: &[u8]) {
         match self {
             Self::Standard(device) => device.lock().io_write(port, data),
             Self::Virtio(device) => device.lock().io_write(port, data),
         }
     }
-    pub(crate) fn legacy_read(&self, offset: u64, data: &mut [u8]) -> () {
+    pub(crate) fn legacy_read(&self, offset: u64, data: &mut [u8]) {
         match self {
             Self::Standard(device) => device.lock().legacy_read(offset, data),
             Self::Virtio(device) => device.lock().legacy_read(offset, data),
         }
     }
-    pub(crate) fn legacy_write(&self, offset: u64, data: &[u8]) -> () {
+    pub(crate) fn legacy_write(&self, offset: u64, data: &[u8]) {
         match self {
             Self::Standard(device) => device.lock().legacy_write(offset, data),
             Self::Virtio(device) => device.lock().legacy_write(offset, data),
@@ -53,7 +53,7 @@ impl Video {
             Self::Virtio(device) => device.lock().linear_framebuffer(),
         }
     }
-    pub(crate) fn mark_framebuffer_dirty(&self) -> () {
+    pub(crate) fn mark_framebuffer_dirty(&self) {
         match self {
             Self::Standard(device) => device.lock().mark_framebuffer_dirty(),
             Self::Virtio(device) => device.lock().mark_framebuffer_dirty(),

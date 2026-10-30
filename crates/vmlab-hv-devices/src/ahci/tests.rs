@@ -241,7 +241,9 @@ fn atapi_identify_identity_and_transfer_mode_match_qtest_observations() {
     }
     let decode = |offset: usize, len: usize| {
         identify[offset..offset + len]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|pair| [pair[1], pair[0]])
             .collect::<Vec<_>>()
     };
