@@ -50,7 +50,6 @@ impl Lpc {
         config[0x60..0x64].fill(0x80);
         config[0x68..0x6c].fill(0x80);
         config[0x82] = 5;
-        config[0xa0] = 0x10;
         let device = Self {
             config,
             pm_status: 0,
@@ -359,6 +358,12 @@ mod tests {
             irq,
             actions,
         )
+    }
+
+    #[test]
+    fn smi_lock_is_clear_at_reset() {
+        let (mut lpc, _, _) = fixture();
+        assert_eq!(lpc.config_read(0xa0 / 4) & 0x10, 0);
     }
 
     #[test]
