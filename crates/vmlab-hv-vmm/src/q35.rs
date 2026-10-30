@@ -272,8 +272,6 @@ impl Mch {
     pub fn new(pam: Arc<Mutex<Pam>>) -> Self {
         let mut config = [0; 4096];
         config[..4].copy_from_slice(&0x29c0_8086u32.to_le_bytes());
-        config[4] = 0x03;
-        config[5] = 0x01;
         config[0xb] = 0x06;
         config[0x2c..0x30].copy_from_slice(&0x1100_1af4u32.to_le_bytes());
         config[0x50..0x52].copy_from_slice(&64u16.to_le_bytes());
@@ -351,7 +349,8 @@ impl PciDevice for Mch {
             }
             let mask = match pos {
                 4 => 0x07,
-                5 => 0x01,
+                5 => 0x05,
+                0x3c => 0xff,
                 0x60 => 0x07,
                 0x63 => 0xfc,
                 0x64 => 0x0f,
@@ -555,6 +554,16 @@ mod tests {
     fn mch() -> Mch {
         let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
         Mch::new(Arc::new(Mutex::new(pam)))
+    }
+
+    #[test]
+    fn host_bridge_pci_command_reset_mask_and_interrupt_line_match_qemu() {
+        let mut mch = mch();
+        assert_eq!(mch.config_read(1) & 0xffff, 0);
+        mch.config_write(1, 0, &[0xff; 2]);
+        assert_eq!(mch.config_read(1) & 0xffff, 0x507);
+        mch.config_write(0x3c / 4, 0, &[0xff]);
+        assert_eq!(mch.config_read(0x3c / 4) & 0xff, 0xff);
     }
 
     #[test]
