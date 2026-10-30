@@ -269,7 +269,13 @@ impl DisplayServer {
                 {
                     self.input(msg)
                 }
-                Message::RequestSize { .. } => return Err(invalid("RequestSize is reserved")),
+                Message::RequestSize { width, height }
+                    if caps.has(Capabilities::INPUT)
+                        && (1..=16384).contains(&width)
+                        && (1..=16384).contains(&height) =>
+                {
+                    self.input(msg)
+                }
                 _ => return Err(invalid("unexpected client message or missing capability")),
             }
             self.shared.changed.notify_all();

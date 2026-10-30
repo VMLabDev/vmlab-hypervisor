@@ -158,6 +158,10 @@ fn cursor_leds_and_all_input_messages() {
         },
         M::Buttons { mask: 1 },
         M::Scroll { dx: -1, dy: 1 },
+        M::RequestSize {
+            width: 800,
+            height: 600,
+        },
     ];
     for m in &messages {
         c.send(m).unwrap();

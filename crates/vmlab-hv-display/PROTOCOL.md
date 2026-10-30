@@ -152,8 +152,10 @@ other bits. Current LED state is sent to every newly connected input client.
 ### RequestSize, kind 13
 
 Payload: `width: u32 @0`, `height: u32 @4`. Total length 16. No fds.
-Reserved for virtio-gpu viewer integration. Version 1 decodes this message
-but the server rejects it and closes the connection.
+Requires the input capability. Dimensions must be in 1..16384; invalid sizes
+close the connection. The InputSink forwards this preferred size to virtio-gpu.
+The guest driver and modesetting client choose when to apply it. Standard VGA
+retains its guest-programmed mode.
 
 ## Server and client API
 
