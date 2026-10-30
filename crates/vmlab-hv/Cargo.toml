@@ -23,4 +23,3 @@ workspace = true
 tempfile = "3"
 vmlab-hv-proto.workspace = true
 vmlab-hv-tests = { path = "../vmlab-hv-tests" }
-tempfile = "3"

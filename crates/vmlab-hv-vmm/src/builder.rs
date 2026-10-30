@@ -42,7 +42,27 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
         ));
     }
     MemLayout::new(desc.memory_mib).map_err(VmmError::InvalidMachine)?;
-    rtc_base_seconds(desc.rtc_base.as_deref())?;
+    crate::clock::rtc_base(desc.rtc_base.as_deref())?;
+    if desc.machine == Machine::Microvm
+        && (desc.display.is_some()
+            || desc.tablet.is_some()
+            || desc.tpm.is_some()
+            || desc.ahci_pci.is_some()
+            || desc.console_pci.is_some()
+            || desc.disks.iter().any(|disk| {
+                disk.bus != DiskBus::Virtio
+                    || disk.cdrom
+                    || disk.port.is_some()
+                    || disk.pci.is_some()
+            })
+            || desc.nics.iter().any(|nic| nic.pci.is_some())
+            || desc.shares.iter().any(|share| share.pci.is_some())
+            || desc.audio.as_ref().is_some_and(|audio| audio.pci.is_some()))
+    {
+        return Err(VmmError::InvalidMachine(
+            "q35 devices and explicit PCI addresses require machine=q35".into(),
+        ));
+    }
     let image = match (&desc.machine, &desc.boot) {
         (Machine::Microvm, Boot::Kernel { kernel, .. }) => kernel,
         (
@@ -89,18 +109,6 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
         )));
     }
     Ok(())
-}
-
-fn rtc_base_seconds(value: Option<&str>) -> Result<i64, VmmError> {
-    match value {
-        Some(value) => chrono::DateTime::parse_from_rfc3339(value)
-            .map(|time| time.timestamp())
-            .map_err(|e| VmmError::InvalidMachine(format!("invalid rtc_base {value:?}: {e}"))),
-        None => Ok(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| VmmError::Other(e.to_string()))?
-            .as_secs() as i64),
-    }
 }
 
 fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
@@ -284,7 +292,7 @@ pub fn build(
         Some(crate::chipset::Chipset::new(
             vm_fd.clone(),
             &layout,
-            rtc_base_seconds(desc.rtc_base.as_deref())?,
+            crate::clock::rtc_base(desc.rtc_base.as_deref())?,
         )?)
     } else {
         None
@@ -413,16 +421,16 @@ pub fn build(
     }
 
     if !q35 {
-    let rtc = Arc::new(Mutex::new(crate::clock::KvmRtc::new(
-        desc.memory_mib << 20,
-        crate::clock::rtc_base(desc.rtc_base.as_deref())?,
-        Arc::new(KvmIrqLine::new(vm_fd.clone(), 8)),
-        vm_fd.clone(),
-    )?));
-    io_bus
-        .register(0x70, 8, rtc.clone())
-        .map_err(VmmError::Other)?;
-    snap_nodes.push(DeviceNode::Plain(rtc));
+        let rtc = Arc::new(Mutex::new(crate::clock::KvmRtc::new(
+            desc.memory_mib << 20,
+            crate::clock::rtc_base(desc.rtc_base.as_deref())?,
+            Arc::new(KvmIrqLine::new(vm_fd.clone(), 8)),
+            vm_fd.clone(),
+        )?));
+        io_bus
+            .register(0x70, 8, rtc.clone())
+            .map_err(VmmError::Other)?;
+        snap_nodes.push(DeviceNode::Plain(rtc));
     }
 
     // COM1: 16550A on IRQ 4, output to the serial log.
@@ -745,6 +753,40 @@ mod tests {
             audio: None,
             rtc_base: None,
         }
+    }
+
+    #[test]
+    fn microvm_rejects_q35_devices_before_building() {
+        let mut machine = desc();
+        machine.ahci_pci = Some(PciAddress {
+            bus: 0,
+            device: 31,
+            function: 2,
+        });
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("machine=q35")
+        );
+        machine.ahci_pci = None;
+        machine.disks.push(Disk {
+            pci: None,
+            bus: DiskBus::Ahci,
+            port: Some(0),
+            cdrom: false,
+            id: "disk0".into(),
+            path: "/disk".into(),
+            format: DiskFormat::Raw,
+            read_only: false,
+            vmstate: false,
+        });
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("machine=q35")
+        );
     }
 
     #[test]

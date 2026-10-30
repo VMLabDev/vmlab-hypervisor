@@ -25,7 +25,6 @@ serde.workspace = true
 zerocopy.workspace = true
 sha2.workspace = true
 parking_lot.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
