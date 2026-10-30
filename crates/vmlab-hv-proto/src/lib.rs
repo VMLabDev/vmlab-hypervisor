@@ -10,6 +10,7 @@
 //! connections on the hypervisor side, and [`client`] talks to a hypervisor
 //! from vmlab or a test harness.
 
+pub mod client;
 pub mod codec;
 pub mod control;
 pub mod machine;
