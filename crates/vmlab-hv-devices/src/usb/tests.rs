@@ -662,6 +662,26 @@ fn msix_acknowledgement_does_not_reassert_an_empty_event_ring() {
 }
 
 #[test]
+fn draining_events_added_while_busy_does_not_latch_a_phantom_interrupt() {
+    let mut d = Driver::new();
+    d.start();
+    for _ in 0..2 {
+        d.trb(d.command, 0, 0, 23 << 10);
+        d.command += 16;
+        d.write(0x2000, 0);
+    }
+    assert_eq!(d.irq.0.lock().unwrap().len(), 1);
+    d.event += 32;
+    d.write(0x44, 8);
+    d.write(0x1038, d.event as u32 | 8);
+    assert_eq!(d.irq.0.lock().unwrap().len(), 1);
+    assert_eq!(d.read(0x1038) & 8, 0);
+    d.trb(d.command, 0, 0, 23 << 10);
+    d.write(0x2000, 0);
+    assert_eq!(d.irq.0.lock().unwrap().len(), 2);
+}
+
+#[test]
 fn interrupt_moderation_delays_delivery_until_counter_expires() {
     let mut d = Driver::new();
     d.start();

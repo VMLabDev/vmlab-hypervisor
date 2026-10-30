@@ -365,6 +365,9 @@ impl XhciController {
             let used = (new + cap - old) % cap;
             self.state.event_used = self.state.event_used.saturating_sub(used);
         }
+        if self.state.event_used == 0 && self.state.pending.is_empty() {
+            self.set(IMAN, self.get(IMAN) & !1);
+        }
         self.flush_events()
     }
     fn update_interrupt(&mut self) {
