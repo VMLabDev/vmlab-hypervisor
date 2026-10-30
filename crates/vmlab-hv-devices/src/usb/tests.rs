@@ -233,6 +233,15 @@ fn p4_enumerate_descriptors_and_receive_tablet_input() {
 }
 
 #[test]
+fn pcie_device_control_matches_qtest_read_only_bits() {
+    let mut d = Driver::new();
+    for value in [0x100u32, 0xffff] {
+        d.hc.config_write(0xa8 / 4, 0, &value.to_le_bytes());
+        assert_eq!(d.hc.config_read(0xa8 / 4), 0);
+    }
+}
+
+#[test]
 fn pci_identity_bar_probe_and_readonly_registers() {
     let mut d = Driver::new();
     assert_eq!(d.hc.config_read(0), 0x000d1b36);

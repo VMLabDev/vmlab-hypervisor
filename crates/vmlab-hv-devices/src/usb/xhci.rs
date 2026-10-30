@@ -1245,7 +1245,6 @@ impl PciDevice for XhciController {
                 0x11 => 0xc0,
                 0x12..=0x17 => 255,
                 0x93 => 0xc0,
-                0xa8 | 0xa9 => 0xff,
                 _ => 0,
             };
             self.state.pci[off] = (self.state.pci[off] & !mask) | (b & mask);
