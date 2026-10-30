@@ -300,3 +300,27 @@ fn delete_removes_and_missing_snapshots_error() {
     let err = snapshot::load(&m.handle, "never").expect_err("absent");
     assert!(err.is_not_found(), "{err}");
 }
+
+#[test]
+fn paused_snapshots_stay_paused() {
+    let Some(m) = machine(&counter_payload(), 8) else {
+        return;
+    };
+    settle(&m);
+    m.handle.pause().expect("pause");
+    assert_eq!(m.handle.status(), vmlab_hv_proto::control::RunState::Paused);
+    snapshot::save(&m.handle, "paused-snap").expect("save while paused");
+    // Saving a paused machine must not resume it.
+    assert_eq!(m.handle.status(), vmlab_hv_proto::control::RunState::Paused);
+    snapshot::load(&m.handle, "paused-snap").expect("load while paused");
+    assert_eq!(
+        m.handle.status(),
+        vmlab_hv_proto::control::RunState::Paused,
+        "a paused snapshot leaves the machine paused"
+    );
+    // And it still runs afterwards.
+    m.handle.resume().expect("resume");
+    let before = m.observed().len();
+    settle(&m);
+    assert!(m.observed().len() > before, "machine runs after resume");
+}
