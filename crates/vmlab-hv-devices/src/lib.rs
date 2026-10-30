@@ -104,7 +104,8 @@ pub trait VirtioDevice: Snapshot + Send {
 }
 
 /// Guest-visible state a device saves into and restores from a snapshot.
-pub trait Snapshot {
+/// `Send` because the VMM keeps snapshot handles in its shared state.
+pub trait Snapshot: Send {
     /// Stable id of this device instance in the machine, used as the section key.
     fn state_id(&self) -> String;
     fn save_state(&self) -> Result<Vec<u8>, DeviceError>;
