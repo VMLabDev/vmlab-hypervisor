@@ -127,6 +127,10 @@ fn filter_cpuid(
     *cpuid = CpuId::from_entries(&entries)
         .map_err(|e| VmmError::Other(format!("building CPUID topology: {e}")))?;
     let shift = count.next_power_of_two().trailing_zeros();
+    let amd = cpuid.as_slice().iter().any(|entry| {
+        entry.function == 0
+            && (entry.ebx, entry.ecx, entry.edx) == (0x68747541, 0x444d4163, 0x69746e65)
+    });
     for entry in cpuid.as_mut_slice() {
         match entry.function {
             1 => {
@@ -159,6 +163,26 @@ fn filter_cpuid(
                 entry.ecx &= !(1 << 2)
             }
             0x8000_0008 => entry.ecx = (entry.ecx & !0xf0ff) | (count - 1).min(255) | (shift << 12),
+            0x8000_0005 if amd => {
+                // Legacy descriptors of the captured QEMU host CPU model.
+                (entry.eax, entry.ebx, entry.ecx, entry.edx) =
+                    (0x01ff01ff, 0x01ff01ff, 0x40020140, 0x40020140);
+            }
+            0x8000_0006 if amd => {
+                (entry.eax, entry.ebx, entry.ecx, entry.edx) =
+                    (0, 0x42004200, 0x02008140, 0x00808140);
+            }
+            0x8000_0007 => entry.edx &= !(1 << 8),
+            0x8000_001d if amd => {
+                // One private L1/L2 per core and one shared 16 MiB L3.
+                (entry.eax, entry.ebx, entry.ecx, entry.edx) = match entry.index {
+                    0 => (0x121, 0x0040003f, 0x1ff, 1),
+                    1 => (0x122, 0x0040003f, 0x1ff, 1),
+                    2 => (0x43, 0x03c0003f, 0x1ff, 0),
+                    3 => (0x163 | ((count - 1) << 14), 0x03c0003f, 0x3fff, 2),
+                    _ => (0, 0, 0, 0),
+                };
+            }
             0x8000_001e => {
                 entry.eax = id as u32;
                 entry.ebx = id as u32;
@@ -226,6 +250,57 @@ impl vmlab_hv_devices::MsiSink for KvmMsiSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amd_cache_descriptors_and_migratable_tsc_match_the_reference_model() {
+        use kvm_bindings::kvm_cpuid_entry2;
+        let mut entries = vec![kvm_cpuid_entry2 {
+            function: 0,
+            ebx: 0x68747541,
+            ecx: 0x444d4163,
+            edx: 0x69746e65,
+            ..Default::default()
+        }];
+        entries.extend(
+            [0x80000005, 0x80000006, 0x80000007].map(|function| kvm_cpuid_entry2 {
+                function,
+                eax: u32::MAX,
+                ebx: u32::MAX,
+                ecx: u32::MAX,
+                edx: u32::MAX,
+                ..Default::default()
+            }),
+        );
+        entries.extend((0..5).map(|index| kvm_cpuid_entry2 {
+            function: 0x8000001d,
+            index,
+            ..Default::default()
+        }));
+        let mut cpuid = CpuId::from_entries(&entries).unwrap();
+        filter_cpuid(&mut cpuid, 0, 2, vmlab_hv_proto::machine::CpuPolicy::Host).unwrap();
+        let leaves = cpuid.as_slice();
+        assert_eq!(
+            (leaves[1].eax, leaves[1].ebx, leaves[1].ecx, leaves[1].edx),
+            (0x01ff01ff, 0x01ff01ff, 0x40020140, 0x40020140)
+        );
+        assert_eq!(
+            (leaves[2].eax, leaves[2].ebx, leaves[2].ecx, leaves[2].edx),
+            (0, 0x42004200, 0x02008140, 0x00808140)
+        );
+        assert_eq!(leaves[3].edx & (1 << 8), 0);
+        assert_eq!(
+            (leaves[4].eax, leaves[4].ebx, leaves[4].ecx, leaves[4].edx),
+            (0x121, 0x0040003f, 0x1ff, 1)
+        );
+        assert_eq!(
+            (leaves[7].eax, leaves[7].ebx, leaves[7].ecx, leaves[7].edx),
+            (0x4163, 0x03c0003f, 0x3fff, 2)
+        );
+        assert_eq!(
+            (leaves[8].eax, leaves[8].ebx, leaves[8].ecx, leaves[8].edx),
+            (0, 0, 0, 0)
+        );
+    }
 
     #[test]
     fn topology_adds_core_level_when_kvm_supplies_only_thread_level() {
