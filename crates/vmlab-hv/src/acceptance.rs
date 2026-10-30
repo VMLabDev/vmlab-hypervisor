@@ -69,7 +69,7 @@ fn boot_template(
     let serial = dir.path().join("serial.log");
     let stderr = dir.path().join("stderr.log");
     let mut description = serde_json::json!({
-        "machine": "q35", "name": name, "arch": "x86_64", "accel": "kvm", "vcpus": 2, "memory_mib": if name.starts_with("ubuntu") { 4096 } else { 2048 },
+        "machine": "q35", "name": name, "arch": "x86_64", "accel": "kvm", "vcpus": 2, "memory_mib": 4096,
         "boot": {"kind":"firmware", "firmware":"seabios", "code":"/usr/share/qemu/bios-256k.bin"},
         "disks":[{"id":"disk0", "pci":{"bus":0,"device":2,"function":0}, "path":disk,"format":"qcow2","read_only":false,"vmstate":true}],
         "console_pci":{"bus":0,"device":1,"function":0},
@@ -219,30 +219,30 @@ fn boot_template(
 }
 
 #[test]
-fn debian_13_firmware_agent_and_snapshot() {
+fn ubuntu_26_04_firmware_agent_and_snapshot() {
     boot_template(
-        "debian-13",
-        "VMLAB_HV_TEMPLATE_DEBIAN_13",
+        "ubuntu-26.04",
+        "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
         true,
         vmlab_hv_proto::machine::DiskBus::Virtio,
     );
 }
 
 #[test]
-fn ubuntu_26_04_firmware_agent() {
+fn almalinux_10_firmware_agent() {
     boot_template(
-        "ubuntu-26.04",
-        "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
+        "almalinux-10",
+        "VMLAB_HV_TEMPLATE_ALMALINUX_10",
         false,
         vmlab_hv_proto::machine::DiskBus::Virtio,
     );
 }
 
 #[test]
-fn debian_13_ahci_firmware_agent() {
+fn ubuntu_26_04_ahci_firmware_agent() {
     boot_template(
-        "debian-13",
-        "VMLAB_HV_TEMPLATE_DEBIAN_13",
+        "ubuntu-26.04",
+        "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
         false,
         vmlab_hv_proto::machine::DiskBus::Ahci,
     );
