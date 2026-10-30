@@ -74,7 +74,18 @@ fn q35_seabios_banner_through_control_socket() {
     let handle = vm.handle();
     let socket = dir.path().join("control.sock");
     crate::control::serve(&socket, &handle).unwrap();
+    crate::display::serve(handle.shared(), dir.path()).unwrap();
     let mut client = vmlab_hv_proto::client::Client::connect(&socket).unwrap();
+    assert!(
+        client
+            .capabilities()
+            .contains(&vmlab_hv_proto::control::Capability::Display)
+    );
+    assert!(
+        client
+            .capabilities()
+            .contains(&vmlab_hv_proto::control::Capability::Input)
+    );
     assert!(matches!(
         client.call(Command::Resume).unwrap(),
         Outcome::Ok { .. }
@@ -103,6 +114,7 @@ fn q35_seabios_banner_through_control_socket() {
         .shared()
         .wait_quiesced(Duration::from_secs(2))
         .unwrap();
+    check_native_display_and_keyboard(&handle, dir.path());
     for (id, fd) in handle.shared().vcpus.lock().iter() {
         let fd = fd.lock();
         let regs = fd.get_regs().unwrap();
@@ -119,6 +131,93 @@ fn q35_seabios_banner_through_control_socket() {
         log.contains("SeaBIOS"),
         "reset-vector boot did not print its banner; exit={reason:?}; log={log}"
     );
+}
+
+fn check_native_display_and_keyboard(handle: &VmHandle, directory: &Path) {
+    use std::os::unix::fs::FileExt;
+    use vmlab_hv_display::{Capabilities, Client, Message};
+    let display = Client::connect(
+        directory.join("display.sock"),
+        Capabilities(Capabilities::FRAMES | Capabilities::INPUT),
+    )
+    .unwrap();
+    display
+        .stream()
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut buffers: Vec<std::fs::File> = vec![];
+    let mut size = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "VGA scanout stayed blank"
+        );
+        let packet = display.receive().unwrap();
+        match packet.message {
+            Message::SurfaceConfigure {
+                width,
+                height,
+                stride,
+                ..
+            } => {
+                assert!(width > 0 && height > 0);
+                size = stride as usize * height as usize;
+                buffers = packet.fds.into_iter().map(std::fs::File::from).collect();
+            }
+            Message::FrameReady {
+                surface_id,
+                buffer,
+                seq,
+                ..
+            } => {
+                let mut pixels = vec![0; size];
+                buffers[buffer as usize]
+                    .read_exact_at(&mut pixels, 0)
+                    .unwrap();
+                display.release(surface_id, buffer, seq).unwrap();
+                if pixels.iter().any(|pixel| *pixel != 0) {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let shared = handle.shared();
+    shared.io_write(0x64, &[0x60]);
+    shared.io_write(0x60, &[1]);
+    shared.io_write(0x64, &[0xae]);
+    shared.io_write(0x60, &[0xf0]);
+    shared.io_write(0x60, &[2]);
+    shared.io_write(0x60, &[0xf4]);
+    let mut byte = [0];
+    for _ in 0..64 {
+        shared.io_read(0x64, &mut byte);
+        if byte[0] & 1 == 0 {
+            break;
+        }
+        shared.io_read(0x60, &mut byte);
+    }
+    display
+        .send(&Message::Key {
+            qcode: "a".into(),
+            down: true,
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        shared.io_read(0x64, &mut byte);
+        if byte[0] & 1 != 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "native key did not reach i8042"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    shared.io_read(0x60, &mut byte);
+    assert_eq!(byte[0], 0x1c);
 }
 
 /// A fake 16550A: records every byte written to the port range.

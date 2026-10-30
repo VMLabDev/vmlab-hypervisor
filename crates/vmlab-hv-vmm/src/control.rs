@@ -109,11 +109,13 @@ pub fn serve(path: &Path, vm: &VmHandle) -> Result<std::thread::JoinHandle<()>, 
         .map_err(|e| VmmError::Control(format!("binding {}: {e}", path.display())))?;
 
     let handler = ControlHandler::new(vm.clone());
-    let server: Server<_> = Server::new(
-        env!("CARGO_PKG_VERSION"),
-        vec![Capability::Snapshots],
-        move |command| handler.handle(command),
-    );
+    let mut capabilities = vec![Capability::Snapshots];
+    if vm.shared().vga.lock().is_some() {
+        capabilities.extend([Capability::Display, Capability::Input]);
+    }
+    let server: Server<_> = Server::new(env!("CARGO_PKG_VERSION"), capabilities, move |command| {
+        handler.handle(command)
+    });
     let broadcaster = server.clone();
     vm.set_event_sink(Arc::new(move |event| broadcaster.broadcast(event)));
 
