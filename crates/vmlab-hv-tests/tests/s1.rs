@@ -334,6 +334,85 @@ fn agent_ready(guest: &vmlab_hv_tests::Guest) -> AgentClient {
 }
 
 #[test]
+fn blocked_serial_client_bounds_rss_and_resumes_without_losing_bytes() {
+    use std::io::Read;
+    let Some(assets) = check() else { return };
+    let mut spec = MachineSpec::idle("s1-serial-memory");
+    spec.extra_ports.push("vmlab.leak.0".into());
+    let mut guest = vmlab_hv_tests::launch(&spec, &assets);
+    let mut stalled =
+        std::os::unix::net::UnixStream::connect(guest.dir().join("extra-0.sock")).unwrap();
+    stalled
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let (_ctl, _) = boot_to_idle(&guest, &spec.container_spec(), BOOT);
+    let mut agent = agent_ready(&guest);
+    let rss = || {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", guest.child.id())).unwrap();
+        status
+            .lines()
+            .find(|line| line.starts_with("VmRSS:"))
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    let setup = format!(
+        "for port in /proc/1/root/sys/class/virtio-ports/*; do if [ \"$({BUSYBOX} cat \"$port/name\")\" = vmlab.leak.0 ]; then dev=$({BUSYBOX} cat \"$port/dev\"); {BUSYBOX} mknod /tmp/leak-port c \"${{dev%:*}}\" \"${{dev#*:}}\"; fi; done; test -c /tmp/leak-port"
+    );
+    let configured = agent
+        .exec(&[BUSYBOX, "sh", "-ec", &setup], Duration::from_secs(15))
+        .unwrap();
+    assert_eq!(configured.exit_code, 0, "{configured:?}");
+    let before = rss();
+    let script = format!(
+        "{BUSYBOX} setsid {BUSYBOX} sh -c '{BUSYBOX} dd if=/dev/zero of=/tmp/leak-port bs=65536 count=1024 2>/tmp/leak-dd.log && echo done >/tmp/leak-done' </dev/null >/dev/null 2>&1 &"
+    );
+    let result = agent
+        .exec(&[BUSYBOX, "sh", "-c", &script], Duration::from_secs(15))
+        .unwrap();
+    assert_eq!(result.exit_code, 0, "{result:?}");
+    std::thread::sleep(Duration::from_secs(3));
+    let after = rss();
+    eprintln!("blocked serial client RSS: {before} -> {after} KiB");
+    let diagnostic = agent
+        .exec(
+            &[BUSYBOX, "cat", "/tmp/leak-dd.log"],
+            Duration::from_secs(15),
+        )
+        .unwrap();
+    eprintln!(
+        "guest serial writer: {}{}",
+        String::from_utf8_lossy(&diagnostic.stdout),
+        String::from_utf8_lossy(&diagnostic.stderr)
+    );
+    assert!(
+        after.saturating_sub(before) < 16 * 1024,
+        "unbounded serial staging: {before} -> {after} KiB"
+    );
+    let mut count = 0;
+    let mut buffer = [0; 65536];
+    while count < 64 << 20 {
+        let read = stalled
+            .read(&mut buffer)
+            .expect("drain stalled serial client");
+        assert_ne!(read, 0);
+        assert!(buffer[..read].iter().all(|byte| *byte == 0));
+        count += read;
+    }
+    let result = agent
+        .exec(
+            &[BUSYBOX, "sh", "-c", "for i in $(/.vmlab/busybox seq 1 100); do test ! -f /tmp/leak-done || exit 0; /.vmlab/busybox sleep 0.01; done; exit 1"],
+            Duration::from_secs(15),
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 0, "{result:?}");
+    guest.quit_and_exit_zero();
+}
+
+#[test]
 fn boots_to_idle_exec_and_scratch_roundtrip() {
     let Some(assets) = check() else { return };
 

@@ -60,6 +60,32 @@ fn first_frame_captures_guest_changes_without_connected_clients() {
 }
 
 #[test]
+fn shutdown_interrupts_unfinished_handshakes_and_idle_sessions() {
+    for rfb in [false, true] {
+        let (server, _, _) = server();
+        let (a, b) = socket();
+        let worker_server = server.clone();
+        let worker = std::thread::spawn(move || {
+            if rfb {
+                worker_server.serve_rfb(a)
+            } else {
+                worker_server.serve_native(a)
+            }
+        });
+        server.shutdown();
+        assert!(worker.join().unwrap().is_err());
+        drop(b);
+    }
+    let (server, _, _) = server();
+    let (client, worker) = client(&server, C::FRAMES);
+    configure(&client);
+    ready(&client);
+    server.shutdown();
+    worker.join().unwrap().unwrap();
+    drop(client);
+}
+
+#[test]
 fn cpu_copy_captures_current_source_without_producer_publication() {
     let (server, source, _) = server();
     let (c, h) = client(&server, C::FRAMES | C::CPU_COPY);
@@ -149,6 +175,50 @@ fn held_buffers_are_immutable_and_slow_clients_skip_independently() {
     drop(fast);
     sh.join().unwrap().unwrap();
     fh.join().unwrap().unwrap();
+}
+
+#[test]
+fn frame_allocations_plateau_without_clients_and_with_unreleased_buffers() {
+    let (server, source, _) = server();
+    let mut allocations = Vec::new();
+    let mut publish = |value| {
+        let next = frame(value, 256, 256);
+        let Pixels::Shm(pixels) = &next.pixels else {
+            unreachable!()
+        };
+        allocations.push(Arc::downgrade(pixels));
+        *source.0.lock().unwrap() = next;
+        server.publish().unwrap();
+        assert!(
+            allocations
+                .iter()
+                .filter(|frame| frame.strong_count() != 0)
+                .count()
+                <= 4
+        );
+    };
+    for value in (0..2000).map(|value| value as u8) {
+        publish(value);
+    }
+    let (slow, handle) = client(&server, C::FRAMES);
+    configure(&slow);
+    ready(&slow);
+    for value in [1, 2] {
+        publish(value);
+        ready(&slow);
+    }
+    for value in (0..2000).map(|value| value as u8) {
+        publish(value);
+    }
+    drop(slow);
+    handle.join().unwrap().unwrap();
+    assert_eq!(
+        allocations
+            .iter()
+            .filter(|frame| frame.strong_count() != 0)
+            .count(),
+        1
+    );
 }
 
 #[test]

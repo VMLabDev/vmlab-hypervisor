@@ -1,8 +1,9 @@
 //! P1 firmware/template acceptance through the executable's control socket.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use vmlab_hv_tests::process::ManagedChild;
 
 use vmlab_hv_proto::{
     client::Client,
@@ -10,13 +11,7 @@ use vmlab_hv_proto::{
 };
 use vmlab_hv_tests::agent::AgentClient;
 
-struct Process(Child);
-impl Drop for Process {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+struct Process(ManagedChild);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Firmware {
@@ -132,14 +127,15 @@ fn boot_template(
         let state = dir.path().join("tpm");
         std::fs::create_dir_all(&state).unwrap();
         let mut child = Process(
-            Command::new("swtpm")
-                .args(["socket", "--tpm2", "--tpmstate"])
-                .arg(format!("dir={}", state.display()))
-                .arg("--ctrl")
-                .arg(format!("type=unixio,path={}", socket.display()))
-                .stdout(Stdio::null())
-                .spawn()
-                .unwrap(),
+            ManagedChild::helper(
+                Command::new("swtpm")
+                    .args(["socket", "--tpm2", "--tpmstate"])
+                    .arg(format!("dir={}", state.display()))
+                    .arg("--ctrl")
+                    .arg(format!("type=unixio,path={}", socket.display()))
+                    .stdout(Stdio::null()),
+            )
+            .unwrap(),
         );
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() {
@@ -269,23 +265,24 @@ fn boot_template(
         });
     let spawn = || {
         Process(
-            Command::new(&binary)
-                .arg("--machine")
-                .arg(&machine)
-                .arg("--control")
-                .arg(&control)
-                .arg("--paused")
-                .env("VMLAB_HV_DIAGNOSTICS", "1")
-                .stdout(Stdio::null())
-                .stderr(
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&stderr)
-                        .unwrap(),
-                )
-                .spawn()
-                .unwrap(),
+            ManagedChild::spawn(
+                Command::new(&binary)
+                    .arg("--machine")
+                    .arg(&machine)
+                    .arg("--control")
+                    .arg(&control)
+                    .arg("--paused")
+                    .env("VMLAB_HV_DIAGNOSTICS", "1")
+                    .stdout(Stdio::null())
+                    .stderr(
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&stderr)
+                            .unwrap(),
+                    ),
+            )
+            .unwrap(),
         )
     };
     let mut process = spawn();
@@ -348,6 +345,7 @@ fn boot_template(
             );
             reboots += 1;
             eprintln!("{name}: restarting after guest reset {reboots}");
+            drop(process);
             if let Some(previous) = swtpm.take() {
                 drop(previous);
                 let socket = dir.path().join("tpm.sock");

@@ -20,6 +20,7 @@
 
 use std::io::{self, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread;
 
@@ -43,6 +44,8 @@ impl<H> Clone for Server<H> {
 }
 
 struct Shared<H> {
+    closed: AtomicBool,
+    operation: Mutex<()>,
     hv_version: String,
     capabilities: Vec<Capability>,
     handler: Mutex<H>,
@@ -57,6 +60,8 @@ impl<H: FnMut(Command) -> Outcome + Send + 'static> Server<H> {
     pub fn new(hv_version: impl Into<String>, capabilities: Vec<Capability>, handler: H) -> Self {
         Self {
             shared: Arc::new(Shared {
+                closed: AtomicBool::new(false),
+                operation: Mutex::new(()),
                 hv_version: hv_version.into(),
                 capabilities,
                 handler: Mutex::new(handler),
@@ -69,21 +74,58 @@ impl<H: FnMut(Command) -> Outcome + Send + 'static> Server<H> {
     /// Blocks the calling thread for the lifetime of the listener; failures
     /// of a single connection end only that connection.
     pub fn serve(&self, listener: UnixListener) -> io::Result<()> {
-        for stream in listener.incoming() {
-            let stream = stream?;
+        self.serve_until(listener, || false)
+    }
+
+    /// Stop accepting and close every connection when the owner has exited.
+    pub fn serve_until(
+        &self,
+        listener: UnixListener,
+        stopped: impl Fn() -> bool,
+    ) -> io::Result<()> {
+        listener.set_nonblocking(true)?;
+        let mut workers = Vec::new();
+        while !stopped() && !self.shared.closed.load(Ordering::SeqCst) {
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let shared = Arc::clone(&self.shared);
-            thread::Builder::new()
-                .name("control-connection".to_owned())
-                .spawn(move || {
-                    // Errors end this connection; the listener serves on.
-                    let _ = serve_connection(&shared, stream);
-                })?;
+            workers.retain(|worker: &thread::JoinHandle<()>| !worker.is_finished());
+            workers.push(
+                thread::Builder::new()
+                    .name("control-connection".to_owned())
+                    .spawn(move || {
+                        // Errors end this connection; the listener serves on.
+                        let _ = serve_connection(&shared, stream);
+                    })?,
+            );
+        }
+        self.shutdown();
+        for worker in workers {
+            let _ = worker.join();
         }
         Ok(())
     }
 }
 
 impl<H> Server<H> {
+    /// Interrupt idle readers and blocked writers without waiting for a handshake.
+    pub fn shutdown(&self) {
+        self.shared.closed.store(true, Ordering::SeqCst);
+        // Let an in-flight Quit send its reply before closing the socket.
+        let _operation = lock(&self.shared.operation);
+        for writer in lock(&self.shared.writers)
+            .drain(..)
+            .filter_map(|w| w.upgrade())
+        {
+            let _ = lock(&writer).shutdown(std::net::Shutdown::Both);
+        }
+    }
     /// Send `event` to every connected client, pruning connections that have
     /// gone away. Returns once the event has been written (or failed) to
     /// each of them.
@@ -108,11 +150,24 @@ fn serve_connection<H: FnMut(Command) -> Outcome>(
     stream: UnixStream,
 ) -> Result<(), ServeError> {
     let writer = Arc::new(Mutex::new(stream.try_clone()?));
-    lock(&shared.writers).push(Arc::downgrade(&writer));
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(1)))?;
+    {
+        let mut writers = lock(&shared.writers);
+        writers.retain(|writer| writer.strong_count() != 0);
+        writers.push(Arc::downgrade(&writer));
+        if shared.closed.load(Ordering::SeqCst) {
+            stream.shutdown(std::net::Shutdown::Both)?;
+            return Ok(());
+        }
+    }
     let mut reader = BufReader::new(stream);
     let mut phase = Phase::AwaitingHello;
     // EOF means the peer closed; nothing to answer.
     while let Some(msg) = codec::read_client_msg(&mut reader)? {
+        let _operation = lock(&shared.operation);
+        if shared.closed.load(Ordering::SeqCst) {
+            break;
+        }
         match respond(shared, &mut phase, msg) {
             Response::Send(msg) => write_to(&writer, &msg)?,
             Response::SendThenClose(msg) => {
@@ -220,6 +275,8 @@ mod tests {
 
     fn test_shared() -> Shared<impl FnMut(Command) -> Outcome> {
         Shared {
+            closed: AtomicBool::new(false),
+            operation: Mutex::new(()),
             hv_version: "test-hv".to_owned(),
             capabilities: vec![Capability::Snapshots],
             handler: Mutex::new(|_| Outcome::Ok {
@@ -227,6 +284,42 @@ mod tests {
             }),
             writers: Mutex::new(Vec::new()),
         }
+    }
+
+    #[test]
+    fn connection_registry_is_bounded_without_events() {
+        let shared = Arc::new(test_shared());
+        for _ in 0..1000 {
+            let (server, client) = UnixStream::pair().unwrap();
+            drop(client);
+            serve_connection(&shared, server).unwrap();
+        }
+        let retained = lock(&shared.writers).len();
+        assert!(
+            retained <= 1,
+            "registry retained {retained} dead connections"
+        );
+    }
+
+    #[test]
+    fn shutdown_interrupts_a_client_without_a_handshake() {
+        let (_directory, path) = socket_path("shutdown");
+        let server = Server::new("test", vec![], |_| Outcome::Ok { status: None });
+        let owner = server.clone();
+        let listener = UnixListener::bind(&path).unwrap();
+        let worker = thread::spawn(move || server.serve(listener).unwrap());
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        owner.shutdown();
+        use std::io::Read;
+        match client.read(&mut [0]) {
+            Ok(0) => {}
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            result => panic!("shutdown did not close the socket: {result:?}"),
+        }
+        worker.join().unwrap();
     }
 
     #[test]

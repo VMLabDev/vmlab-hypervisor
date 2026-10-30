@@ -1,8 +1,9 @@
 //! S1 regression for the BIOS IRQ0 tick used by SYSLINUX's timeout.
 
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use vmlab_hv_tests::process::ManagedChild;
 
 use vmlab_hv_proto::client::Client;
 use vmlab_hv_proto::control::{Command as Control, Outcome};
@@ -10,7 +11,7 @@ use vmlab_hv_proto::machine::MachineDescription;
 
 const SHA256: &str = "39fc293200534b03cf805620a099f2f68265220215434fde687536f67a955bc3";
 
-struct Process(Child);
+struct Process(ManagedChild);
 impl Drop for Process {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -69,16 +70,17 @@ fn alpine_syslinux_countdown_reaches_login() {
     let log = std::fs::File::create(&log_path).unwrap();
     let socket = dir.path().join("control.sock");
     let mut process = Process(
-        Command::new(binary)
-            .arg("--machine")
-            .arg(machine)
-            .arg("--control")
-            .arg(&socket)
-            .arg("--paused")
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .unwrap(),
+        ManagedChild::spawn(
+            Command::new(binary)
+                .arg("--machine")
+                .arg(machine)
+                .arg("--control")
+                .arg(&socket)
+                .arg("--paused")
+                .stdout(Stdio::null())
+                .stderr(log),
+        )
+        .unwrap(),
     );
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut control = loop {

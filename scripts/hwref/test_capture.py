@@ -33,7 +33,8 @@ class ParserTests(unittest.TestCase):
                 cfg = {"nics": [], "title": "probe", "boot": "esp", "tpm": tpm}
                 with patch.object(capture, "DOCS", self.root), \
                      patch.object(capture, "build_argv", return_value=[]), \
-                     patch.object(capture.subprocess, "Popen", side_effect=launch), \
+                     patch.object(capture, "spawn_process", side_effect=launch), \
+                     patch.object(capture, "stop_process") as stop, \
                      patch.object(capture.time, "sleep"), \
                      patch.object(capture, "write_config_readme"), \
                      redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
@@ -41,8 +42,7 @@ class ParserTests(unittest.TestCase):
                 self.assertTrue(logs)
                 self.assertTrue(all(log.closed for log in logs))
                 if tpm and fail_at == 2:
-                    child.terminate.assert_called_once()
-                    child.wait.assert_called_once()
+                    stop.assert_any_call(child)
 
     def test_qmp_closes_failed_connections_and_the_command_stream(self):
         failed, connected, stream = Mock(), Mock(), Mock()

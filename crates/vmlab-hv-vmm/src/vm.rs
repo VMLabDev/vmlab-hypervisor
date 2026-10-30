@@ -181,8 +181,8 @@ impl VmShared {
     }
 
     fn kick_all(&self) {
-        let tids = self.kicks.lock().clone();
-        for tid in tids {
+        let tids = self.kicks.lock();
+        for &tid in tids.iter() {
             // SAFETY: pthread_kill(3) with a registered signal number on a
             // thread id from the registry; stale ids cannot exist because
             // unregister runs before the thread exits.
@@ -825,13 +825,21 @@ impl Vm {
             .map(|(id, fd)| (id, Arc::new(Mutex::new(fd))))
             .collect();
         *shared.vcpus.lock() = fds.clone();
-        let vcpus = fds
-            .into_iter()
-            .map(|(id, fd)| VcpuThread::spawn(id, fd, shared.clone()))
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|e| VmmError::Other(format!("spawning vCPU threads: {e}")))?;
-        let timer = if shared.chipset.lock().is_some() {
-            let weak = Arc::downgrade(&shared);
+        // Own each thread immediately, including during partial construction.
+        let mut machine = Self {
+            shared,
+            vcpus: Vec::new(),
+            ram,
+            timer: None,
+        };
+        for (id, fd) in fds {
+            machine.vcpus.push(
+                VcpuThread::spawn(id, fd, machine.shared.clone())
+                    .map_err(|e| VmmError::Other(format!("spawning vCPU threads: {e}")))?,
+            );
+        }
+        machine.timer = if machine.shared.chipset.lock().is_some() {
+            let weak = Arc::downgrade(&machine.shared);
             Some(
                 std::thread::Builder::new()
                     .name("q35-timers".into())
@@ -852,12 +860,7 @@ impl Vm {
         } else {
             None
         };
-        Ok(Vm {
-            shared,
-            vcpus,
-            ram,
-            timer,
-        })
+        Ok(machine)
     }
 
     /// A handle for the control server and tests.
@@ -873,21 +876,7 @@ impl Vm {
     /// Block until the machine exits, joining the vCPU threads; returns why.
     pub fn wait(mut self) -> ExitReason {
         let reason = self.shared.wait_exit();
-        while self.vcpus.iter().any(|vcpu| !vcpu.is_finished()) {
-            // A kick delivered just before KVM_RUN can be consumed before
-            // the ioctl blocks, including an AP waiting for SIPI.
-            self.shared.kick_all();
-            let mut state = self.shared.state.lock();
-            self.shared
-                .state_cv
-                .wait_for(&mut state, std::time::Duration::from_millis(1));
-        }
-        for vcpu in self.vcpus.drain(..) {
-            vcpu.join();
-        }
-        if let Some(timer) = self.timer.take() {
-            let _ = timer.join();
-        }
+        self.join_workers();
         if let Some(tpm) = self.shared.tpm.lock().as_ref()
             && let Err(e) = tpm.lock().shutdown()
         {
@@ -968,6 +957,31 @@ impl Vm {
         }
         reason
     }
+
+    fn join_workers(&mut self) {
+        // A kick can arrive between the state check and KVM_RUN. Reassert it
+        // until every CPU has left, including CPUs blocked in guest HLT.
+        while self.vcpus.iter().any(|cpu| !cpu.is_finished()) {
+            self.shared.kick_all();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        for cpu in self.vcpus.drain(..) {
+            cpu.join();
+        }
+        if let Some(timer) = self.timer.take() {
+            let _ = timer.join();
+        }
+    }
+}
+
+impl Drop for Vm {
+    fn drop(&mut self) {
+        self.handle().quit();
+        self.join_workers();
+        if let Some(display) = self.shared.display.lock().as_ref() {
+            display.shutdown();
+        }
+    }
 }
 
 /// The control-server-facing view of a machine. Cheap to clone.
@@ -975,6 +989,9 @@ impl Vm {
 pub struct VmHandle(Arc<VmShared>);
 
 impl VmHandle {
+    pub(crate) fn from_shared(shared: Arc<VmShared>) -> Self {
+        Self(shared)
+    }
     pub fn serve_display(
         &self,
         native: &std::path::Path,

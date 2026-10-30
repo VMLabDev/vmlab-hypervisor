@@ -276,26 +276,40 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
         (native_listener, false, "display-native"),
         (rfb_listener, true, "display-rfb"),
     ] {
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| VmmError::Control(format!("configuring {name}: {e}")))?;
         let server = server.clone();
+        let weak = Arc::downgrade(shared);
         std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
-                for stream in listener.incoming() {
-                    let stream = match stream {
-                        Ok(stream) => stream,
+                let mut workers = Vec::new();
+                while weak.upgrade().is_some_and(|shared| !shared.exited()) {
+                    let stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            continue;
+                        }
                         Err(error) => {
                             eprintln!("{name}: {error}");
                             break;
                         }
                     };
                     let server = server.clone();
-                    std::thread::spawn(move || {
+                    workers.retain(|worker: &std::thread::JoinHandle<()>| !worker.is_finished());
+                    workers.push(std::thread::spawn(move || {
                         let _ = if rfb {
                             server.serve_rfb(stream)
                         } else {
                             server.serve_native(stream)
                         };
-                    });
+                    }));
+                }
+                server.shutdown();
+                for worker in workers {
+                    let _ = worker.join();
                 }
             })
             .map_err(|e| VmmError::Other(format!("spawning {name}: {e}")))?;
