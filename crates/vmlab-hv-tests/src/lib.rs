@@ -186,6 +186,7 @@ pub struct MachineSpec {
     pub memory_mib: u64,
     pub vcpus: u32,
     pub paused: bool,
+    pub rtc_base: Option<String>,
 }
 
 impl MachineSpec {
@@ -197,6 +198,7 @@ impl MachineSpec {
             memory_mib: MEMORY_MIB,
             vcpus: 1,
             paused: false,
+            rtc_base: None,
         }
     }
 
@@ -414,7 +416,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         ],
         shares: Vec::new(),
         audio: None,
-        rtc_base: None,
+        rtc_base: spec.rtc_base.clone(),
     };
     let machine_path = dir.join("machine.json");
     std::fs::write(

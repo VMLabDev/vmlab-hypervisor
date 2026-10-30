@@ -58,6 +58,7 @@ pub fn install(mem: &GuestMemoryMmap, cfg: &AcpiConfig) -> Result<AcpiPlacement,
     fadt.pm1a_cnt_blk = u32::from(PM1A_CNT_BASE).into();
     fadt.pm1_evt_len = 4;
     fadt.pm1_cnt_len = 2;
+    fadt.century = 0x32;
     fadt.preferred_pm_profile = PmProfile::EnterpriseServer as u8;
     fadt.flags = ((Flags::Wbinvd as u32) | (Flags::Headless as u32)).into();
     let fadt = fadt.dsdt_64(dsdt_addr).finalize();
@@ -180,7 +181,13 @@ fn dsdt(layout: &MemLayout) -> Sdt {
     let pwrb_sta = aml::Name::new(aml::Path::new("_STA"), &0xFu32);
     let pwrb = aml::Device::new(aml::Path::new("PWRB"), vec![&pwrb_hid, &pwrb_sta]);
 
-    let sb = aml::Scope::new(aml::Path::new("\\_SB_"), vec![&pci0, &pwrb]);
+    let rtc_hid = aml::Name::new(aml::Path::new("_HID"), &aml::EISAName::new("PNP0B00"));
+    let rtc_io = aml::IO::new(0x70, 0x70, 1, 8);
+    let rtc_irq = aml::Interrupt::new(true, true, false, false, 8);
+    let rtc_resources = aml::ResourceTemplate::new(vec![&rtc_io, &rtc_irq]);
+    let rtc_crs = aml::Name::new(aml::Path::new("_CRS"), &rtc_resources);
+    let rtc = aml::Device::new(aml::Path::new("RTC0"), vec![&rtc_hid, &rtc_crs]);
+    let sb = aml::Scope::new(aml::Path::new("\\_SB_"), vec![&pci0, &pwrb, &rtc]);
 
     let slp0 = 0u32;
     let slp5 = crate::pm::SLP_TYP_S5 as u32;
@@ -361,6 +368,7 @@ mod tests {
         assert_eq!(u32at(64), 0x604, "pm1a_cnt_blk");
         assert_eq!(u8at(88), 4, "pm1_evt_len");
         assert_eq!(u8at(89), 2, "pm1_cnt_len");
+        assert_eq!(u8at(108), 0x32, "RTC century register");
         // X_DSDT at offset 140.
         let dsdt_ptr = u64::from_le_bytes(fadt[140..148].try_into().unwrap());
         let dsdt = read_table(&memory, dsdt_ptr);
@@ -384,7 +392,7 @@ mod tests {
             &memory,
             u64::from_le_bytes(read_table(&memory, fadt_addr)[140..148].try_into().unwrap()),
         );
-        let names: &[&[u8; 4]] = &[b"PCI0", b"PWRB", b"_HID", b"_CRS", b"_STA"];
+        let names: &[&[u8; 4]] = &[b"PCI0", b"PWRB", b"RTC0", b"_HID", b"_CRS", b"_STA"];
         for name in names {
             assert!(
                 dsdt.windows(4).any(|w| w == name.as_slice()),
@@ -393,7 +401,11 @@ mod tests {
         }
         // The EISA ids PNP0A08 (PCI root) and PNP0C0C (power button), in the
         // big-endian DWordConst form AML uses (as iasl emits them).
-        for id in [[0x41u8, 0xD0, 0x0A, 0x08], [0x41, 0xD0, 0x0C, 0x0C]] {
+        for id in [
+            [0x41u8, 0xD0, 0x0A, 0x08],
+            [0x41, 0xD0, 0x0C, 0x0C],
+            [0x41, 0xD0, 0x0B, 0x00],
+        ] {
             assert!(dsdt.windows(4).any(|w| w == id), "EISA id {id:?}");
         }
         // \_S5 with the SLP_TYP the PM device expects.

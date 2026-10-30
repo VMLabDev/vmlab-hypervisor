@@ -5,6 +5,7 @@ pub mod acpi;
 pub mod builder;
 pub mod bus;
 pub mod chipset;
+mod clock;
 pub mod control;
 mod display;
 pub mod e820;

@@ -41,9 +41,12 @@ use crate::vm::VmHandle;
 /// How long a snapshot waits for every vCPU to leave KVM_RUN.
 const QUIESCE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Architectural MSRs KVM migrates through KVM_GET_MSRS (Intel SDM vol. 4
-/// indices). EFER, the APIC base and the PAT ride in `sregs`.
+/// Architectural and KVM clock MSRs migrated through KVM_GET_MSRS.
+/// EFER, the APIC base and the PAT ride in `sregs`. Restoring IA32_TSC and
+/// the pvclock registrations keeps guest TSC interpolation on the saved
+/// timeline after RAM and KVM_SET_CLOCK have been restored.
 const MIGRATABLE_MSRS: &[u32] = &[
+    0x0000_0010, // IA32_TSC
     0x0000_0175, // IA32_SYSENTER_ESP
     0x0000_0176, // IA32_SYSENTER_EIP
     0xC000_0081, // IA32_STAR
@@ -54,6 +57,8 @@ const MIGRATABLE_MSRS: &[u32] = &[
     0xC000_0101, // IA32_GS_BASE
     0xC000_0102, // IA32_KERNEL_GS_BASE
     0xC000_0103, // IA32_TSC_AUX
+    0x4b56_4d00, // MSR_KVM_WALL_CLOCK_NEW
+    0x4b56_4d01, // MSR_KVM_SYSTEM_TIME_NEW
 ];
 
 /// Why a snapshot operation failed, mapped onto control error codes.
@@ -741,12 +746,15 @@ fn restore_kernel_state(
 
     let pit: kvm_pit_state2 = from_json(sections.get("pit").ok_or_else(|| missing("pit"))?, "pit")?;
     vm.set_pit2(&pit).map_err(io)?;
-    let clock: kvm_clock_data = from_json(
+    let mut clock: kvm_clock_data = from_json(
         sections
             .get("kvmclock")
             .ok_or_else(|| missing("kvmclock"))?,
         "kvmclock",
     )?;
+    // Restore the captured instant. KVM_CLOCK_REALTIME would add host time
+    // elapsed since capture, defeating clock rollback on online restore.
+    clock.flags = 0;
     vm.set_clock(&clock).map_err(io)?;
 
     let vcpus = shared.vcpus.lock().clone();

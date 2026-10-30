@@ -412,6 +412,19 @@ pub fn build(
         ]);
     }
 
+    if !q35 {
+    let rtc = Arc::new(Mutex::new(crate::clock::KvmRtc::new(
+        desc.memory_mib << 20,
+        crate::clock::rtc_base(desc.rtc_base.as_deref())?,
+        Arc::new(KvmIrqLine::new(vm_fd.clone(), 8)),
+        vm_fd.clone(),
+    )?));
+    io_bus
+        .register(0x70, 8, rtc.clone())
+        .map_err(VmmError::Other)?;
+    snap_nodes.push(DeviceNode::Plain(rtc));
+    }
+
     // COM1: 16550A on IRQ 4, output to the serial log.
     let irq4: Arc<dyn IrqLine> = Arc::new(KvmIrqLine::new(vm_fd.clone(), 4));
     let serial =
