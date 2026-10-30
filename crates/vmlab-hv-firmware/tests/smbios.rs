@@ -163,8 +163,24 @@ fn ancillary_files_match_capture_bytes() {
         .collect();
     assert_eq!(
         files["bootorder"],
-        b"/pci@i0cf8/scsi@2/disk@0,0\n/pci@i0cf8/scsi@1f,2/disk@0,0\n\0"
+        b"/pci@i0cf8/scsi@2/disk@0,0\n/pci@i0cf8/scsi@1f,2/disk@0,0\0"
     );
+}
+
+#[test]
+fn bootorder_matches_captured_line_and_nul_terminators() {
+    let captured =
+        include_bytes!("../../../docs/hwref/q35-seabios-linux-generic/guest/fwcfg/blobs/bootorder");
+    let paths = std::str::from_utf8(captured.strip_suffix(&[0]).unwrap()).unwrap();
+    let options = FirmwareOptions {
+        bootorder: paths.lines().map(str::to_owned).collect(),
+        ..Default::default()
+    };
+    let files: BTreeMap<_, _> = ancillary_files(&Platform::default(), &options)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(files["bootorder"], captured);
 }
 
 #[test]
