@@ -213,7 +213,7 @@ for entry in /sys/firmware/qemu_fw_cfg/by_key/*; do
   # Inventory every blob, but avoid port-I/O copies of large boot assets.
   [ "$size" -le 65536 ] || continue
   mkdir -p "fwcfg/blobs/$(dirname "$name")"
-  timeout 30 cat "$entry/raw" >"fwcfg/blobs/$name" 2>>fwcfg/read-errors.log
+  timeout 120 cat "$entry/raw" >"fwcfg/blobs/$name" 2>>fwcfg/read-errors.log
 done
 
 # PNP/ISA devices
