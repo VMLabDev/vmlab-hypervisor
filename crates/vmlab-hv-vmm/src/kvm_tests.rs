@@ -132,8 +132,37 @@ fn q35_seabios_banner_through_control_socket() {
             sregs.cs.base, regs.rip, regs.rax, regs.rdx, sregs.cr0
         );
     }
+    let mut unfinished_native =
+        std::os::unix::net::UnixStream::connect(dir.path().join("display.sock")).unwrap();
+    let mut unfinished_rfb =
+        std::os::unix::net::UnixStream::connect(dir.path().join("vnc.sock")).unwrap();
+    let shared = Arc::downgrade(handle.shared());
+    let ram = Arc::downgrade(&vm.ram);
     let _ = client.call(Command::Quit);
     let reason = vm.wait();
+    drop(client);
+    drop(handle);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while shared.strong_count() != 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(shared.strong_count(), 0, "control server retained the VM");
+    assert_eq!(ram.strong_count(), 0, "exited VM retained RAM");
+    use std::io::Read;
+    for stream in [&mut unfinished_native, &mut unfinished_rfb] {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buffer = [0; 64];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                result => panic!("display session outlived VM: {result:?}"),
+            }
+        }
+    }
     eprintln!("SeaBIOS observation: {log}");
     assert!(
         log.contains("SeaBIOS"),

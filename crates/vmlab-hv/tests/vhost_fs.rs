@@ -15,9 +15,10 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use vmlab_hv_tests::process::ManagedChild;
 
 use parking_lot::Mutex;
 use vmlab_hv_devices::serial::{Serial, SerialOut};
@@ -85,7 +86,7 @@ impl Drop for Dir {
 
 /// A running virtiofsd serving one directory over one socket.
 struct Virtiofsd {
-    child: Child,
+    child: ManagedChild,
     socket: PathBuf,
 }
 
@@ -123,12 +124,13 @@ impl Virtiofsd {
                 .map(String::from),
             );
         }
-        let mut child = Command::new(VIRTIOFSD)
-            .args(&args)
-            .stdout(log.try_clone().unwrap())
-            .stderr(Stdio::from(log))
-            .spawn()
-            .expect("spawn virtiofsd");
+        let mut child = ManagedChild::helper(
+            Command::new(VIRTIOFSD)
+                .args(&args)
+                .stdout(log.try_clone().unwrap())
+                .stderr(Stdio::from(log)),
+        )
+        .expect("spawn virtiofsd");
         // The socket appears once the daemon is ready; a bad flag shows up as
         // an early exit instead.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -451,6 +453,7 @@ fn guest_mounts_the_share_and_the_session_is_real() {
     let Some(()) = or_skip() else {
         return;
     };
+    let _permit = vmlab_hv_tests::process::VmPermit::acquire().unwrap();
     let dir = Dir::new("probe");
     let shared = dir.path.join("share");
     fs::create_dir(&shared).unwrap();
@@ -495,6 +498,7 @@ fn device_state_round_trips_through_virtiofsd() {
     let Some(()) = or_skip() else {
         return;
     };
+    let _permit = vmlab_hv_tests::process::VmPermit::acquire().unwrap();
     let dir = Dir::new("roundtrip");
     let shared = dir.path.join("share");
     fs::create_dir(&shared).unwrap();

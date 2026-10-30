@@ -108,21 +108,33 @@ pub fn serve(path: &Path, vm: &VmHandle) -> Result<std::thread::JoinHandle<()>, 
     let listener = UnixListener::bind(path)
         .map_err(|e| VmmError::Control(format!("binding {}: {e}", path.display())))?;
 
-    let handler = ControlHandler::new(vm.clone());
+    let weak = Arc::downgrade(vm.shared());
     let mut capabilities = vec![Capability::Snapshots];
     if vm.shared().vga.lock().is_some() {
         capabilities.extend([Capability::Display, Capability::Input]);
     }
-    let server: Server<_> = Server::new(env!("CARGO_PKG_VERSION"), capabilities, move |command| {
-        handler.handle(command)
-    });
+    let server: Server<_> =
+        Server::new(
+            env!("CARGO_PKG_VERSION"),
+            capabilities,
+            move |command| match weak.upgrade() {
+                Some(shared) => ControlHandler::new(VmHandle::from_shared(shared)).handle(command),
+                None => Outcome::Error {
+                    code: ErrorCode::InvalidState,
+                    message: "machine has exited".into(),
+                },
+            },
+        );
     let broadcaster = server.clone();
     vm.set_event_sink(Arc::new(move |event| broadcaster.broadcast(event)));
 
+    let weak = Arc::downgrade(vm.shared());
     std::thread::Builder::new()
         .name("control-serve".to_string())
         .spawn(move || {
-            if let Err(e) = server.serve(listener) {
+            if let Err(e) = server.serve_until(listener, || {
+                weak.upgrade().is_none_or(|shared| shared.exited())
+            }) {
                 eprintln!("control: accept loop ended: {e}");
             }
         })

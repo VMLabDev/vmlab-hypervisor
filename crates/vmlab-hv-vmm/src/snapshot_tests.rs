@@ -215,6 +215,67 @@ fn machine(payload: &[u8], disk_mib: u64) -> Option<Machine> {
     })
 }
 
+#[test]
+fn dropping_vm_joins_vcpus_and_releases_ram() {
+    for paused in [false, true] {
+        for _ in 0..8 {
+            let Some(machine) = machine(&counter_payload(), 32) else {
+                return;
+            };
+            std::thread::sleep(SETTLE);
+            if paused {
+                machine.handle.pause().unwrap();
+            }
+            let shared = Arc::downgrade(machine.handle.shared());
+            let ram = Arc::downgrade(&machine.vm.ram);
+            let log = machine.log.clone();
+            drop(machine);
+            let before = log.0.lock().len();
+            std::thread::sleep(SETTLE);
+            let after = log.0.lock().len();
+            eprintln!(
+                "after VM drop: shared={}, RAM={}, serial bytes {before} -> {after}",
+                shared.strong_count(),
+                ram.strong_count()
+            );
+            assert!(
+                shared.upgrade().is_none(),
+                "dropped VM retained shared state"
+            );
+            assert!(ram.upgrade().is_none(), "dropped VM retained guest RAM");
+        }
+    }
+}
+
+#[test]
+fn control_server_releases_exited_vm() {
+    use vmlab_hv_proto::{client::Client, control::Command};
+    let Some(machine) = machine(&counter_payload(), 32) else {
+        return;
+    };
+    let path = machine._dir.path().join("control.sock");
+    let shared = Arc::downgrade(machine.handle.shared());
+    let ram = Arc::downgrade(&machine.vm.ram);
+    let server = crate::control::serve(&path, &machine.handle).unwrap();
+    let mut client = Client::connect(&path).unwrap();
+    client.call(Command::Quit).unwrap();
+    drop(client);
+    machine.vm.wait();
+    drop(machine.handle);
+    drop(machine._pause_target);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !server.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(server.is_finished(), "control listener outlived its VM");
+    server.join().unwrap();
+    assert!(
+        shared.upgrade().is_none(),
+        "control server retained VM state"
+    );
+    assert!(ram.upgrade().is_none(), "control server retained guest RAM");
+}
+
 impl Machine {
     /// Pairs of (counter, scratch) the guest has printed so far.
     fn observed(&self) -> Vec<u8> {

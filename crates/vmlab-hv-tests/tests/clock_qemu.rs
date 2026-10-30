@@ -1,12 +1,13 @@
 //! Black-box clock oracle using vmlab's container argv and unmodified guest.
 
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::Duration;
+use vmlab_hv_tests::process::ManagedChild;
 
 use vmlab_cinit_proto::CtlEvent;
 use vmlab_hv_tests::{MachineSpec, agent::AgentClient, ctl::CtlClient, probe_assets};
 
-struct Qemu(Child);
+struct Qemu(ManagedChild);
 
 impl Drop for Qemu {
     fn drop(&mut self) {
@@ -35,7 +36,7 @@ fn fixed_base_matches_qemu_container() {
     vmlab_disk::ops::create_qcow2(&dir.path().join("scratch.qcow2"), 2 << 30, None, None).unwrap();
     let log = std::fs::File::create(dir.path().join("qemu.log")).unwrap();
     let mut qemu = Qemu(
-        Command::new("qemu-system-x86_64")
+        ManagedChild::spawn(Command::new("qemu-system-x86_64")
             .args([
                 "-machine",
                 "q35",
@@ -100,7 +101,7 @@ fn fixed_base_matches_qemu_container() {
             ])
             .stdout(Stdio::null())
             .stderr(log)
-            .spawn()
+            )
             .unwrap(),
     );
     let spec = MachineSpec::idle("clock-oracle").container_spec();

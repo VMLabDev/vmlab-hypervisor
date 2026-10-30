@@ -44,6 +44,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from process_guard import VmPermit, spawn_process, stop_process
 
 HERE = Path(__file__).resolve().parent
 CACHE = HERE / ".cache"
@@ -948,7 +949,9 @@ def run_capture(cfg_name: str, cfg: dict, assets: Assets) -> bool:
     sinks: list[NicSink] = []
     reader = None
     proc = None
+    permit = None
     try:
+        permit = VmPermit()
         argv = build_argv(cfg, p, assets, run, cfg_name)
         probe_note = (
             "# -kernel/-initrd/-append are this capture's probe boot; vmlab\n"
@@ -973,12 +976,12 @@ def run_capture(cfg_name: str, cfg: dict, assets: Assets) -> bool:
                           f"--ctrl=type=unixio,path={p.swtpm_sock}",
                           "--terminate"]
             swtpm_log = open(out_dir / "swtpm.log", "wb")
-            swtpm_proc = subprocess.Popen(swtpm_argv, stdout=swtpm_log,
-                                          stderr=subprocess.STDOUT)
+            swtpm_proc = spawn_process(swtpm_argv, stdout=swtpm_log,
+                                      stderr=subprocess.STDOUT)
             (out_dir / "swtpm-argv.txt").write_text(shlex.join(swtpm_argv) + "\n")
             time.sleep(1.5)  # let it bind the control socket
         qemu_log = open(out_dir / "qemu-stderr.log", "wb")
-        proc = subprocess.Popen([QEMU] + argv, stdout=qemu_log, stderr=subprocess.STDOUT)
+        proc = spawn_process([QEMU] + argv, stdout=qemu_log, stderr=subprocess.STDOUT)
         reader = ChanReader(p.agent_sock)
         reader.start()
         with open(out_dir / "qmp.log", "wb") as qmp_log:
@@ -1047,16 +1050,15 @@ def run_capture(cfg_name: str, cfg: dict, assets: Assets) -> bool:
         import traceback
         traceback.print_exc()
     finally:
-        if proc and proc.poll() is None:
-            proc.kill()
-            proc.wait()
+        stop_process(proc)
         if reader:
             reader.close()
             reader.join(timeout=2)
         for s in sinks:
             s.close()
-        if swtpm_proc and swtpm_proc.poll() is None:
-            swtpm_proc.terminate()
+        stop_process(swtpm_proc)
+        if permit:
+            permit.close()
         shutil.rmtree(run, ignore_errors=True)
     write_config_readme(cfg_name, cfg, ok, reason)
     print(f"{'OK  ' if ok else 'FAIL'} {cfg_name}" + ("" if ok else f" — {reason}"))

@@ -1063,6 +1063,7 @@ dependencies = [
 name = "vmlab-hv-tests"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",
