@@ -6,6 +6,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import Mock, patch
 from pathlib import Path
 
@@ -16,6 +17,33 @@ SPEC.loader.exec_module(capture)
 
 
 class ParserTests(unittest.TestCase):
+    def test_capture_closes_child_logs_when_launch_fails(self):
+        for tpm, fail_at in ((False, 1), (True, 1), (True, 2)):
+            with self.subTest(tpm=tpm, fail_at=fail_at):
+                logs = []
+                child = Mock()
+                child.poll.return_value = None
+
+                def launch(*args, **kwargs):
+                    logs.append(kwargs["stdout"])
+                    if len(logs) == fail_at:
+                        raise OSError("launch failed")
+                    return child
+
+                cfg = {"nics": [], "title": "probe", "boot": "esp", "tpm": tpm}
+                with patch.object(capture, "DOCS", self.root), \
+                     patch.object(capture, "build_argv", return_value=[]), \
+                     patch.object(capture.subprocess, "Popen", side_effect=launch), \
+                     patch.object(capture.time, "sleep"), \
+                     patch.object(capture, "write_config_readme"), \
+                     redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                    self.assertFalse(capture.run_capture("probe", cfg, Mock()))
+                self.assertTrue(logs)
+                self.assertTrue(all(log.closed for log in logs))
+                if tpm and fail_at == 2:
+                    child.terminate.assert_called_once()
+                    child.wait.assert_called_once()
+
     def test_qmp_closes_failed_connections_and_the_command_stream(self):
         failed, connected, stream = Mock(), Mock(), Mock()
         failed.connect.side_effect = ConnectionRefusedError()

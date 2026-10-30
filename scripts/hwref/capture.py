@@ -980,13 +980,13 @@ def run_capture(cfg_name: str, cfg: dict, assets: Assets) -> bool:
                           f"--tpmstate=dir={p.swtpm_dir}",
                           f"--ctrl=type=unixio,path={p.swtpm_sock}",
                           "--terminate"]
-            swtpm_log = open(out_dir / "swtpm.log", "wb")
-            swtpm_proc = subprocess.Popen(swtpm_argv, stdout=swtpm_log,
-                                          stderr=subprocess.STDOUT)
+            with open(out_dir / "swtpm.log", "wb") as swtpm_log:
+                swtpm_proc = subprocess.Popen(swtpm_argv, stdout=swtpm_log,
+                                              stderr=subprocess.STDOUT)
             (out_dir / "swtpm-argv.txt").write_text(shlex.join(swtpm_argv) + "\n")
             time.sleep(1.5)  # let it bind the control socket
-        qemu_log = open(out_dir / "qemu-stderr.log", "wb")
-        proc = subprocess.Popen([QEMU] + argv, stdout=qemu_log, stderr=subprocess.STDOUT)
+        with open(out_dir / "qemu-stderr.log", "wb") as qemu_log:
+            proc = subprocess.Popen([QEMU] + argv, stdout=qemu_log, stderr=subprocess.STDOUT)
         reader = ChanReader(p.agent_sock)
         reader.start()
         with open(out_dir / "qmp.log", "wb") as qmp_log:
@@ -1063,8 +1063,14 @@ def run_capture(cfg_name: str, cfg: dict, assets: Assets) -> bool:
             reader.join(timeout=2)
         for s in sinks:
             s.close()
-        if swtpm_proc and swtpm_proc.poll() is None:
-            swtpm_proc.terminate()
+        if swtpm_proc:
+            if swtpm_proc.poll() is None:
+                swtpm_proc.terminate()
+            try:
+                swtpm_proc.wait(10)
+            except subprocess.TimeoutExpired:
+                swtpm_proc.kill()
+                swtpm_proc.wait()
         shutil.rmtree(run, ignore_errors=True)
     write_config_readme(cfg_name, cfg, ok, reason)
     print(f"{'OK  ' if ok else 'FAIL'} {cfg_name}" + ("" if ok else f" — {reason}"))
