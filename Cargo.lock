@@ -1202,7 +1202,7 @@ name = "vmlab-hv-lockstep"
 version = "0.1.0"
 dependencies = [
  "libc",
- "thiserror",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
