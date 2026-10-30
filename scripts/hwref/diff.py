@@ -32,6 +32,7 @@ def acpi(data: bytes) -> bytes:
         b"RSDT": [(36, len(data) - 36)],
         b"XSDT": [(36, len(data) - 36)],
         b"BGRT": [(40, 8)],
+        b"TPM2": [(68, 8)],
     }.get(signature, [])
     if data.startswith(b"RSD PTR "):
         fields = [(8, 1), (16, 4), (24, 8), (32, 1)]
@@ -156,7 +157,7 @@ def normalize_text(name: str, text: str) -> str:
         text = "\n".join(rows) + "\n"
     if name.endswith(".dsl") or name == "acpi-dsl/iasl.log":
         text = re.sub(r"(?m)^.*(?:Disassembly of|Disassembling to|Parsing completed|disassembly completed|Compilation of|Input file|Output file|ASL Output|Binary Output|AML Output|Table checksum|Checksum :|File appears to be binary: found).*$", "", text)
-        text = re.sub(r"(FACS Address|DSDT Address|Image Address)(\s*:\s*)[0-9A-F]+", r"\1\2<allocation>", text)
+        text = re.sub(r"(FACS Address|DSDT Address|Image Address|Log Address)(\s*:\s*)[0-9A-F]+", r"\1\2<allocation>", text)
         # iasl includes a redundant raw table dump after the decoded fields.
         text = text.split("Raw Table Data:")[0]
     if name in ("dmesg.txt", "e820-dmesg.txt"):
@@ -181,6 +182,8 @@ def normalize_text(name: str, text: str) -> str:
         text += "\n" + "\n".join(kernel)
     if name == "fwcfg/listing.txt":
         text = re.sub(r"\w{3}\s+\d+\s+\d\d:\d\d", "<time>", text)
+    if name == "fwcfg/sizes.txt":
+        text = "\n".join(sorted(text.splitlines())) + "\n"
     if name == "usb.txt":
         text = re.sub(r"Bus \d+ Device \d+:", "USB device:", text)
         text = re.sub(r"/sys/bus/usb/devices/(?:usb\d+|\d+-[\d.]+)", "<usb-path>", text)

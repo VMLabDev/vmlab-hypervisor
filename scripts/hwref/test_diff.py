@@ -25,6 +25,25 @@ REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_tpm_event_log_relocation_keeps_the_declared_length(self):
+        path = ROOT / "docs/hwref/q35-ovmf-win11/guest/acpi/TPM2"
+        original = path.read_bytes()
+        moved = bytearray(original)
+        struct.pack_into("<Q", moved, 68, struct.unpack_from("<Q", moved, 68)[0] + 0x20000)
+        self.assertEqual(diff.acpi(original), diff.acpi(moved))
+        struct.pack_into("<I", moved, 64, 0x20000)
+        self.assertNotEqual(diff.acpi(original), diff.acpi(moved))
+        text = "[044h 0068 008h] Log Address : 000000007FEBB000\n[040h 0064 004h] Minimum Log Length : 00010000\n"
+        normal = diff.normalize_text("acpi/TPM2.dsl", text)
+        self.assertEqual(normal, diff.normalize_text("acpi/TPM2.dsl", text.replace("7FEBB000", "7FE9B000")))
+        self.assertNotEqual(normal, diff.normalize_text("acpi/TPM2.dsl", text.replace("00010000", "00020000")))
+
+    def test_fwcfg_inventory_order_is_not_a_blob_size_difference(self):
+        first = "etc/a 8\netc/b 65536\n"
+        second = "etc/b 65536\netc/a 8\n"
+        self.assertEqual(diff.normalize_text("fwcfg/sizes.txt", first), diff.normalize_text("fwcfg/sizes.txt", second))
+        self.assertNotEqual(diff.normalize_text("fwcfg/sizes.txt", first), diff.normalize_text("fwcfg/sizes.txt", second.replace("65536", "32768")))
+
     def test_truncated_fwcfg_transfer_cannot_pass_the_diff_gate(self):
         with tempfile.TemporaryDirectory(prefix="hwref-truncated-") as tmp:
             root = Path(tmp) / "capture"
