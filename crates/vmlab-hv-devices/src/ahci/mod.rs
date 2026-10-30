@@ -8,6 +8,8 @@
 
 mod ata;
 mod atapi;
+#[cfg(test)]
+mod tests;
 
 use std::sync::Arc;
 
