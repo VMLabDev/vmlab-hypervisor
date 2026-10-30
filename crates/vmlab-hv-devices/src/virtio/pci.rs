@@ -328,7 +328,7 @@ impl VirtioPciDevice {
         write_virtio_cap(
             &mut config,
             COMMON_CAP_OFF,
-            ISR_CAP_OFF as u8,
+            NOTIFY_CAP_OFF as u8,
             1,
             COMMON_CFG_OFF,
             COMMON_CFG_LEN,
@@ -336,11 +336,13 @@ impl VirtioPciDevice {
         write_virtio_cap(
             &mut config,
             NOTIFY_CAP_OFF,
-            DEVICE_CAP_OFF as u8,
+            ISR_CAP_OFF as u8,
             2,
             NOTIFY_OFF,
             NOTIFY_OFF_MULTIPLIER * num_queues as u64,
         );
+        // virtio_pci_notify_cap is 20 bytes: the common header plus the multiplier.
+        config[NOTIFY_CAP_OFF + 2] = 20;
         config[NOTIFY_CAP_OFF + 16..NOTIFY_CAP_OFF + 20]
             .copy_from_slice(&(NOTIFY_OFF_MULTIPLIER as u32).to_le_bytes());
         write_virtio_cap(
@@ -1312,11 +1314,11 @@ mod tests {
         // Virtio capabilities: common, notify (+multiplier), ISR, device.
         // Each cap is vndr, next, len, type, bar, 3 pad, offset, length.
         let word = |g: &mut Guest, off: u64| g.cfg32(off);
-        assert_eq!(word(&mut g, 0x4C), 0x0110_7009); // vndr 9, next 0x70, len 16, common
+        assert_eq!(word(&mut g, 0x4C), 0x0110_5C09); // vndr 9, next 0x5C, len 16, common
         assert_eq!(word(&mut g, 0x50), 4); // BAR
         assert_eq!(word(&mut g, 0x54), 0); // offset
         assert_eq!(word(&mut g, 0x58), 56); // length
-        assert_eq!(word(&mut g, 0x5C), 0x0210_8009); // notify, next 0x80
+        assert_eq!(word(&mut g, 0x5C), 0x0214_7009); // notify, next 0x70, len 20
         assert_eq!(word(&mut g, 0x64), 0x1000);
         assert_eq!(word(&mut g, 0x68), 4); // 1 queue * multiplier 4
         assert_eq!(word(&mut g, 0x5C + 16), 4); // notify_off_multiplier

@@ -288,9 +288,8 @@ fn virtio_devices_are_enumerated_through_the_pci_root() {
     let log = serial_log_text(&dir);
     // The kernel found both functions behind this VMM's CF8/CFC and ECAM
     // root, sized and assigned their 64-bit BARs from the windows this
-    // machine declares, and enabled memory decoding. Driver probe completes
-    // once vmlab-hv-devices links its virtio capability chain correctly
-    // (common currently skips notify; reported to that work package).
+    // machine declares, enabled memory decoding, and the virtio-pci driver
+    // accepted both functions' capability lists.
     assert!(
         log.contains("virtio-pci 0000:00:01.0: enabling device"),
         "the block function must be assigned and enabled: {log}"
@@ -300,8 +299,8 @@ fn virtio_devices_are_enumerated_through_the_pci_root() {
         "the console function must be assigned and enabled: {log}"
     );
     assert!(
-        log.contains("missing capabilities"),
-        "the failure must come from the device model, not this root: {log}"
+        !log.contains("probe with driver virtio-pci failed"),
+        "virtio-pci must accept both functions: {log}"
     );
 }
 

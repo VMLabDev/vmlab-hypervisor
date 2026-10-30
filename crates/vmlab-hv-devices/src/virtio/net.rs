@@ -36,6 +36,8 @@ use virtio_queue::{Queue, QueueState, QueueT};
 use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
 
 /// Virtio device id 1, the network device.
+/// Size of `struct virtio_net_config` up to and including `mtu`.
+const CONFIG_LEN: usize = 12;
 const DEVICE_ID: u32 = 1;
 /// `VIRTIO_NET_F_MTU` (feature bit 3).
 const F_MTU: u64 = 1 << 3;
@@ -573,6 +575,10 @@ impl VirtioDevice for Net {
         &[QUEUE_SIZE, QUEUE_SIZE]
     }
 
+    fn config_len(&self) -> u64 {
+        CONFIG_LEN as u64
+    }
+
     fn features(&self) -> u64 {
         let mut features = F_MAC | F_STATUS | F_VERSION_1;
         if self.config.mtu != DEFAULT_MTU {
@@ -587,12 +593,15 @@ impl VirtioDevice for Net {
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         let link_up = lock(&self.shared).link_up;
-        let mut config = [0u8; 10];
+        // struct virtio_net_config: mac[6], status u16 @6,
+        // max_virtqueue_pairs u16 @8, mtu u16 @10 (VIRTIO 1.2 §5.1.4).
+        let mut config = [0u8; CONFIG_LEN];
         config[0..6].copy_from_slice(&self.config.mac);
         let status = if link_up { S_LINK_UP } else { 0 };
         config[6..8].copy_from_slice(&status.to_le_bytes());
+        config[8..10].copy_from_slice(&1u16.to_le_bytes());
         if self.config.mtu != DEFAULT_MTU {
-            config[8..10].copy_from_slice(&self.config.mtu.to_le_bytes());
+            config[10..12].copy_from_slice(&self.config.mtu.to_le_bytes());
         }
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = config.get(offset as usize + i).copied().unwrap_or(0);
@@ -1148,10 +1157,11 @@ mod tests {
         assert_ne!(features & F_MAC, 0);
         assert_ne!(features & F_STATUS, 0);
         assert_ne!(features & F_VERSION_1, 0);
-        let mut config = [0u8; 10];
+        assert_eq!(big.config_len(), 12);
+        let mut config = [0u8; 12];
         big.read_config(0, &mut config);
         assert_eq!(&config[0..6], &[0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc]);
-        assert_eq!(u16::from_le_bytes(config[8..10].try_into().unwrap()), 9000);
+        assert_eq!(u16::from_le_bytes(config[10..12].try_into().unwrap()), 9000);
         drop(big);
 
         // The default MTU keeps the field out of the config space.
@@ -1163,9 +1173,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(normal.features() & F_MTU, 0);
-        let mut config = [0u8; 10];
+        let mut config = [0u8; 12];
         normal.read_config(0, &mut config);
-        assert_eq!(&config[8..10], &[0, 0]);
+        assert_eq!(&config[10..12], &[0, 0]);
     }
 
     #[test]

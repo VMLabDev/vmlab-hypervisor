@@ -763,6 +763,10 @@ impl VirtioDevice for Console {
         &self.queue_sizes
     }
 
+    fn config_len(&self) -> u64 {
+        CONFIG_LEN as u64
+    }
+
     fn features(&self) -> u64 {
         F_MULTIPORT | F_VERSION_1
     }
