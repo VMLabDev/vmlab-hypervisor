@@ -22,7 +22,7 @@ use vmlab_hv_devices::{BusDevice, IrqLine};
 use crate::{error::VmmError, layout::MemLayout, q35::PirqRouter};
 
 struct IrqHub {
-    vm: Arc<VmFd>,
+    deliver: Box<dyn Fn(u32, bool) + Send + Sync>,
     sources: Mutex<BTreeMap<(u32, u32), bool>>,
 }
 
@@ -35,12 +35,15 @@ struct Source {
 impl IrqLine for Source {
     fn set_level(&self, high: bool) {
         let mut sources = self.hub.sources.lock();
+        let previous = sources
+            .iter()
+            .any(|((_, gsi), active)| *gsi == self.gsi && *active);
         sources.insert((self.id, self.gsi), high);
         let level = sources
             .iter()
             .any(|((_, gsi), active)| *gsi == self.gsi && *active);
-        if let Err(e) = self.hub.vm.set_irq_line(self.gsi, level) {
-            eprintln!("q35 IRQ {}: {e}", self.gsi);
+        if previous != level {
+            (self.hub.deliver)(self.gsi, level);
         }
     }
 }
@@ -112,8 +115,13 @@ impl vmlab_hv_devices::Snapshot for ChipsetRegisters {
 impl Chipset {
     pub fn new(vm: Arc<VmFd>, layout: &MemLayout, rtc_base: i64) -> Result<Arc<Self>, VmmError> {
         install_irq_routes(&vm)?;
+        let irq_vm = vm.clone();
         let hub = Arc::new(IrqHub {
-            vm: vm.clone(),
+            deliver: Box::new(move |gsi, level| {
+                if let Err(error) = irq_vm.set_irq_line(gsi, level) {
+                    eprintln!("q35 IRQ {gsi}: {error}");
+                }
+            }),
             sources: Mutex::new(BTreeMap::new()),
         });
         let pirqs = PirqRouter::new(std::array::from_fn(|gsi| hub.line(0, gsi as u32)));
@@ -378,6 +386,25 @@ fn install_irq_routes(vm: &VmFd) -> Result<(), VmmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unchanged_levels_do_not_repeat_kvm_irq_delivery() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let output = events.clone();
+        let hub = Arc::new(IrqHub {
+            deliver: Box::new(move |gsi, level| output.lock().push((gsi, level))),
+            sources: Mutex::new(BTreeMap::new()),
+        });
+        let first = hub.line(1, 9);
+        let second = hub.line(2, 9);
+        for _ in 0..65536 {
+            first.set_level(false);
+        }
+        first.set_level(true);
+        second.set_level(true);
+        first.set_level(false);
+        second.set_level(false);
+        assert_eq!(*events.lock(), [(9, true), (9, false)]);
+    }
     #[test]
     fn platform_timers_freeze_between_pause_and_resume() {
         let kvm = match crate::kvm::KvmVm::new() {
