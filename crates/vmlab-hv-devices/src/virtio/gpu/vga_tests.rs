@@ -239,6 +239,28 @@ fn vga_vbe_framebuffer_legacy_window_and_rom() {
 }
 
 #[test]
+fn same_size_scanout_replacement_reset_and_restore_change_generation() {
+    let mut d = Driver::new();
+    d.start();
+    for id in [1, 2] {
+        d.create(id, 2, 2, 2);
+    }
+    d.ok(0x103, &[0, 0, 2, 2, 0, 1]);
+    let first = d.dev.scanout_generation();
+    d.ok(0x103, &[0, 0, 2, 2, 0, 1]);
+    assert_eq!(d.dev.scanout_generation(), first);
+    d.ok(0x103, &[0, 0, 2, 2, 0, 2]);
+    assert_ne!(d.dev.scanout_generation(), first);
+    let second = d.dev.scanout_generation();
+    let saved = d.dev.save_state().unwrap();
+    d.write(0x14, &[0]);
+    assert_ne!(d.dev.scanout_generation(), second);
+    let reset = d.dev.scanout_generation();
+    d.dev.restore_state(&saved).unwrap();
+    assert_ne!(d.dev.scanout_generation(), reset);
+}
+
+#[test]
 fn queue_driven_scanout_fences_damage_snapshot_and_reset() {
     let mut d = Driver::new();
     d.start();

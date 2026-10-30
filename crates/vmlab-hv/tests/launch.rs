@@ -85,6 +85,58 @@ fn serial_log_text(dir: &Dir) -> String {
 }
 
 #[test]
+fn display_startup_failure_preserves_targets_and_never_advertises_control() {
+    if !Path::new("/dev/kvm").exists()
+        || !Path::new("/usr/share/qemu/bios-256k.bin").exists()
+        || !Path::new("/usr/share/qemu/vgabios-stdvga.bin").exists()
+    {
+        eprintln!("skipping display startup failure: KVM or VGA firmware unavailable");
+        return;
+    }
+    for occupied in [true, false] {
+        let dir = Dir::new("display-startup");
+        let machine = dir.machine();
+        let native = dir.path.join("native.sock");
+        let rfb = dir.path.join("missing/vnc.sock");
+        if occupied {
+            std::fs::write(&native, b"existing target").unwrap();
+        }
+        let mut desc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&machine).unwrap()).unwrap();
+        desc["machine"] = "q35".into();
+        desc["boot"] = serde_json::json!({"kind":"firmware", "firmware":"seabios", "code":"/usr/share/qemu/bios-256k.bin"});
+        desc["display"] = serde_json::json!({"device":"std-vga", "pci":{"bus":0,"device":4,"function":0}, "rom":null, "socket":native, "vnc_socket":rfb});
+        std::fs::write(&machine, serde_json::to_vec(&desc).unwrap()).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+            .arg("--machine")
+            .arg(machine)
+            .arg("--control")
+            .arg(dir.control())
+            .arg("--paused")
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            !dir.control().exists(),
+            "control became available before display startup succeeded"
+        );
+        if occupied {
+            assert_eq!(std::fs::read(native).unwrap(), b"existing target");
+        } else {
+            assert!(
+                !native.exists(),
+                "failed RFB binding left the native socket behind"
+            );
+        }
+    }
+}
+
+#[test]
 fn boots_kernel_and_exits_zero_on_guest_reset() {
     if !kernel_available() {
         eprintln!("skipping: /dev/kvm or the container kernel is not present");

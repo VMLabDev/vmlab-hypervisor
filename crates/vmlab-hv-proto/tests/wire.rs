@@ -128,6 +128,30 @@ fn sample_machine() -> MachineDescription {
 }
 
 #[test]
+fn display_socket_paths_are_optional_and_pinned() {
+    use vmlab_hv_proto::machine::{Display, DisplayDevice, PciAddress};
+    wire(
+        &Display {
+            device: DisplayDevice::VirtioVga,
+            pci: PciAddress {
+                bus: 0,
+                device: 4,
+                function: 0,
+            },
+            rom: None,
+            socket: Some("/run/vm/display.sock".into()),
+            vnc_socket: Some("/run/vm/vnc.sock".into()),
+        },
+        r#"{"device":"virtio-vga","pci":{"bus":0,"device":4,"function":0},"rom":null,"socket":"/run/vm/display.sock","vnc_socket":"/run/vm/vnc.sock"}"#,
+    );
+    let old: Display = serde_json::from_str(
+        r#"{"device":"std-vga","pci":{"bus":0,"device":4,"function":0},"rom":null}"#,
+    )
+    .unwrap();
+    assert!(old.socket.is_none() && old.vnc_socket.is_none());
+}
+
+#[test]
 fn pinned_firmware_boot() {
     use vmlab_hv_proto::machine::FirmwareKind;
     wire(
@@ -200,6 +224,8 @@ fn q35_devices_and_policy_wire_contract() {
                 function: 0,
             },
             rom: None,
+            socket: None,
+            vnc_socket: None,
         },
         r#"{"device":"std-vga","pci":{"bus":0,"device":4,"function":0},"rom":null}"#,
     );

@@ -42,7 +42,7 @@ pub struct Cursor {
     pub generation: u64,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Rect {
     x: u32,
     y: u32,
@@ -97,6 +97,7 @@ struct State {
     resources: BTreeMap<u32, Resource>,
     scanout: Option<(u32, Rect)>,
     native: bool,
+    scanout_generation: u64,
     dirty: bool,
     cursor: Cursor,
     mem: Option<GuestMemory>,
@@ -123,6 +124,7 @@ impl Gpu {
                 resources: BTreeMap::new(),
                 scanout: None,
                 native: false,
+                scanout_generation: 0,
                 dirty: true,
                 cursor: Cursor::default(),
                 mem: None,
@@ -182,6 +184,11 @@ impl Gpu {
             pixels,
             dirty: std::mem::replace(&mut s.dirty, false),
         })
+    }
+
+    /// Runtime surface generation, including same-size replacement and reset.
+    pub fn scanout_generation(&self) -> u64 {
+        self.state.lock().scanout_generation
     }
 }
 
@@ -290,11 +297,13 @@ impl State {
                 self.resources.remove(&id).ok_or(RESOURCE)?;
                 if self.scanout.is_some_and(|(i, _)| i == id) {
                     self.scanout = None;
+                    self.scanout_generation = self.scanout_generation.wrapping_add(1);
                     self.dirty = true;
                 }
                 NODATA
             }
             0x103 => {
+                let previous = (self.native, self.scanout);
                 let rect = d.rect()?;
                 if d.u32()? != 0 {
                     return Err(SCANOUT);
@@ -310,6 +319,9 @@ impl State {
                     self.scanout = Some((id, rect));
                 }
                 self.native = true;
+                if previous != (self.native, self.scanout) {
+                    self.scanout_generation = self.scanout_generation.wrapping_add(1);
+                }
                 self.dirty = true;
                 NODATA
             }
@@ -605,6 +617,7 @@ impl VirtioDevice for Gpu {
         s.resources.clear();
         s.scanout = None;
         s.native = false;
+        s.scanout_generation = s.scanout_generation.wrapping_add(1);
         s.dirty = true;
         let generation = s.cursor.generation.wrapping_add(1);
         s.cursor = Cursor {

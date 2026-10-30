@@ -133,12 +133,12 @@ paths remain exact. ACPI log relocation masking handles uppercase hexadecimal
 addresses too. Clock stabilization timestamps are masked. PCI function numbers
 are preserved when normalizing decimal measurements.
 
-Two further omissions are **pending owner decision**, as directed by the
-orchestrator: VMware's vmport/vmmouse interface and the virtio-net PXE ROM
-from `qemu-common`. The filter permits only the observed VMware-to-Explorer
-PS/2 enumeration substitution and the 3584-byte initialized PXE ROM copy.
-D14 also permits the 9216-byte initialized kvmvapic ROM copy. Other ROM sizes
-and mouse models remain failures.
+VMware's vmport/vmmouse interface is an **approved D15 omission**. The filter
+permits only the observed VMware-to-Explorer PS/2 enumeration substitution.
+D14 permits the 9216-byte initialized kvmvapic ROM copy. D16 compares the
+separately built upstream iPXE ROM by presence, ROM BAR size and PCI ROM
+identity rather than executable bytes; its absence is no longer permitted.
+Other ROM sizes and mouse models remain failures.
 
 The 2a gate also records category and reason metadata for two temporary groups:
 `etc/smi/*` and `etc/tpm/*` are **deferred to 2c** and must be removed from the

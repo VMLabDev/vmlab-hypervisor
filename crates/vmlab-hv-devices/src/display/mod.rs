@@ -82,6 +82,7 @@ pub struct StandardVga {
     big_endian: bool,
     dirty: bool,
     cached_pixels: Option<Vec<u8>>,
+    render_vram: Vec<u8>,
 }
 
 impl StandardVga {
@@ -117,6 +118,7 @@ impl StandardVga {
             big_endian: false,
             dirty: true,
             cached_pixels: None,
+            render_vram: Vec::new(),
         };
         dev.rom[..rom.len()].copy_from_slice(rom);
         dev.config[..4].copy_from_slice(&[0x34, 0x12, 0x11, 0x11]);
@@ -538,6 +540,9 @@ impl StandardVga {
     }
 
     fn byte(&self, addr: usize) -> u8 {
+        if !self.render_vram.is_empty() {
+            return self.render_vram.get(addr).copied().unwrap_or(0);
+        }
         self.vram.read_obj(GuestAddress(addr as u64)).unwrap_or(0)
     }
 
@@ -664,6 +669,12 @@ impl StandardVga {
             };
         }
         let mut pixels = vec![0; mode.stride as usize * mode.height as usize];
+        // Translate and copy guest memory once, rather than once per pixel.
+        let size = if self.enabled() { VRAM_SIZE } else { 0x40000 };
+        self.render_vram.resize(size, 0);
+        self.vram
+            .read_slice(&mut self.render_vram, GuestAddress(0))
+            .expect("VGA rendering storage is mapped");
         let blank =
             !self.enabled() && (self.regs[SEQ + 1] & 0x20 != 0 || self.attr_index & 0x20 == 0);
         if !blank {
@@ -680,6 +691,7 @@ impl StandardVga {
             }
         }
         self.cached_pixels = Some(pixels.clone());
+        self.render_vram.clear();
         Frame {
             mode,
             pixels,

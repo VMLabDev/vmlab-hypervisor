@@ -8,6 +8,14 @@ literal wire bytes.
 
 ## Envelope
 
+For q35 machines, `display.socket` and `display.vnc_socket` in the machine
+description select the native and RFB Unix socket paths. Both are optional.
+When absent, they default to `display.sock` and `vnc.sock` beside the control
+socket. The paths must differ and must not already exist. The binary binds
+both before resuming a guest, including when launched with `--paused`.
+A connected native client receives the initial surface while paused and
+subsequent firmware frames after resume.
+
 The transport is an AF_UNIX stream. Each message starts with this header:
 
 | Byte offset | Type | Meaning |
@@ -144,8 +152,10 @@ other bits. Current LED state is sent to every newly connected input client.
 ### RequestSize, kind 13
 
 Payload: `width: u32 @0`, `height: u32 @4`. Total length 16. No fds.
-Reserved for virtio-gpu viewer integration. Version 1 decodes this message
-but the server rejects it and closes the connection.
+Requires the input capability. Dimensions must be in 1..16384; invalid sizes
+close the connection. The InputSink forwards this preferred size to virtio-gpu.
+The guest driver and modesetting client choose when to apply it. Standard VGA
+retains its guest-programmed mode.
 
 ## Server and client API
 

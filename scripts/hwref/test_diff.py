@@ -103,6 +103,8 @@ class NormalizeTests(unittest.TestCase):
 
     def test_pending_mouse_and_rom_rules_are_narrow_and_directional(self):
         rules = json.loads(diff.DEFAULT_ALLOW.read_text())
+        mouse_rule = next(entry for entry in rules["platform_omissions"] if entry["device"] == "vmport/vmmouse")
+        self.assertEqual((mouse_rule["category"], mouse_rule["decision"]), ("approved", "D15"))
         mouse = "input: VirtualPS/2 VMware VMMouse as /devices/platform/i8042/serio1/input/input<index>\n"
         generic = "input: ImExPS/2 Generic Explorer Mouse as /devices/platform/i8042/serio1/input/input<index>\n"
         nic = "00:03.0 Class [0200]: Device [1af4:1000]\n"

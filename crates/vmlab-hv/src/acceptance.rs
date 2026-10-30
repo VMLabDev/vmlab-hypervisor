@@ -41,9 +41,19 @@ fn boot_template(
     variable: &str,
     snapshot: bool,
     bus: vmlab_hv_proto::machine::DiskBus,
+    display_test: bool,
 ) {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("skipping {name}: /dev/kvm is unavailable");
+        return;
+    }
+    if display_test
+        && !Command::new("tesseract")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    {
+        eprintln!("skipping P3: tesseract is unavailable for firmware/console frame recognition");
         return;
     }
     if !Path::new("/usr/share/qemu/bios-256k.bin").is_file()
@@ -68,6 +78,8 @@ fn boot_template(
     let agent = dir.path().join("agent.sock");
     let serial = dir.path().join("serial.log");
     let stderr = dir.path().join("stderr.log");
+    let native = dir.path().join("native-custom.sock");
+    let rfb = dir.path().join("rfb-custom.sock");
     let mut description = serde_json::json!({
         "machine": "q35", "name": name, "arch": "x86_64", "accel": "kvm", "vcpus": 2, "memory_mib": 4096,
         "boot": {"kind":"firmware", "firmware":"seabios", "code":"/usr/share/qemu/bios-256k.bin"},
@@ -78,6 +90,10 @@ fn boot_template(
         "tablet":{"bus":0,"device":5,"function":0},
         "ports":[{"name":"vmlab.agent.0", "socket":agent}], "nics":[],"serial_log":serial
     });
+    if display_test {
+        description["display"]["socket"] = serde_json::to_value(&native).unwrap();
+        description["display"]["vnc_socket"] = serde_json::to_value(&rfb).unwrap();
+    }
     if bus == vmlab_hv_proto::machine::DiskBus::Ahci {
         description["disks"][0]
             .as_object_mut()
@@ -143,6 +159,11 @@ fn boot_template(
         );
         std::thread::sleep(Duration::from_millis(20));
     };
+    let display = display_test.then(|| crate::display_acceptance::Observer::connect(&native));
+    if display_test {
+        assert!(!dir.path().join("display.sock").exists());
+        assert!(!dir.path().join("vnc.sock").exists());
+    }
     assert!(matches!(
         client.call(Control::Resume).unwrap(),
         Outcome::Ok { .. }
@@ -165,6 +186,9 @@ fn boot_template(
         .unwrap();
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.stdout, b"firmware-agent-ready");
+    if let Some(display) = &display {
+        display.exercise(&mut guest, &rfb);
+    }
     if snapshot {
         guest
             .exec(
@@ -225,6 +249,7 @@ fn ubuntu_26_04_firmware_agent_and_snapshot() {
         "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
         true,
         vmlab_hv_proto::machine::DiskBus::Virtio,
+        false,
     );
 }
 
@@ -235,6 +260,7 @@ fn almalinux_10_firmware_agent() {
         "VMLAB_HV_TEMPLATE_ALMALINUX_10",
         false,
         vmlab_hv_proto::machine::DiskBus::Virtio,
+        false,
     );
 }
 
@@ -245,5 +271,17 @@ fn ubuntu_26_04_ahci_firmware_agent() {
         "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
         false,
         vmlab_hv_proto::machine::DiskBus::Ahci,
+        false,
+    );
+}
+
+#[test]
+fn ubuntu_26_04_native_display_input_and_rfb() {
+    boot_template(
+        "ubuntu-26.04",
+        "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
+        false,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+        true,
     );
 }

@@ -11,7 +11,7 @@
     {"identity": "1b36:000d", "category": "D6", "reason": "One qemu-xhci replacement controller"}
   ],
   "platform_omissions": [
-    {"device": "vmport/vmmouse", "category": "pending owner decision", "reason": "VMware backdoor vmport/vmmouse absent"}
+    {"device": "vmport/vmmouse", "category": "approved", "decision": "D15", "reason": "VMware backdoor vmport/vmmouse omitted (D15)"}
   ],
   "compared": [
     {"device": "virtio-net-pxe-rom", "decision": "D16", "reason": "Own upstream iPXE build: compare presence, ROM BAR size and PCI ROM identity, not executable bytes"}

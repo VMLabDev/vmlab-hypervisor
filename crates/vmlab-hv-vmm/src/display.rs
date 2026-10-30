@@ -41,10 +41,13 @@ impl Video {
             Self::Virtio(device) => device.lock().legacy_write(offset, data),
         }
     }
-    pub(crate) fn frame(&self) -> vmlab_hv_devices::display::Frame {
+    pub(crate) fn frame(&self) -> (u64, vmlab_hv_devices::display::Frame) {
         match self {
-            Self::Standard(device) => device.lock().frame(),
-            Self::Virtio(device) => device.lock().frame(),
+            Self::Standard(device) => (0, device.lock().frame()),
+            Self::Virtio(device) => {
+                let mut device = device.lock();
+                (device.scanout_generation(), device.frame())
+            }
         }
     }
     pub(crate) fn linear_framebuffer(&self) -> vmlab_hv_devices::GuestMemory {
@@ -94,11 +97,14 @@ impl Video {
     }
 }
 
-struct Source(Weak<VmShared>);
+struct Source {
+    shared: Weak<VmShared>,
+    generation: Mutex<((u64, u64), u64)>,
+}
 impl FrameSource for Source {
     fn frame(&self) -> io::Result<Frame> {
         let shared = self
-            .0
+            .shared
             .upgrade()
             .ok_or_else(|| io::Error::other("machine has exited"))?;
         let vga = shared
@@ -107,14 +113,26 @@ impl FrameSource for Source {
             .clone()
             .ok_or_else(|| io::Error::other("machine has no VGA"))?;
         let dirty = shared.vga_framebuffer_dirty();
-        let frame = {
+        let (scanout_generation, frame) = {
             if dirty {
                 vga.mark_framebuffer_dirty();
             }
             vga.frame()
         };
+        let generation = {
+            let mut state = self.generation.lock();
+            let key = (
+                shared.display_generation.load(Ordering::SeqCst),
+                scanout_generation,
+            );
+            if state.0 != key {
+                state.0 = key;
+                state.1 = state.1.wrapping_add(1);
+            }
+            state.1
+        };
         Ok(Frame {
-            generation: shared.display_generation.load(Ordering::SeqCst),
+            generation,
             width: frame.mode.width,
             height: frame.mode.height,
             stride: frame.mode.stride,
@@ -146,6 +164,29 @@ struct Input {
     shared: Weak<VmShared>,
     pointer: Mutex<vmlab_hv_devices::usb::PointerEvent>,
 }
+
+fn pointer_message(pointer: &mut vmlab_hv_devices::usb::PointerEvent, message: Message) {
+    pointer.wheel = 0;
+    match message {
+        Message::PointerAbs {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            pointer.x =
+                ((x as u64 * 32767) / width.saturating_sub(1).max(1) as u64).min(32767) as u16;
+            pointer.y =
+                ((y as u64 * 32767) / height.saturating_sub(1).max(1) as u64).min(32767) as u16;
+        }
+        Message::Buttons { mask } => {
+            pointer.buttons = ((mask & 0x19) | ((mask & 2) << 1) | ((mask & 4) >> 1)) as u8
+        }
+        Message::Scroll { dy, .. } => pointer.wheel = -dy.clamp(-127, 127) as i8,
+        _ => unreachable!(),
+    }
+}
+
 impl InputSink for Input {
     fn input(&self, message: Message) {
         let Some(shared) = self.shared.upgrade() else {
@@ -168,23 +209,7 @@ impl InputSink for Input {
             | Message::Buttons { .. }
             | Message::Scroll { .. }) => {
                 let mut pointer = self.pointer.lock();
-                pointer.wheel = 0;
-                match message {
-                    Message::PointerAbs {
-                        x,
-                        y,
-                        width,
-                        height,
-                    } => {
-                        pointer.x = ((x as u64 * 32767) / width.saturating_sub(1).max(1) as u64)
-                            .min(32767) as u16;
-                        pointer.y = ((y as u64 * 32767) / height.saturating_sub(1).max(1) as u64)
-                            .min(32767) as u16;
-                    }
-                    Message::Buttons { mask } => pointer.buttons = (mask & 31) as u8,
-                    Message::Scroll { dy, .. } => pointer.wheel = dy.clamp(-127, 127) as i8,
-                    _ => unreachable!(),
-                }
+                pointer_message(&mut pointer, message);
                 if let Some(xhci) = shared.xhci.lock().as_ref()
                     && let Err(e) = xhci.lock().inject_pointer(*pointer)
                 {
@@ -196,24 +221,45 @@ impl InputSink for Input {
     }
 }
 
-pub(crate) fn serve(shared: &Arc<VmShared>, directory: &Path) -> Result<(), VmmError> {
+pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result<(), VmmError> {
     if shared.vga.lock().is_none() {
         return Ok(());
     }
-    let native = directory.join("display.sock");
-    let rfb = directory.join("vnc.sock");
+    if native == rfb {
+        return Err(VmmError::Control(
+            "native and RFB sockets must be different".into(),
+        ));
+    }
     if native.exists() || rfb.exists() {
         return Err(VmmError::Control(
             "display.sock or vnc.sock already exists".into(),
         ));
     }
-    let native_listener = UnixListener::bind(&native)
+    let native_listener = UnixListener::bind(native)
         .map_err(|e| VmmError::Control(format!("binding {}: {e}", native.display())))?;
-    let rfb_listener = UnixListener::bind(&rfb)
-        .map_err(|e| VmmError::Control(format!("binding {}: {e}", rfb.display())))?;
+    let rfb_listener = match UnixListener::bind(rfb) {
+        Ok(listener) => listener,
+        Err(error) => {
+            drop(native_listener);
+            std::fs::remove_file(native).map_err(|cleanup| {
+                VmmError::Control(format!(
+                    "binding {}: {error}; removing newly bound {}: {cleanup}",
+                    rfb.display(),
+                    native.display()
+                ))
+            })?;
+            return Err(VmmError::Control(format!(
+                "binding {}: {error}",
+                rfb.display()
+            )));
+        }
+    };
     let server = Arc::new(
         DisplayServer::new(
-            Arc::new(Source(Arc::downgrade(shared))),
+            Arc::new(Source {
+                shared: Arc::downgrade(shared),
+                generation: Mutex::new(((0, 0), 0)),
+            }),
             Arc::new(Input {
                 shared: Arc::downgrade(shared),
                 pointer: Mutex::new(vmlab_hv_devices::usb::PointerEvent {
@@ -260,4 +306,37 @@ pub(crate) fn serve(shared: &Arc<VmShared>, directory: &Path) -> Result<(), VmmE
     }
     *shared.display.lock() = Some(server);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_buttons_and_scroll_match_usb_hid_conventions() {
+        let mut pointer = vmlab_hv_devices::usb::PointerEvent::default();
+        pointer_message(&mut pointer, Message::Buttons { mask: 2 });
+        assert_eq!(pointer.buttons, 4);
+        pointer_message(&mut pointer, Message::Buttons { mask: 4 });
+        assert_eq!(pointer.buttons, 2);
+        pointer_message(&mut pointer, Message::Scroll { dx: 0, dy: 1 });
+        assert_eq!(pointer.wheel, -1);
+        pointer_message(
+            &mut pointer,
+            Message::Scroll {
+                dx: 0,
+                dy: i32::MIN,
+            },
+        );
+        assert_eq!(pointer.wheel, 127);
+        pointer_message(
+            &mut pointer,
+            Message::PointerAbs {
+                x: 400,
+                y: 300,
+                width: 801,
+                height: 601,
+            },
+        );
+        assert_eq!((pointer.x, pointer.y, pointer.wheel), (16383, 16383, 0));
+    }
 }

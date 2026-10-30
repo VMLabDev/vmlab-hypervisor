@@ -872,8 +872,12 @@ impl Vm {
 pub struct VmHandle(Arc<VmShared>);
 
 impl VmHandle {
-    pub fn serve_display(&self, directory: &std::path::Path) -> Result<(), VmmError> {
-        crate::display::serve(&self.0, directory)
+    pub fn serve_display(
+        &self,
+        native: &std::path::Path,
+        rfb: &std::path::Path,
+    ) -> Result<(), VmmError> {
+        crate::display::serve(&self.0, native, rfb)
     }
     /// The shared machine state, for snapshot orchestration in this crate.
     pub(crate) fn shared(&self) -> &Arc<VmShared> {
