@@ -161,15 +161,19 @@ def one_repeat(args, arch, smp, pin, version, index):
         }
         return result, backend, session, agent, digest
     finally:
-        # Always leave nothing running, whatever happened above.
-        if agent is not None:
-            agent.shutdown()
-            agent.close()
-        if args.backend == "vmlab-hv":
-            backend.quit()
-        code = session.wait_exit(SHUTDOWN_TIMEOUT)
-        if code is None:
-            log(f"VM did not exit after powerdown within {SHUTDOWN_TIMEOUT}s; killing")
+        # Always leave nothing running. The graceful paths are best effort:
+        # a failure in them must not skip the kill.
+        try:
+            if agent is not None:
+                agent.shutdown()
+                agent.close()
+            if args.backend == "vmlab-hv":
+                backend.quit()
+            code = session.wait_exit(SHUTDOWN_TIMEOUT)
+            if code is None:
+                log(f"VM did not exit after powerdown within {SHUTDOWN_TIMEOUT}s")
+        except Exception as e:  # noqa: BLE001 - cleanup must reach the kill
+            log(f"note: graceful shutdown path failed ({e}); killing")
         session.kill()
         result["vm_exit"] = session.exit_code()
         if result["vm_exit"] != 0:

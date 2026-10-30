@@ -44,7 +44,10 @@ def compare(arch, args):
     for key in sorted(grouped):
         entries = grouped[key]
         if len(entries) < 2:
-            notes.append(f"{arch} {key}: only {len(entries)} entry, nothing to compare")
+            notes.append(
+                f"{arch} {key[0]} {key[1]} vcpus={key[2]} {key[3]}: "
+                f"only {len(entries)} entry, nothing to compare"
+            )
             continue
         previous, latest = entries[-2], entries[-1]
         verdict, allowed = lib.regression_verdict(previous, latest)
