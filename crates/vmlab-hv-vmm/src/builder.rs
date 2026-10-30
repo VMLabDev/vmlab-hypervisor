@@ -786,15 +786,15 @@ mod tests {
             eprintln!("skipping: /dev/kvm is not available");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("vmlab-hv-builder-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let mut d = desc();
         d.boot = Boot::Kernel {
-            kernel: dir.join("broken-vmlinuz"),
+            kernel: dir.path().join("broken-vmlinuz"),
             initrd: None,
             cmdline: String::new(),
         };
-        std::fs::write(dir.join("broken-vmlinuz"), b"not a bzImage").unwrap();
+        d.serial_log = dir.path().join("serial.log");
+        std::fs::write(dir.path().join("broken-vmlinuz"), b"not a bzImage").unwrap();
         d.disks = vec![Disk {
             pci: None,
             bus: Default::default(),
@@ -818,7 +818,7 @@ mod tests {
         // thing asked of the factory: the failure names COM1, not a panic.
         d.disks.clear();
         d.boot = Boot::Kernel {
-            kernel: tiny_bzimage(&dir),
+            kernel: tiny_bzimage(dir.path()),
             initrd: None,
             cmdline: String::new(),
         };

@@ -775,6 +775,7 @@ mod tests {
     /// A scripted vhost-user backend: one connection, answered inline.
     struct FakeBackend {
         log: Arc<Mutex<BackendLog>>,
+        _dir: tempfile::TempDir,
         listener: UnixListener,
         socket: PathBuf,
         join: Option<JoinHandle<()>>,
@@ -786,17 +787,15 @@ mod tests {
     impl FakeBackend {
         /// Listen on a fresh socket; nothing is served until [`serve`].
         fn new(tag: &str) -> Self {
-            let socket = std::env::temp_dir().join(format!(
-                "vmlab-hv-fs-test-{tag}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let dir = tempfile::Builder::new()
+                .prefix(&format!("hv-fs-{tag}-"))
+                .tempdir()
+                .unwrap();
+            let socket = dir.path().join("vhost.sock");
             let listener = UnixListener::bind(&socket).expect("bind fake backend socket");
             Self {
                 log: Arc::new(Mutex::new(BackendLog::default())),
+                _dir: dir,
                 listener,
                 socket,
                 join: None,

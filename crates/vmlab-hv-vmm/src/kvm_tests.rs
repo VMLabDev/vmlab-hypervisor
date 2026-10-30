@@ -346,14 +346,13 @@ fn watchdog(handle: &VmHandle) {
     });
 }
 
-fn temp_socket(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "vmlab-hv-kvm-tests-{}-{}",
-        std::process::id(),
-        name
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("control.sock")
+fn temp_socket(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("hv-kvm-{name}-"))
+        .tempdir()
+        .unwrap();
+    let socket = dir.path().join("control.sock");
+    (dir, socket)
 }
 
 #[test]
@@ -421,7 +420,7 @@ fn control_socket_end_to_end() {
     };
     watchdog(&handle);
 
-    let socket = temp_socket("e2e");
+    let (_dir, socket) = temp_socket("e2e");
     crate::control::serve(&socket, &handle).expect("serve control socket");
 
     let mut client = vmlab_hv_proto::client::Client::connect(&socket).expect("handshake");
@@ -490,9 +489,7 @@ fn real_kernel_boots_and_resets() {
     drop(kvm); // builder opens its own; this only gates on availability.
 
     let (factory, serial) = TestFactory::new();
-    let dir =
-        std::env::temp_dir().join(format!("vmlab-hv-kvm-tests-kernel-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let desc = MachineDescription {
         machine: Default::default(),
         cpu: Default::default(),
@@ -514,7 +511,7 @@ fn real_kernel_boots_and_resets() {
         },
         disks: vec![],
         nics: vec![],
-        serial_log: dir.join("serial.log"),
+        serial_log: dir.path().join("serial.log"),
         ports: vec![],
         shares: vec![],
         audio: None,

@@ -20,6 +20,7 @@ serde_json.workspace = true
 workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 vmlab-hv-proto.workspace = true
 vmlab-hv-tests = { path = "../vmlab-hv-tests" }
 tempfile = "3"

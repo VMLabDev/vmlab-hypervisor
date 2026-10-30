@@ -495,9 +495,8 @@ fn quit_exits_cleanly_while_booting() {
 fn missing_kernel_is_a_clear_launch_error() {
     use std::io::Write as _;
 
-    let dir =
-        std::env::temp_dir().join(format!("vmlab-hv-s1-missing-kernel-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
     let machine = dir.join("machine.json");
     let json = format!(
         r#"{{
@@ -541,5 +540,4 @@ fn missing_kernel_is_a_clear_launch_error() {
         "the error must name the kernel: {stderr}"
     );
     assert!(!control.exists(), "no control socket may be left behind");
-    let _ = std::fs::remove_dir_all(&dir);
 }

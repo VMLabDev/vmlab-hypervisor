@@ -239,7 +239,7 @@ impl MachineSpec {
 /// A launched machine: the process, the control client and the paths its
 /// sockets live at. Dropping it stops the process and removes the directory.
 pub struct Guest {
-    dir: Option<PathBuf>,
+    dir: Option<tempfile::TempDir>,
     pub child: Child,
     pub control: Client,
     pub ctl_sock: PathBuf,
@@ -264,7 +264,7 @@ impl std::fmt::Debug for Guest {
 
 impl Guest {
     pub fn dir(&self) -> &Path {
-        self.dir.as_deref().expect("dir is only taken on drop")
+        self.dir.as_ref().expect("dir is only taken on drop").path()
     }
 
     /// The serial log so far, for failure messages.
@@ -321,9 +321,7 @@ impl Drop for Guest {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Some(dir) = self.dir.take() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+        drop(self.dir.take());
     }
 }
 
@@ -332,8 +330,8 @@ impl Drop for Guest {
 /// `vmlab-disk`, spawns the hypervisor, and connects the control client.
 pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
     let launched = Instant::now();
-    let dir = temp_dir(&spec.name);
-    std::fs::create_dir_all(&dir).expect("create test dir");
+    let temp = temp_dir(&spec.name);
+    let dir = temp.path();
 
     let scratch = dir.join("scratch.qcow2");
     vmlab_disk::ops::create_qcow2(&scratch, SCRATCH_SIZE, None, None)
@@ -457,7 +455,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
     };
 
     Guest {
-        dir: Some(dir),
+        dir: Some(temp),
         child,
         control,
         ctl_sock: machine_path.parent().unwrap().join("ctl.sock"),
@@ -470,12 +468,11 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
     }
 }
 
-fn temp_dir(name: &str) -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    std::env::temp_dir().join(format!("vmlab-hv-s1-{name}-{}-{nanos}", std::process::id()))
+fn temp_dir(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("hv-s1-{name}-"))
+        .tempdir()
+        .expect("create test dir")
 }
 
 pub(crate) fn connect_with_retry(

@@ -317,8 +317,8 @@ fn same_size_reset_reconfigures_without_overwriting_old_held_buffers() {
 
 #[test]
 fn client_connects_to_a_named_socket() {
-    let path =
-        std::env::temp_dir().join(format!("vmlab-native-display-{}.sock", std::process::id()));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("display.sock");
     let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
     let (server, _, _) = server();
     let h = std::thread::spawn(move || server.serve_native(listener.accept().unwrap().0));
