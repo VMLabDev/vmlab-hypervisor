@@ -23,11 +23,10 @@ use parking_lot::Mutex;
 use vmlab_hv_devices::serial::{Serial, SerialOut};
 use vmlab_hv_devices::virtio::fs::{Fs, FsConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
-use vmlab_hv_devices::{
-    BusDevice, GuestMemory, IrqLine, MsiSink, PciDevice, Snapshot, VirtioDevice,
-};
+use vmlab_hv_devices::{GuestMemory, IrqLine, MsiSink, PciSnapshot};
 use vmlab_hv_proto::machine::{Accel, Arch, Boot, FsShare, MachineDescription};
 use vmlab_hv_vmm::error::DeviceUnavailable;
+use vmlab_hv_vmm::factory::{BuiltPci, BuiltSerial};
 use vmlab_hv_vmm::{builder, DeviceFactory, Vm};
 
 const KERNEL: &str = "/home/wil/dev/vmlab/guest/dist/x86_64/vmlinuz";
@@ -175,18 +174,18 @@ impl Drop for Virtiofsd {
 }
 
 /// A factory whose serial is the real 16550A into a log file and whose only
-/// PCI device is the real vhost-user-fs front-end; it records the transport
-/// so the tests can reach the device's snapshot seam.
+/// PCI device is the real vhost-user-fs front-end; it records the function's
+/// snapshot handle so the tests can drive the device-state seam.
 struct TestFactory {
     log_dir: PathBuf,
-    fs_pci: Mutex<Option<Arc<Mutex<VirtioPciDevice>>>>,
+    fs_snapshot: Mutex<Option<Arc<Mutex<dyn PciSnapshot>>>>,
 }
 
 impl TestFactory {
     fn new(log_dir: &Path) -> Self {
         Self {
             log_dir: log_dir.to_path_buf(),
-            fs_pci: Mutex::new(None),
+            fs_snapshot: Mutex::new(None),
         }
     }
 
@@ -194,8 +193,8 @@ impl TestFactory {
         self.log_dir.join("serial.log")
     }
 
-    fn fs_pci(&self) -> Arc<Mutex<VirtioPciDevice>> {
-        self.fs_pci.lock().clone().expect("share built")
+    fn fs_snapshot(&self) -> Arc<Mutex<dyn PciSnapshot>> {
+        self.fs_snapshot.lock().clone().expect("share built")
     }
 }
 
@@ -204,7 +203,7 @@ impl DeviceFactory for TestFactory {
         &self,
         log_path: &Path,
         irq: Arc<dyn IrqLine>,
-    ) -> Result<Arc<Mutex<dyn BusDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltSerial, DeviceUnavailable> {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -215,11 +214,15 @@ impl DeviceFactory for TestFactory {
                     format!("cannot open serial log {}: {e}", log_path.display()),
                 )
             })?;
-        Ok(Arc::new(Mutex::new(Serial::new(
+        let dev = Arc::new(Mutex::new(Serial::new(
             "serial0",
             SerialOut::new(Box::new(file)),
             irq,
-        ))))
+        )));
+        Ok(BuiltSerial {
+            device: dev.clone(),
+            snapshot: Some(dev),
+        })
     }
 
     fn virtio_blk(
@@ -227,7 +230,7 @@ impl DeviceFactory for TestFactory {
         _disk: &vmlab_hv_proto::machine::Disk,
         _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<vmlab_hv_vmm::factory::BuiltBlk, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-blk",
             "no block device in this test",
@@ -239,7 +242,7 @@ impl DeviceFactory for TestFactory {
         _ports: &[vmlab_hv_proto::machine::SerialPort],
         _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-console",
             "no console device in this test",
@@ -251,7 +254,7 @@ impl DeviceFactory for TestFactory {
         _nic: &vmlab_hv_proto::machine::Nic,
         _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-net",
             "no net device in this test",
@@ -263,7 +266,7 @@ impl DeviceFactory for TestFactory {
         share: &FsShare,
         mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltPci, DeviceUnavailable> {
         let id = format!("fs-{}", share.tag);
         let fs = Fs::new(
             id.clone(),
@@ -282,8 +285,11 @@ impl DeviceFactory for TestFactory {
             Some(msi),
             None,
         )));
-        *self.fs_pci.lock() = Some(Arc::clone(&pci));
-        Ok(pci)
+        *self.fs_snapshot.lock() = Some(pci.clone() as Arc<Mutex<dyn PciSnapshot>>);
+        Ok(BuiltPci {
+            function: pci,
+            snapshot: None,
+        })
     }
 }
 
@@ -427,8 +433,11 @@ fn guest_mounts_the_share_and_the_session_is_real() {
     // through the device-state pipe and passes CHECK_DEVICE_STATE — proof the
     // backend holds the mem table and both live vrings.
     vm.handle().pause().expect("pause");
-    let pci = factory.fs_pci();
-    let section = pci.lock().device().save_state().expect("save device state");
+    let fs = factory.fs_snapshot();
+    let section = fs
+        .lock()
+        .save_wrapped_state()
+        .expect("save device state");
     // magic(4) + version(1) + active(1) + features(8) + count(2) + 2*base(8)
     // + len(4) leaves the state bytes themselves, which must be non-empty.
     assert!(
@@ -464,11 +473,11 @@ fn device_state_round_trips_through_virtiofsd() {
     .expect("build machine A");
     wait_for_serial(&factory_a.serial_log(), "VMLAB-FS-OK");
     vm_a.handle().pause().expect("pause A");
-    let pci_a = factory_a.fs_pci();
+    let fs_a = factory_a.fs_snapshot();
     let (transport_state, device_state) = {
-        let mut pci = pci_a.lock();
-        let transport = pci.save_state().expect("save transport state");
-        let device = pci.device_mut().save_state().expect("save device state");
+        let mut fs = fs_a.lock();
+        let transport = fs.save_function_state().expect("save transport state");
+        let device = fs.save_wrapped_state().expect("save device state");
         (transport, device)
     };
     assert!(
@@ -494,15 +503,14 @@ fn device_state_round_trips_through_virtiofsd() {
         true,
     )
     .expect("build machine B");
-    let pci_b = factory_b.fs_pci();
-    pci_b
+    let fs_b = factory_b.fs_snapshot();
+    fs_b
         .lock()
-        .restore_state(&transport_state)
+        .restore_function_state(&transport_state)
         .expect("restore transport");
-    pci_b
+    fs_b
         .lock()
-        .device_mut()
-        .restore_state(&device_state)
+        .restore_wrapped_state(&device_state)
         .expect("restore device state");
 
     // Resume: the guest boots fresh, and mounts and reads the share through

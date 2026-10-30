@@ -13,13 +13,18 @@ vmlab-disk.workspace = true
 vm-memory.workspace = true
 thiserror.workspace = true
 kvm-ioctls.workspace = true
-kvm-bindings.workspace = true
+kvm-bindings = { workspace = true, features = ["serde", "fam-wrappers"] }
 linux-loader.workspace = true
 acpi_tables.workspace = true
 libc.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 zerocopy.workspace = true
+sha2.workspace = true
 parking_lot.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

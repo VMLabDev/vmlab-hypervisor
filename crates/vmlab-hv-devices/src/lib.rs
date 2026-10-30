@@ -104,11 +104,26 @@ pub trait VirtioDevice: Snapshot + Send {
 }
 
 /// Guest-visible state a device saves into and restores from a snapshot.
-pub trait Snapshot {
+/// `Send` because the VMM keeps snapshot handles in its shared state.
+pub trait Snapshot: Send {
     /// Stable id of this device instance in the machine, used as the section key.
     fn state_id(&self) -> String;
     fn save_state(&self) -> Result<Vec<u8>, DeviceError>;
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError>;
+}
+
+/// Layered snapshot access to a PCI function: the function's own state and
+/// the state of the device it wraps, as separate sections. The VMM saves
+/// and restores the function's state first: a virtio transport's restore
+/// re-activates the wrapped device with the restored queues, so the wrapped
+/// device's own state lands after it.
+pub trait PciSnapshot: Send {
+    /// Stable id of this function instance, keying its snapshot sections.
+    fn snapshot_id(&self) -> String;
+    fn save_function_state(&self) -> Result<Vec<u8>, DeviceError>;
+    fn save_wrapped_state(&self) -> Result<Vec<u8>, DeviceError>;
+    fn restore_function_state(&mut self, state: &[u8]) -> Result<(), DeviceError>;
+    fn restore_wrapped_state(&mut self, state: &[u8]) -> Result<(), DeviceError>;
 }
 
 #[derive(Debug, thiserror::Error)]

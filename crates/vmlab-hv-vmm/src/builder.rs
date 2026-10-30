@@ -17,6 +17,7 @@ use crate::loader;
 use crate::memory::{GuestRam, register_memslots};
 use crate::pci::{PciConfigIo, PciEcam, PciRoot};
 use crate::pm::{PM_BLOCK_LEN, PM1A_EVT_BASE, PmDevice, SCI_GSI, SleepSignal};
+use crate::snapshot::{DeviceNode, DiskNode, SnapshotRegistry};
 use crate::vm::{Vm, VmShared};
 
 /// Static checks that do not need KVM; each error names what is wrong.
@@ -117,9 +118,13 @@ pub fn build(
         )
         .map_err(VmmError::Other)?;
 
-    // Devices, in the machine description's order.
+    // Devices, in the machine description's order. Each built device also
+    // hands back its snapshot handle; the registry keeps them in machine
+    // order for snapshot orchestration.
     let vm_fd = kvm.vm.clone();
     let msi: Arc<dyn MsiSink> = Arc::new(KvmMsiSink::new(vm_fd.clone()));
+    let mut snap_disks = Vec::new();
+    let mut snap_nodes = Vec::new();
 
     // COM1: 16550A on IRQ 4, output to the serial log.
     let irq4: Arc<dyn IrqLine> = Arc::new(KvmIrqLine::new(vm_fd.clone(), 4));
@@ -130,57 +135,86 @@ pub fn build(
                 device: e.device,
                 reason: format!("serial (COM1): {}", e.reason),
             })?;
-    io_bus.register(0x3F8, 8, serial).map_err(VmmError::Other)?;
+    io_bus
+        .register(0x3F8, 8, serial.device)
+        .map_err(VmmError::Other)?;
+    if let Some(node) = serial.snapshot {
+        snap_nodes.push(DeviceNode::Plain(node));
+    }
 
     let add_pci = |root: &Arc<Mutex<PciRoot>>,
-                   device: Result<
-        Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>,
-        crate::error::DeviceUnavailable,
-    >,
+                   built: Result<crate::factory::BuiltPci, crate::error::DeviceUnavailable>,
                    what: String|
-     -> Result<u8, VmmError> {
-        let dev = device.map_err(|e| VmmError::DeviceUnavailable {
+     -> Result<crate::factory::BuiltPci, VmmError> {
+        let built = built.map_err(|e| VmmError::DeviceUnavailable {
             device: e.device,
             reason: format!("{what}: {}", e.reason),
         })?;
-        root.lock().add_device(dev).map_err(VmmError::Other)
+        root.lock()
+            .add_device(built.function.clone())
+            .map_err(VmmError::Other)?;
+        Ok(built)
     };
 
     // Rootfs and scratch disks in order: /dev/vda, /dev/vdb, ...
     for disk in &desc.disks {
-        add_pci(
-            &pci_root,
-            factory.virtio_blk(disk, &ram.mem, msi.clone()),
-            format!(
-                "disk `{}` (/dev/vd{})",
-                disk.id,
-                disk_index_letter(disk, &desc.disks)
-            ),
-        )?;
+        let blk = factory
+            .virtio_blk(disk, &ram.mem, msi.clone())
+            .map_err(|e| VmmError::DeviceUnavailable {
+                device: e.device,
+                reason: format!(
+                    "disk `{}` (/dev/vd{}): {}",
+                    disk.id,
+                    disk_index_letter(disk, &desc.disks),
+                    e.reason
+                ),
+            })?;
+        pci_root
+            .lock()
+            .add_device(blk.pci.function.clone())
+            .map_err(VmmError::Other)?;
+        if let Some(node) = blk.pci.snapshot {
+            snap_nodes.push(DeviceNode::Virtio(node));
+        }
+        snap_disks.push(DiskNode {
+            id: disk.id.clone(),
+            writable: !disk.read_only,
+            vmstate: disk.vmstate,
+            image: blk.disk,
+        });
     }
     // One multiport console with the named ports.
     if !desc.ports.is_empty() {
-        add_pci(
+        let built = add_pci(
             &pci_root,
             factory.virtio_console(&desc.ports, &ram.mem, msi.clone()),
             "virtio-console ports".to_string(),
         )?;
+        if let Some(node) = built.snapshot {
+            snap_nodes.push(DeviceNode::Virtio(node));
+        }
     }
     // One NIC per interface.
     for nic in &desc.nics {
-        add_pci(
+        let built = add_pci(
             &pci_root,
             factory.virtio_net(nic, &ram.mem, msi.clone()),
             format!("nic {}", nic.mac),
         )?;
+        if let Some(node) = built.snapshot {
+            snap_nodes.push(DeviceNode::Virtio(node));
+        }
     }
     // One vhost-user-fs function per share.
     for share in &desc.shares {
-        add_pci(
+        let built = add_pci(
             &pci_root,
             factory.vhost_user_fs(share, &ram.mem, msi.clone()),
             format!("share `{}`", share.tag),
         )?;
+        if let Some(node) = built.snapshot {
+            snap_nodes.push(DeviceNode::Virtio(node));
+        }
     }
 
     // ACPI PM1a block on IRQ 9.
@@ -200,6 +234,11 @@ pub fn build(
         sleep_signal,
         layout.mmio64_base,
     );
+    shared.set_snapshot_registry(Arc::new(SnapshotRegistry {
+        digest: machine_digest(desc),
+        disks: snap_disks,
+        nodes: snap_nodes,
+    }));
 
     // vCPUs: the BSP enters the kernel's 64-bit entry; the APs stay in
     // reset state until the kernel's INIT-SIPI-SIPI wakes them.
@@ -226,6 +265,15 @@ fn disk_index_letter(
 ) -> char {
     let idx = disks.iter().position(|d| d.id == disk.id).unwrap_or(0);
     (b'a' + idx.min(25) as u8) as char
+}
+
+/// SHA-256 of the serialised machine description: the snapshot identity a
+/// restore refuses to cross (D32). Field order is fixed by the struct, so
+/// serialisation is deterministic for a given build.
+fn machine_digest(desc: &MachineDescription) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(desc).unwrap_or_default();
+    Sha256::digest(&bytes).into()
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::Arc;
 
-use vmlab_hv_proto::control::{Command, ErrorCode, Outcome, RunState};
+use vmlab_hv_proto::control::{Capability, Command, ErrorCode, Outcome, RunState};
 use vmlab_hv_proto::server::Server;
 
 use crate::error::VmmError;
@@ -61,13 +61,37 @@ impl ControlHandler {
                     status: Some(RunState::ShuttingDown),
                 }
             }
-            Command::SnapshotSave { .. }
-            | Command::SnapshotLoad { .. }
-            | Command::SnapshotDelete { .. } => Outcome::Error {
-                code: ErrorCode::Unsupported,
-                message: "snapshots are not implemented in this build".to_string(),
-            },
+            Command::SnapshotSave { name } => {
+                snapshot_outcome(self.vm.status(), crate::snapshot::save(&self.vm, &name))
+            }
+            Command::SnapshotLoad { name } => {
+                snapshot_outcome(self.vm.status(), crate::snapshot::load(&self.vm, &name))
+            }
+            Command::SnapshotDelete { name } => {
+                snapshot_outcome(self.vm.status(), crate::snapshot::delete(&self.vm, &name))
+            }
         }
+    }
+}
+
+/// Map a snapshot operation onto a protocol outcome.
+fn snapshot_outcome(
+    status: RunState,
+    result: Result<(), crate::snapshot::SnapshotError>,
+) -> Outcome {
+    match result {
+        Ok(()) => Outcome::Ok {
+            status: Some(status),
+        },
+        Err(e) => Outcome::Error {
+            code: match &e {
+                crate::snapshot::SnapshotError::Unsupported(_) => ErrorCode::Unsupported,
+                crate::snapshot::SnapshotError::NotFound(_) => ErrorCode::SnapshotNotFound,
+                crate::snapshot::SnapshotError::Incompatible(_) => ErrorCode::SnapshotIncompatible,
+                crate::snapshot::SnapshotError::Internal(_) => ErrorCode::Internal,
+            },
+            message: e.to_string(),
+        },
     }
 }
 
@@ -85,11 +109,9 @@ pub fn serve(path: &Path, vm: &VmHandle) -> Result<std::thread::JoinHandle<()>, 
         .map_err(|e| VmmError::Control(format!("binding {}: {e}", path.display())))?;
 
     let handler = ControlHandler::new(vm.clone());
-    // Phase 1 command surface: nothing to advertise until snapshots land
-    // (they answer `Unsupported` in this build).
     let server: Server<_> = Server::new(
         env!("CARGO_PKG_VERSION"),
-        Vec::new(), // Capability::Snapshots, once implemented
+        vec![Capability::Snapshots],
         move |command| handler.handle(command),
     );
     let broadcaster = server.clone();
