@@ -142,6 +142,21 @@ fn p4_tpm2_log_relocation_and_namespace_match_ovmf_capture() {
     let dsdt = read_table(blob, 64);
     let captured = include_bytes!("../../../docs/hwref/q35-ovmf-win11/guest/acpi/DSDT");
     let captured_node = &captured[0x2138..0x23a4];
+    let resource = &captured[0x1f2e..0x1f3a];
+    assert!(
+        dsdt.windows(resource.len())
+            .any(|window| window == resource),
+        "PCI0._CRS must reserve the TIS aperture"
+    );
+    let tpm_offset = dsdt
+        .windows(captured_node.len())
+        .position(|node| node == captured_node)
+        .unwrap();
+    let keyboard_offset = dsdt.windows(4).position(|name| name == b"KBD_").unwrap();
+    assert!(
+        tpm_offset < keyboard_offset,
+        "captured LPC namespace places TPM before legacy devices"
+    );
     assert!(
         dsdt.windows(captured_node.len())
             .any(|node| node == captured_node)

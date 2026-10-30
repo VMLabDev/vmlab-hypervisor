@@ -358,7 +358,21 @@ fn dsdt(p: &Platform) -> Vec<u8> {
     scope.extend(package(&[0x5b, 0x82], &cpus));
     let mut b = source[..0x1922].to_vec();
     b.extend(package(&[0x10], &scope));
-    b.extend_from_slice(&source[0x1d9b..0x1f7b]);
+    if p.tpm {
+        b.extend_from_slice(&source[0x1d9b..0x1db7]);
+        let mut resources = source[0x1dce..0x1e82].to_vec();
+        resources.extend_from_slice(&TPM_DSDT[0x1f2e..0x1f3a]);
+        resources.extend_from_slice(&[0x79, 0]);
+        let mut buffer = vec![0x0a, resources.len() as u8];
+        buffer.extend(resources);
+        let mut scope = source[0x1dba..0x1dc9].to_vec();
+        scope.extend(package(&[0x11], &buffer));
+        scope.extend_from_slice(&source[0x1e84..0x1f15]);
+        b.extend(package(&[0x10], &scope));
+        b.extend_from_slice(&source[0x1f15..0x1f7b]);
+    } else {
+        b.extend_from_slice(&source[0x1d9b..0x1f7b]);
+    }
     let mut pci = b"PCI0".to_vec();
     let mut devices = p.pci_devices.clone();
     devices.sort_by_key(|d| (d.device, d.function));
@@ -378,10 +392,11 @@ fn dsdt(p: &Platform) -> Vec<u8> {
             }
         }
         if d.device == 31 && d.function == 0 {
-            node.extend_from_slice(&source[0x205d..0x2198]);
+            node.extend_from_slice(&source[0x205d..0x20ac]);
             if p.tpm {
                 node.extend(tpm_device());
             }
+            node.extend_from_slice(&source[0x20ac..0x2198]);
         }
         pci.extend(package(&[0x5b, 0x82], &node));
     }
