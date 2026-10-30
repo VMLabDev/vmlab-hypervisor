@@ -20,7 +20,7 @@ enum Firmware {
     SecureOvmf,
 }
 
-fn template(name: &str, variable: &str) -> Option<PathBuf> {
+pub(super) fn template(name: &str, variable: &str) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(variable) {
         return Some(path.into());
     }

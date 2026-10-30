@@ -9,6 +9,43 @@ use vmlab_hv_tests::{MachineSpec, agent::AgentClient, ctl::CtlClient, probe_asse
 
 struct Qemu(ManagedChild);
 
+const RTC_BASE: i64 = 1_577_836_800;
+
+fn cmos_initializes_before_cinit(serial: &str) -> bool {
+    serial
+        .lines()
+        .take_while(|line| !line.contains("vmlab-cinit:"))
+        .filter(|line| line.contains("rtc_cmos") && line.contains("setting system clock to "))
+        .filter_map(|line| {
+            let (_, epoch) = line.rsplit_once('(')?;
+            epoch.trim_end().strip_suffix(')')?.parse::<i64>().ok()
+        })
+        .any(|seconds| (RTC_BASE..RTC_BASE + 120).contains(&seconds))
+}
+
+#[test]
+fn cmos_initialization_allows_elapsed_boot_time_but_rejects_wrong_clocks() {
+    for offset in [0, 1, 119] {
+        let serial = format!(
+            "rtc_cmos 00:04: setting system clock to 2020-01-01 UTC ({})\r\nvmlab-cinit: boot\r\n",
+            RTC_BASE + offset
+        );
+        assert!(cmos_initializes_before_cinit(&serial));
+        assert!(!cmos_initializes_before_cinit(&format!(
+            "vmlab-cinit: boot\n{serial}"
+        )));
+    }
+    for epoch in [0, RTC_BASE - 1, RTC_BASE + 120] {
+        assert!(!cmos_initializes_before_cinit(&format!(
+            "rtc_cmos 00:04: setting system clock to wrong time ({epoch})\n"
+        )));
+    }
+    assert!(!cmos_initializes_before_cinit(
+        "rtc_cmos 00:04: setting system clock to invalid (not an epoch)\n"
+    ));
+    assert!(!cmos_initializes_before_cinit("vmlab-cinit: boot\n"));
+}
+
 impl Drop for Qemu {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -134,8 +171,7 @@ fn fixed_base_matches_qemu_container() {
     eprintln!("QEMU guest epoch seconds: {seconds}");
     let serial = std::fs::read_to_string(dir.path().join("serial.log")).unwrap();
     assert!(
-        serial.lines().any(|line| line.contains("rtc_cmos")
-            && line.contains("setting system clock to 2020-01-01T00:00:00")),
+        cmos_initializes_before_cinit(&serial),
         "the kernel must initialize wall time from CMOS before cinit starts: {serial}"
     );
     for line in serial
@@ -155,8 +191,5 @@ fn fixed_base_matches_qemu_container() {
         "RTC trace (last reads):\n{}",
         trace.lines().rev().take(24).collect::<Vec<_>>().join("\n")
     );
-    assert!(
-        (1_577_836_800..1_577_836_920).contains(&seconds),
-        "{seconds}"
-    );
+    assert!((RTC_BASE..RTC_BASE + 120).contains(&seconds), "{seconds}");
 }

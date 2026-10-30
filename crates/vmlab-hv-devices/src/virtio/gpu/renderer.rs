@@ -263,6 +263,12 @@ impl Renderer {
                 },
                 pixels: frame.pixels.as_ref().clone(),
                 dirty: true,
+                damage: vec![crate::display::Damage {
+                    x: 0,
+                    y: 0,
+                    width: frame.width,
+                    height: frame.height,
+                }],
             })
         })
     }

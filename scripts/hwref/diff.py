@@ -222,6 +222,8 @@ def pci_rom_identity(data: bytes) -> str:
 
 
 def normalize_artifact(name: str, data: bytes) -> str:
+    if name.startswith("drm/") and name.endswith(".edid"):
+        return hex_dump(data)
     if name.startswith("pci-roms/") and name.endswith(".rom"):
         return pci_rom_identity(data)
     if name.startswith("acpi/") and not name.endswith((".dsl", ".log", ".pre")):
@@ -327,6 +329,16 @@ def load_capture(root: Path) -> dict[str, str]:
     readme = root / "README.md"
     if readme.exists() and "CAPTURE FAILED" in readme.read_text():
         raise ValueError(f"{root}: capture is marked failed")
+    display_manifest = root / "display.json"
+    if display_manifest.exists():
+        if json.loads(display_manifest.read_text()) != {"kind": "display", "version": 1}:
+            raise ValueError(f"{root}: invalid display capture manifest")
+        for name in ("drm/Virtual-1.edid", "drm/framebuffer-size.txt"):
+            if not (guest / name).is_file() or not (guest / name).stat().st_size:
+                raise ValueError(f"{root}: missing or empty required display artefact {name}")
+        return {path.relative_to(guest).as_posix(): normalize_artifact(
+                    path.relative_to(guest).as_posix(), path.read_bytes())
+                for path in sorted(guest.rglob("*")) if path.is_file()}
     required = ("lspci-nn.txt", "lspci-nnnvvvxxxx.txt", "cpuid.txt", "fwcfg/sizes.txt", "smbios.bin",
                 "acpi/DSDT", "acpi/FACP", "e820-memmap.txt", "interrupts.txt")
     for name in required:
@@ -518,6 +530,8 @@ def approved_platform(left: dict[str, str], right: dict[str, str], rules: dict) 
 
 
 def compare(reference: Path, candidate: Path, allow: Path | None = DEFAULT_ALLOW) -> str:
+    if (reference / "display.json").exists() != (candidate / "display.json").exists():
+        raise ValueError("cannot compare display-only and full hardware captures")
     left, right = load_capture(reference), load_capture(candidate)
     if allow:
         rules = json.loads(allow.read_text())

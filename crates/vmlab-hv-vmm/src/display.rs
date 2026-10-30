@@ -196,16 +196,16 @@ impl FrameSource for Source {
             drm_fourcc: vmlab_hv_display::protocol::XRGB8888,
             modifier: 0,
             timestamp_ns: crate::chipset::host_monotonic_ns(),
-            damage: if frame.dirty {
-                vec![Rect {
-                    x: 0,
-                    y: 0,
-                    width: frame.mode.width,
-                    height: frame.mode.height,
-                }]
-            } else {
-                vec![]
-            },
+            damage: frame
+                .damage
+                .into_iter()
+                .map(|r| Rect {
+                    x: r.x,
+                    y: r.y,
+                    width: r.width,
+                    height: r.height,
+                })
+                .collect(),
             pixels: Pixels::Shm(Arc::new(frame.pixels)),
         })
     }

@@ -49,11 +49,93 @@ pub struct Mode {
     pub format: PixelFormat,
 }
 
+#[derive(Clone)]
 pub struct Frame {
     pub mode: Mode,
     pub pixels: Vec<u8>,
-    /// Full-frame damage since the previous `frame` call, including mode changes.
+    /// True when damage is nonempty.
     pub dirty: bool,
+    pub damage: Vec<Damage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Damage {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Frame {
+    pub(crate) fn unchanged(&self) -> Self {
+        Self {
+            dirty: false,
+            damage: Vec::new(),
+            ..self.clone()
+        }
+    }
+
+    /// Compare rendered tiles, so redundant writes, hidden VRAM and palette
+    /// changes that do not affect visible pixels cannot produce false damage.
+    pub(crate) fn compare(
+        mode: Mode,
+        pixels: Vec<u8>,
+        previous: Option<&Self>,
+        tile: (u32, u32),
+    ) -> Self {
+        let mut damage: Vec<Damage> = Vec::new();
+        if let Some(previous) = previous.filter(|p| p.mode == mode) {
+            for y in (0..mode.height).step_by(tile.1 as usize) {
+                let height = tile.1.min(mode.height - y);
+                for x in (0..mode.width).step_by(tile.0 as usize) {
+                    let width = tile.0.min(mode.width - x);
+                    let changed = (y..y + height).any(|row| {
+                        let start = (row * mode.stride + x * 4) as usize;
+                        let end = start + width as usize * 4;
+                        pixels[start..end] != previous.pixels[start..end]
+                    });
+                    if changed {
+                        if let Some(last) = damage.last_mut()
+                            && last.y == y
+                            && last.x + last.width == x
+                            && last.height == height
+                        {
+                            last.width += width;
+                        } else {
+                            damage.push(Damage {
+                                x,
+                                y,
+                                width,
+                                height,
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            damage.push(Damage {
+                x: 0,
+                y: 0,
+                width: mode.width,
+                height: mode.height,
+            });
+        }
+        // One-scanline text cells can fragment damage beyond the wire limit.
+        if damage.len() > u16::MAX as usize {
+            damage = vec![Damage {
+                x: 0,
+                y: 0,
+                width: mode.width,
+                height: mode.height,
+            }];
+        }
+        Self {
+            mode,
+            pixels,
+            dirty: !damage.is_empty(),
+            damage,
+        }
+    }
 }
 
 /// A single standard VGA PCI function. Firmware supplies the option ROM bytes.
@@ -81,7 +163,7 @@ pub struct StandardVga {
     status: u8,
     big_endian: bool,
     dirty: bool,
-    cached_pixels: Option<Vec<u8>>,
+    cached_frame: Option<Frame>,
     render_vram: Vec<u8>,
 }
 
@@ -117,7 +199,7 @@ impl StandardVga {
             status: 0,
             big_endian: false,
             dirty: true,
-            cached_pixels: None,
+            cached_frame: None,
             render_vram: Vec::new(),
         };
         dev.rom[..rom.len()].copy_from_slice(rom);
@@ -655,18 +737,14 @@ impl StandardVga {
         }
     }
 
-    /// Convert the visible framebuffer and consume full-frame damage.
+    /// Convert the visible framebuffer and consume tile damage.
     /// The caller may retain the returned pixels across subsequent device writes.
     pub fn frame(&mut self) -> Frame {
         let mode = self.mode();
         if !self.dirty
-            && let Some(pixels) = &self.cached_pixels
+            && let Some(frame) = &self.cached_frame
         {
-            return Frame {
-                mode,
-                pixels: pixels.clone(),
-                dirty: false,
-            };
+            return frame.unchanged();
         }
         let mut pixels = vec![0; mode.stride as usize * mode.height as usize];
         // Translate and copy guest memory once, rather than once per pixel.
@@ -690,13 +768,19 @@ impl StandardVga {
                 }
             }
         }
-        self.cached_pixels = Some(pixels.clone());
+        let tile = if !self.enabled() && self.regs[GC + 6] & 1 == 0 {
+            (
+                if self.regs[SEQ + 1] & 1 != 0 { 8 } else { 9 },
+                (self.regs[CRTC + 9] as u32 & 31) + 1,
+            )
+        } else {
+            (16, 16)
+        };
+        let frame = Frame::compare(mode, pixels, self.cached_frame.as_ref(), tile);
+        self.cached_frame = Some(frame.clone());
         self.render_vram.clear();
-        Frame {
-            mode,
-            pixels,
-            dirty: std::mem::replace(&mut self.dirty, false),
-        }
+        self.dirty = false;
+        frame
     }
 }
 
@@ -764,7 +848,16 @@ impl PciDevice for StandardVga {
     fn bar_read(&mut self, bar: u8, offset: u64, data: &mut [u8]) {
         data.fill(0xff);
         if bar == 2 {
-            if (0x400..0x420).contains(&offset) {
+            if offset < 0x400 {
+                let edid = crate::virtio::gpu::edid(1280, 800);
+                for (i, byte) in data.iter_mut().enumerate() {
+                    *byte = offset
+                        .checked_add(i as u64)
+                        .and_then(|at| edid.get(at as usize))
+                        .copied()
+                        .unwrap_or(0);
+                }
+            } else if (0x400..0x420).contains(&offset) {
                 self.io_read((offset - 0x400 + 0x3c0) as u16, data);
             } else if (0x500..0x516).contains(&offset)
                 && data.len() <= 2
@@ -947,6 +1040,7 @@ impl Snapshot for StandardVga {
             .write_slice(&state[header + 20..], GuestAddress(0))
             .map_err(|e| DeviceError::Memory(e.to_string()))?;
         self.dirty = true;
+        self.cached_frame = None;
         Ok(())
     }
 }
