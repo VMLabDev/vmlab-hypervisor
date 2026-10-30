@@ -1,0 +1,98 @@
+# Sail toolchain container for the phase-3 TCG pipeline.
+#
+# Emits the textual Jib IR for sail-riscv (isla-sail) and builds the Sail
+# C++ model as the lockstep oracle. Every network input is pinned in
+# pins.env; the tcg recipes pass them here as build args.
+#
+# Build context: toolchain/sail/
+
+FROM debian:12-slim@sha256:a3bba7dc7dbcc1f37c2856c51fc9a7fac96608f50cb87b1b4e4d8b8c85ae988e
+
+ARG OPAM_VERSION=2.5.1
+ARG OPAM_SHA256=33705e328d9f740026ce182079e2457639791bcf04a0e4bafbdb2024dd4d6092
+ARG OPAM_REPO_COMMIT=a1f0fcbd9384bce190ac51678bf1c2637a6a5cf4
+ARG OCAML_VERSION=5.2.1
+ARG SAIL_VERSION=0.20.3
+ARG SAIL_RTS_C_SHA256=8ccb5e2a178694adc5d92c826eef29dd648b3241ced30e4cd8822d2fc6b912c3
+ARG ISLA_COMMIT=e9b5d945394277656593a0d429466d7fa0a2b4b3
+ARG SAIL_RISCV_COMMIT=fc074f99f578954376214c4ca9490152d35d0ec2
+ARG RISCV_CONFIG=rv64d_v128_e64
+
+ENV OPAMROOT=/opt/opam
+ENV OPAMYES=1
+# Bound so the opam switch build stays well inside the docker memory cap.
+ENV OPAMJOBS=8
+
+
+# build-essential: gcc/g++/make for opam, isla-sail and the oracle build.
+# z3: on PATH for isla-sail's -memo_z3 flag. gmp/zlib: Sail C runtime deps.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates cmake curl git libgmp-dev pkg-config \
+        patch python3 unzip xz-utils z3 zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# opam, pinned binary.
+RUN curl -fsSL -o /usr/local/bin/opam \
+        "https://github.com/ocaml/opam/releases/download/${OPAM_VERSION}/opam-${OPAM_VERSION}-x86_64-linux" \
+    && echo "${OPAM_SHA256}  /usr/local/bin/opam" | sha256sum -c - \
+    && chmod +x /usr/local/bin/opam
+
+# OCaml switch with the Sail compiler, resolved against a pinned opam
+# repository so package hashes cannot move under us. The switch lives
+# under /opt so unprivileged container users can read it.
+RUN git clone -q https://github.com/ocaml/opam-repository.git /opt/opam-repository \
+    && git -C /opt/opam-repository checkout -q "${OPAM_REPO_COMMIT}" \
+    && opam init -a --disable-sandboxing --bare file:///opt/opam-repository \
+    && opam switch create toolchain "ocaml.${OCAML_VERSION}" \
+    && opam install -y "sail.${SAIL_VERSION}" \
+    && chmod -R a+rX /opt/opam
+
+# isla-sail: the Jib IR dump plugin, built against the installed Sail.
+ENV PATH=/opt/opam/toolchain/bin:$PATH
+RUN git clone -q https://github.com/rems-project/isla.git /opt/isla \
+    && git -C /opt/isla checkout -q "${ISLA_COMMIT}" \
+    && make -C /opt/isla/isla-sail \
+    && chmod -R a+rX /opt/isla
+
+# sail-riscv at the pinned model commit.
+RUN git clone -q https://github.com/riscv/sail-riscv.git /opt/sail-riscv \
+    && git -C /opt/sail-riscv checkout -q "${SAIL_RISCV_COMMIT}"
+
+COPY patches/rts-weak-emulator-memory.patch /opt/patches/rts-weak-emulator-memory.patch
+
+# Weakify the emulator memory seam in the installed Sail runtime
+# (<switch>/share/sail/lib/rts.c — the copy sail-riscv's cmake compiles) so
+# the oracle can override read/write routing with host callbacks at link
+# time. Content-checked against the pin before patching.
+RUN SAIL_LIB="$(/opt/opam/toolchain/bin/sail --dir)/lib" \
+    && echo "sail lib dir: $SAIL_LIB" \
+    && echo "${SAIL_RTS_C_SHA256}  $SAIL_LIB/rts.c" | sha256sum -c - \
+    && patch --forward "$SAIL_LIB/rts.c" /opt/patches/rts-weak-emulator-memory.patch
+
+# Configure sail-riscv and build the C++ model library once, so the
+# recipes only pay for the generation they ask for. FetchContent deps
+# (softfloat, jsoncons) are baked in here too.
+RUN /opt/opam/toolchain/bin/sail --version \
+    && cmake -S /opt/sail-riscv -B /work/build \
+        -DCMAKE_BUILD_TYPE=Release -DSAIL_BIN=/opt/opam/toolchain/bin/sail \
+    && cmake --build /work/build --target riscv_model --parallel "$(nproc)" \
+    && chmod -R a+rwX /work/build
+
+ENV PATH=/opt/opam/toolchain/bin:/opt/isla/isla-sail:/usr/local/bin:/usr/bin:/bin \
+    SAIL_VERSION=${SAIL_VERSION} \
+    SAIL_RISCV_COMMIT=${SAIL_RISCV_COMMIT} \
+    ISLA_COMMIT=${ISLA_COMMIT} \
+    SAIL_RISCV=/opt/sail-riscv \
+    SAIL_RISCV_BUILD=/work/build \
+    RISCV_CONFIG=${RISCV_CONFIG}
+
+WORKDIR /work
+COPY oracle/ /opt/oracle/
+COPY scripts/ /opt/scripts/
+
+# Smoke check: the pinned tools are present and the config exists.
+RUN sail --version \
+    && test -x /opt/isla/isla-sail/isla-sail \
+    && test -x /opt/opam/toolchain/bin/sail \
+    && test -f "/work/build/config/${RISCV_CONFIG}.json"
