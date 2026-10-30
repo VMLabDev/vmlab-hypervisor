@@ -145,7 +145,9 @@ impl Chipset {
         let pit_vm = vm.clone();
         let errors = error.clone();
         let hpet = Arc::new(Mutex::new(Hpet::new(
-            std::array::from_fn(|gsi| hub.line(4, gsi as u32)),
+            // HPET indexes name IOAPIC pins. KVM's timer route is GSI 0,
+            // shared by PIC IRQ0 and IOAPIC pin 2.
+            std::array::from_fn(|gsi| hub.line(4, timer_gsi(gsi as u32))),
             Arc::new(move |legacy| {
                 gate.enabled.store(!legacy, Ordering::SeqCst);
                 gate.output
@@ -344,6 +346,14 @@ pub(crate) fn host_monotonic_ns() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
+fn timer_gsi(pin: u32) -> u32 {
+    match pin {
+        0 => 2,
+        2 => 0,
+        _ => pin,
+    }
+}
+
 fn install_irq_routes(vm: &VmFd) -> Result<(), VmmError> {
     use kvm_bindings::*;
     #[repr(C)]
@@ -363,7 +373,10 @@ fn install_irq_routes(vm: &VmFd) -> Result<(), VmmError> {
         routes.header.nr += 1;
     };
     for gsi in 0..24 {
-        add(gsi, KVM_IRQCHIP_IOAPIC, if gsi == 0 { 2 } else { gsi });
+        // Each irqchip pin must have a unique GSI for KVM's reverse
+        // acknowledgement lookup. Aliasing PIC IRQ0 to GSI 2 loses PIT
+        // acknowledgements on GSI 0 and stops delivery after the first tick.
+        add(gsi, KVM_IRQCHIP_IOAPIC, timer_gsi(gsi));
     }
     for gsi in 0..16 {
         if gsi == 2 {
@@ -379,7 +392,6 @@ fn install_irq_routes(vm: &VmFd) -> Result<(), VmmError> {
             gsi % 8,
         );
     }
-    add(2, KVM_IRQCHIP_PIC_MASTER, 0);
     vm.set_gsi_routing(&routes.header)
         .map_err(|e| VmmError::ioctl("KVM_SET_GSI_ROUTING(q35)", e))
 }
@@ -387,6 +399,102 @@ fn install_irq_routes(vm: &VmFd) -> Result<(), VmmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hpet_legacy_timer_uses_pic_irq0_and_ioapic_pin2() {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("skipping HPET routing test: /dev/kvm is unavailable");
+            return;
+        }
+        let kvm = crate::kvm::KvmVm::new().unwrap();
+        let chipset = Chipset::new(kvm.vm.clone(), &MemLayout::q35(64).unwrap(), 0).unwrap();
+        let mut hpet = chipset.hpet.lock();
+        hpet.write(0x100, &4u64.to_le_bytes());
+        hpet.write(0x108, &100u64.to_le_bytes());
+        hpet.write(0x10, &3u64.to_le_bytes());
+        assert_ne!(
+            kvm.vm.get_pit2().unwrap().flags & kvm_bindings::KVM_PIT_FLAGS_HPET_LEGACY,
+            0
+        );
+        hpet.advance(1000);
+        let mut pic = kvm_bindings::kvm_irqchip {
+            chip_id: kvm_bindings::KVM_IRQCHIP_PIC_MASTER,
+            ..Default::default()
+        };
+        kvm.vm.get_irqchip(&mut pic).unwrap();
+        // SAFETY: chip_id selects the PIC member of the KVM irqchip union.
+        assert_ne!(unsafe { pic.chip.pic.irr } & 1, 0);
+        hpet.write(0x10, &0u64.to_le_bytes());
+        assert_eq!(
+            kvm.vm.get_pit2().unwrap().flags & kvm_bindings::KVM_PIT_FLAGS_HPET_LEGACY,
+            0
+        );
+        assert!(chipset.error.lock().is_none());
+        assert_eq!(timer_gsi(2), 0);
+        assert_eq!(timer_gsi(0), 2);
+    }
+
+    #[test]
+    fn pit_keeps_delivering_after_pic_acknowledgements() {
+        use kvm_ioctls::VcpuExit;
+        use vm_memory::{Bytes, GuestAddress};
+
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("skipping PIT delivery test: /dev/kvm is unavailable");
+            return;
+        }
+        let kvm = crate::kvm::KvmVm::new().unwrap();
+        let layout = MemLayout::q35(64).unwrap();
+        let ram = crate::memory::GuestRam::anonymous(layout.clone()).unwrap();
+        crate::memory::register_memslots(&kvm.vm, &ram).unwrap();
+        let _chipset = Chipset::new(kvm.vm.clone(), &layout, 0).unwrap();
+        let mut vcpu = kvm.create_vcpu(0).unwrap();
+        let mut sregs = vcpu.get_sregs().unwrap();
+        sregs.cs.base = 0;
+        sregs.cs.selector = 0;
+        vcpu.set_sregs(&sregs).unwrap();
+        vcpu.set_regs(&kvm_bindings::kvm_regs {
+            rip: 0x1000,
+            rsp: 0x8000,
+            rflags: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        // Initialize both PICs, unmask IRQ0, and program PIT0 for 100 Hz.
+        // Polling I/O bounds the host wait even if IRQ0 stops arriving.
+        let code = [
+            0xfa, 0xb0, 0x11, 0xe6, 0x20, 0xe6, 0xa0, 0xb0, 0x08, 0xe6, 0x21, 0xb0, 0x70, 0xe6,
+            0xa1, 0xb0, 0x04, 0xe6, 0x21, 0xb0, 0x02, 0xe6, 0xa1, 0xb0, 0x01, 0xe6, 0x21, 0xe6,
+            0xa1, 0xb0, 0xfe, 0xe6, 0x21, 0xb0, 0xff, 0xe6, 0xa1, 0xb0, 0x34, 0xe6, 0x43, 0xb0,
+            0x9c, 0xe6, 0x40, 0xb0, 0x2e, 0xe6, 0x40, 0xfb, 0xa0, 0x00, 0x05, 0xe6, 0xe9, 0xeb,
+            0xf9,
+        ];
+        ram.mem.write_slice(&code, GuestAddress(0x1000)).unwrap();
+        ram.mem
+            .write_slice(&[0x00, 0x11, 0, 0], GuestAddress(8 * 4))
+            .unwrap();
+        ram.mem
+            .write_slice(
+                &[
+                    0xfe, 0x06, 0x00, 0x05, // inc byte [0x500]
+                    0xb0, 0x20, 0xe6, 0x20, 0xcf, // EOI; iret
+                ],
+                GuestAddress(0x1100),
+            )
+            .unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        let mut ticks = 0;
+        while Instant::now() < deadline && ticks < 5 {
+            match vcpu.run().unwrap() {
+                VcpuExit::IoOut(0xe9, bytes) => ticks = bytes[0],
+                exit => panic!("unexpected PIT test exit: {exit:?}"),
+            }
+        }
+        assert!(
+            ticks >= 5,
+            "PIT stopped after {ticks} acknowledged interrupts"
+        );
+    }
     #[test]
     fn unchanged_levels_do_not_repeat_kvm_irq_delivery() {
         let events = Arc::new(Mutex::new(Vec::new()));
