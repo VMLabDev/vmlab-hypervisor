@@ -15,7 +15,7 @@ use vmlab_hv_proto::control::{
 };
 use vmlab_hv_proto::machine::{
     Accel, Arch, Audio, AudioDevice, Boot, Disk, DiskFormat, FsShare, MachineDescription, Nic,
-    NicAttachment, SerialPort,
+    NicAttachment, PciAddress, SerialPort,
 };
 
 /// Assert that `value` serializes to exactly `json` and parses back.
@@ -51,6 +51,53 @@ fn nic_option_rom_wire() {
         &nic,
         r#"{"mac":"52:54:00:12:34:56","mtu":null,"attachment":{"kind":"stream","socket":"/switch.sock"}}"#,
     );
+}
+
+#[test]
+fn fs_share_socket_and_path_are_alternatives() {
+    use vmlab_hv_proto::machine::FsBacking;
+    let socket = FsShare {
+        pci: None,
+        tag: "share0".into(),
+        socket: Some("/run/vmlab/web-1/virtiofs.sock".into()),
+        path: None,
+    };
+    wire(
+        &socket,
+        r#"{"tag":"share0","socket":"/run/vmlab/web-1/virtiofs.sock"}"#,
+    );
+    assert_eq!(
+        socket.backing(),
+        Some(FsBacking::Socket("/run/vmlab/web-1/virtiofs.sock".into()))
+    );
+    let path = FsShare {
+        pci: Some(PciAddress {
+            bus: 0,
+            device: 5,
+            function: 0,
+        }),
+        tag: "share0".into(),
+        socket: None,
+        path: Some("/srv/web-1".into()),
+    };
+    wire(
+        &path,
+        r#"{"pci":{"bus":0,"device":5,"function":0},"tag":"share0","path":"/srv/web-1"}"#,
+    );
+    assert_eq!(path.backing(), Some(FsBacking::Directory("/srv/web-1".into())));
+    // Both or neither leave the backing unresolved; the builder rejects them.
+    let both = FsShare {
+        socket: Some("/sock".into()),
+        path: Some("/srv".into()),
+        ..path.clone()
+    };
+    assert_eq!(both.backing(), None);
+    let neither = FsShare {
+        socket: None,
+        path: None,
+        ..path
+    };
+    assert_eq!(neither.backing(), None);
 }
 
 fn sample_machine() -> MachineDescription {
@@ -114,7 +161,8 @@ fn sample_machine() -> MachineDescription {
         shares: vec![FsShare {
             pci: None,
             tag: "share0".to_owned(),
-            socket: PathBuf::from("/run/vmlab/web-1/virtiofs.sock"),
+            socket: Some(PathBuf::from("/run/vmlab/web-1/virtiofs.sock")),
+            path: None,
         }],
         audio: Some(Audio {
             pci: None,

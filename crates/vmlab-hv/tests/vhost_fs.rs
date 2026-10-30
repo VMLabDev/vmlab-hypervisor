@@ -419,7 +419,8 @@ fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
         shares: vec![FsShare {
             pci: None,
             tag: TAG.into(),
-            socket: socket.to_path_buf(),
+            socket: Some(socket.to_path_buf()),
+            path: None,
         }],
         audio: None,
         rtc_base: None,

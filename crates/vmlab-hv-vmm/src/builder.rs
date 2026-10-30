@@ -183,6 +183,13 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
         add(nic.pci, "NIC")?;
     }
     for share in &desc.shares {
+        if share.backing().is_none() {
+            return Err(VmmError::InvalidMachine(format!(
+                "share `{}` must set exactly one of `socket` (external virtiofsd) \
+                 and `path` (in-process)",
+                share.tag
+            )));
+        }
         add(share.pci, &share.tag)?;
     }
     if let Some(display) = &desc.display {

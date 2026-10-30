@@ -162,11 +162,21 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let id = format!("fs-{}", share.tag);
+        let Some(vmlab_hv_proto::machine::FsBacking::Socket(socket)) = share.backing() else {
+            return Err(DeviceUnavailable::new(
+                "virtio-fs",
+                format!(
+                    "share `{}` is not served by an external virtiofsd; \
+                     the in-process device model has not landed yet",
+                    share.tag
+                ),
+            ));
+        };
         let fs = Fs::new(
             id.clone(),
             FsConfig {
                 tag: share.tag.clone(),
-                socket: share.socket.clone(),
+                socket,
             },
         )
         .map_err(|e| {
