@@ -218,6 +218,52 @@ fn s2_crate_written_images_pass_check_and_compare() {
 /// Backing chains: relative and absolute backing paths, raw and qcow2
 /// backing formats, recursive reads through the crate.
 #[test]
+fn s2_backing_reads_preserve_offsets_within_clusters() {
+    require_qemu_img!();
+    let temp = tmpdir("backing-offsets");
+    let base = temp.path().join("base.raw");
+    let content: Vec<u8> = (0..262144)
+        .map(|i| ((i / 512 + i % 251) % 256) as u8)
+        .collect();
+    std::fs::write(&base, &content).unwrap();
+    let overlay = temp.path().join("overlay.qcow2");
+    qemu_img(&[
+        "create",
+        "-f",
+        "qcow2",
+        "-b",
+        &base.to_string_lossy(),
+        "-F",
+        "raw",
+        &overlay.to_string_lossy(),
+    ]);
+    for allocated_l2 in [false, true] {
+        if allocated_l2 {
+            write_pattern(&overlay, Format::Qcow2, 196608, &[0x33; 512]);
+        }
+        let oracle = temp.path().join("oracle.raw");
+        qemu_img(&[
+            "convert",
+            "-O",
+            "raw",
+            &overlay.to_string_lossy(),
+            &oracle.to_string_lossy(),
+        ]);
+        let expected = std::fs::read(&oracle).unwrap();
+        let mut disk = vmlab_disk::open(&overlay, Format::Qcow2, true).unwrap();
+        for (offset, len) in [(512, 512), (65535, 1026), (66048, 4096)] {
+            let mut got = vec![0; len];
+            disk.read_at(offset as u64, &mut got).unwrap();
+            assert_eq!(
+                got,
+                expected[offset..offset + len],
+                "offset {offset}, allocated L2 {allocated_l2}"
+            );
+        }
+    }
+}
+
+#[test]
 fn s2_backing_chains() {
     require_qemu_img!();
     let temp = tmpdir("backing");
