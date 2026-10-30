@@ -94,3 +94,28 @@ tcg-oracle-build: tcg-image-build
 [group('tcg')]
 tcg-oracle-test: tcg-oracle-build
 	cargo test --manifest-path toolchain/sail/oracle-test/Cargo.toml
+
+# Run the D2 benchmark suite (bench/README.md); backend qemu|vmlab-hv
+[group('bench')]
+bench-run backend="qemu" arch="all" vcpus="1,4" repeats="3" guest="debian-13": (bench-hv-binary backend)
+	python3 bench/run.py --backend {{backend}} --arch {{arch}} --vcpus {{vcpus}} --repeats {{repeats}} --guest {{guest}}
+
+# Print the per-workload trend from bench/history
+[group('bench')]
+bench-report arch="all" backend="all" guest="all":
+	python3 bench/report.py --arch {{arch}} --backend {{backend}} --guest {{guest}}
+
+# Fail if the latest run regressed beyond measured noise for its backend
+[group('bench')]
+bench-check arch="all" backend="all":
+	python3 bench/check.py --arch {{arch}} --backend {{backend}}
+
+# Run the bench suite's own unit tests
+[group('bench')]
+bench-test:
+	cd bench && python3 -m unittest
+
+# Build the release binary the vmlab-hv bench backend needs (no-op for qemu)
+[private]
+bench-hv-binary backend:
+	@if [ "{{backend}}" = "vmlab-hv" ]; then cargo build --release -p vmlab-hv; fi

@@ -2,3 +2,4 @@
 /toolchain/sail/oracle-test/target
 /.scratch
 __pycache__/
+/bench/run/
