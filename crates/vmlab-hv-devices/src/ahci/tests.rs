@@ -217,6 +217,24 @@ impl Driver {
 }
 
 #[test]
+fn msi_reports_a_second_port_while_the_first_port_is_pending() {
+    let mut d = Driver::new();
+    d.hba.attach_disk(0, image(vec![0; 4096], false)).unwrap();
+    d.hba.attach_cdrom(2, None).unwrap();
+    d.start(0);
+    d.hba.config_write(32, 2, &[0x81]);
+    d.prepare(0xec, 0, 0, 0, None, &[(0x4000, 512, false)]);
+    d.issue(0);
+    assert_eq!(d.irq.messages.lock().unwrap().len(), 1);
+    let base = port_base(2);
+    d.write(base + 8, 0x2000);
+    d.write(base + 0x14, u32::MAX);
+    d.write(base + 0x18, 0x10);
+    assert_eq!(d.read(8) & 5, 5);
+    assert_eq!(d.irq.messages.lock().unwrap().len(), 2);
+}
+
+#[test]
 fn pci_identity_capabilities_and_bar_probes() {
     let mut d = Driver::new();
     assert_eq!(d.hba.config_read(0), 0x2922_8086);

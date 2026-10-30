@@ -73,7 +73,7 @@ pub struct Ahci {
     regs: [u8; REGS],
     drives: [Option<Drive>; PORTS],
     index: u32,
-    msi_pending: bool,
+    msi_pending: u32,
 }
 
 impl Ahci {
@@ -94,7 +94,7 @@ impl Ahci {
             regs: [0; REGS],
             drives: std::array::from_fn(|_| None),
             index: 0,
-            msi_pending: false,
+            msi_pending: 0,
         };
         device.config[..4].copy_from_slice(&0x2922_8086u32.to_le_bytes());
         device.config[6] = 0x10;
@@ -246,7 +246,7 @@ impl Ahci {
             self.reset_port(port);
         }
         self.index = 0;
-        self.msi_pending = false;
+        self.msi_pending = 0;
         self.irq.set_level(false);
     }
 
@@ -276,13 +276,14 @@ impl Ahci {
         self.config[6] = 0x10 | if active && !enabled { 8 } else { 0 };
         self.irq
             .set_level(active && !enabled && self.config[5] & 4 == 0);
-        if active && enabled && !self.msi_pending {
+        let pending = if active && enabled { self.get32(8) } else { 0 };
+        if pending & !self.msi_pending != 0 {
             self.msi.signal(MsiMessage {
                 address: le64(&self.config[0x84..]),
                 data: u16::from_le_bytes([self.config[0x8c], self.config[0x8d]]) as u32,
             });
         }
-        self.msi_pending = active && enabled;
+        self.msi_pending = pending;
     }
 
     fn dma_read(&self, address: u64, bytes: &mut [u8]) -> Result<(), ()> {
@@ -959,7 +960,7 @@ impl Snapshot for Ahci {
                 optical.sense.copy_from_slice(&bytes[5..8]);
             }
         }
-        self.msi_pending = false;
+        self.msi_pending = 0;
         self.update_irq();
         Ok(())
     }
