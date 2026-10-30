@@ -138,7 +138,7 @@ pub fn build(
     for disk in &desc.disks {
         add_pci(
             &pci_root,
-            factory.virtio_blk(disk, msi.clone()),
+            factory.virtio_blk(disk, &ram.mem, msi.clone()),
             format!("disk `{}` (/dev/vd{})", disk.id, disk_index_letter(disk, &desc.disks)),
         )?;
     }
@@ -146,7 +146,7 @@ pub fn build(
     if !desc.ports.is_empty() {
         add_pci(
             &pci_root,
-            factory.virtio_console(&desc.ports, msi.clone()),
+            factory.virtio_console(&desc.ports, &ram.mem, msi.clone()),
             "virtio-console ports".to_string(),
         )?;
     }
@@ -154,7 +154,7 @@ pub fn build(
     for nic in &desc.nics {
         add_pci(
             &pci_root,
-            factory.virtio_net(nic, msi.clone()),
+            factory.virtio_net(nic, &ram.mem, msi.clone()),
             format!("nic {}", nic.mac),
         )?;
     }
@@ -162,7 +162,7 @@ pub fn build(
     for share in &desc.shares {
         add_pci(
             &pci_root,
-            factory.vhost_user_fs(share, msi.clone()),
+            factory.vhost_user_fs(share, &ram.mem, msi.clone()),
             format!("share `{}`", share.tag),
         )?;
     }

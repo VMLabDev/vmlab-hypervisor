@@ -81,6 +81,7 @@ impl DeviceFactory for TestFactory {
     fn virtio_blk(
         &self,
         disk: &vmlab_hv_proto::machine::Disk,
+        _mem: &vmlab_hv_devices::GuestMemory,
         _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
     ) -> Result<Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
@@ -92,6 +93,7 @@ impl DeviceFactory for TestFactory {
     fn virtio_console(
         &self,
         _ports: &[vmlab_hv_proto::machine::SerialPort],
+        _mem: &vmlab_hv_devices::GuestMemory,
         _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
     ) -> Result<Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
@@ -103,6 +105,7 @@ impl DeviceFactory for TestFactory {
     fn virtio_net(
         &self,
         nic: &vmlab_hv_proto::machine::Nic,
+        _mem: &vmlab_hv_devices::GuestMemory,
         _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
     ) -> Result<Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
@@ -114,6 +117,7 @@ impl DeviceFactory for TestFactory {
     fn vhost_user_fs(
         &self,
         share: &vmlab_hv_proto::machine::FsShare,
+        _mem: &vmlab_hv_devices::GuestMemory,
         _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
     ) -> Result<Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>, DeviceUnavailable> {
         Err(DeviceUnavailable::new(

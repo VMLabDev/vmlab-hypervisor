@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use vmlab_hv_proto::MachineDescription;
-use vmlab_hv_vmm::{builder, control, factory::NoDevices, vm::ExitReason, VmHandle};
+use vmlab_hv_vmm::{builder, control, vm::ExitReason, VmHandle};
+
+use crate::devices::DeviceSet;
 
 const USAGE: &str = "usage: vmlab-hv --machine <machine.json> --control <control.sock> [--paused]";
 
@@ -48,6 +50,8 @@ fn next_value(argv: &mut impl Iterator<Item = String>, flag: &str) -> Result<Pat
         .map(PathBuf::from)
         .ok_or_else(|| format!("{flag} needs a value"))
 }
+
+mod devices;
 
 fn main() -> ExitCode {
     let args = match parse_args() {
@@ -91,7 +95,7 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
     // block before the vCPU threads exist.
     block_termination_signals();
 
-    let mut vm = builder::build(&desc, &NoDevices, args.paused)
+    let mut vm = builder::build(&desc, &DeviceSet, args.paused)
         .map_err(|e| format!("building machine `{}`: {e}", desc.name))?;
     let handle = vm.handle();
 

@@ -11,16 +11,16 @@
 //! land:
 //!
 //! - `serial::Serial16550A::new(log: File, irq: Arc<dyn IrqLine>)` for COM1;
-//! - `virtio::VirtioPciDevice::new_blk(disk: ...)` / `new_console(ports)` /
-//!   `new_net(nic)` taking `Arc<dyn MsiSink>` and returning
-//!   `Arc<Mutex<dyn PciDevice>>` (the transport implements the PCI side);
-//! - a vhost-user-fs PCI device taking the share and the shared memory.
+//! - `virtio::VirtioPciDevice::new(id, Box<dyn VirtioDevice>, GuestMemory,
+//!   msi, intx)` wrapping `block::Block`, `console::Console` and `net::Net`;
+//! - a vhost-user-fs PCI device taking the share and the shared memory
+//!   (still to come: the vhost-user master).
 
 use std::path::Path;
 use std::sync::Arc;
 use parking_lot::Mutex;
 
-use vmlab_hv_devices::{BusDevice, IrqLine, MsiSink, PciDevice};
+use vmlab_hv_devices::{BusDevice, GuestMemory, IrqLine, MsiSink, PciDevice};
 use vmlab_hv_proto::machine::{Disk, FsShare, Nic, SerialPort};
 
 use crate::error::DeviceUnavailable;
@@ -38,6 +38,7 @@ pub trait DeviceFactory: Send + Sync {
     fn virtio_blk(
         &self,
         disk: &Disk,
+        mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
     ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable>;
 
@@ -45,6 +46,7 @@ pub trait DeviceFactory: Send + Sync {
     fn virtio_console(
         &self,
         ports: &[SerialPort],
+        mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
     ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable>;
 
@@ -52,6 +54,7 @@ pub trait DeviceFactory: Send + Sync {
     fn virtio_net(
         &self,
         nic: &Nic,
+        mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
     ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable>;
 
@@ -59,6 +62,7 @@ pub trait DeviceFactory: Send + Sync {
     fn vhost_user_fs(
         &self,
         share: &FsShare,
+        mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
     ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable>;
 }
@@ -84,6 +88,7 @@ impl DeviceFactory for NoDevices {
     fn virtio_blk(
         &self,
         disk: &Disk,
+        _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
     ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
@@ -98,6 +103,7 @@ impl DeviceFactory for NoDevices {
     fn virtio_console(
         &self,
         ports: &[SerialPort],
+        _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
     ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
@@ -112,6 +118,7 @@ impl DeviceFactory for NoDevices {
     fn virtio_net(
         &self,
         nic: &Nic,
+        _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
     ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
@@ -126,6 +133,7 @@ impl DeviceFactory for NoDevices {
     fn vhost_user_fs(
         &self,
         share: &FsShare,
+        _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
     ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
         Err(DeviceUnavailable::new(

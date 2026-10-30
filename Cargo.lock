@@ -345,7 +345,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
+ "parking_lot",
  "serde_json",
+ "vmlab-disk",
+ "vmlab-hv-devices",
  "vmlab-hv-proto",
  "vmlab-hv-vmm",
 ]

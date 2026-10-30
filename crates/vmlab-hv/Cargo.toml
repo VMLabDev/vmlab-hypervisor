@@ -9,7 +9,10 @@ rust-version.workspace = true
 [dependencies]
 vmlab-hv-proto.workspace = true
 vmlab-hv-vmm.workspace = true
+vmlab-hv-devices.workspace = true
+vmlab-disk.workspace = true
 libc.workspace = true
+parking_lot.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 
