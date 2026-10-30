@@ -217,6 +217,45 @@ impl Driver {
 }
 
 #[test]
+fn ncq_read_write_tags_set_device_bits_and_error_log_survive_snapshot() {
+    let mut d = Driver::new();
+    d.hba.attach_disk(0, image(vec![0; 4096], false)).unwrap();
+    d.start(0);
+    assert_ne!(d.read(0) & (1 << 30), 0);
+    assert_eq!(d.read(0) & (1 << 24), 0);
+    d.put(0x4000, &[0x5a; 512]);
+    for (command, flags, tag, lba) in [(0x61, 0x40, 5, 2), (0x60, 0, 13, 2), (0x60, 0, 23, 99)] {
+        d.ack(0);
+        d.prepare(command, flags, lba, 0, None, &[(0x4000, 512, false)]);
+        d.put(0x3003, &[1]);
+        d.put(0x300c, &[(tag << 3) as u8]);
+        let header = d.bytes(0x1000, 32);
+        d.put(0x1000 + tag * 32, &header);
+        d.write(port_base(0) + 0x34, 1 << tag);
+        d.write(port_base(0) + 0x38, 1 << tag);
+        assert_eq!(d.read(port_base(0) + 0x34), 0);
+        assert_eq!(d.bytes(0x2058, 1), [0xa1]);
+        assert_eq!(le32(&d.bytes(0x205c, 4)), 1 << tag);
+        assert_ne!(d.read(port_base(0) + 0x10) & 8, 0);
+        if lba == 2 {
+            assert_eq!(d.read(port_base(0) + 0x20), 0x50);
+            assert_eq!(d.bytes(0x4000, 512), [0x5a; 512]);
+        } else {
+            assert_ne!(d.read(port_base(0) + 0x10) & TFES, 0);
+        }
+    }
+    let saved = d.hba.save_state().unwrap();
+    d.hba.restore_state(&saved).unwrap();
+    d.ack(0);
+    d.prepare(0x2f, 0, 0x10, 1, None, &[(0x4000, 512, false)]);
+    assert_eq!(d.issue(0), 0x50);
+    let log = d.bytes(0x4000, 512);
+    assert_eq!(log[0], 23);
+    assert_eq!(&log[2..5], &[0x51, 0x10, 99]);
+    assert_eq!(log.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)), 0);
+}
+
+#[test]
 fn msi_reports_a_second_port_while_the_first_port_is_pending() {
     let mut d = Driver::new();
     d.hba.attach_disk(0, image(vec![0; 4096], false)).unwrap();
@@ -292,7 +331,7 @@ fn p4_identify_dma_write_read_flush_and_fis() {
     assert_eq!(le32(&d.bytes(0x1004, 4)), 512);
     let identify = d.bytes(0x4000, 512);
     assert_eq!(le64(&identify[200..]), 128);
-    assert_eq!(identify[153] & 1, 0);
+    assert_eq!(identify[153] & 1, 1);
     assert_eq!(d.bytes(0x2020, 1), [0x5f]);
     let payload: Vec<u8> = (0..1024).map(|i| (i % 251) as u8).collect();
     d.put(0x4000, &payload);

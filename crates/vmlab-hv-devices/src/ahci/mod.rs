@@ -3,8 +3,8 @@
 //! Register and DMA layouts follow Intel AHCI 1.3.1, sections 3-5 and 10.
 //! ATA commands follow T13/1410D, and optical commands follow T10 MMC-4.
 //! PCI identity and capabilities match the q35 hardware captures. Commands
-//! complete synchronously. NCQ, port multipliers and power management are not
-//! advertised. Disk contents belong to the VMM's disk snapshot transaction.
+//! complete synchronously, including tagged NCQ commands. Port multipliers and
+//! power management are not advertised. Disk contents belong to the VMM snapshot.
 
 mod ata;
 mod atapi;
@@ -25,7 +25,7 @@ use atapi::Optical;
 
 const PORTS: usize = 6;
 const REGS: usize = 0x1000;
-const CAP: u32 = (1 << 31) | (1 << 24) | (1 << 20) | (1 << 18) | (31 << 8) | 5;
+const CAP: u32 = (1 << 31) | (1 << 30) | (1 << 20) | (1 << 18) | (31 << 8) | 5;
 const DHRS: u32 = 1;
 const PSS: u32 = 2;
 const DSS: u32 = 4;
@@ -131,6 +131,7 @@ impl Ahci {
                 image,
                 write_cache: true,
                 transfer_mode: 0x22,
+                ncq_error: [0; 24],
             }),
         )
     }
@@ -261,6 +262,9 @@ impl Ahci {
         if let Some(Drive::Cdrom(optical)) = self.drives[port].as_mut() {
             optical.locked = false;
             optical.sense = [0; 3];
+        }
+        if let Some(Drive::Disk(disk)) = self.drives[port].as_mut() {
+            disk.ncq_error = [0; 24];
         }
     }
 
@@ -448,9 +452,13 @@ impl Ahci {
             prds.push((address, len, raw & (1 << 31) != 0));
         }
         let write = flags & 0x40 != 0;
+        let queued = matches!(cfis[2], 0x60 | 0x61);
+        if queued && usize::from(cfis[12] >> 3) != slot {
+            return Err(());
+        }
         let mut input = Vec::new();
         // ATA write lengths are limited by the sector count, never by guest PRDT capacity.
-        if write && matches!(cfis[2], 0x35 | 0xca | 0x30 | 0x34) {
+        if write && matches!(cfis[2], 0x35 | 0xca | 0x30 | 0x34 | 0x61) {
             let (_, length) = Self::ata_range(&cfis);
             if length > capacity {
                 return Err(());
@@ -526,8 +534,30 @@ impl Ahci {
             header_addr.checked_add(4).ok_or(())?,
             &(transferred as u32).to_le_bytes(),
         )?;
-        let pio =
-            matches!(cfis[2], 0xec | 0xa1 | 0x20 | 0x24) || (cfis[2] == 0xa0 && cfis[3] & 1 == 0);
+        if queued {
+            if error != 0
+                && let Some(Drive::Disk(disk)) = self.drives[port].as_mut()
+            {
+                disk.ncq_error[..20].copy_from_slice(&cfis);
+                disk.ncq_error[20] = status;
+                disk.ncq_error[21] = error;
+            }
+            self.put32(base + 0x20, u32::from(status) | (u32::from(error) << 8));
+            let active = 1u32 << slot;
+            self.put32(base + 0x34, self.get32(base + 0x34) & !active);
+            if self.get32(base + 0x18) & 0x10 != 0 {
+                let mut sdb = [0xa1, 0x40, status, error, 0, 0, 0, 0];
+                sdb[4..].copy_from_slice(&active.to_le_bytes());
+                self.dma_write(self.address(base + 8).checked_add(0x58).ok_or(())?, &sdb)?;
+            }
+            self.port_interrupt(
+                port,
+                8 | if error != 0 { TFES } else { 0 } | if ioc { DSS } else { 0 },
+            );
+            return Ok(());
+        }
+        let pio = matches!(cfis[2], 0xec | 0xa1 | 0x20 | 0x24 | 0x2f)
+            || (cfis[2] == 0xa0 && cfis[3] & 1 == 0);
         let mut source = cfis;
         if cfis[2] == 0xa0 {
             source[12] = 3; // ATAPI command complete: C/D and I/O.
@@ -572,11 +602,16 @@ impl Ahci {
     }
 
     fn ata_range(fis: &[u8; 20]) -> (u64, usize) {
-        let ext = matches!(fis[2], 0x25 | 0x35 | 0x24 | 0x34);
+        let queued = matches!(fis[2], 0x60 | 0x61);
+        let ext = queued || matches!(fis[2], 0x25 | 0x35 | 0x24 | 0x34);
         let mut lba = fis[4] as u64 | ((fis[5] as u64) << 8) | ((fis[6] as u64) << 16);
         let count = if ext {
             lba |= (fis[8] as u64) << 24 | (fis[9] as u64) << 32 | (fis[10] as u64) << 40;
-            let raw = u16::from_le_bytes([fis[12], fis[13]]) as usize;
+            let raw = u16::from_le_bytes(if queued {
+                [fis[3], fis[11]]
+            } else {
+                [fis[12], fis[13]]
+            }) as usize;
             if raw == 0 { 65536 } else { raw }
         } else {
             lba |= ((fis[7] & 0xf) as u64) << 24;
@@ -608,8 +643,8 @@ impl Ahci {
                     _ => Err(4),
                 }
             }
-            0x25 | 0xc8 | 0x20 | 0x24 | 0x35 | 0xca | 0x30 | 0x34 => {
-                let expected_write = matches!(fis[2], 0x35 | 0xca | 0x30 | 0x34);
+            0x25 | 0xc8 | 0x20 | 0x24 | 0x35 | 0xca | 0x30 | 0x34 | 0x60 | 0x61 => {
+                let expected_write = matches!(fis[2], 0x35 | 0xca | 0x30 | 0x34 | 0x61);
                 if write != expected_write {
                     return Err(4);
                 }
@@ -629,7 +664,7 @@ impl Ahci {
                         return Err(4);
                     }
                     image.write_at(offset, input).map_err(|_| 0x40)?;
-                    if !disk.write_cache {
+                    if !disk.write_cache || (fis[2] == 0x61 && fis[7] & 0x80 != 0) {
                         image.flush().map_err(|_| 0x40)?;
                     }
                     Ok(Payload::Bytes(Vec::new()))
@@ -644,6 +679,24 @@ impl Ahci {
                 }
                 _ => Err(4),
             },
+            0x2f if !write && fis[4] == 0x10 && fis[5..7] == [0, 0] && fis[12..14] == [1, 0] => {
+                let Drive::Disk(disk) = drive else {
+                    return Err(4);
+                };
+                let mut log = vec![0; 512];
+                if disk.ncq_error[20] == 0 {
+                    log[0] = 0x80;
+                } else {
+                    log[0] = disk.ncq_error[12] >> 3;
+                    log[2..4].copy_from_slice(&disk.ncq_error[20..22]);
+                    log[4..11].copy_from_slice(&disk.ncq_error[4..11]);
+                    log[12] = disk.ncq_error[3];
+                    log[13] = disk.ncq_error[11];
+                }
+                log[511] =
+                    0u8.wrapping_sub(log.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)));
+                Ok(Payload::Bytes(log))
+            }
             0xef => {
                 let Drive::Disk(disk) = drive else {
                     return Err(4);
@@ -870,12 +923,12 @@ impl Snapshot for Ahci {
         self.id.clone()
     }
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
-        let mut state = b"AHC1".to_vec();
+        let mut state = b"AHC2".to_vec();
         state.extend(self.config);
         state.extend(self.regs);
         state.extend(self.index.to_le_bytes());
         for drive in &self.drives {
-            let mut bytes = [0; 24];
+            let mut bytes = [0; 48];
             match drive {
                 None => {}
                 Some(Drive::Disk(disk)) => {
@@ -884,6 +937,7 @@ impl Snapshot for Ahci {
                     bytes[2] = u8::from(disk.write_cache);
                     bytes[3] = disk.transfer_mode;
                     bytes[8..16].copy_from_slice(&disk.image.size().to_le_bytes());
+                    bytes[24..48].copy_from_slice(&disk.ncq_error);
                 }
                 Some(Drive::Cdrom(optical)) => {
                     bytes[0] = 2;
@@ -905,7 +959,7 @@ impl Snapshot for Ahci {
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
         let invalid =
             || DeviceError::State("AHCI snapshot version, topology or media mismatch".into());
-        if state.len() != 4 + 256 + REGS + 4 + PORTS * 24 || &state[..4] != b"AHC1" {
+        if state.len() != 4 + 256 + REGS + 4 + PORTS * 48 || &state[..4] != b"AHC2" {
             return Err(invalid());
         }
         let config: [u8; 256] = state[4..260].try_into().unwrap();
@@ -921,7 +975,7 @@ impl Snapshot for Ahci {
         }
         let ports = &state[264 + REGS..];
         for (port, drive) in self.drives.iter().enumerate() {
-            let bytes = &ports[port * 24..port * 24 + 24];
+            let bytes = &ports[port * 48..port * 48 + 48];
             let valid = match drive {
                 None => bytes[0] == 0,
                 Some(Drive::Disk(disk)) => {
@@ -947,12 +1001,13 @@ impl Snapshot for Ahci {
         self.index = index;
         for (port, drive) in self.drives.iter_mut().enumerate() {
             if let Some(Drive::Disk(disk)) = drive {
-                let bytes = &ports[port * 24..port * 24 + 24];
+                let bytes = &ports[port * 48..port * 48 + 48];
                 disk.write_cache = bytes[2] != 0;
                 disk.transfer_mode = bytes[3];
+                disk.ncq_error.copy_from_slice(&bytes[24..48]);
             }
             if let Some(Drive::Cdrom(optical)) = drive {
-                let bytes = &ports[port * 24..port * 24 + 24];
+                let bytes = &ports[port * 48..port * 48 + 48];
                 optical.tray_open = bytes[1] != 0;
                 optical.locked = bytes[2] != 0;
                 optical.attention = bytes[3] != 0;

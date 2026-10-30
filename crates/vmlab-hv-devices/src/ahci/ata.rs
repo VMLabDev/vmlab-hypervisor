@@ -6,6 +6,7 @@ pub(super) struct AtaDisk {
     pub image: Box<dyn DiskImage>,
     pub write_cache: bool,
     pub transfer_mode: u8,
+    pub ncq_error: [u8; 24],
 }
 
 pub(super) enum Drive {
@@ -56,8 +57,8 @@ impl Drive {
             },
         );
         word(64, 3);
-        word(75, 0); // No NCQ.
-        word(76, 2); // SATA Gen1.
+        word(75, if packet { 0 } else { 31 });
+        word(76, 2 | if packet { 0 } else { 1 << 8 }); // SATA Gen1 and NCQ.
         word(80, 0x007e);
         word(81, 0x0016);
         word(82, 1 << 5); // Write cache and FLUSH CACHE.
