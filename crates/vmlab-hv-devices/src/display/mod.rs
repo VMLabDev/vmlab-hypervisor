@@ -18,6 +18,7 @@
 mod font;
 #[cfg(test)]
 mod tests;
+pub mod virtio_vga;
 
 use crate::{BarInfo, BarKind, DeviceError, PciDevice, Snapshot};
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};

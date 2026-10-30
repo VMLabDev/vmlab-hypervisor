@@ -10,6 +10,7 @@
 pub mod block;
 pub mod console;
 pub mod fs;
+pub mod gpu;
 pub mod net;
 pub mod pci;
 
