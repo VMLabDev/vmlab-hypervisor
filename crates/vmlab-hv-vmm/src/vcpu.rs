@@ -145,6 +145,18 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                 // interrupt; re-enter and let the state check handle pauses.
             }
             Ok(VcpuExit::IrqWindowOpen) => {}
+            Ok(VcpuExit::Hyperv) => {
+                if let Err(e) = crate::hyperv::handle_exit(guard.get_kvm_run()) {
+                    shared.request_exit(crate::vm::ExitReason::Error(e.to_string()));
+                    return;
+                }
+            }
+            Ok(VcpuExit::SystemEvent(kvm_bindings::KVM_SYSTEM_EVENT_RESET, _)) => {
+                shared.request_exit(crate::vm::ExitReason::Shutdown(
+                    vmlab_hv_proto::control::ShutdownReason::GuestReset,
+                ));
+                return;
+            }
             Ok(VcpuExit::Shutdown) => {
                 // Triple fault: the guest reset. `reboot=t` and `panic=-1`
                 // both land here.
