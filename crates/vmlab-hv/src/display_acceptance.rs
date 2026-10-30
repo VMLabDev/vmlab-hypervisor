@@ -78,6 +78,91 @@ fn recognize(image: &Image) -> String {
     String::from_utf8(result.stdout).unwrap()
 }
 
+fn screenshot(path: &Path) -> Image {
+    let client = Client::connect(path, Capabilities(Capabilities::FRAMES)).unwrap();
+    client
+        .stream()
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let packet = client.receive().unwrap();
+    let Message::SurfaceConfigure {
+        width,
+        height,
+        stride,
+        kind: SurfaceKind::Shm,
+        ..
+    } = packet.message
+    else {
+        panic!("expected screenshot shm configure");
+    };
+    let Message::FrameReady {
+        surface_id,
+        buffer,
+        seq,
+        damage,
+        ..
+    } = client.receive().unwrap().message
+    else {
+        panic!("expected first screenshot frame");
+    };
+    assert!(
+        damage
+            .iter()
+            .any(|r| { r.x == 0 && r.y == 0 && r.width == width && r.height == height })
+    );
+    let mut pixels = vec![0; stride as usize * height as usize];
+    File::from(packet.fds[buffer as usize].try_clone().unwrap())
+        .read_exact_at(&mut pixels, 0)
+        .unwrap();
+    assert_eq!(stride, width * 4);
+    client.release(surface_id, buffer, seq).unwrap();
+    Image {
+        width,
+        height,
+        pixels,
+    }
+}
+
+pub(super) fn screenshots_after_unobserved_boot(path: &Path, agent: &mut AgentClient) {
+    Observer::guest(
+        agent,
+        &[
+            "sh",
+            "-c",
+            "for n in $(seq 1 300); do grep -aq 'login:' /dev/vcs1 && exit 0; sleep .1; done; cat /dev/vcs1; exit 1",
+        ],
+    );
+    let image = screenshot(path);
+    let text = recognize(&image);
+    assert!(
+        text.to_lowercase().contains("login:"),
+        "first screenshot OCR: {text:?}"
+    );
+    eprintln!(
+        "S1 first screenshot {}x{}: {text:?}",
+        image.width, image.height
+    );
+    Observer::guest(
+        agent,
+        &[
+            "sh",
+            "-c",
+            // Let fbdev's deferred DRM update reach the scanout without a viewer.
+            r"printf '\033[2J\033[HDisconnected console update\n' >/dev/tty1; sleep 1",
+        ],
+    );
+    let image = screenshot(path);
+    let text = recognize(&image);
+    assert!(
+        text.to_lowercase().contains("disconnected console update"),
+        "reconnected screenshot OCR: {text:?}"
+    );
+    eprintln!(
+        "S1 reconnected screenshot {}x{}: {text:?}",
+        image.width, image.height
+    );
+}
+
 pub(super) struct Observer {
     client: Arc<Client>,
     state: Arc<(Mutex<State>, Condvar)>,
