@@ -20,10 +20,39 @@ use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
 
-use vmlab_hv_devices::{BusDevice, GuestMemory, IrqLine, MsiSink, PciDevice};
+use vmlab_disk::DiskImage;
+use vmlab_hv_devices::{
+    BusDevice, GuestMemory, IrqLine, MsiSink, PciDevice, PciSnapshot, Snapshot,
+};
 use vmlab_hv_proto::machine::{Disk, FsShare, Nic, SerialPort};
 
 use crate::error::DeviceUnavailable;
+
+/// One open disk image shared between a block device and the VMM's snapshot
+/// orchestration.
+pub type SharedImage = Arc<Mutex<Box<dyn DiskImage>>>;
+
+/// A built serial console: the bus device plus its snapshot handle (the
+/// same object), when the model carries guest-visible state.
+pub struct BuiltSerial {
+    pub device: Arc<Mutex<dyn BusDevice>>,
+    pub snapshot: Option<Arc<Mutex<dyn Snapshot>>>,
+}
+
+/// A built PCI function: the function the PCI root places, plus snapshot
+/// access to the same object when the model carries guest-visible state.
+pub struct BuiltPci {
+    pub function: Arc<Mutex<dyn PciDevice>>,
+    pub snapshot: Option<Arc<Mutex<dyn PciSnapshot>>>,
+}
+
+/// A built virtio-blk function plus the shared disk image handle: the block
+/// device runs on this image and so does snapshot orchestration, through
+/// one open file (D14).
+pub struct BuiltBlk {
+    pub pci: BuiltPci,
+    pub disk: SharedImage,
+}
 
 /// Produces the device models a machine description names.
 pub trait DeviceFactory: Send + Sync {
@@ -32,7 +61,7 @@ pub trait DeviceFactory: Send + Sync {
         &self,
         log_path: &Path,
         irq: Arc<dyn IrqLine>,
-    ) -> Result<Arc<Mutex<dyn BusDevice>>, DeviceUnavailable>;
+    ) -> Result<BuiltSerial, DeviceUnavailable>;
 
     /// A virtio-blk PCI function for one disk.
     fn virtio_blk(
@@ -40,7 +69,7 @@ pub trait DeviceFactory: Send + Sync {
         disk: &Disk,
         mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable>;
+    ) -> Result<BuiltBlk, DeviceUnavailable>;
 
     /// A single multiport virtio-console PCI function with `ports` in order.
     fn virtio_console(
@@ -48,7 +77,7 @@ pub trait DeviceFactory: Send + Sync {
         ports: &[SerialPort],
         mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable>;
+    ) -> Result<BuiltPci, DeviceUnavailable>;
 
     /// A virtio-net PCI function for one NIC.
     fn virtio_net(
@@ -56,7 +85,7 @@ pub trait DeviceFactory: Send + Sync {
         nic: &Nic,
         mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable>;
+    ) -> Result<BuiltPci, DeviceUnavailable>;
 
     /// A vhost-user-fs PCI function backed by an external virtiofsd.
     fn vhost_user_fs(
@@ -64,7 +93,7 @@ pub trait DeviceFactory: Send + Sync {
         share: &FsShare,
         mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable>;
+    ) -> Result<BuiltPci, DeviceUnavailable>;
 }
 
 /// A factory with no devices: every constructor explains that the model has
@@ -78,7 +107,7 @@ impl DeviceFactory for NoDevices {
         &self,
         _log_path: &Path,
         _irq: Arc<dyn IrqLine>,
-    ) -> Result<Arc<Mutex<dyn BusDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltSerial, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "serial-16550a",
             "the device model has not landed in vmlab-hv-devices yet",
@@ -90,7 +119,7 @@ impl DeviceFactory for NoDevices {
         disk: &Disk,
         _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltBlk, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-blk",
             format!(
@@ -105,7 +134,7 @@ impl DeviceFactory for NoDevices {
         ports: &[SerialPort],
         _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-console",
             format!(
@@ -124,7 +153,7 @@ impl DeviceFactory for NoDevices {
         nic: &Nic,
         _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-net",
             format!(
@@ -139,7 +168,7 @@ impl DeviceFactory for NoDevices {
         share: &FsShare,
         _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "vhost-user-fs",
             format!(
@@ -147,5 +176,70 @@ impl DeviceFactory for NoDevices {
                 share.tag
             ),
         ))
+    }
+}
+
+/// Forwards [`DiskImage`] to one shared handle, so a block device and the
+/// VMM's snapshot orchestration use the same open image: qcow2 metadata
+/// caches cannot be duplicated across two handles of one file.
+///
+/// The VMM holds the [`SharedImage`] in its snapshot registry; the block
+/// device gets this box around a clone of it.
+pub struct SharedDisk(pub SharedImage);
+
+impl DiskImage for SharedDisk {
+    fn size(&self) -> u64 {
+        self.0.lock().size()
+    }
+
+    fn read_only(&self) -> bool {
+        self.0.lock().read_only()
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> vmlab_disk::Result<()> {
+        self.0.lock().read_at(offset, buf)
+    }
+
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> vmlab_disk::Result<()> {
+        self.0.lock().write_at(offset, buf)
+    }
+
+    fn flush(&mut self) -> vmlab_disk::Result<()> {
+        self.0.lock().flush()
+    }
+
+    fn discard(&mut self, offset: u64, len: u64) -> vmlab_disk::Result<()> {
+        self.0.lock().discard(offset, len)
+    }
+
+    fn snapshots(&self) -> vmlab_disk::Result<Vec<vmlab_disk::SnapshotInfo>> {
+        self.0.lock().snapshots()
+    }
+
+    fn snapshot_create(
+        &mut self,
+        name: &str,
+        vm_state_size: u64,
+        vm_clock_nsec: u64,
+    ) -> vmlab_disk::Result<()> {
+        self.0
+            .lock()
+            .snapshot_create(name, vm_state_size, vm_clock_nsec)
+    }
+
+    fn snapshot_apply(&mut self, name: &str) -> vmlab_disk::Result<vmlab_disk::SnapshotInfo> {
+        self.0.lock().snapshot_apply(name)
+    }
+
+    fn snapshot_delete(&mut self, name: &str) -> vmlab_disk::Result<()> {
+        self.0.lock().snapshot_delete(name)
+    }
+
+    fn write_vmstate(&mut self, offset: u64, buf: &[u8]) -> vmlab_disk::Result<()> {
+        self.0.lock().write_vmstate(offset, buf)
+    }
+
+    fn read_vmstate(&mut self, offset: u64, buf: &mut [u8]) -> vmlab_disk::Result<()> {
+        self.0.lock().read_vmstate(offset, buf)
     }
 }

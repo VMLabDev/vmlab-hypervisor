@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use kvm_ioctls::{VcpuExit, VcpuFd};
+use parking_lot::Mutex;
 
 use crate::vm::VmShared;
 
@@ -38,14 +39,19 @@ pub fn install_kick_handler() {
 }
 
 /// One running vCPU: its thread. The kick handle is the thread's id, held in
-/// the shared registry from thread start to thread end.
+/// the shared registry from thread start to thread end; the KVM fd itself is
+/// shared with the VMM so snapshot orchestration can read and write vCPU
+/// state while the owning thread is parked.
 pub struct VcpuThread {
     handle: Option<JoinHandle<()>>,
 }
 
 impl VcpuThread {
     /// Spawn the thread that owns `vcpu` and runs it against `shared`.
-    pub fn spawn(id: u8, vcpu: VcpuFd, shared: Arc<VmShared>) -> std::io::Result<Self> {
+    /// The fd sits in a mutex shared with the snapshot path: this thread
+    /// holds it across KVM_RUN only, so a snapshot can take it once the
+    /// thread parks.
+    pub fn spawn(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: Arc<VmShared>) -> std::io::Result<Self> {
         install_kick_handler();
         let handle = std::thread::Builder::new()
             .name(format!("vcpu-{id}"))
@@ -68,8 +74,9 @@ impl VcpuThread {
     }
 }
 
-/// The KVM_RUN loop of one vCPU.
-fn run_vcpu(id: u8, mut vcpu: VcpuFd, shared: &Arc<VmShared>) {
+/// The KVM_RUN loop of one vCPU. The fd is locked across the ioctl only, so
+/// the snapshot path can hold it while this thread is parked.
+fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
     loop {
         if !shared.should_run() {
             if shared.exited() {
@@ -78,8 +85,12 @@ fn run_vcpu(id: u8, mut vcpu: VcpuFd, shared: &Arc<VmShared>) {
             shared.park();
             continue;
         }
-        vcpu.set_kvm_immediate_exit(0);
-        match vcpu.run() {
+        // The exit borrows the fd's kvm_run area, so the guard lives through
+        // the dispatch; nothing else takes this mutex while the thread runs
+        // (the snapshot path waits for the thread to park first).
+        let mut guard = vcpu.lock();
+        guard.set_kvm_immediate_exit(0);
+        match guard.run() {
             Ok(VcpuExit::IoIn(port, data)) => shared.io_read(port, data),
             Ok(VcpuExit::IoOut(port, data)) => shared.io_write(port, data),
             Ok(VcpuExit::MmioRead(addr, data)) => shared.mmio_read(addr, data),

@@ -320,6 +320,48 @@ impl PciRoot {
         }
         None
     }
+
+    /// Root-side BAR state for snapshots: per occupied slot, the programmed
+    /// address and mid-sizing flag of each BAR, in registration order. The
+    /// pre-assigned addresses are deterministic for a machine description,
+    /// so only the guest-driven part needs saving.
+    pub fn save_bar_states(&self) -> Vec<(u8, Vec<(u64, bool)>)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, func)| {
+                func.as_ref().map(|f| {
+                    (
+                        slot as u8,
+                        f.bars.iter().map(|b| (b.addr, b.sizing)).collect(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Restore BAR state saved by [`PciRoot::save_bar_states`]. The slot
+    /// and BAR layout must match, which the machine-description digest
+    /// guarantees for a compatible snapshot.
+    pub fn restore_bar_states(&mut self, saved: &[(u8, Vec<(u64, bool)>)]) -> Result<(), String> {
+        for (slot, bars) in saved {
+            let Some(func) = self.slots.get_mut(*slot as usize).and_then(|s| s.as_mut()) else {
+                return Err(format!("saved PCI state names slot {slot}, which is empty"));
+            };
+            if func.bars.len() != bars.len() {
+                return Err(format!(
+                    "saved PCI state for slot {slot} has {} bars, this machine has {}",
+                    bars.len(),
+                    func.bars.len()
+                ));
+            }
+            for (bar, (addr, sizing)) in func.bars.iter_mut().zip(bars) {
+                bar.addr = *addr;
+                bar.sizing = *sizing;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn bar_low_read(bar: &BarState) -> u32 {
