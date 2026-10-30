@@ -1,0 +1,17 @@
+[package]
+name = "vmlab-hv-vmm"
+description = "KVM virtual machine, vCPUs, machine models and snapshot orchestration for vmlab-hv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vmlab-hv-proto.workspace = true
+vmlab-hv-devices.workspace = true
+vmlab-disk.workspace = true
+vm-memory.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

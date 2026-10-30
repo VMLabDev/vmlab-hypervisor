@@ -1,0 +1,15 @@
+[package]
+name = "vmlab-hv-devices"
+description = "Device models for vmlab-hv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vm-memory.workspace = true
+virtio-queue = "0.18"
+thiserror.workspace = true
+
+[lints]
+workspace = true

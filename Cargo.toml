@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/VMLabDev/vmlab-hypervisor"
+rust-version = "1.99"
+
+[workspace.dependencies]
+vmlab-hv-proto = { path = "crates/vmlab-hv-proto" }
+vmlab-disk = { path = "crates/vmlab-disk" }
+vmlab-hv-devices = { path = "crates/vmlab-hv-devices" }
+vmlab-hv-vmm = { path = "crates/vmlab-hv-vmm" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+vm-memory = { version = "0.18", features = ["backend-mmap", "backend-bitmap"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
