@@ -8,6 +8,14 @@ literal wire bytes.
 
 ## Envelope
 
+For q35 machines, `display.socket` and `display.vnc_socket` in the machine
+description select the native and RFB Unix socket paths. Both are optional.
+When absent, they default to `display.sock` and `vnc.sock` beside the control
+socket. The paths must differ and must not already exist. The binary binds
+both before resuming a guest, including when launched with `--paused`.
+A connected native client receives the initial surface while paused and
+subsequent firmware frames after resume.
+
 The transport is an AF_UNIX stream. Each message starts with this header:
 
 | Byte offset | Type | Meaning |

@@ -253,6 +253,12 @@ pub struct Display {
     pub device: DisplayDevice,
     pub pci: PciAddress,
     pub rom: Option<PathBuf>,
+    /// Native display socket; absent uses display.sock beside the control socket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<PathBuf>,
+    /// RFB socket; absent uses vnc.sock beside the control socket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vnc_socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

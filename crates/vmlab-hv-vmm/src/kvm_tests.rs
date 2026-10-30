@@ -74,7 +74,15 @@ fn q35_seabios_banner_through_control_socket() {
     let handle = vm.handle();
     let socket = dir.path().join("control.sock");
     crate::control::serve(&socket, &handle).unwrap();
-    crate::display::serve(handle.shared(), dir.path()).unwrap();
+    let duplicate = dir.path().join("duplicate.sock");
+    assert!(crate::display::serve(handle.shared(), &duplicate, &duplicate).is_err());
+    assert!(!duplicate.exists());
+    crate::display::serve(
+        handle.shared(),
+        &dir.path().join("display.sock"),
+        &dir.path().join("vnc.sock"),
+    )
+    .unwrap();
     let mut client = vmlab_hv_proto::client::Client::connect(&socket).unwrap();
     assert!(
         client

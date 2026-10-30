@@ -54,6 +54,8 @@ fn next_value(argv: &mut impl Iterator<Item = String>, flag: &str) -> Result<Pat
 #[cfg(test)]
 mod acceptance;
 mod devices;
+#[cfg(test)]
+mod display_acceptance;
 
 fn main() -> ExitCode {
     let args = match parse_args() {
@@ -112,9 +114,20 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
 
     // Bind every served socket before the vCPUs run.
     control::serve(&args.control, &handle).map_err(|e| format!("control socket: {e}"))?;
-    handle
-        .serve_display(args.control.parent().unwrap_or(std::path::Path::new(".")))
-        .map_err(|e| e.to_string())?;
+    if let Some(display) = &desc.display {
+        let directory = args.control.parent().unwrap_or(std::path::Path::new("."));
+        let native = display
+            .socket
+            .clone()
+            .unwrap_or_else(|| directory.join("display.sock"));
+        let rfb = display
+            .vnc_socket
+            .clone()
+            .unwrap_or_else(|| directory.join("vnc.sock"));
+        handle
+            .serve_display(&native, &rfb)
+            .map_err(|e| e.to_string())?;
+    }
 
     spawn_signal_waiter(handle.clone());
 

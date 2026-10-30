@@ -196,12 +196,15 @@ impl InputSink for Input {
     }
 }
 
-pub(crate) fn serve(shared: &Arc<VmShared>, directory: &Path) -> Result<(), VmmError> {
+pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result<(), VmmError> {
     if shared.vga.lock().is_none() {
         return Ok(());
     }
-    let native = directory.join("display.sock");
-    let rfb = directory.join("vnc.sock");
+    if native == rfb {
+        return Err(VmmError::Control(
+            "native and RFB sockets must be different".into(),
+        ));
+    }
     if native.exists() || rfb.exists() {
         return Err(VmmError::Control(
             "display.sock or vnc.sock already exists".into(),
