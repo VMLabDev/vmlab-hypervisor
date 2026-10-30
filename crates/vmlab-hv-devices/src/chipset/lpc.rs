@@ -260,6 +260,7 @@ impl PciDevice for Lpc {
             let mask = match index {
                 4 => 0x0f,
                 5 => 1,
+                0x3c => 0xff,
                 0x40 => 0x80,
                 0x41 => 0xff,
                 0x44 => 0x80,
@@ -358,6 +359,13 @@ mod tests {
             irq,
             actions,
         )
+    }
+
+    #[test]
+    fn ovmf_can_assign_the_lpc_interrupt_line() {
+        let (mut lpc, _, _) = fixture();
+        lpc.config_write(0x3c / 4, 0, &[0xff]);
+        assert_eq!(lpc.config_read(0x3c / 4) & 0xff, 0xff);
     }
 
     #[test]
