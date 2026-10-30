@@ -887,6 +887,75 @@ fn s2_discard_and_zero_semantics() {
     assert!(content[384 * 1024..1024 * 1024].iter().all(|&b| b == 0x77));
 }
 
+#[test]
+fn s2_partial_discard_preserves_adjacent_filesystem_blocks() {
+    require_qemu_img!();
+    let temp = tmpdir("partial-discard");
+    let disk = temp.path().join("disk.qcow2");
+    let expected = temp.path().join("expected.raw");
+    let data = vec![0x5a; 3 * 65536];
+    std::fs::write(&expected, &data).unwrap();
+    ops::create_qcow2(&disk, data.len() as u64, None, None).unwrap();
+    let mut image = vmlab_disk::open(&disk, Format::Qcow2, false).unwrap();
+    image.write_at(0, &data).unwrap();
+    image.snapshot_create("before-trim", 0, 0).unwrap();
+    // ext4 frees 4 KiB blocks, smaller than the image's 64 KiB clusters.
+    // A discard hint may be ignored, but may never erase neighbouring blocks.
+    for (offset, length) in [
+        (0, 4096),
+        (4096, 4096),
+        (65536 - 4096, 8192),
+        (131072, 0),
+        (data.len() as u64 - 4096, 4096),
+    ] {
+        image.discard(offset, length).unwrap();
+        let mut actual = vec![0; data.len()];
+        image.read_at(0, &mut actual).unwrap();
+        assert!(
+            actual[..offset as usize] == data[..offset as usize],
+            "discard damaged bytes before {offset}"
+        );
+        assert!(
+            actual[(offset + length) as usize..] == data[(offset + length) as usize..],
+            "discard damaged bytes after {}",
+            offset + length
+        );
+    }
+    image.flush().unwrap();
+    drop(image);
+    qemu_check(&disk);
+    // The conservative implementation keeps partially covered clusters.
+    qemu_img(&[
+        "compare",
+        "-f",
+        "qcow2",
+        "-F",
+        "raw",
+        &disk.to_string_lossy(),
+        &expected.to_string_lossy(),
+    ]);
+    {
+        let mut image = vmlab_disk::open(&disk, Format::Qcow2, false).unwrap();
+        image.discard(4096, 2 * 65536).unwrap();
+        image.flush().unwrap();
+    }
+    let mut trimmed = data.clone();
+    trimmed[65536..131072].fill(0);
+    std::fs::write(&expected, trimmed).unwrap();
+    qemu_img(&[
+        "compare",
+        "-f",
+        "qcow2",
+        "-F",
+        "raw",
+        &disk.to_string_lossy(),
+        &expected.to_string_lossy(),
+    ]);
+    ops::snapshot_apply(&disk, "before-trim").unwrap();
+    assert_eq!(read_all(&disk, Format::Qcow2), data);
+    qemu_check(&disk);
+}
+
 /// Snapshot lifecycle churn: create/apply/delete interleaved, with vmstate
 /// of varying sizes, leaves a checkable image every time (mirrors what the
 /// VMM does across a machine's life).

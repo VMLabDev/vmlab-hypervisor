@@ -1132,14 +1132,12 @@ impl DiskImage for Qcow2Image {
         if end > self.size {
             return Err(Error::Unsupported("discard beyond end of image".into()));
         }
-        // Unmapping a partial cluster would discard live neighboring sectors.
-        // Discard is a hint; retain both partial boundary clusters.
-        let mut off = offset
-            .checked_next_multiple_of(self.cluster_size)
-            .unwrap_or(end);
-        let aligned_end = end & !(self.cluster_size - 1);
-        while off < aligned_end {
-            let cluster_off = off & !(self.cluster_size - 1);
+        // Discard is a hint. Keep partially covered clusters: freeing one
+        // would destroy live filesystem blocks outside the requested range.
+        let first = offset.div_ceil(self.cluster_size);
+        let last = end / self.cluster_size;
+        for cluster in first..last {
+            let cluster_off = cluster * self.cluster_size;
             let l1_index = self.l1_index_of(cluster_off) as usize;
             let l2_index = self.l2_index_of(cluster_off);
             if l1_index < self.l1.len() {
@@ -1158,7 +1156,6 @@ impl DiskImage for Qcow2Image {
                     }
                 }
             }
-            off = cluster_off + self.cluster_size;
         }
         Ok(())
     }
