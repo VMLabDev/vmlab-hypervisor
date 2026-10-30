@@ -78,6 +78,7 @@ struct ClientState {
 }
 impl DisplayServer {
     pub fn serve_rfb(&self, mut stream: UnixStream) -> io::Result<()> {
+        let _session = self.session(&stream)?;
         stream.write_all(b"RFB 003.008\n")?;
         if &read::<12>(&mut stream)? != b"RFB 003.008\n" {
             return Err(invalid("RFB 3.8 required"));

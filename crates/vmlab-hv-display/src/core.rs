@@ -8,7 +8,8 @@ use std::os::unix::{
     fs::FileExt,
     net::{UnixListener, UnixStream},
 };
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 /// Published pixels must stay immutable for the lifetime of their Arc.
@@ -100,6 +101,8 @@ pub(crate) struct State {
     pub led_seq: u64,
 }
 struct Shared {
+    closed: AtomicBool,
+    sessions: Mutex<Vec<Weak<UnixStream>>>,
     capture: Mutex<()>,
     state: Mutex<State>,
     changed: Condvar,
@@ -116,6 +119,8 @@ impl DisplayServer {
         frame.validate()?;
         Ok(Self {
             shared: Arc::new(Shared {
+                closed: AtomicBool::new(false),
+                sessions: Mutex::new(Vec::new()),
                 capture: Mutex::new(()),
                 state: Mutex::new(State {
                     frame: Arc::new(frame),
@@ -131,6 +136,33 @@ impl DisplayServer {
             }),
         })
     }
+    /// Interrupt all sessions, including unfinished handshakes and blocked writes.
+    pub fn shutdown(&self) {
+        self.shared.closed.store(true, Ordering::SeqCst);
+        for stream in self
+            .shared
+            .sessions
+            .lock()
+            .unwrap()
+            .drain(..)
+            .filter_map(|s| s.upgrade())
+        {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        self.shared.changed.notify_all();
+    }
+
+    pub(crate) fn session(&self, stream: &UnixStream) -> io::Result<Arc<UnixStream>> {
+        let session = Arc::new(stream.try_clone()?);
+        let mut sessions = self.shared.sessions.lock().unwrap();
+        if self.shared.closed.load(Ordering::SeqCst) {
+            return Err(io::Error::other("display server has stopped"));
+        }
+        sessions.retain(|session| session.strong_count() != 0);
+        sessions.push(Arc::downgrade(&session));
+        Ok(session)
+    }
+
     /// Capture the source once. No socket or client lock is acquired here.
     pub fn publish(&self) -> io::Result<()> {
         // Keep capture order and publication order identical for dirty sources.
@@ -207,6 +239,7 @@ impl DisplayServer {
         Ok(())
     }
     pub fn serve_native(&self, stream: UnixStream) -> io::Result<()> {
+        let _session = self.session(&stream)?;
         let Message::Hello {
             version: protocol::VERSION,
             capabilities,
@@ -308,7 +341,7 @@ impl DisplayServer {
                 (s.closed, s.cpu_copy)
             };
             let (frame, seq, cursor, cs, leds, ls) = self.snapshot();
-            if closed {
+            if closed || self.shared.closed.load(Ordering::SeqCst) {
                 return Ok(());
             }
             if caps.has(Capabilities::CURSOR) && cs != cursor_seen {

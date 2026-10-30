@@ -127,7 +127,8 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
             .serve_display(&native, &rfb)
             .map_err(|e| e.to_string())?;
     }
-    control::serve(&args.control, &handle).map_err(|e| format!("control socket: {e}"))?;
+    let control =
+        control::serve(&args.control, &handle).map_err(|e| format!("control socket: {e}"))?;
 
     spawn_signal_waiter(handle.clone());
 
@@ -135,9 +136,11 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
         vm.start();
     }
 
-    // Joins the vCPU threads once the exit reason is set; the control
-    // thread serves until the process ends.
-    Ok(vm.wait())
+    let reason = vm.wait();
+    control
+        .join()
+        .map_err(|_| "control server panicked".to_string())?;
+    Ok(reason)
 }
 
 fn block_termination_signals() {
