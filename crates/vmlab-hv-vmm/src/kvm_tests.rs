@@ -36,14 +36,18 @@ const PAYLOAD_ADDR: u64 = 0x8000;
 #[test]
 fn repeated_byte_io_preserves_fw_cfg_stream_access_width() {
     let code = [
-        0xba, 0x10, 0x05, 0x31, 0xc0, 0xef,
-        0xba, 0x11, 0x05, 0xbf, 0x00, 0x81, 0xb9, 4, 0, 0xf3, 0x6c,
-        0xbe, 0x00, 0x81, 0xb9, 4, 0, 0xba, 0xf8, 0x03, 0xf3, 0x6e,
-        0xba, 0x04, 0x06, 0xb8, 0x00, 0x34, 0xef, 0xf4,
+        0xba, 0x10, 0x05, 0x31, 0xc0, 0xef, 0xba, 0x11, 0x05, 0xbf, 0x00, 0x81, 0xb9, 4, 0, 0xf3,
+        0x6c, 0xbe, 0x00, 0x81, 0xb9, 4, 0, 0xba, 0xf8, 0x03, 0xf3, 0x6e, 0xba, 0x04, 0x06, 0xb8,
+        0x00, 0x34, 0xef, 0xf4,
     ];
-    let Some((vm, handle, serial)) = payload_vm(&code, false, false) else { return };
+    let Some((vm, handle, serial)) = payload_vm(&code, false, false) else {
+        return;
+    };
     watchdog(&handle);
-    assert_eq!(vm.wait(), ExitReason::Shutdown(ShutdownReason::GuestShutdown));
+    assert_eq!(
+        vm.wait(),
+        ExitReason::Shutdown(ShutdownReason::GuestShutdown)
+    );
     assert_eq!(&*serial.lock(), b"QEMU");
 }
 
@@ -295,7 +299,13 @@ fn payload_vm(payload: &[u8], paused: bool, protected: bool) -> Option<PayloadVm
 
     let (factory, out) = TestFactory::new();
     let mut io_bus = IoBus::new();
-    io_bus.register(0x510, 12, Arc::new(PlMutex::new(vmlab_hv_firmware::FwCfg::new(ram.mem.clone())))).ok()?;
+    io_bus
+        .register(
+            0x510,
+            12,
+            Arc::new(PlMutex::new(vmlab_hv_firmware::FwCfg::new(ram.mem.clone()))),
+        )
+        .ok()?;
     let mmio_bus = MmioBus::new();
     let pci_root = Arc::new(PlMutex::new(PciRoot::new(layout.mmio64_base)));
 

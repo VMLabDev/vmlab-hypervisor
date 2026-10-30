@@ -112,7 +112,9 @@ fn register_address_space(
             slot: slot as u32 | address_space,
             guest_phys_addr: base,
             memory_size: size,
-            userspace_addr: ram.mem.get_host_address(GuestAddress(base))
+            userspace_addr: ram
+                .mem
+                .get_host_address(GuestAddress(base))
                 .map_err(|e| VmmError::Memory(e.to_string()))? as u64,
             flags: 0,
         };
@@ -132,12 +134,22 @@ mod tests {
 
     #[test]
     fn registering_ram_ignores_device_regions_in_the_dma_view() {
-        if !std::path::Path::new("/dev/kvm").exists() { return; }
+        if !std::path::Path::new("/dev/kvm").exists() {
+            return;
+        }
         let kvm = crate::kvm::KvmVm::new().unwrap();
         let mut ram = GuestRam::anonymous(MemLayout::q35(8).unwrap()).unwrap();
         register_memslots(&kvm.vm, &ram).unwrap();
-        let aperture = Arc::new(vm_memory::GuestRegionMmap::from_range(GuestAddress(0xa0000), 0x20000, None).unwrap());
-        let region = kvm_userspace_memory_region { slot: 128, guest_phys_addr: 0xa0000, memory_size: 0x20000, userspace_addr: aperture.as_ptr() as u64, flags: 0 };
+        let aperture = Arc::new(
+            vm_memory::GuestRegionMmap::from_range(GuestAddress(0xa0000), 0x20000, None).unwrap(),
+        );
+        let region = kvm_userspace_memory_region {
+            slot: 128,
+            guest_phys_addr: 0xa0000,
+            memory_size: 0x20000,
+            userspace_addr: aperture.as_ptr() as u64,
+            flags: 0,
+        };
         // SAFETY: aperture owns the mapping until after the VM is dropped.
         unsafe { kvm.vm.set_user_memory_region(region) }.unwrap();
         ram.mem = ram.mem.insert_region(aperture).unwrap();

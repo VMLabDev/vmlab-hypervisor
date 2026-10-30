@@ -203,8 +203,11 @@ impl Chipset {
     }
 
     fn clock_step(&self, running: Option<bool>) {
+        self.clock_step_at(Instant::now(), running);
+    }
+
+    fn clock_step_at(&self, now: Instant, running: Option<bool>) {
         let mut clock = self.clock.lock();
-        let now = Instant::now();
         if clock.1 {
             let ns = now.duration_since(clock.0).as_nanos().min(u64::MAX as u128) as u64;
             self.lpc.lock().advance(ns);
@@ -370,4 +373,32 @@ fn install_irq_routes(vm: &VmFd) -> Result<(), VmmError> {
     add(2, KVM_IRQCHIP_PIC_MASTER, 0);
     vm.set_gsi_routing(&routes.header)
         .map_err(|e| VmmError::ioctl("KVM_SET_GSI_ROUTING(q35)", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn platform_timers_freeze_between_pause_and_resume() {
+        let kvm = match crate::kvm::KvmVm::new() {
+            Ok(kvm) => kvm,
+            Err(error) => {
+                eprintln!("skipping timer clock test: {error}");
+                return;
+            }
+        };
+        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0).unwrap();
+        let base = chipset.clock.lock().0;
+        chipset.clock_step_at(base, Some(true));
+        chipset.clock_step_at(base + std::time::Duration::from_secs(1), Some(false));
+        let mut bytes = [0; 4];
+        chipset.lpc.lock().read(8, &mut bytes);
+        assert_eq!(u32::from_le_bytes(bytes), 3_579_545);
+        chipset.clock_step_at(base + std::time::Duration::from_secs(3), Some(true));
+        chipset.lpc.lock().read(8, &mut bytes);
+        assert_eq!(u32::from_le_bytes(bytes), 3_579_545);
+        chipset.clock_step_at(base + std::time::Duration::from_secs(4), None);
+        chipset.lpc.lock().read(8, &mut bytes);
+        assert_eq!(u32::from_le_bytes(bytes), 7_159_090);
+    }
 }

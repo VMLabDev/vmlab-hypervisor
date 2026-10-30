@@ -36,7 +36,12 @@ fn template(name: &str, variable: &str) -> Option<PathBuf> {
     versions.pop()
 }
 
-fn boot_template(name: &str, variable: &str, snapshot: bool) {
+fn boot_template(
+    name: &str,
+    variable: &str,
+    snapshot: bool,
+    bus: vmlab_hv_proto::machine::DiskBus,
+) {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("skipping {name}: /dev/kvm is unavailable");
         return;
@@ -63,8 +68,8 @@ fn boot_template(name: &str, variable: &str, snapshot: bool) {
     let agent = dir.path().join("agent.sock");
     let serial = dir.path().join("serial.log");
     let stderr = dir.path().join("stderr.log");
-    let description = serde_json::json!({
-        "machine": "q35", "name": name, "arch": "x86_64", "accel": "kvm", "vcpus": 2, "memory_mib": 2048,
+    let mut description = serde_json::json!({
+        "machine": "q35", "name": name, "arch": "x86_64", "accel": "kvm", "vcpus": 2, "memory_mib": if name.starts_with("ubuntu") { 4096 } else { 2048 },
         "boot": {"kind":"firmware", "firmware":"seabios", "code":"/usr/share/qemu/bios-256k.bin"},
         "disks":[{"id":"disk0", "pci":{"bus":0,"device":2,"function":0}, "path":disk,"format":"qcow2","read_only":false,"vmstate":true}],
         "console_pci":{"bus":0,"device":1,"function":0},
@@ -73,6 +78,14 @@ fn boot_template(name: &str, variable: &str, snapshot: bool) {
         "tablet":{"bus":0,"device":5,"function":0},
         "ports":[{"name":"vmlab.agent.0", "socket":agent}], "nics":[],"serial_log":serial
     });
+    if bus == vmlab_hv_proto::machine::DiskBus::Ahci {
+        description["disks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("pci");
+        description["disks"][0]["bus"] = "ahci".into();
+        description["disks"][0]["port"] = 0.into();
+    }
     let machine = dir.path().join("machine.json");
     std::fs::write(&machine, serde_json::to_vec(&description).unwrap()).unwrap();
     let binary = std::env::var_os("VMLAB_HV_BINARY")
@@ -200,10 +213,30 @@ fn boot_template(name: &str, variable: &str, snapshot: bool) {
 
 #[test]
 fn debian_13_firmware_agent_and_snapshot() {
-    boot_template("debian-13", "VMLAB_HV_TEMPLATE_DEBIAN_13", true);
+    boot_template(
+        "debian-13",
+        "VMLAB_HV_TEMPLATE_DEBIAN_13",
+        true,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+    );
 }
 
 #[test]
-fn ubuntu_24_04_firmware_agent() {
-    boot_template("ubuntu-24.04", "VMLAB_HV_TEMPLATE_UBUNTU_24_04", false);
+fn ubuntu_26_04_firmware_agent() {
+    boot_template(
+        "ubuntu-26.04",
+        "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
+        false,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+    );
+}
+
+#[test]
+fn debian_13_ahci_firmware_agent() {
+    boot_template(
+        "debian-13",
+        "VMLAB_HV_TEMPLATE_DEBIAN_13",
+        false,
+        vmlab_hv_proto::machine::DiskBus::Ahci,
+    );
 }

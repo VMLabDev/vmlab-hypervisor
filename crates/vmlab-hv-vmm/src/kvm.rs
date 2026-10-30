@@ -230,12 +230,23 @@ mod tests {
     #[test]
     fn topology_adds_core_level_when_kvm_supplies_only_thread_level() {
         let mut cpuid = CpuId::from_entries(&[kvm_bindings::kvm_cpuid_entry2 {
-            function: 0xb, flags: kvm_bindings::KVM_CPUID_FLAG_SIGNIFCANT_INDEX, ..Default::default()
-        }]).unwrap();
+            function: 0xb,
+            flags: kvm_bindings::KVM_CPUID_FLAG_SIGNIFCANT_INDEX,
+            ..Default::default()
+        }])
+        .unwrap();
         filter_cpuid(&mut cpuid, 1, 2, vmlab_hv_proto::machine::CpuPolicy::Host).unwrap();
-        let core = cpuid.as_slice().iter().find(|entry| entry.function == 0xb && entry.index == 1).unwrap();
+        let core = cpuid
+            .as_slice()
+            .iter()
+            .find(|entry| entry.function == 0xb && entry.index == 1)
+            .unwrap();
         assert_eq!((core.eax, core.ebx, core.ecx, core.edx), (1, 2, 0x201, 1));
-        let end = cpuid.as_slice().iter().find(|entry| entry.function == 0xb && entry.index == 2).unwrap();
+        let end = cpuid
+            .as_slice()
+            .iter()
+            .find(|entry| entry.function == 0xb && entry.index == 2)
+            .unwrap();
         assert_eq!((end.eax, end.ebx, end.ecx, end.edx), (0, 0, 2, 1));
     }
 

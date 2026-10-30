@@ -99,17 +99,25 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             // the stable vCPU mmap; size is metadata disjoint from the I/O
             // payload slice borrowed by VcpuExit.
             unsafe { (*run_ptr).__bindgen_anon_1.io.size as usize }
-        } else { 1 };
+        } else {
+            1
+        };
         if !matches!(width, 1 | 2 | 4) {
-            shared.request_exit(crate::vm::ExitReason::Error(format!("invalid KVM I/O width {width}")));
+            shared.request_exit(crate::vm::ExitReason::Error(format!(
+                "invalid KVM I/O width {width}"
+            )));
             return;
         }
         match result {
             Ok(VcpuExit::IoIn(port, data)) => {
-                for value in data.chunks_mut(width) { shared.io_read(port, value); }
+                for value in data.chunks_mut(width) {
+                    shared.io_read(port, value);
+                }
             }
             Ok(VcpuExit::IoOut(port, data)) => {
-                for value in data.chunks(width) { shared.io_write(port, value); }
+                for value in data.chunks(width) {
+                    shared.io_write(port, value);
+                }
                 if port == 0xb2 && shared.take_smi() {
                     // Complete the deferred OUT before SMM saves RIP. Without
                     // this completion, RSM can return to the same APMC write.
