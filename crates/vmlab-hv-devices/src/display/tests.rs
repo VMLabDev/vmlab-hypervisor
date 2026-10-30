@@ -54,6 +54,25 @@ fn text_mode(dev: &mut StandardVga) {
 }
 
 #[test]
+fn rendering_uses_a_detached_vram_copy_and_returns_to_live_reads() {
+    let mut dev = device();
+    dev.set_byte(100, 0x31);
+    dev.render_vram.resize(0x40000, 0);
+    dev.vram
+        .read_slice(&mut dev.render_vram, GuestAddress(0))
+        .unwrap();
+    dev.set_byte(100, 0x42);
+    assert_eq!(dev.byte(100), 0x31);
+    dev.render_vram.clear();
+    assert_eq!(dev.byte(100), 0x42);
+    text_mode(&mut dev);
+    dev.frame();
+    assert!(dev.render_vram.is_empty());
+    dev.set_byte(100, 0x53);
+    assert_eq!(dev.byte(100), 0x53);
+}
+
+#[test]
 fn linear_framebuffer_mapping_shares_bar_pixels_and_snapshot_storage() {
     let mut dev = device();
     vbe(&mut dev, 640, 480, 32);
