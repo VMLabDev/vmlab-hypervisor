@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import fnmatch
 import json
 import re
 import sys
@@ -288,11 +289,12 @@ def approved_pci(left: dict[str, str], right: dict[str, str], rules: dict) -> se
 
     a = inventory(left.get("lspci-nn.txt", ""))
     b = inventory(right.get("lspci-nn.txt", ""))
-    removed = {slot for slot, identity in rules["reference_only"].items()
-               if a.get(slot) == identity and slot not in b}
-    added = {slot for slot, identity in b.items() if slot not in a and identity in rules["candidate_only_ids"]}
+    allowed_ids = {entry["identity"] for entry in rules["candidate_only_ids"]}
+    removed = {slot for slot, entry in rules["reference_only"].items()
+               if a.get(slot) == entry["identity"] and slot not in b}
+    added = {slot for slot, identity in b.items() if slot not in a and identity in allowed_ids}
     # D6 permits one replacement controller, not an arbitrary number of them.
-    if len(added) != 1 or any(identity in rules["candidate_only_ids"] for identity in a.values()):
+    if len(added) != 1 or any(identity in allowed_ids for identity in a.values()):
         added = set()
     for captures, slots in ((left, removed), (right, added)):
         for name in ("lspci-nn.txt", "lspci-nnnvvvxxxx.txt"):
@@ -367,6 +369,53 @@ def approved_aml(left: dict[str, str], right: dict[str, str], reference: Path, r
         left[name] = normalize_artifact(name, relocate_loader(path.read_bytes(), cuts))
 
 
+def approved_artifacts(left: dict[str, str], right: dict[str, str], rules: dict) -> None:
+    """Allow only missing reference artefacts, retaining changed or new files."""
+    prefix = "/sys/firmware/qemu_fw_cfg/by_name/"
+    candidate_names = {line.removeprefix(prefix) for line in right.get("fwcfg/files.txt", "").splitlines()}
+    candidate_names.update(line.split()[0] for line in right.get("fwcfg/sizes.txt", "").splitlines() if line.split())
+    omitted = set()
+    for name in left.keys() - right.keys():
+        if name.startswith("fwcfg/blobs/") and name.removeprefix("fwcfg/blobs/") in candidate_names:
+            continue
+        if any(fnmatch.fnmatchcase(name, entry["pattern"]) for entry in rules.get("artifact_omissions", [])):
+            omitted.add(name)
+    for name in omitted:
+        del left[name]
+    names = {name.removeprefix("fwcfg/blobs/") for name in omitted}
+    omitted_top = {name.split("/", 1)[0] for name in names if "/" in name}
+    if not names:
+        return
+    for capture in (left, right):
+        if "fwcfg/files.txt" in capture:
+            lines = capture["fwcfg/files.txt"].splitlines()
+            capture["fwcfg/files.txt"] = "".join(line + "\n" for line in sorted(lines)
+                                                 if line.removeprefix(prefix) not in names)
+        if "fwcfg/sizes.txt" in capture:
+            capture["fwcfg/sizes.txt"] = "".join(line for line in capture["fwcfg/sizes.txt"].splitlines(True)
+                                                 if line.split()[0] not in names)
+        if "fwcfg/listing.txt" in capture:
+            files = {line.removeprefix(prefix) for line in capture.get("fwcfg/files.txt", "").splitlines()}
+            top = {name.split("/", 1)[0] for name in files}
+            lines = []
+            for line in capture["fwcfg/listing.txt"].splitlines():
+                match = re.fullmatch(r"([dl][rwx-]{9})\s+\d+\s+(\S+)\s+(\S+)\s+(\d+)\s+<time>\s+(.+)", line)
+                if not match:
+                    lines.append(line)
+                    continue
+                mode, user, group, size, filename = match.groups()
+                if mode.startswith("d") and filename in omitted_top and filename not in top:
+                    continue
+                if mode.startswith("l"):
+                    target = re.fullmatch(r"(.+) -> \.\./by_key/[0-9a-fA-F]+", filename)
+                    if target:
+                        if target[1] in names:
+                            continue
+                        filename = target[1] + " -> ../by_key/<selector>"
+                lines.append(f"{mode} <links> {user} {group} {size} <time> {filename}")
+            capture["fwcfg/listing.txt"] = "\n".join(lines) + "\n"
+
+
 def compare(reference: Path, candidate: Path, allow: Path | None = DEFAULT_ALLOW) -> str:
     left, right = load_capture(reference), load_capture(candidate)
     if allow:
@@ -375,14 +424,25 @@ def compare(reference: Path, candidate: Path, allow: Path | None = DEFAULT_ALLOW
                 or not isinstance(rules.get("reference_only"), dict)
                 or not isinstance(rules.get("candidate_only_ids"), list)):
             raise ValueError("allow-list requires D6, reference_only object, and candidate_only_ids list")
-        for slot, identity in rules["reference_only"].items():
-            if not re.fullmatch(BDF, slot) or not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{4}", identity):
+        def metadata(entry):
+            return (isinstance(entry, dict) and isinstance(entry.get("reason"), str) and bool(entry["reason"])
+                    and entry.get("category") in ("D6", "deferred to 2c", "pending owner decision"))
+        for slot, entry in rules["reference_only"].items():
+            if (not re.fullmatch(BDF, slot) or not metadata(entry)
+                    or not isinstance(entry.get("identity"), str)
+                    or not re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{4}", entry["identity"])):
                 raise ValueError("invalid reference_only PCI address or identity")
-        if not all(isinstance(identity, str) and re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{4}", identity)
-                   for identity in rules["candidate_only_ids"]):
+        if not all(metadata(entry) and isinstance(entry.get("identity"), str)
+                   and re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{4}", entry["identity"])
+                   for entry in rules["candidate_only_ids"]):
             raise ValueError("invalid candidate_only_ids PCI identity")
+        omissions = rules.get("artifact_omissions", [])
+        if not isinstance(omissions, list) or not all(metadata(entry) and isinstance(entry.get("pattern"), str)
+                                                     and entry["pattern"].startswith("fwcfg/blobs/") for entry in omissions):
+            raise ValueError("invalid artifact omission category, reason, or pattern")
         removed = approved_pci(left, right, rules)
         approved_aml(left, right, reference, removed)
+        approved_artifacts(left, right, rules)
     report = []
     for name in sorted(left.keys() | right.keys()):
         if name not in left or name not in right:

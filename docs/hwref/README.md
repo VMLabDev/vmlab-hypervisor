@@ -105,6 +105,16 @@ adjusted for those removed bytes. Other AML and loader fields remain compared.
 IRQ routing and other boot-log differences remain visible for review. The
 allow-list does not suppress arbitrary USB-related lines.
 
+The 2a gate also records category and reason metadata for two temporary groups:
+`etc/smi/*` and `etc/tpm/*` are **deferred to 2c** and must be removed from the
+allow-list when 2c lands. `genroms/kvmvapic.bin` and
+`genroms/linuxboot_dma.bin` are **pending owner decision** because these
+QEMU-built ROMs are not shipped. These rules permit only reference-only files;
+changed files, candidate-only files and failed blob collection still fail.
+Their corresponding fw_cfg inventory entries and now-empty top-level
+directories are removed. Directory link counts and selector-link numbers are
+canonicalized only when such an omission applies. Other files remain compared.
+
 To check that the tool retains real differences:
 
 ```sh

@@ -1,11 +1,19 @@
 {
   "decision": "D6",
-  "reason": "q35 uses qemu-xhci and omits ICH9 UHCI/EHCI; no other hardware differences are approved",
+  "reason": "Phase-2a gate: D6 omissions, explicit 2c deferrals, and ROM differences pending an owner decision",
   "reference_only": {
-    "00:1d.0": "8086:2934",
-    "00:1d.1": "8086:2935",
-    "00:1d.2": "8086:2936",
-    "00:1d.7": "8086:293a"
+    "00:1d.0": {"identity": "8086:2934", "category": "D6", "reason": "ICH9 UHCI function omitted in favour of xHCI"},
+    "00:1d.1": {"identity": "8086:2935", "category": "D6", "reason": "ICH9 UHCI function omitted in favour of xHCI"},
+    "00:1d.2": {"identity": "8086:2936", "category": "D6", "reason": "ICH9 UHCI function omitted in favour of xHCI"},
+    "00:1d.7": {"identity": "8086:293a", "category": "D6", "reason": "ICH9 EHCI function omitted in favour of xHCI"}
   },
-  "candidate_only_ids": ["1b36:000d"]
+  "candidate_only_ids": [
+    {"identity": "1b36:000d", "category": "D6", "reason": "One qemu-xhci replacement controller"}
+  ],
+  "artifact_omissions": [
+    {"pattern": "fwcfg/blobs/etc/smi/*", "category": "deferred to 2c", "reason": "SPEC.md places SMI negotiation in 2c; remove this entry when 2c lands"},
+    {"pattern": "fwcfg/blobs/etc/tpm/*", "category": "deferred to 2c", "reason": "SPEC.md places TPM firmware files in 2c; remove this entry when 2c lands"},
+    {"pattern": "fwcfg/blobs/genroms/kvmvapic.bin", "category": "pending owner decision", "reason": "QEMU-built option ROM is not shipped; owner must decide whether HV-D30 permits its omission"},
+    {"pattern": "fwcfg/blobs/genroms/linuxboot_dma.bin", "category": "pending owner decision", "reason": "QEMU-built option ROM is not shipped; owner must decide whether HV-D30 permits its omission"}
+  ]
 }
