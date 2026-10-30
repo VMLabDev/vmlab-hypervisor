@@ -28,7 +28,10 @@ pub fn install_kick_handler() {
             action.sa_sigaction = kick_handler as *const () as usize;
             action.sa_flags = 0;
             if libc::sigaction(KICK_SIGNAL, &action, std::ptr::null_mut()) != 0 {
-                panic!("sigaction(SIGUSR1) failed: {}", std::io::Error::last_os_error());
+                panic!(
+                    "sigaction(SIGUSR1) failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
         }
     });
@@ -95,9 +98,6 @@ fn run_vcpu(id: u8, mut vcpu: VcpuFd, shared: &Arc<VmShared>) {
                 return;
             }
             Ok(exit) => {
-                if std::env::var_os("VMLINUX_DEBUG").is_some() {
-                    eprintln!("vcpu {id}: unhandled exit {exit:?}");
-                }
                 shared.request_exit(crate::vm::ExitReason::Error(format!(
                     "vcpu {id}: unhandled KVM exit {exit:?}"
                 )));

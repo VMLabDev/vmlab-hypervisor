@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use acpi_tables::aml;
 use acpi_tables::Aml;
+use acpi_tables::aml;
 use acpi_tables::fadt::{FADTBuilder, Flags, PmProfile};
 use acpi_tables::madt::{
     EnabledStatus, IoApic, LocalInterruptController, MADT, ProcessorLocalApic,
@@ -19,8 +19,8 @@ use acpi_tables::mcfg::MCFG;
 use acpi_tables::rsdp::Rsdp;
 use acpi_tables::sdt::Sdt;
 use acpi_tables::xsdt::XSDT;
-use zerocopy::{Immutable, IntoBytes};
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+use zerocopy::{Immutable, IntoBytes};
 
 use crate::error::VmmError;
 use crate::layout::{
@@ -171,7 +171,9 @@ fn dsdt(layout: &MemLayout) -> Sdt {
     let pci0_crs = aml::Name::new(aml::Path::new("_CRS"), &crs);
     let pci0 = aml::Device::new(
         aml::Path::new("PCI0"),
-        vec![&pci0_hid, &pci0_cid, &pci0_uid, &pci0_seg, &pci0_bbn, &pci0_crs],
+        vec![
+            &pci0_hid, &pci0_cid, &pci0_uid, &pci0_seg, &pci0_bbn, &pci0_crs,
+        ],
     );
 
     let pwrb_hid = aml::Name::new(aml::Path::new("_HID"), &aml::EISAName::new("PNP0C0C"));
@@ -281,7 +283,14 @@ mod tests {
     fn tables_are_placed_and_checksummed() {
         let layout = MemLayout::new(16).unwrap();
         let memory = mem();
-        let placement = install(&memory, &AcpiConfig { vcpus: 2, layout: &layout }).unwrap();
+        let placement = install(
+            &memory,
+            &AcpiConfig {
+                vcpus: 2,
+                layout: &layout,
+            },
+        )
+        .unwrap();
 
         // RSDP inside the reserved area, checksums valid over both spans.
         assert!(placement.rsdp >= ACPI_TABLES_BASE && placement.rsdp + 36 <= ACPI_TABLES_LIMIT);
@@ -300,10 +309,14 @@ mod tests {
             .unwrap();
         assert_eq!(&buf[0..4], b"XSDT");
         let mut len = [0u8; 4];
-        memory.read_slice(&mut len, GuestAddress(xsdt_addr + 4)).unwrap();
+        memory
+            .read_slice(&mut len, GuestAddress(xsdt_addr + 4))
+            .unwrap();
         let xsdt_len = u32::from_le_bytes(len) as usize;
         let mut xsdt = vec![0u8; xsdt_len];
-        memory.read_slice(&mut xsdt, GuestAddress(xsdt_addr)).unwrap();
+        memory
+            .read_slice(&mut xsdt, GuestAddress(xsdt_addr))
+            .unwrap();
         assert!(sum_zero(&xsdt));
         let entries = (xsdt_len - 36) / 8;
         assert_eq!(entries, 3);
@@ -316,7 +329,11 @@ mod tests {
             let n = u32::from_le_bytes(l) as usize;
             let mut table = vec![0u8; n];
             memory.read_slice(&mut table, GuestAddress(addr)).unwrap();
-            assert!(sum_zero(&table), "checksum of {}", String::from_utf8_lossy(&sig));
+            assert!(
+                sum_zero(&table),
+                "checksum of {}",
+                String::from_utf8_lossy(&sig)
+            );
         }
     }
 
@@ -324,7 +341,14 @@ mod tests {
     fn fadt_points_at_the_pm_block_and_dsdt() {
         let layout = MemLayout::new(16).unwrap();
         let memory = mem();
-        let placement = install(&memory, &AcpiConfig { vcpus: 1, layout: &layout }).unwrap();
+        let placement = install(
+            &memory,
+            &AcpiConfig {
+                vcpus: 1,
+                layout: &layout,
+            },
+        )
+        .unwrap();
         let fadt_addr = read_entry(&memory, placement.rsdp, 0);
         let fadt = read_table(&memory, fadt_addr);
         assert_eq!(&fadt[0..4], b"FACP");
@@ -347,7 +371,14 @@ mod tests {
     fn dsdt_names_the_pci_root_and_power_button() {
         let layout = MemLayout::new(16).unwrap();
         let memory = mem();
-        let placement = install(&memory, &AcpiConfig { vcpus: 1, layout: &layout }).unwrap();
+        let placement = install(
+            &memory,
+            &AcpiConfig {
+                vcpus: 1,
+                layout: &layout,
+            },
+        )
+        .unwrap();
         let fadt_addr = read_entry(&memory, placement.rsdp, 0);
         let dsdt = read_table(
             &memory,
@@ -373,7 +404,14 @@ mod tests {
     fn madt_lists_every_vcpu_and_the_overrides() {
         let layout = MemLayout::new(16).unwrap();
         let memory = mem();
-        let placement = install(&memory, &AcpiConfig { vcpus: 3, layout: &layout }).unwrap();
+        let placement = install(
+            &memory,
+            &AcpiConfig {
+                vcpus: 3,
+                layout: &layout,
+            },
+        )
+        .unwrap();
         let madt = read_table(&memory, read_entry(&memory, placement.rsdp, 1));
         assert_eq!(&madt[0..4], b"APIC");
         let mut lapics = 0;
@@ -404,7 +442,14 @@ mod tests {
     fn mcfg_declares_the_ecam_window() {
         let layout = MemLayout::new(16).unwrap();
         let memory = mem();
-        let placement = install(&memory, &AcpiConfig { vcpus: 1, layout: &layout }).unwrap();
+        let placement = install(
+            &memory,
+            &AcpiConfig {
+                vcpus: 1,
+                layout: &layout,
+            },
+        )
+        .unwrap();
         let mcfg = read_table(&memory, read_entry(&memory, placement.rsdp, 2));
         assert_eq!(&mcfg[0..4], b"MCFG");
         // One entry at offset 44: base address, segment, start/end bus.

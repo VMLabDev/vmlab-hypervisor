@@ -174,8 +174,9 @@ impl VmShared {
         match sleep {
             // The PM device folds S4 into S5 already; treat it the same if
             // it ever surfaces.
-            SleepState::S4 | SleepState::S5 => self
-                .request_exit(ExitReason::Shutdown(ShutdownReason::GuestShutdown)),
+            SleepState::S4 | SleepState::S5 => {
+                self.request_exit(ExitReason::Shutdown(ShutdownReason::GuestShutdown))
+            }
             SleepState::S3 => {
                 let mut state = self.state.lock();
                 if *state == RunState::Running {
@@ -249,7 +250,11 @@ pub struct Vm {
 }
 
 impl Vm {
-    pub(crate) fn from_parts(shared: Arc<VmShared>, vcpu_fds: Vec<(u8, VcpuFd)>, ram: GuestRam) -> Result<Self, VmmError> {
+    pub(crate) fn from_parts(
+        shared: Arc<VmShared>,
+        vcpu_fds: Vec<(u8, VcpuFd)>,
+        ram: GuestRam,
+    ) -> Result<Self, VmmError> {
         let vcpus = vcpu_fds
             .into_iter()
             .map(|(id, fd)| VcpuThread::spawn(id, fd, shared.clone()))

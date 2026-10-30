@@ -104,4 +104,3 @@ pub fn serve(path: &Path, vm: &VmHandle) -> Result<std::thread::JoinHandle<()>, 
         })
         .map_err(|e| VmmError::Control(format!("spawning control thread: {e}")))
 }
-

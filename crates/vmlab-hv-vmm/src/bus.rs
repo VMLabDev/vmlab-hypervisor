@@ -1,7 +1,7 @@
 //! Dispatch of guest port-I/O and MMIO accesses to bus devices.
 
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 
 use vmlab_hv_devices::BusDevice;
 
@@ -106,8 +106,7 @@ impl MmioBus {
 
     /// Remove the region exactly covering `[base, base+len)`, if present.
     pub fn unregister(&mut self, base: u64, len: u64) {
-        self.regions
-            .retain(|r| !(r.base == base && r.len == len));
+        self.regions.retain(|r| !(r.base == base && r.len == len));
     }
 
     /// Drop every region pointing at this device address (used when a BAR is

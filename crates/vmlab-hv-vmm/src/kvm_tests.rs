@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use parking_lot::Mutex as PlMutex;
 use parking_lot::Mutex;
+use vm_memory::{Bytes, GuestAddress};
 use vmlab_hv_devices::{BusDevice, IrqLine};
 use vmlab_hv_proto::control::{Command, Event, Outcome, ShutdownReason};
-use vmlab_hv_proto::machine::{Arch, Accel, Boot, MachineDescription};
-use vm_memory::{Bytes, GuestAddress};
+use vmlab_hv_proto::machine::{Accel, Arch, Boot, MachineDescription};
 
 use crate::builder;
 use crate::bus::{IoBus, MmioBus};
@@ -23,17 +23,16 @@ use crate::error::DeviceUnavailable;
 use crate::factory::DeviceFactory;
 use crate::kvm::KvmVm;
 use crate::layout::MemLayout;
-use crate::memory::{register_memslots, GuestRam};
+use crate::memory::{GuestRam, register_memslots};
 use crate::pci::PciRoot;
-use crate::pm::{PmDevice, SleepSignal, PM1A_EVT_BASE, PM_BLOCK_LEN};
+use crate::pm::{PM_BLOCK_LEN, PM1A_EVT_BASE, PmDevice, SleepSignal};
 use crate::vm::{ExitReason, Vm, VmHandle, VmShared};
 
 /// How long a payload test waits for the guest before forcing a host exit.
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Where the payload lives; real mode after reset runs from 0xFFFF0.
+/// Where the payload lives; the vCPU enters it in flat real mode.
 const PAYLOAD_ADDR: u64 = 0x8000;
-const RESET_VECTOR: u64 = 0xFFFF0;
 
 /// A fake 16550A: records every byte written to the port range.
 struct FakeSerial {
@@ -75,7 +74,9 @@ impl DeviceFactory for TestFactory {
         _log_path: &Path,
         _irq: Arc<dyn IrqLine>,
     ) -> Result<Arc<Mutex<dyn BusDevice>>, DeviceUnavailable> {
-        Ok(Arc::new(parking_lot::Mutex::new(FakeSerial { out: self.out.clone() })))
+        Ok(Arc::new(parking_lot::Mutex::new(FakeSerial {
+            out: self.out.clone(),
+        })))
     }
 
     fn virtio_blk(
@@ -169,8 +170,9 @@ fn s5_payload() -> Vec<u8> {
     code
 }
 
-/// A real-mode payload: writes the message to COM1, then executes `ud2`,
-/// which faults through an empty real-mode IVT into a triple fault.
+/// A real-mode payload: writes the message to COM1, loads a null IDT (limit
+/// 0) and executes `int3`; delivering any exception through that IDT faults
+/// recursively into a triple fault, which KVM reports as a shutdown.
 fn triple_fault_payload() -> Vec<u8> {
     let mut code = vec![
         0xBE, 0x40, 0x80, // mov si, 0x8040
@@ -180,26 +182,27 @@ fn triple_fault_payload() -> Vec<u8> {
         0xBA, 0xF8, 0x03, // mov dx, 0x3F8
         0xEE, // out dx, al
         0xEB, 0xF5, // jmp .next
-        0x0F, 0x0B, // .boom: ud2
+        0xBF, 0x46, 0x80, // .boom: mov di, 0x8046
+        0x0F, 0x01, 0x1F, // lidt [di] (limit 0)
+        0xCC, // int3 -> #GP -> #DF -> triple fault
     ];
-    code.extend_from_slice(&[0u8; 0x40 - 0x12]);
+    code.extend_from_slice(&vec![0u8; 0x40 - code.len()]);
     code.extend_from_slice(b"triple\0");
+    code.extend_from_slice(&[0u8; 6]); // null IDT descriptor at 0x8046
     code
 }
 
 /// Assemble a machine that boots `payload` in real mode: no kernel, no ACPI
-/// tables, one vCPU at its reset state. The payload lands at 0x8000 and a
-/// far jump at the reset vector enters it.
-fn payload_vm(payload: &[u8], paused: bool) -> Option<(Vm, VmHandle, Arc<PlMutex<Vec<u8>>>)> {
+/// tables, one vCPU entering flat real mode at 0x8000.
+/// A built payload machine: the machine, its handle, and the serial log.
+type PayloadVm = (Vm, VmHandle, Arc<PlMutex<Vec<u8>>>);
+
+fn payload_vm(payload: &[u8], paused: bool, protected: bool) -> Option<PayloadVm> {
     let kvm = kvm_or_skip()?;
     let layout = MemLayout::new(16).ok()?;
     let ram = GuestRam::anonymous(layout.clone()).ok()?;
     register_memslots(&kvm.vm, &ram).ok()?;
 
-    // Reset vector: far jump to 0x0000:0x8000.
-    ram.mem
-        .write_slice(&[0xEA, 0x00, 0x80, 0x00, 0x00], GuestAddress(RESET_VECTOR))
-        .ok()?;
     ram.mem
         .write_slice(payload, GuestAddress(PAYLOAD_ADDR))
         .ok()?;
@@ -219,7 +222,9 @@ fn payload_vm(payload: &[u8], paused: bool) -> Option<(Vm, VmHandle, Arc<PlMutex
         Arc::new(NullIrq),
         sleep_signal.sink(),
     )));
-    io_bus.register(PM1A_EVT_BASE, PM_BLOCK_LEN, pm.clone()).ok()?;
+    io_bus
+        .register(PM1A_EVT_BASE, PM_BLOCK_LEN, pm.clone())
+        .ok()?;
 
     let shared = VmShared::new(
         kvm,
@@ -230,7 +235,14 @@ fn payload_vm(payload: &[u8], paused: bool) -> Option<(Vm, VmHandle, Arc<PlMutex
         sleep_signal,
         layout.mmio64_base,
     );
-    let vcpu = shared.kvm.create_vcpu(0).ok()?;
+    let mut vcpu = shared.kvm.create_vcpu(0).ok()?;
+    // Flat mode at the payload: the architecture's reset vector is at
+    // physical 0xFFFF_FFF0, which this 16 MiB machine does not back.
+    if protected {
+        crate::loader::init_protected_16(&mut vcpu, PAYLOAD_ADDR).ok()?;
+    } else {
+        crate::loader::init_real_mode(&mut vcpu, PAYLOAD_ADDR).ok()?;
+    }
     let mut vm = Vm::from_parts(shared, vec![(0, vcpu)], ram).ok()?;
     if !paused {
         vm.start();
@@ -268,7 +280,7 @@ fn temp_socket(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn guest_s5_after_powerdown_is_guest_shutdown() {
-    let Some((vm, handle, serial)) = payload_vm(&s5_payload(), false) else {
+    let Some((vm, handle, serial)) = payload_vm(&s5_payload(), false, false) else {
         return;
     };
     watchdog(&handle);
@@ -285,7 +297,10 @@ fn guest_s5_after_powerdown_is_guest_shutdown() {
 
 #[test]
 fn triple_fault_is_guest_reset() {
-    let Some((vm, _handle, serial)) = payload_vm(&triple_fault_payload(), false) else {
+    // Exception delivery in flat real mode goes through KVM's emulator,
+    // which does not turn a null-IDT int3 into a shutdown; in protected
+    // mode the hardware path triple-faults as the protocol expects.
+    let Some((vm, _handle, serial)) = payload_vm(&triple_fault_payload(), false, true) else {
         return;
     };
     watchdog(&_handle);
@@ -301,7 +316,7 @@ fn triple_fault_is_guest_reset() {
 
 #[test]
 fn paused_machine_resumes_and_reports_events() {
-    let Some((mut vm, handle, serial)) = payload_vm(&s5_payload(), true) else {
+    let Some((mut vm, handle, serial)) = payload_vm(&s5_payload(), true, false) else {
         return;
     };
     assert_eq!(handle.status(), vmlab_hv_proto::control::RunState::Paused);
@@ -323,7 +338,7 @@ fn paused_machine_resumes_and_reports_events() {
 
 #[test]
 fn control_socket_end_to_end() {
-    let Some((vm, handle, serial)) = payload_vm(&s5_payload(), false) else {
+    let Some((vm, handle, serial)) = payload_vm(&s5_payload(), false, false) else {
         return;
     };
     watchdog(&handle);
@@ -342,10 +357,11 @@ fn control_socket_end_to_end() {
         other => panic!("expected running status, got {other:?}"),
     }
 
-    match client.call(Command::SnapshotSave {
-        name: "nope".into(),
-    })
-    .expect("snapshot reply")
+    match client
+        .call(Command::SnapshotSave {
+            name: "nope".into(),
+        })
+        .expect("snapshot reply")
     {
         Outcome::Error {
             code: vmlab_hv_proto::control::ErrorCode::Unsupported,
@@ -375,9 +391,11 @@ fn control_socket_end_to_end() {
 }
 
 /// Black-box check of the whole builder path with vmlab's real container
-/// kernel: boots, prints to the serial log, finds no rootfs, and `panic=-1`
-/// + `reboot=t` turn the panic into the triple-fault reset this VMM reports
-/// as `guest_reset`. Skips when the kernel asset is not on this host.
+/// kernel: boots, prints to the serial log, finds no rootfs, and the
+/// `panic=-1 reboot=t` cmdline turns the panic into the triple-fault reset
+/// this VMM reports as `guest_reset`.
+///
+/// Skips when the kernel asset is not on this host.
 #[test]
 fn real_kernel_boots_and_resets() {
     const KERNEL: &str = "/home/wil/dev/vmlab/guest/dist/x86_64/vmlinuz";
@@ -391,7 +409,8 @@ fn real_kernel_boots_and_resets() {
     drop(kvm); // builder opens its own; this only gates on availability.
 
     let (factory, serial) = TestFactory::new();
-    let dir = std::env::temp_dir().join(format!("vmlab-hv-kvm-tests-kernel-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("vmlab-hv-kvm-tests-kernel-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let desc = MachineDescription {
         name: "kernel-test".into(),
@@ -402,7 +421,7 @@ fn real_kernel_boots_and_resets() {
         boot: Boot::Kernel {
             kernel: KERNEL.into(),
             initrd: None,
-            cmdline: "console=ttyS0 quiet loglevel=3 panic=-1 reboot=t".into(),
+            cmdline: "console=ttyS0 panic=-1 reboot=t".into(),
         },
         disks: vec![],
         nics: vec![],
@@ -436,12 +455,12 @@ fn guest_s3_suspends() {
     // Wait for SCI-less S3: write SLP_TYP=3 | SLP_EN to PM1a_CNT directly.
     code.extend_from_slice(&[
         0xBA, 0x04, 0x06, // mov dx, 0x604
-        0xB8, 0x00, 0x1C, // mov ax, 0x1C00 (SLP_TYP=3 | SLP_EN)
+        0xB8, 0x00, 0x2C, // mov ax, 0x2C00 (SLP_TYP=3 | SLP_EN)
         0xEF, // out dx, ax
         0xF4, // hlt
         0xEB, 0xFD, // jmp
     ]);
-    let Some((vm, handle, _serial)) = payload_vm(&code, false) else {
+    let Some((vm, handle, _serial)) = payload_vm(&code, false, false) else {
         return;
     };
     watchdog(&handle);
@@ -449,7 +468,8 @@ fn guest_s3_suspends() {
     // Poll for Suspended rather than blocking on wait_exit, which never
     // fires: a suspend is not an exit.
     let mut suspended = false;
-    for _ in 0..100 {
+    // Generous window: the first run of the suite pays compile-time load.
+    for _ in 0..400 {
         if handle.status() == vmlab_hv_proto::control::RunState::Suspended {
             suspended = true;
             break;
@@ -459,13 +479,12 @@ fn guest_s3_suspends() {
     assert!(suspended, "guest S3 must report Suspended");
     // Resume from suspend is a wakeup, and the run continues.
     assert_eq!(
-        handle.resume().map(|s| s == vmlab_hv_proto::control::RunState::Running),
+        handle
+            .resume()
+            .map(|s| s == vmlab_hv_proto::control::RunState::Running),
         Ok(true)
     );
     // Stop the machine so the test ends.
     handle.quit();
-    assert_eq!(
-        vm.wait(),
-        ExitReason::Shutdown(ShutdownReason::HostRequest)
-    );
+    assert_eq!(vm.wait(), ExitReason::Shutdown(ShutdownReason::HostRequest));
 }

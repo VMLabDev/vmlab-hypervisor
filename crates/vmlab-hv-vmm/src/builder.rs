@@ -1,10 +1,10 @@
 //! Building a [`Vm`] from a [`MachineDescription`] and a [`DeviceFactory`].
 
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 
 use vmlab_hv_devices::{IrqLine, MsiSink};
-use vmlab_hv_proto::machine::{Arch, Accel, Boot, MachineDescription};
+use vmlab_hv_proto::machine::{Accel, Arch, Boot, MachineDescription};
 
 use crate::acpi::{self, AcpiConfig};
 use crate::bus::{IoBus, MmioBus};
@@ -12,11 +12,11 @@ use crate::e820;
 use crate::error::VmmError;
 use crate::factory::DeviceFactory;
 use crate::kvm::{KvmIrqLine, KvmMsiSink, KvmVm};
-use crate::layout::{MemLayout, MMCONFIG_BASE, MMCONFIG_SIZE};
+use crate::layout::{MMCONFIG_BASE, MMCONFIG_SIZE, MemLayout};
 use crate::loader;
-use crate::memory::{register_memslots, GuestRam};
+use crate::memory::{GuestRam, register_memslots};
 use crate::pci::{PciConfigIo, PciEcam, PciRoot};
-use crate::pm::{SleepSignal, PmDevice, PM1A_EVT_BASE, PM_BLOCK_LEN, SCI_GSI};
+use crate::pm::{PM_BLOCK_LEN, PM1A_EVT_BASE, PmDevice, SCI_GSI, SleepSignal};
 use crate::vm::{Vm, VmShared};
 
 /// Static checks that do not need KVM; each error names what is wrong.
@@ -76,7 +76,13 @@ pub fn build(
 
     // Platform: e820, ACPI, kernel.
     let e820_map = e820::build_e820(&layout);
-    let acpi = acpi::install(&ram.mem, &AcpiConfig { vcpus: desc.vcpus, layout: &layout })?;
+    let acpi = acpi::install(
+        &ram.mem,
+        &AcpiConfig {
+            vcpus: desc.vcpus,
+            layout: &layout,
+        },
+    )?;
     let Boot::Kernel {
         kernel,
         initrd,
@@ -97,7 +103,11 @@ pub fn build(
     let mut mmio_bus = MmioBus::new();
     let pci_root = Arc::new(Mutex::new(PciRoot::new(layout.mmio64_base)));
     io_bus
-        .register(0xCF8, 12, Arc::new(Mutex::new(PciConfigIo::new(pci_root.clone()))))
+        .register(
+            0xCF8,
+            12,
+            Arc::new(Mutex::new(PciConfigIo::new(pci_root.clone()))),
+        )
         .map_err(VmmError::Other)?;
     mmio_bus
         .register(
@@ -113,18 +123,20 @@ pub fn build(
 
     // COM1: 16550A on IRQ 4, output to the serial log.
     let irq4: Arc<dyn IrqLine> = Arc::new(KvmIrqLine::new(vm_fd.clone(), 4));
-    let serial = factory
-        .serial(&desc.serial_log, irq4)
-        .map_err(|e| VmmError::DeviceUnavailable {
-            device: e.device,
-            reason: format!("serial (COM1): {}", e.reason),
-        })?;
-    io_bus
-        .register(0x3F8, 8, serial)
-        .map_err(VmmError::Other)?;
+    let serial =
+        factory
+            .serial(&desc.serial_log, irq4)
+            .map_err(|e| VmmError::DeviceUnavailable {
+                device: e.device,
+                reason: format!("serial (COM1): {}", e.reason),
+            })?;
+    io_bus.register(0x3F8, 8, serial).map_err(VmmError::Other)?;
 
     let add_pci = |root: &Arc<Mutex<PciRoot>>,
-                   device: Result<Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>, crate::error::DeviceUnavailable>,
+                   device: Result<
+        Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>,
+        crate::error::DeviceUnavailable,
+    >,
                    what: String|
      -> Result<u8, VmmError> {
         let dev = device.map_err(|e| VmmError::DeviceUnavailable {
@@ -139,7 +151,11 @@ pub fn build(
         add_pci(
             &pci_root,
             factory.virtio_blk(disk, &ram.mem, msi.clone()),
-            format!("disk `{}` (/dev/vd{})", disk.id, disk_index_letter(disk, &desc.disks)),
+            format!(
+                "disk `{}` (/dev/vd{})",
+                disk.id,
+                disk_index_letter(disk, &desc.disks)
+            ),
         )?;
     }
     // One multiport console with the named ports.
@@ -204,7 +220,10 @@ pub fn build(
 }
 
 /// `a`, `b`, ... for a disk's guest device name, for error messages only.
-fn disk_index_letter(disk: &vmlab_hv_proto::machine::Disk, disks: &[vmlab_hv_proto::machine::Disk]) -> char {
+fn disk_index_letter(
+    disk: &vmlab_hv_proto::machine::Disk,
+    disks: &[vmlab_hv_proto::machine::Disk],
+) -> char {
     let idx = disks.iter().position(|d| d.id == disk.id).unwrap_or(0);
     (b'a' + idx.min(25) as u8) as char
 }
@@ -295,7 +314,7 @@ mod tests {
             initrd: None,
             cmdline: String::new(),
         };
-        std::fs::write(&dir.join("broken-vmlinuz"), b"not a bzImage").unwrap();
+        std::fs::write(dir.join("broken-vmlinuz"), b"not a bzImage").unwrap();
         d.disks = vec![Disk {
             id: "rootfs".into(),
             path: "/disk.raw".into(),

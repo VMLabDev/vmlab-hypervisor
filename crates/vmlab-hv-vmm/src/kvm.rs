@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use kvm_bindings::{kvm_pit_config, CpuId, KVM_MAX_CPUID_ENTRIES};
+use kvm_bindings::{CpuId, KVM_MAX_CPUID_ENTRIES, kvm_pit_config};
 use kvm_ioctls::{Cap, Kvm, VcpuFd, VmFd};
 
 use crate::error::{VmmError, VmmError as E};
@@ -29,9 +29,7 @@ impl KvmVm {
         if !kvm.check_extension(Cap::Irqchip) {
             return Err(E::KvmCap("in-kernel irqchip"));
         }
-        let vm = kvm
-            .create_vm()
-            .map_err(|e| E::ioctl("KVM_CREATE_VM", e))?;
+        let vm = kvm.create_vm().map_err(|e| E::ioctl("KVM_CREATE_VM", e))?;
         // Must precede KVM_CREATE_IRQCHIP + vCPUs.
         vm.set_tss_address(KVM_TSS_ADDR)
             .map_err(|e| E::ioctl("KVM_SET_TSS_ADDR", e))?;

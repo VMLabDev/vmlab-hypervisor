@@ -16,9 +16,9 @@
 //! - a vhost-user-fs PCI device taking the share and the shared memory
 //!   (still to come: the vhost-user master).
 
+use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 use vmlab_hv_devices::{BusDevice, GuestMemory, IrqLine, MsiSink, PciDevice};
 use vmlab_hv_proto::machine::{Disk, FsShare, Nic, SerialPort};
@@ -110,7 +110,11 @@ impl DeviceFactory for NoDevices {
             "virtio-console",
             format!(
                 "the device model has not landed in vmlab-hv-devices yet (ports {})",
-                ports.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+                ports
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         ))
     }

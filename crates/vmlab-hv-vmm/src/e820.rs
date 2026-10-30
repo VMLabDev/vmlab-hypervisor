@@ -70,8 +70,6 @@ mod tests {
     use super::*;
     use crate::layout::MemLayout;
 
-    const MIB: u64 = 1 << 20;
-
     #[test]
     fn covers_all_of_physical_space_in_order() {
         let layout = MemLayout::new(256).unwrap();
@@ -81,7 +79,11 @@ mod tests {
             "entries must be sorted and non-overlapping: {map:?}"
         );
         // RAM below the hole is fully covered.
-        assert!(map.iter().filter(|e| e.kind == E820_RAM).any(|e| e.addr == 0x10_0000));
+        assert!(
+            map.iter()
+                .filter(|e| e.kind == E820_RAM)
+                .any(|e| e.addr == 0x10_0000)
+        );
         assert_eq!(map.first().unwrap().addr, 0);
         // The hole is described as reserved through 4 GiB.
         let last = map.last().unwrap();
@@ -123,9 +125,10 @@ mod tests {
             ]
         );
         // No RAM entry straddles the hole.
-        assert!(map
-            .iter()
-            .filter(|e| e.kind == E820_RAM)
-            .all(|e| e.addr >= 0x1_0000_0000 || e.addr + e.size <= 0xC000_0000));
+        assert!(
+            map.iter()
+                .filter(|e| e.kind == E820_RAM)
+                .all(|e| e.addr >= 0x1_0000_0000 || e.addr + e.size <= 0xC000_0000)
+        );
     }
 }

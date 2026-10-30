@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use kvm_bindings::kvm_userspace_memory_region;
 use kvm_ioctls::VmFd;
-use vm_memory::{Address, FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::{
+    Address, FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion,
+};
 
 use crate::error::VmmError;
 use crate::layout::MemLayout;
@@ -36,10 +38,16 @@ impl GuestRam {
     /// guest's memory.
     pub fn shared_memfd(layout: MemLayout) -> Result<Self, VmmError> {
         let file = create_memfd().map_err(VmmError::Memory)?;
-        let total: u64 = layout.regions.iter().map(|(base, size)| base + size).max().unwrap();
+        let total: u64 = layout
+            .regions
+            .iter()
+            .map(|(base, size)| base + size)
+            .max()
+            .unwrap();
         // The memfd must cover the high region's offset too; its size is the
         // top of RAM.
-        file.set_len(total).map_err(|e| VmmError::Memory(format!("sizing memfd: {e}")))?;
+        file.set_len(total)
+            .map_err(|e| VmmError::Memory(format!("sizing memfd: {e}")))?;
         let mem = mmap_regions(&layout, Some(&file))
             .map_err(|e| VmmError::Memory(format!("mapping guest RAM: {e}")))?;
         Ok(GuestRam {
@@ -59,8 +67,7 @@ fn mmap_regions(
     file: Option<&File>,
 ) -> Result<GuestMemoryMmap, vm_memory::mmap::FromRangesError> {
     let ranges = layout.regions.iter().map(|(base, size)| {
-        let file_offset =
-            file.map(|f| FileOffset::new(f.try_clone().expect("clone memfd"), *base));
+        let file_offset = file.map(|f| FileOffset::new(f.try_clone().expect("clone memfd"), *base));
         (GuestAddress(*base), *size as usize, file_offset)
     });
     GuestMemoryMmap::from_ranges_with_files(ranges)
@@ -74,7 +81,7 @@ fn create_memfd() -> Result<File, String> {
     let fd = unsafe {
         libc::syscall(
             libc::SYS_memfd_create,
-            b"vmlab-hv-ram\0".as_ptr() as *const libc::c_char,
+            c"vmlab-hv-ram".as_ptr(),
             MFD_CLOEXEC | MFD_ALLOW_SEALING,
         )
     };
@@ -113,9 +120,7 @@ mod tests {
     fn anonymous_ram_round_trips() {
         let layout = MemLayout::new(8).unwrap();
         let ram = GuestRam::anonymous(layout).unwrap();
-        ram.mem
-            .write_slice(b"hello", GuestAddress(0))
-            .unwrap();
+        ram.mem.write_slice(b"hello", GuestAddress(0)).unwrap();
         let mut buf = [0u8; 5];
         ram.mem.read_slice(&mut buf, GuestAddress(0)).unwrap();
         assert_eq!(&buf, b"hello");

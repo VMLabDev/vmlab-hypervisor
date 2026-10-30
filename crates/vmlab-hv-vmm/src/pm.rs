@@ -163,8 +163,8 @@ impl SleepSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
     struct FakeIrq {
         level: AtomicBool,
@@ -189,10 +189,7 @@ mod tests {
             sleeps: Mutex::new(Vec::new()),
         });
         let sink2 = sink.clone();
-        let mut pm = PmDevice::new(
-            irq.clone(),
-            Arc::new(move |s| sink2.sleeps.lock().push(s)),
-        );
+        let mut pm = PmDevice::new(irq.clone(), Arc::new(move |s| sink2.sleeps.lock().push(s)));
 
         // Button pressed with the event disabled: status latched, no SCI.
         pm.press_power_button();
@@ -219,9 +216,18 @@ mod tests {
         });
         let seen = Arc::new(AtomicU8::new(0));
         let seen2 = seen.clone();
-        let mut pm = PmDevice::new(irq, Arc::new(move |s| {
-            seen2.store(match s { SleepState::S3 => 3, SleepState::S4 | SleepState::S5 => 5 }, Ordering::SeqCst)
-        }));
+        let mut pm = PmDevice::new(
+            irq,
+            Arc::new(move |s| {
+                seen2.store(
+                    match s {
+                        SleepState::S3 => 3,
+                        SleepState::S4 | SleepState::S5 => 5,
+                    },
+                    Ordering::SeqCst,
+                )
+            }),
+        );
         // SLP_TYP=5, SLP_EN.
         pm.write(4, &0x3400u16.to_le_bytes());
         assert_eq!(seen.load(Ordering::SeqCst), 5);

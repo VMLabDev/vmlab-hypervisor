@@ -17,14 +17,12 @@
 //! [`PciRoot::dispatch_io`] directly, so one lock (the root) covers config
 //! and BAR state.
 
-use std::sync::Arc;
 use parking_lot::{Mutex, MutexGuard};
+use std::sync::Arc;
 
 use vmlab_hv_devices::{BarInfo, BarKind, BusDevice, PciDevice};
 
-use crate::layout::{
-    IO_ALLOC_BASE, MMCONFIG_SIZE, MMIO32_BASE, MMIO32_SIZE, MMIO64_SIZE,
-};
+use crate::layout::{IO_ALLOC_BASE, MMCONFIG_SIZE, MMIO32_BASE, MMIO32_SIZE, MMIO64_SIZE};
 
 /// Number of slots on bus 0.
 pub const PCI_SLOTS: usize = 32;
@@ -56,9 +54,7 @@ impl BarState {
         match self.info.kind {
             BarKind::Io => 0x1,
             BarKind::Mmio32 => 0x0,
-            BarKind::Mmio64 { prefetchable } => {
-                0x4 | if prefetchable { 0x8 } else { 0 }
-            }
+            BarKind::Mmio64 { prefetchable } => 0x4 | if prefetchable { 0x8 } else { 0 },
         }
     }
 
@@ -120,7 +116,7 @@ impl BarAllocator {
     }
 
     fn mmio64_base(&self) -> u64 {
-        self.mmio64_next.map(|next| next).unwrap_or(0)
+        self.mmio64_next.unwrap_or(0)
     }
 }
 
@@ -163,10 +159,7 @@ impl PciRoot {
                 1
             };
             if dword + span > BAR_REG_END {
-                return Err(format!(
-                    "BAR {} does not fit in config space",
-                    info.index
-                ));
+                return Err(format!("BAR {} does not fit in config space", info.index));
             }
             if bars.iter().any(|b: &BarState| {
                 (b.dword..b.dword + if b.is_64bit() { 2 } else { 1 })
@@ -197,7 +190,11 @@ impl PciRoot {
         if let Some(bar) = func.bars.iter().find(|b| b.dword == reg) {
             return bar_low_read(bar);
         }
-        if let Some(bar) = func.bars.iter().find(|b| b.is_64bit() && b.dword + 1 == reg) {
+        if let Some(bar) = func
+            .bars
+            .iter()
+            .find(|b| b.is_64bit() && b.dword + 1 == reg)
+        {
             return bar_high_read(bar);
         }
         let mut dev = func.dev.lock();
@@ -205,14 +202,7 @@ impl PciRoot {
     }
 
     /// Write config bytes at `offset` (0..256) of `(bus, slot, function)`.
-    pub fn config_write(
-        &mut self,
-        bus: u8,
-        slot: u8,
-        function: u8,
-        offset: usize,
-        data: &[u8],
-    ) {
+    pub fn config_write(&mut self, bus: u8, slot: u8, function: u8, offset: usize, data: &[u8]) {
         if bus != 0 || function != 0 || slot as usize >= PCI_SLOTS {
             return;
         }
@@ -229,8 +219,7 @@ impl PciRoot {
             let n = data.len().min(4 - within);
             let chunk = &data[..n];
             let is_low = |reg: usize| func.bars.iter().any(|b| b.dword == reg);
-            let is_high =
-                |reg: usize| func.bars.iter().any(|b| b.is_64bit() && b.dword + 1 == reg);
+            let is_high = |reg: usize| func.bars.iter().any(|b| b.is_64bit() && b.dword + 1 == reg);
             if is_low(reg) {
                 let idx = func.bars.iter().position(|b| b.dword == reg).unwrap();
                 Self::write_low_dword(&mut func.bars[idx], within, chunk);
@@ -250,7 +239,9 @@ impl PciRoot {
         }
     }
 
-    /// Overlay a partial write on the BAR's low dword and interpret it.
+    /// Overlay a partial write on the BAR's low dword and interpret it. The
+    /// high dword of a 64-bit BAR is preserved: drivers may program the two
+    /// dwords in either order.
     fn write_low_dword(bar: &mut BarState, within: usize, chunk: &[u8]) {
         let mut current = bar_low_read(bar).to_le_bytes();
         current[within..within + chunk.len()].copy_from_slice(chunk);
@@ -263,7 +254,12 @@ impl PciRoot {
             bar.sizing = true;
         } else {
             bar.sizing = false;
-            bar.addr = u64::from(value & addr_bits_mask);
+            let high = if bar.is_64bit() {
+                bar.addr & 0xFFFF_FFFF_0000_0000
+            } else {
+                0
+            };
+            bar.addr = high | u64::from(value & addr_bits_mask);
         }
     }
 
@@ -274,7 +270,7 @@ impl PciRoot {
         if value == 0xFFFF_FFFF {
             // Stays in sizing until the low dword gets a real address; keep
             // the high half's all-ones read without a separate flag.
-            bar.addr = bar.addr & 0xFFFF_FFFF; // low half unchanged
+            bar.addr &= 0xFFFF_FFFF; // low half unchanged
             bar.sizing = true;
         } else {
             bar.sizing = false;
@@ -312,10 +308,7 @@ impl PciRoot {
     }
 
     /// Find the function and BAR covering `addr`, locking its device.
-    fn find_bar(
-        &mut self,
-        addr: u64,
-    ) -> Option<(MutexGuard<'_, dyn PciDevice>, u8, u64)> {
+    fn find_bar(&mut self, addr: u64) -> Option<(MutexGuard<'_, dyn PciDevice>, u8, u64)> {
         for func in self.slots.iter_mut().filter_map(|s| s.as_mut()) {
             for bar in &func.bars {
                 if bar.addr <= addr && addr < bar.addr + bar.info.size {
@@ -427,7 +420,10 @@ impl BusDevice for PciEcam {
             return;
         }
         let (bus, slot, function, conf_off) = ecam_decode(offset);
-        let dword = self.root.lock().config_read(bus, slot, function, conf_off / 4);
+        let dword = self
+            .root
+            .lock()
+            .config_read(bus, slot, function, conf_off / 4);
         let bytes = dword.to_le_bytes();
         copy_into(data, &bytes[conf_off % 4..]);
     }
@@ -466,11 +462,15 @@ fn overlay(target: &mut [u8], source: &[u8]) {
 mod tests {
     use super::*;
 
+    /// One recorded BAR or config access: register/index, offset, bytes,
+    /// write flag.
+    type Access = (u8, u64, Vec<u8>, bool);
+
     /// A minimal PCI function: a vendor dword, two BARs, and a log of BAR
     /// and config traffic.
     struct FakePci {
         bars: Vec<BarInfo>,
-        bar_log: Mutex<Vec<(u8, u64, Vec<u8>, bool)>>,
+        bar_log: Mutex<Vec<Access>>,
         config_log: Mutex<Vec<(usize, u64, Vec<u8>)>>,
     }
 
@@ -482,8 +482,6 @@ mod tests {
                 config_log: Mutex::new(Vec::new()),
             }))
         }
-
-
     }
 
     impl PciDevice for FakePci {
@@ -511,16 +509,24 @@ mod tests {
         }
 
         fn bar_write(&mut self, bar: u8, offset: u64, data: &[u8]) {
-            self.bar_log
-                .lock()
-                .push((bar, offset, data.to_vec(), true));
+            self.bar_log.lock().push((bar, offset, data.to_vec(), true));
         }
     }
 
     fn test_bars() -> Vec<BarInfo> {
         vec![
-            BarInfo { index: 0, size: 0x1000, kind: BarKind::Mmio32 },
-            BarInfo { index: 2, size: 0x2000, kind: BarKind::Mmio64 { prefetchable: false } },
+            BarInfo {
+                index: 0,
+                size: 0x1000,
+                kind: BarKind::Mmio32,
+            },
+            BarInfo {
+                index: 2,
+                size: 0x2000,
+                kind: BarKind::Mmio64 {
+                    prefetchable: false,
+                },
+            },
         ]
     }
 
@@ -578,10 +584,7 @@ mod tests {
         root.config_write(0, 1, 0, 16, &0xC200_0000u32.to_le_bytes());
         assert!(root.dispatch_mmio_write(0xC200_0000 + 8, &[0x55, 0x66]));
         let log = dev.lock().bar_log.lock().clone();
-        assert_eq!(
-            log.last().unwrap(),
-            &(0, 8, vec![0x55, 0x66], true)
-        );
+        assert_eq!(log.last().unwrap(), &(0, 8, vec![0x55, 0x66], true));
         // Outside any BAR: unhandled.
         assert!(!root.dispatch_mmio_read(0xDEAD_0000, &mut data));
     }
@@ -637,7 +640,11 @@ mod tests {
 
     #[test]
     fn io_bar_allocation_and_dispatch() {
-        let dev = FakePci::new(vec![BarInfo { index: 3, size: 0x100, kind: BarKind::Io }]);
+        let dev = FakePci::new(vec![BarInfo {
+            index: 3,
+            size: 0x100,
+            kind: BarKind::Io,
+        }]);
         let mut root = PciRoot::new(0x1_0000_0000);
         root.add_device(dev.clone()).unwrap();
         let root_cell = Mutex::new(root);

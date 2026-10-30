@@ -51,7 +51,9 @@ impl MemLayout {
             .filter(|r| *r >= 4 * MIB)
             .ok_or_else(|| format!("memory_mib {ram_mib} is out of range (4..=1<<20 MiB)"))?;
         if ram > (1 << 40) {
-            return Err(format!("memory_mib {ram_mib} exceeds the 1 TiB phase 1 limit"));
+            return Err(format!(
+                "memory_mib {ram_mib} exceeds the 1 TiB phase 1 limit"
+            ));
         }
         let low = ram.min(PCI_HOLE_START);
         let high = ram - low;
@@ -87,7 +89,7 @@ impl MemLayout {
 }
 
 /// Size of the 64-bit MMIO BAR window.
-pub const MMIO64_SIZE: u64 = 1 * GIB;
+pub const MMIO64_SIZE: u64 = GIB;
 
 #[cfg(test)]
 mod tests {

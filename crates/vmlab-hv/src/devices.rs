@@ -6,21 +6,19 @@
 //! prepared by the VMM when a machine has shares; the device that hands it to
 //! virtiofsd has not landed yet).
 
+use parking_lot::Mutex;
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
+use vmlab_disk::Format;
 use vmlab_hv_devices::serial::{Serial, SerialOut};
 use vmlab_hv_devices::virtio::block::Block;
 use vmlab_hv_devices::virtio::console::{Console, PortConfig};
 use vmlab_hv_devices::virtio::net::{Net, NetConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
-use vmlab_hv_devices::{
-    BusDevice, GuestMemory, IrqLine, MsiSink, PciDevice, VirtioDevice,
-};
+use vmlab_hv_devices::{BusDevice, GuestMemory, IrqLine, MsiSink, PciDevice, VirtioDevice};
 use vmlab_hv_proto::machine::{Disk, DiskFormat, FsShare, Nic, NicAttachment, SerialPort};
-use vmlab_disk::Format;
 
 use vmlab_hv_vmm::error::DeviceUnavailable;
 
@@ -37,7 +35,11 @@ impl DeviceSet {
         msi: Arc<dyn MsiSink>,
     ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
         Ok(Arc::new(Mutex::new(VirtioPciDevice::new(
-            id, device, mem.clone(), Some(msi), None,
+            id,
+            device,
+            mem.clone(),
+            Some(msi),
+            None,
         ))))
     }
 }
@@ -78,7 +80,11 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         let image = vmlab_disk::open(&disk.path, format, disk.read_only).map_err(|e| {
             DeviceUnavailable::new(
                 "virtio-blk",
-                format!("cannot open disk {} (id `{}`): {e}", disk.path.display(), disk.id),
+                format!(
+                    "cannot open disk {} (id `{}`): {e}",
+                    disk.path.display(),
+                    disk.id
+                ),
             )
         })?;
         self.wrap(
@@ -103,7 +109,10 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
             })
             .collect();
         let console = Console::new("console0", ports).map_err(|e| {
-            DeviceUnavailable::new("virtio-console", format!("cannot listen on port sockets: {e}"))
+            DeviceUnavailable::new(
+                "virtio-console",
+                format!("cannot listen on port sockets: {e}"),
+            )
         })?;
         self.wrap("console0".into(), Box::new(console), mem, msi)
     }
@@ -157,8 +166,9 @@ fn parse_mac(mac: &str) -> Result<[u8; 6], DeviceUnavailable> {
         ));
     }
     for (slot, part) in bytes.iter_mut().zip(parts) {
-        *slot = u8::from_str_radix(part, 16)
-            .map_err(|_| DeviceUnavailable::new("virtio-net", format!("malformed MAC address {mac:?}")))?;
+        *slot = u8::from_str_radix(part, 16).map_err(|_| {
+            DeviceUnavailable::new("virtio-net", format!("malformed MAC address {mac:?}"))
+        })?;
     }
     Ok(bytes)
 }

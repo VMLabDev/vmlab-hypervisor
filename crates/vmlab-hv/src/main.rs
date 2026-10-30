@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use vmlab_hv_proto::MachineDescription;
-use vmlab_hv_vmm::{builder, control, vm::ExitReason, VmHandle};
+use vmlab_hv_vmm::{VmHandle, builder, control, vm::ExitReason};
 
 use crate::devices::DeviceSet;
 
@@ -84,8 +84,8 @@ fn main() -> ExitCode {
 }
 
 fn read_machine(path: &PathBuf) -> Result<MachineDescription, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))
 }
 
@@ -100,8 +100,7 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
     let handle = vm.handle();
 
     // Bind every served socket before the vCPUs run.
-    control::serve(&args.control, &handle)
-        .map_err(|e| format!("control socket: {e}"))?;
+    control::serve(&args.control, &handle).map_err(|e| format!("control socket: {e}"))?;
 
     spawn_signal_waiter(handle.clone());
 

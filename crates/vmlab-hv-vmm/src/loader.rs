@@ -12,8 +12,8 @@ use std::path::Path;
 
 use kvm_ioctls::VcpuFd;
 use linux_loader::bootparam::boot_params;
-use linux_loader::loader::bzimage::BzImage;
 use linux_loader::loader::KernelLoader;
+use linux_loader::loader::bzimage::BzImage;
 use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemoryMmap};
 
 use crate::e820::E820Entry;
@@ -71,8 +71,11 @@ pub fn load(
     }
     mem.write_slice(cmdline_bytes, GuestAddress(CMDLINE_ADDR))
         .map_err(|e| VmmError::Kernel(format!("writing cmdline: {e}")))?;
-    mem.write_slice(&[0], GuestAddress(CMDLINE_ADDR + cmdline_bytes.len() as u64))
-        .map_err(|e| VmmError::Kernel(format!("writing cmdline: {e}")))?;
+    mem.write_slice(
+        &[0],
+        GuestAddress(CMDLINE_ADDR + cmdline_bytes.len() as u64),
+    )
+    .map_err(|e| VmmError::Kernel(format!("writing cmdline: {e}")))?;
     hdr.cmd_line_ptr = CMDLINE_ADDR as u32;
     hdr.cmdline_size = cmdline_len as u32;
 
@@ -177,8 +180,10 @@ pub fn init_vcpu(vcpu: &mut VcpuFd, boot: &KernelBoot) -> Result<(), VmmError> {
     sregs.cr4 = 0x20; // PAE
     sregs.efer = 0x500; // LME | LMA
     let seg = |selector: u16, kind: SegKind| -> kvm_bindings::kvm_segment {
-        let mut s = kvm_bindings::kvm_segment::default();
-        s.selector = selector;
+        let mut s = kvm_bindings::kvm_segment {
+            selector,
+            ..Default::default()
+        };
         match kind {
             SegKind::Code64 => {
                 s.base = 0;
@@ -223,6 +228,54 @@ pub fn init_vcpu(vcpu: &mut VcpuFd, boot: &KernelBoot) -> Result<(), VmmError> {
     Ok(())
 }
 
+/// Put a freshly created vCPU into flat 16-bit protected mode at `entry`
+/// (CR0.PE set, CS a 16-bit code segment). Used where exception delivery
+/// must take the hardware path (a deliberate triple fault).
+pub fn init_protected_16(vcpu: &mut VcpuFd, entry: u64) -> Result<(), VmmError> {
+    init_mode(vcpu, entry, true)
+}
+
+/// Put a freshly created vCPU into flat real mode at `entry` (CS base 0,
+/// everything else zero, IF cleared). The architecture's reset vector is at
+/// physical 0xFFFF_FFF0, which no small machine backs with RAM, so a
+/// real-mode entry needs an explicit register image.
+pub fn init_real_mode(vcpu: &mut VcpuFd, entry: u64) -> Result<(), VmmError> {
+    init_mode(vcpu, entry, false)
+}
+
+fn init_mode(vcpu: &mut VcpuFd, entry: u64, protected: bool) -> Result<(), VmmError> {
+    let mut regs = vcpu
+        .get_regs()
+        .map_err(|e| VmmError::ioctl("KVM_GET_REGS", e))?;
+    regs.rip = entry;
+    regs.rflags = 0x2;
+    vcpu.set_regs(&regs)
+        .map_err(|e| VmmError::ioctl("KVM_SET_REGS", e))?;
+
+    let mut sregs = vcpu
+        .get_sregs()
+        .map_err(|e| VmmError::ioctl("KVM_GET_SREGS", e))?;
+    let mut seg = kvm_bindings::kvm_segment {
+        selector: 0,
+        base: 0,
+        limit: 0xFFFFF,
+        type_: 11,
+        present: 1,
+        s: 1,
+        g: 1,
+        ..Default::default()
+    };
+    sregs.cs = seg;
+    seg.type_ = 3; // read/write, accessed
+    sregs.ds = seg;
+    sregs.es = seg;
+    sregs.ss = seg;
+    sregs.cr0 = if protected { 0x11 } else { 0x10 }; // PE|ET or ET
+    vcpu.set_sregs(&sregs)
+        .map_err(|e| VmmError::ioctl("KVM_SET_SREGS", e))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,7 +303,8 @@ mod tests {
     }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("vmlab-hv-loader-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("vmlab-hv-loader-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -280,7 +334,8 @@ mod tests {
         assert_eq!(boot.entry, KERNEL_ADDR + 0x200);
         assert_eq!(boot.zero_page, ZERO_PAGE_ADDR);
 
-        // The zero page keeps the header magic and points at the cmdline.
+        // The setup header inside the zero page keeps its magic and now
+        // points at the cmdline.
         let params: boot_params = mem.read_obj(GuestAddress(ZERO_PAGE_ADDR)).unwrap();
         let hdr_magic = { params.hdr.header };
         assert_eq!(hdr_magic, 0x5372_6448); // "HdrS"
@@ -291,12 +346,16 @@ mod tests {
 
         // Cmdline bytes plus NUL.
         let mut buf = [0u8; 20];
-        mem.read_slice(&mut buf, GuestAddress(CMDLINE_ADDR)).unwrap();
+        mem.read_slice(&mut buf, GuestAddress(CMDLINE_ADDR))
+            .unwrap();
         assert_eq!(&buf, b"console=ttyS0 quiet\0");
 
         // e820 count and the RSDP pointer.
         let e820_entries = { params.e820_entries };
-        assert_eq!(e820_entries as usize, crate::e820::build_e820(&layout).len());
+        assert_eq!(
+            e820_entries as usize,
+            crate::e820::build_e820(&layout).len()
+        );
         let rsdp = { params.acpi_rsdp_addr };
         assert_eq!(rsdp, 0x9_E000);
 
@@ -305,7 +364,8 @@ mod tests {
         mem.read_slice(&mut pml4e, GuestAddress(PML4_ADDR)).unwrap();
         assert_eq!(u64::from_le_bytes(pml4e) & 0xF, 0x3);
         let mut gdt = [0u8; 8];
-        mem.read_slice(&mut gdt, GuestAddress(GDT_ADDR + 8)).unwrap();
+        mem.read_slice(&mut gdt, GuestAddress(GDT_ADDR + 8))
+            .unwrap();
         assert_eq!(u64::from_le_bytes(gdt), 0xAF_9B00_0000_FFFF);
     }
 
