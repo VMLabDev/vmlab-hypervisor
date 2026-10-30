@@ -31,7 +31,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use virtio_queue::{Queue, QueueState, QueueT};
+use virtio_queue::{Queue, QueueOwnedT, QueueState, QueueT};
 
 use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
 
@@ -61,6 +61,8 @@ const EV_PORT_OPEN: u16 = 6;
 const EV_PORT_NAME: u16 = 7;
 /// Largest read the worker takes from a client socket in one go.
 const READ_CHUNK: usize = 64 * 1024;
+/// Apply backpressure after this much staged output, plus at most one chain.
+const MAX_TX_STAGE: usize = 1024 * 1024;
 
 /// One named virtio-serial port served on a unix socket.
 #[derive(Debug, Clone)]
@@ -384,11 +386,11 @@ fn run(
                     None => {}
                 }
             }
-            if clients[i].is_some()
-                && revents & libc::POLLOUT != 0
-                && let Some(client) = clients[i].as_mut()
-            {
-                flush_tx(&shared, i, client);
+            if clients[i].is_some() && revents & libc::POLLOUT != 0 {
+                if let Some(client) = clients[i].as_mut() {
+                    flush_tx(&shared, i, client);
+                }
+                process_tx(&shared, &mut clients, i as u16 + 1);
             }
             if clients[i].is_some() && revents & (libc::POLLHUP | libc::POLLERR) != 0 {
                 disconnect(&shared, &mut clients, i);
@@ -424,6 +426,8 @@ fn disconnect(shared: &Arc<Mutex<Shared>>, clients: &mut [Option<UnixStream>], i
         name: None,
     });
     flush_pending(&mut sh);
+    drop(sh);
+    process_tx(shared, clients, port);
 }
 
 /// Route a queue kick to its handler.
@@ -510,58 +514,79 @@ fn drain_rx_stage(sh: &mut Shared, i: usize) {
 /// to the connected client, or discard them when no client is connected.
 fn process_tx(shared: &Arc<Mutex<Shared>>, clients: &mut [Option<UnixStream>], port: u16) {
     let queue = tx_queue(port);
-    let mut out = Vec::new();
-    let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
-    {
-        let mut sh = lock(shared);
-        // A plain reborrow lets the field borrows below stay disjoint.
-        let sh = &mut *sh;
-        let Some(mem) = sh.mem.as_ref() else {
-            return;
-        };
-        let Some(q) = sh
-            .queues
-            .get_mut(usize::from(queue))
-            .and_then(|q| q.as_mut())
-        else {
-            return;
-        };
-        while let Some(chain) = q.pop_descriptor_chain(mem) {
-            let head = chain.head_index();
-            let len = match chain.reader(mem) {
-                Ok(mut reader) => {
-                    let mut buf = vec![0u8; reader.available_bytes()];
-                    if reader.read_exact(&mut buf).is_ok() {
-                        out.extend_from_slice(&buf);
-                        buf.len() as u32
-                    } else {
-                        0
-                    }
-                }
-                Err(_) => 0,
+    loop {
+        let mut out = Vec::new();
+        let connected = port >= 1 && clients[port as usize - 1].is_some();
+        let mut blocked = false;
+        let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
+        {
+            let mut sh = lock(shared);
+            // A plain reborrow lets the field borrows below stay disjoint.
+            let sh = &mut *sh;
+            let pending = if connected {
+                sh.ports[port as usize - 1].tx_stage.len()
+            } else {
+                0
             };
-            if q.add_used(mem, head, len).is_err() {
-                break;
+            let Some(mem) = sh.mem.as_ref() else {
+                return;
+            };
+            let Some(q) = sh
+                .queues
+                .get_mut(usize::from(queue))
+                .and_then(|q| q.as_mut())
+            else {
+                return;
+            };
+            while let Some(chain) = q.pop_descriptor_chain(mem) {
+                if connected && pending + out.len() >= MAX_TX_STAGE {
+                    q.go_to_previous_position();
+                    blocked = true;
+                    break;
+                }
+                let head = chain.head_index();
+                let len = match chain.reader(mem) {
+                    Ok(mut reader) => {
+                        if !connected {
+                            reader.available_bytes() as u32
+                        } else {
+                            let mut buf = vec![0u8; reader.available_bytes()];
+                            if reader.read_exact(&mut buf).is_ok() {
+                                out.extend_from_slice(&buf);
+                                buf.len() as u32
+                            } else {
+                                0
+                            }
+                        }
+                    }
+                    Err(_) => 0,
+                };
+                if q.add_used(mem, head, len).is_err() {
+                    break;
+                }
+            }
+            if q.needs_notification(mem).unwrap_or(false) {
+                irq = sh.interrupt.clone().map(|irq| (irq, queue));
             }
         }
-        if q.needs_notification(mem).unwrap_or(false) {
-            irq = sh.interrupt.clone().map(|irq| (irq, queue));
+        if let Some((irq, queue)) = irq {
+            irq.notify_queue(queue);
         }
-    }
-    if let Some((irq, queue)) = irq {
-        irq.notify_queue(queue);
-    }
-    // Port 0 has no host side: its output is always discarded.
-    if port >= 1 {
-        let i = port as usize - 1;
-        if clients[i].is_some() {
-            {
-                let mut sh = lock(shared);
-                sh.ports[i].tx_stage.extend_from_slice(&out);
+        // Port 0 has no host side: its output is always discarded.
+        if port >= 1 {
+            let i = port as usize - 1;
+            if clients[i].is_some() {
+                {
+                    let mut sh = lock(shared);
+                    sh.ports[i].tx_stage.extend_from_slice(&out);
+                }
+                if let Some(client) = clients[i].as_mut() {
+                    flush_tx(shared, i, client);
+                }
             }
-            if let Some(client) = clients[i].as_mut() {
-                flush_tx(shared, i, client);
-            }
+        }
+        if !blocked || lock(shared).ports[port as usize - 1].tx_stage.len() >= MAX_TX_STAGE {
+            return;
         }
     }
 }
@@ -1364,6 +1389,44 @@ mod tests {
 
     /// The port id the driver puts in DEVICE_READY (VIRTIO_CONSOLE_BAD_ID).
     const BAD_ID_FOR_TEST: u32 = u32::MAX;
+
+    #[test]
+    fn transmit_staging_is_bounded_when_client_stops_reading() {
+        let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 2 << 20)]).unwrap();
+        let shared = Arc::new(Mutex::new(Shared {
+            mem: Some(mem.clone()),
+            interrupt: None,
+            queues: (0..6).map(|_| None).collect(),
+            names: vec!["test".into()],
+            device_ready: true,
+            pending: VecDeque::new(),
+            ports: vec![PortState {
+                host_open: true,
+                guest_open: true,
+                rx_stage: vec![],
+                tx_stage: vec![],
+            }],
+        }));
+        let (mut producer, _client) = UnixStream::pair().unwrap();
+        producer.set_nonblocking(true).unwrap();
+        let payload = vec![23; READ_CHUNK];
+        while producer.write(&payload).is_ok() {}
+        let mut clients = vec![Some(producer)];
+        mem.write_slice(&payload, GuestAddress(0x100000)).unwrap();
+        for iteration in 0..128 {
+            let mut ring = TestVq::new(0x1000, 8);
+            mem.write_obj(0u16, GuestAddress(ring.avail + 2)).unwrap();
+            mem.write_obj(0u16, GuestAddress(ring.used + 2)).unwrap();
+            ring.add_chain(&mem, &[(0x100000, payload.len() as u32, false)]);
+            lock(&shared).queues[5] = Some(ring.queue());
+            process_tx(&shared, &mut clients, 1);
+            let bytes = lock(&shared).ports[0].tx_stage.len();
+            assert!(
+                bytes <= 1024 * 1024,
+                "iteration {iteration}: staged {bytes} bytes"
+            );
+        }
+    }
 
     #[test]
     fn config_space_names_the_port_count() {

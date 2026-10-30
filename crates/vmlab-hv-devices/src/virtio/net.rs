@@ -31,7 +31,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use virtio_queue::{Queue, QueueState, QueueT};
+use virtio_queue::{Queue, QueueOwnedT, QueueState, QueueT};
 
 use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
 
@@ -60,6 +60,8 @@ const RXQ: u16 = 0;
 const TXQ: u16 = 1;
 /// Largest Ethernet frame the wire format accepts (64 KiB payload + header).
 const MAX_FRAME: usize = 65536 + 14;
+/// Bound host-side output while the switch is backpressured.
+const MAX_TX_STAGE: usize = 1024 * 1024;
 /// Largest read the worker takes from the switch socket in one go.
 const READ_CHUNK: usize = 128 * 1024;
 /// Default reconnect interval after the switch socket closes.
@@ -300,6 +302,13 @@ fn run(
                 drop_link(&mut stream, &shared);
                 continue;
             }
+            if revents & libc::POLLOUT != 0 {
+                process_tx(
+                    &shared,
+                    &mut stream,
+                    hdr_len(negotiated.load(Ordering::Acquire)),
+                );
+            }
             if dead {
                 drop_link(&mut stream, &shared);
             }
@@ -493,52 +502,68 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
 /// Consume transmitq buffers: strip the header, frame the packet, and send it
 /// to the switch — or drop it while the link is down.
 fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_len: usize) {
-    let mut out = Vec::new();
-    let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
-    {
-        let mut guard = lock(shared);
-        // A plain reborrow lets the field borrows below stay disjoint.
-        let sh = &mut *guard;
-        let Some(mem) = sh.mem.as_ref() else {
-            return;
-        };
-        let Some(q) = sh.queues.get_mut(usize::from(TXQ)).and_then(|q| q.as_mut()) else {
-            return;
-        };
-        while let Some(chain) = q.pop_descriptor_chain(mem) {
-            let head = chain.head_index();
-            let mut consumed = 0;
-            if let Ok(mut reader) = chain.reader(mem) {
-                let mut hdr = vec![0u8; hdr_len.min(reader.available_bytes())];
-                if reader.read_exact(&mut hdr).is_ok() {
-                    let mut frame = vec![0u8; reader.available_bytes()];
-                    if reader.read_exact(&mut frame).is_ok() {
-                        consumed = (hdr.len() + frame.len()) as u32;
-                        if frame.len() <= MAX_FRAME {
-                            out.extend_from_slice(&(frame.len() as u32).to_be_bytes());
-                            out.extend_from_slice(&frame);
+    loop {
+        let mut out = Vec::new();
+        let mut blocked = false;
+        let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
+        {
+            let mut guard = lock(shared);
+            // A plain reborrow lets the field borrows below stay disjoint.
+            let sh = &mut *guard;
+            let pending = sh.tx_out.len();
+            let Some(mem) = sh.mem.as_ref() else {
+                return;
+            };
+            let Some(q) = sh.queues.get_mut(usize::from(TXQ)).and_then(|q| q.as_mut()) else {
+                return;
+            };
+            while let Some(chain) = q.pop_descriptor_chain(mem) {
+                if stream.is_some() && pending + out.len() >= MAX_TX_STAGE {
+                    q.go_to_previous_position();
+                    blocked = true;
+                    break;
+                }
+                let head = chain.head_index();
+                let mut consumed = 0;
+                if let Ok(mut reader) = chain.reader(mem) {
+                    let mut hdr = vec![0u8; hdr_len.min(reader.available_bytes())];
+                    if reader.read_exact(&mut hdr).is_ok() {
+                        if reader.available_bytes() > MAX_FRAME || stream.is_none() {
+                            consumed = (hdr.len() + reader.available_bytes()) as u32;
+                        } else {
+                            let mut frame = vec![0u8; reader.available_bytes()];
+                            if reader.read_exact(&mut frame).is_ok() {
+                                consumed = (hdr.len() + frame.len()) as u32;
+                                if frame.len() <= MAX_FRAME {
+                                    out.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+                                    out.extend_from_slice(&frame);
+                                }
+                            }
                         }
                     }
                 }
+                if q.add_used(mem, head, consumed).is_err() {
+                    break;
+                }
             }
-            if q.add_used(mem, head, consumed).is_err() {
-                break;
+            if q.needs_notification(mem).unwrap_or(false) {
+                irq = sh.interrupt.clone().map(|irq| (irq, TXQ));
+            }
+            if stream.is_some() {
+                sh.tx_out.extend_from_slice(&out);
             }
         }
-        if q.needs_notification(mem).unwrap_or(false) {
-            irq = sh.interrupt.clone().map(|irq| (irq, TXQ));
+        if let Some((irq, queue)) = irq {
+            irq.notify_queue(queue);
         }
-        if stream.is_some() {
-            sh.tx_out.extend_from_slice(&out);
+        if let Some(stream_ref) = stream.as_mut()
+            && flush_tx(shared, stream_ref).is_err()
+        {
+            drop_link(stream, shared);
         }
-    }
-    if let Some((irq, queue)) = irq {
-        irq.notify_queue(queue);
-    }
-    if let Some(stream_ref) = stream.as_mut()
-        && flush_tx(shared, stream_ref).is_err()
-    {
-        drop_link(stream, shared);
+        if !blocked || lock(shared).tx_out.len() >= MAX_TX_STAGE {
+            return;
+        }
     }
 }
 
@@ -1193,6 +1218,39 @@ mod tests {
         let mut config = [0u8; 12];
         normal.read_config(0, &mut config);
         assert_eq!(&config[10..12], &[0, 0]);
+    }
+
+    #[test]
+    fn transmit_staging_is_bounded_when_switch_stops_reading() {
+        let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 2 << 20)]).unwrap();
+        let shared = Arc::new(Mutex::new(Shared {
+            mem: Some(mem.clone()),
+            interrupt: None,
+            queues: vec![None, None],
+            link_up: true,
+            rx: RxRead::Idle,
+            rx_pending: VecDeque::new(),
+            tx_out: vec![],
+        }));
+        let (mut producer, _switch) = UnixStream::pair().unwrap();
+        producer.set_nonblocking(true).unwrap();
+        let payload = vec![23; 4096];
+        while producer.write(&payload).is_ok() {}
+        let mut stream = Some(producer);
+        mem.write_slice(&payload, GuestAddress(0x100000)).unwrap();
+        for iteration in 0..1024 {
+            let mut ring = TestVq::new(0x1000, 8);
+            mem.write_obj(0u16, GuestAddress(ring.avail + 2)).unwrap();
+            mem.write_obj(0u16, GuestAddress(ring.used + 2)).unwrap();
+            ring.add_chain(&mem, &[(0x100000, payload.len() as u32, false)]);
+            lock(&shared).queues[1] = Some(ring.queue());
+            process_tx(&shared, &mut stream, 12);
+            let bytes = lock(&shared).tx_out.len();
+            assert!(
+                bytes <= 1024 * 1024 + MAX_FRAME,
+                "iteration {iteration}: staged {bytes} bytes"
+            );
+        }
     }
 
     #[test]
