@@ -12,6 +12,115 @@ Run `uv run scripts/hwref/capture.py --summarize` to regenerate these tables.
 Requirements and asset preparation are in `scripts/hwref/README.md`.
 Existing results for the selected configuration are replaced.
 
+## Run the P2 differential
+
+Capture into fresh directories to preserve the reference data:
+
+```sh
+python3 scripts/hwref/capture.py --output .scratch/hwref-a q35-seabios-linux-generic
+python3 scripts/hwref/capture.py --output .scratch/hwref-b q35-seabios-linux-generic
+python3 scripts/hwref/capture.py diff \
+  .scratch/hwref-a/q35-seabios-linux-generic \
+  .scratch/hwref-b/q35-seabios-linux-generic --no-allow-list
+```
+
+An empty report and exit 0 mean the normalized observations match. Exit 1
+means unapproved differences. Exit 2 means invalid input or a missing required
+artefact. `--report PATH` writes the report to a file.
+`python3 scripts/hwref/diff.py` accepts the same diff arguments.
+
+To capture the same probe under `vmlab-hv`, supply a resolved phase-2 machine
+description and the binary to test:
+
+```sh
+python3 scripts/hwref/capture.py --backend vmlab-hv \
+  --binary target/debug/vmlab-hv --machine /path/to/machine.json \
+  --output .scratch/hwref-hv
+python3 scripts/hwref/capture.py diff \
+  .scratch/hwref-a/q35-seabios-linux-generic .scratch/hwref-hv
+```
+
+The description must select `machine = "q35"` and `boot.kind = "firmware"`.
+Use the proto crate's firmware fields for SeaBIOS or OVMF, with its CODE path,
+VARS path, secure-boot setting, and boot order. Give the probe disk the ID
+`hwref-probe` and include exactly one port named `vmlab.agent.0`.
+Set vCPUs, memory, display, NICs, CPU policy, and explicit PCI addresses to
+match the reference configuration. The capture retains those device fields.
+It replaces the probe disk with the generated firmware-bootable media,
+redirects the serial log and agent socket, and connects NICs to local sinks.
+Other writable disks get disposable qcow2 overlays. OVMF VARS is copied,
+so the original disks and variable store remain unchanged.
+
+The harness launches `vmlab-hv --machine PATH --control SOCKET --paused`,
+connects the guest stream, handshakes with protocol version 1, and sends
+`resume`. The guest archive has a length and SHA-256 check before extraction.
+Missing KVM, the binary, probe assets, or firmware produces a named `SKIP`
+and exit 0. A known rejection of q35 or `Boot::Firmware` also skips, with
+`SKIPPED.txt` in the output. Other launch errors, timeouts, control errors,
+and incomplete archives fail. A skipped output has no `guest/` and cannot
+pass the diff command.
+
+New SeaBIOS captures boot the probe from a Syslinux FAT32 disk. They use
+SeaBIOS and SeaVGABIOS, disable the vapic ROM and NIC ROMs, and do not load
+QEMU's linuxboot ROMs. The checked-in Linux reference used direct-kernel boot.
+Its extra fw_cfg boot blobs remain visible differences against disk boots.
+OVMF captures use the same kernel and initramfs in a UKI. The unsigned probe
+requires setup-mode VARS, as in the checked-in OVMF references.
+
+## Normalization and approved differences
+
+The comparison operates on every file under `guest/`, including unknown
+files. Unknown binaries get a byte-for-byte hex diff. Missing files are
+reported separately. Host argv, versions, environment, transport archives,
+and console logs outside `guest/` remain provenance, not hardware parity
+inputs. The decoded archive supplies the guest observations.
+
+Normalization removes log timestamps, audit times, IRQ and serial counters,
+MAC addresses, system UUIDs, kernel relocation addresses, and the clocksource
+watchdog's scheduling-delay notice. Boot-log lines are sorted to remove
+asynchronous log ordering. Native host CPUID leaves and host CPU descriptions
+are masked. Hypervisor CPUID leaves and guest CPU counts remain comparable.
+PCI BAR allocation bases and MSI destinations are masked in text and raw
+config dumps. BAR type bits, sizes, IDs, capabilities, and routing remain.
+ACPI FADT table pointers, FACS wake vectors, root-table pointers, BGRT image
+addresses, RSDP pointers, and affected checksums are masked in binaries.
+SMBIOS UUIDs, native processor IDs, and entry-point addresses are masked in
+every binary copy.
+Movable ACPI and Linux setup-data boundaries in e820 and iomem are named by
+role and size, including adjacent RAM boundaries. Other e820 endpoints,
+including the guest RAM ceiling and architectural holes, remain exact.
+iasl timestamps, relocated table pointers, checksums, and redundant raw-table
+text are removed from disassemblies. Other fw_cfg blobs remain byte-exact.
+
+`scripts/hwref/approved-differences.json` records D6. It permits reference-only
+ICH9 USB functions at `00:1d.0`, `.1`, `.2`, and `.7` only with their captured
+Intel IDs. It permits a candidate-only `1b36:000d` xHCI function. The filter
+applies to PCI inventories, config blocks, topology, resource ranges, and USB
+host-controller listings. Changes to a function present on both sides are
+never approved automatically. Dependent changes to ACPI namespaces, IRQ
+routing, or boot logs remain visible for review. The allow-list does not
+suppress arbitrary USB-related lines.
+
+To check that the tool retains real differences:
+
+```sh
+python3 scripts/hwref/capture.py diff \
+  docs/hwref/q35-seabios-linux-generic docs/hwref/q35-ovmf-win11
+```
+
+This exits 1 and reports different GPU IDs, vCPU counts, Hyper-V leaves,
+ACPI tables including TPM2, firmware identity, and fw_cfg contents.
+Run the Python regression suite with:
+
+```sh
+python3 -m unittest discover -s scripts/hwref -p 'test_*.py'
+```
+
+Set `HWREF_RECAPTURE=1` on a provisioned KVM host to include the P2 black-box
+test. It boots QEMU twice, requires an empty diff with no allow-list, then
+changes a captured PCI ID and requires exit 1. Without that opt-in, the test
+skips with a prerequisite message.
+
 ## Capture contents and limits
 
 Each configuration directory records exact argv, version, host CPU and firmware

@@ -15,6 +15,7 @@ pub mod chipset;
 pub mod display;
 pub mod hda;
 pub mod serial;
+pub mod usb;
 pub mod virtio;
 
 /// Guest physical memory as devices see it.
