@@ -19,6 +19,7 @@ fn generated_fetch_decode_execute_and_self_modification() {
     cpu.step().unwrap();
     assert_eq!(cpu.gpr(1).unwrap(), 5);
     assert_eq!(cpu.gpr(2).unwrap(), 12);
+    assert_eq!(cpu.read_csr(0xb00).unwrap(), 2);
     cpu.interpreter
         .memory
         .write(0x8000_0000, &0x00900093u32.to_le_bytes())
@@ -42,6 +43,20 @@ fn generated_csr_lookup_and_constructor_mismatch() {
         .unwrap();
     assert_eq!(result.u64().unwrap(), 0x300);
     assert_eq!(cpu.read_csr(0x301).unwrap() >> 62, 2);
+    for csr in [
+        0x001u16, 0x002, 0x003, 0x100, 0x104, 0x105, 0x106, 0x140, 0x141, 0x142, 0x143, 0x144,
+        0x180, 0x300, 0x301, 0x302, 0x303, 0x304, 0x305, 0x306, 0x340, 0x341, 0x342, 0x343, 0x344,
+        0xb00, 0xb02,
+    ] {
+        let original = &cpu.interpreter.program.functions["zread_CSR"];
+        let full = cpu
+            .interpreter
+            .run_function(original, vec![Value::bits(12, csr)])
+            .unwrap()
+            .u64()
+            .unwrap();
+        assert_eq!(cpu.read_csr(csr).unwrap(), full, "CSR {csr:#x}");
+    }
 }
 
 #[test]

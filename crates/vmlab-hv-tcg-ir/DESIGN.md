@@ -64,6 +64,13 @@ result to the logical width. Unknown widths retain the generic operation.
 Signed additions reduce modulo the result width. Oversized shifts do not
 use Rust's masked shift count.
 
+`specialize_argument` binds an immutable scalar parameter to a literal. It
+rejects assignments to that parameter and references that could mutate it.
+Pure comparisons of literals are folded before dead-path removal. The
+runtime uses this pass to cache a generated CSR accessor for each CSR ID,
+so lockstep observation does not repeatedly interpret the complete CSR
+dispatch chain. Tests compare these accessors with the unspecialised model.
+
 The reference value container still uses `BigInt` and `BigUint`. Native
 operations convert bounded operands to u128; this is a correctness-oriented
 representation, with allocation costs that the trace compiler must avoid.
@@ -133,5 +140,13 @@ State must be committed at exits that can trap. Neither a Cranelift backend
 nor hot-trace scheduling is part of this emitter package.
 
 The generic interpreter is the reference for those transformations.
-The separate lockstep package remains responsible for comparisons against
-the independent Sail oracle; the local tests are not a lockstep claim.
+The optional `lockstep` feature implements `StepCpu` for
+`Riscv64<LockstepMemory>`. Reset replaces memory and CPU state, restores raw
+FP bits without dirtying FS, and clears reservations and write logs. Each
+step drains its ordered physical-memory writes. The adapter samples the
+CSR set supplied in its initial `State`. The `sail` feature enables the
+independent oracle driver in `examples/lockstep.rs`.
+
+The deterministic step schedule calls generated `try_step` with forced
+wait completion disabled, then calls generated `tick_clock`. This matches
+the oracle's instruction-count clock rather than the host wall clock.

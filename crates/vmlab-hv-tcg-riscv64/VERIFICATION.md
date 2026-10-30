@@ -29,7 +29,8 @@ absolute source paths and a local checkout's paths.
 ## Parser and generated artifact
 
 The full input contains 14,135,859 bytes and 5,734 definitions. The parser
-round-trips its bytes and reparses the resulting document to the same AST:
+round-trips its bytes, emits canonical Jib from the AST independently of the
+original source, and reparses both forms to the same AST:
 
 ```sh
 cargo run -p vmlab-hv-sail-ir --example roundtrip -- target/tcg/riscv64.ir
@@ -41,6 +42,8 @@ AST equality after reparsing. Parser tests also check malformed branches,
 types, literals, strings, and bounded recursive nesting.
 After the nesting guards were finalized, a second run completed 51,562
 executions in 75 seconds without a crash.
+The final fuzz target also checks canonical AST emission. It completed
+108,601 executions in 31 seconds without a crash.
 
 The generated crate has 361 instruction builders and includes 1,986 model
 functions, 214 registers, and 285 initialization functions. It contains
@@ -107,10 +110,10 @@ lost updates before the transaction lock was added.
 ## Interpreter speed and remaining precision costs
 
 The release interpreter executed a 3,000-instruction scalar loop in
-6.923160 seconds, or 0.000433 MIPS. The loop contains an increment, a
+6.854221 seconds, or 0.000438 MIPS. The loop contains an increment, a
 decrement, and a backward conditional branch. Timing excludes model
 initialization and includes fetch, decode, generated interrupt and retirement
-logic, and the interpreter's dispatch. It executed 30,034,295 IR operations.
+logic, and the interpreter's dispatch. It executed 30,250,295 IR operations.
 
 ```sh
 systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
@@ -131,9 +134,39 @@ stronger whole-program specialisation pass.
 ## Scope of the evidence
 
 These results establish the listed interpreter and parser tests. They do not
-establish independent Sail lockstep, riscv-arch-test coverage, a Linux boot,
-VMM integration, or performance parity. Those checks belong to the separate
-lockstep, machine, and JIT work packages. No S1 template boot is claimed.
+establish a Linux TCG boot, VMM integration, or performance parity. Those
+checks belong to the machine and JIT work packages. No S1 TCG template boot
+is claimed.
+
+## Independent Sail lockstep
+
+After merging the lockstep package from local main, the runtime's optional
+adapter passed all 67 `riscv-tests` RV64I/M programs against the independently
+compiled Sail C++ model. Comparison checks integer and raw FP registers,
+privilege, virtualization, the supplied CSR set, and each instruction's
+ordered physical-memory writes. The oracle and corpus are built locally
+under `target/tcg/lockstep-oracle` and `target/tcg/lockstep-corpus` using the
+merged lockstep package's build scripts.
+
+The first divergence was instruction 1 of `rv64ui-add`, at PC 0x80000000,
+instruction 0x0540006f. CSR 0xb00, `mcycle`, was zero in the interpreter and
+one in Sail. The runtime omitted the model's clock tick. Calling generated
+`tick_clock` after generated `try_step` fixed the same reproduction; the
+complete 509-instruction test then matched and reached `tohost=1`.
+
+The initial architectural-test attempt exhausted the runtime's cumulative
+IR-operation guard because every observation also executes generated CSR
+accessors. The adapter now budgets each state snapshot and step separately.
+CSR accessors are also specialised by immutable CSR ID, with a test against
+their unspecialised generated twins. The 24 GiB host memory cap was unchanged.
+
+```sh
+VMLAB_SAIL_ORACLE="$PWD/target/tcg/lockstep-oracle/libvmlab_sail_oracle.so" \
+VMLAB_SAIL_CONFIG=/path/to/rv64d_v128_e64.json \
+systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
+  cargo run --release -p vmlab-hv-tcg --features sail --example lockstep -- \
+  target/tcg/lockstep-corpus/bin/*.elf
+```
 
 The generated model has more extensions than RV64GC. `MODEL_ISA.md` records
 its enabled configuration with FP and vector state enabled. That list is not

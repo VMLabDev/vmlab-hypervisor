@@ -409,7 +409,19 @@ fn constant_eq(a: &Expr, b: &Expr) -> Option<bool> {
             .ok()
             .zip(b.parse::<i128>().ok())
             .map(|(a, b)| a == b),
-        (Expr::Bits(a), Expr::Bits(b)) if a == b => Some(true),
+        (Expr::Bits(a), Expr::Bits(b)) => {
+            if a == b {
+                return Some(true);
+            }
+            let parse = |s: &str| {
+                let radix = if s.as_bytes()[1] == b'x' { 16 } else { 2 };
+                let width = (s.len() - 2) * if radix == 16 { 4 } else { 1 };
+                u128::from_str_radix(&s[2..], radix)
+                    .ok()
+                    .map(|value| (width, value))
+            };
+            parse(a).zip(parse(b)).map(|(a, b)| a == b)
+        }
         _ => None,
     }
 }
@@ -494,11 +506,29 @@ pub fn specialize(function: &mut Function) {
                     constants.insert(name.clone(), value.clone());
                 }
             }
-            Op::Call(_, _, args) => {
-                for arg in args {
+            Op::Call(location, target, args) => {
+                for arg in args.iter_mut() {
                     fold(arg, &constants);
                 }
-                constants.clear();
+                let folded = match (&*location, &*target, args.as_slice()) {
+                    (Location::Id(_), Target::Intrinsic(name), [a, b])
+                        if matches!(
+                            name.as_str(),
+                            "eq_bits" | "eq_int" | "eq_bool" | "eq_string" | "eq_anything"
+                        ) =>
+                    {
+                        constant_eq(a, b).map(Expr::Bool)
+                    }
+                    _ => None,
+                };
+                if let Some(value) = folded {
+                    if let Location::Id(name) = location {
+                        constants.insert(name.clone(), value.clone());
+                    }
+                    *op = Op::Assign(location.clone(), value);
+                } else {
+                    constants.clear();
+                }
             }
             Op::Branch(expr, _) => {
                 fold(expr, &constants);
@@ -575,6 +605,64 @@ pub fn specialize_constructor(function: &mut Function, constructor: &str) {
     specialize(function);
 }
 
+/// Specialize an immutable parameter without changing architectural effects.
+/// The caller still supplies the original argument list to the resulting IR.
+pub fn specialize_argument(function: &mut Function, argument: &str, value: Expr) -> bool {
+    fn root(location: &Location) -> &str {
+        match location {
+            Location::Id(name) => name,
+            Location::Field(base, _) | Location::Deref(base) => root(base),
+        }
+    }
+    fn references(expr: &Expr, argument: &str) -> bool {
+        match expr {
+            Expr::Ref(name) => name == argument,
+            Expr::Field(expr, _) | Expr::As(expr, _) | Expr::Is(expr, _) => {
+                references(expr, argument)
+            }
+            Expr::Op(_, _, args) => args.iter().any(|expr| references(expr, argument)),
+            Expr::Struct(_, fields) => fields.iter().any(|(_, expr)| references(expr, argument)),
+            _ => false,
+        }
+    }
+    if !literal(&value) {
+        return false;
+    }
+    if function.code.iter().any(|op| match op {
+        Op::Assign(location, expr) => root(location) == argument || references(expr, argument),
+        Op::Call(location, _, args) => {
+            root(location) == argument || args.iter().any(|expr| references(expr, argument))
+        }
+        Op::Declare(name, _, expr) => {
+            name == argument || expr.as_ref().is_some_and(|expr| references(expr, argument))
+        }
+        Op::Branch(expr, _) => references(expr, argument),
+        _ => false,
+    }) {
+        return false;
+    }
+    if function.code.iter().any(|op| matches!(op,
+        Op::Assign(Location::Id(name), _) | Op::Call(Location::Id(name), _, _) | Op::Declare(name, _, _) if name == argument)) {
+        return false;
+    }
+    let constants = BTreeMap::from([(argument.to_owned(), value)]);
+    for op in &mut function.code {
+        match op {
+            Op::Declare(_, _, Some(expr)) | Op::Assign(_, expr) | Op::Branch(expr, _) => {
+                fold(expr, &constants)
+            }
+            Op::Call(_, _, args) => {
+                for expr in args {
+                    fold(expr, &constants);
+                }
+            }
+            _ => {}
+        }
+    }
+    specialize(function);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,7 +706,44 @@ mod tests {
             vec![Expr::Bits("0xff".into()), Expr::Bits("0b11111111".into())],
         );
         fold(&mut expr, &BTreeMap::new());
-        assert!(matches!(expr, Expr::Op(_, _, _)));
+        assert_eq!(expr, Expr::Bool(true));
+    }
+
+    #[test]
+    fn argument_specialization_folds_pure_calls_and_rejects_mutable_parameters() {
+        let doc = vmlab_hv_sail_ir::parse("val eq = \"eq_bits\" : (%bv, %bv) -> %bool\nval f : (%bv12) -> %i\nfn f(x) { b : %bool; b = eq(x,0x300); jump b goto 5; return = 7; goto 6; return = 9; end; }").unwrap();
+        let program = lower(&doc.definitions).unwrap();
+        let mut function = program.functions["f"].clone();
+        assert!(specialize_argument(
+            &mut function,
+            "x",
+            Expr::Bits("0x300".into())
+        ));
+        assert!(
+            !function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::Branch(_, _)))
+        );
+        assert!(
+            !function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::Call(_, _, _)))
+        );
+        let doc =
+            vmlab_hv_sail_ir::parse("val f : (%i) -> %i\nfn f(x) { x = 3; return = x; end; }")
+                .unwrap();
+        let mut function = lower(&doc.definitions)
+            .unwrap()
+            .functions
+            .remove("f")
+            .unwrap();
+        assert!(!specialize_argument(
+            &mut function,
+            "x",
+            Expr::Integer("9".into(), None)
+        ));
     }
 
     #[test]

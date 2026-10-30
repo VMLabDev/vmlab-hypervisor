@@ -88,8 +88,12 @@ impl<M: Memory> Riscv64<M> {
         self.interpreter.fetch_address = None;
         let waiting = self
             .interpreter
-            .call("ztry_step", vec![Value::int(self.steps), Value::Bool(true)])?
+            .call(
+                "ztry_step",
+                vec![Value::int(self.steps), Value::Bool(false)],
+            )?
             .boolean()?;
+        self.interpreter.call("ztick_clock", vec![Value::Unit])?;
         self.steps += 1;
         Ok(waiting)
     }

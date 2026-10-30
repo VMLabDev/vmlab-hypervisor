@@ -1,6 +1,8 @@
 //! Reference execution of the same specialised IR consumed by the trace compiler.
 mod cpu;
 mod intrinsics;
+#[cfg(feature = "lockstep")]
+pub mod lockstep;
 mod memory;
 mod softfloat;
 mod value;
@@ -50,6 +52,7 @@ pub struct Interpreter<'a, M> {
     fetch_address: Option<u64>,
     decode_cache: BTreeMap<(u64, u64, u32), Value>,
     instruction_cache: BTreeMap<String, std::sync::Arc<Function>>,
+    csr_cache: BTreeMap<u16, std::sync::Arc<Function>>,
 }
 
 impl<'a, M: Memory> Interpreter<'a, M> {
@@ -67,6 +70,7 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             fetch_address: None,
             decode_cache: BTreeMap::new(),
             instruction_cache: BTreeMap::new(),
+            csr_cache: BTreeMap::new(),
         }
     }
 
@@ -248,6 +252,29 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             .functions
             .get(name)
             .ok_or_else(|| Error::Undefined(format!("function {name}")))?;
+        if name == "zread_CSR" {
+            let csr = u16::try_from(
+                args.first()
+                    .ok_or_else(|| Error::Type("CSR argument".into()))?
+                    .u64()?,
+            )
+            .map_err(|_| Error::Type("CSR index".into()))?;
+            let builder = self
+                .csr_cache
+                .entry(csr)
+                .or_insert_with(|| {
+                    let mut builder = function.clone();
+                    let argument = builder.args[0].0.clone();
+                    vmlab_hv_tcg_ir::specialize_argument(
+                        &mut builder,
+                        &argument,
+                        Expr::Bits(format!("0x{csr:03x}")),
+                    );
+                    std::sync::Arc::new(builder)
+                })
+                .clone();
+            return self.run_function(&builder, args);
+        }
         if name == "zexecute"
             && let Some(Value::Union(tag, _)) = args.first()
         {

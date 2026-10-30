@@ -1103,6 +1103,7 @@ dependencies = [
  "num-traits",
  "parking_lot",
  "thiserror",
+ "vmlab-hv-lockstep",
  "vmlab-hv-sail-ir",
  "vmlab-hv-tcg-ir",
  "vmlab-hv-tcg-riscv64",

@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+lockstep = ["dep:vmlab-hv-lockstep"]
+sail = ["lockstep", "vmlab-hv-lockstep/sail"]
+
 [dependencies]
 vmlab-hv-tcg-ir = { path = "../vmlab-hv-tcg-ir" }
 vmlab-hv-tcg-riscv64 = { path = "../vmlab-hv-tcg-riscv64" }
@@ -13,6 +18,7 @@ num-bigint = "0.4.8"
 num-traits = "0.2"
 thiserror.workspace = true
 parking_lot.workspace = true
+vmlab-hv-lockstep = { path = "../vmlab-hv-lockstep", optional = true }
 
 [build-dependencies]
 cc = "1"
