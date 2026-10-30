@@ -355,12 +355,17 @@ fn bad_machine_file_is_a_clear_launch_error() {
     // An existing control socket path is refused, not clobbered.
     let existing = dir.path.join("existing.sock");
     let _ = std::process::Command::new("touch").arg(&existing).status();
+    // Any existing file passes the kernel check, which runs before the
+    // control socket is bound; the guest never boots.
+    let kernel = dir.path.join("vmlinuz");
+    std::fs::write(&kernel, b"not a kernel").unwrap();
     std::fs::write(
         &machine,
         format!(
             r#"{{"name":"x","arch":"x86_64","accel":"kvm","vcpus":1,"memory_mib":64,
-            "boot":{{"kind":"kernel","kernel":"{KERNEL}","initrd":null,"cmdline":""}},
-            "disks":[],"nics":[],"serial_log":"/dev/null","ports":[],"shares":[]}}"#
+            "boot":{{"kind":"kernel","kernel":"{}","initrd":null,"cmdline":""}},
+            "disks":[],"nics":[],"serial_log":"/dev/null","ports":[],"shares":[]}}"#,
+            kernel.display()
         ),
     )
     .unwrap();

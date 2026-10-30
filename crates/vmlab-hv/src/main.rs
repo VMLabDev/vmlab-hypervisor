@@ -95,6 +95,15 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
     // block before the vCPU threads exist.
     block_termination_signals();
 
+    // Refuse an occupied control path before doing any work, so a stale
+    // socket or a second launch fails fast and leaves the path alone.
+    if args.control.exists() {
+        return Err(format!(
+            "control socket: {} already exists",
+            args.control.display()
+        ));
+    }
+
     let mut vm = builder::build(&desc, &DeviceSet, args.paused)
         .map_err(|e| format!("building machine `{}`: {e}", desc.name))?;
     let handle = vm.handle();
