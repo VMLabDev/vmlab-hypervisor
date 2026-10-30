@@ -413,6 +413,74 @@ fn nic_dhcp_exchange_with_test_switch() {
 }
 
 #[test]
+fn nic_traffic_survives_snapshot_load() {
+    let Some(assets) = check() else { return };
+
+    let spec = MachineSpec::idle("s1-nic-snapshot").with_nics(1);
+    let mut guest = vmlab_hv_tests::launch(&spec, &assets);
+    let container = spec.container_spec();
+    let (_ctl, _) = boot_to_idle(&guest, &container, BOOT);
+    let mut agent = agent_ready(&guest);
+
+    let exchange = |agent: &mut AgentClient, guest: &vmlab_hv_tests::Guest, phase: &str| {
+        let switch = guest.switch.as_ref().expect("switch");
+        let before = switch.stats().frames_from_guest_mac;
+        // Request a fresh lease without changing the interface configuration.
+        // A successful foreground client must receive the switch's OFFER/ACK.
+        let output = agent
+            .exec(
+                &[
+                    BUSYBOX,
+                    "udhcpc",
+                    "-f",
+                    "-n",
+                    "-q",
+                    "-i",
+                    "eth0",
+                    "-t",
+                    "3",
+                    "-T",
+                    "1",
+                    "-s",
+                    "/bin/true",
+                ],
+                Duration::from_secs(15),
+            )
+            .unwrap_or_else(|e| panic!("{phase}: {e}\n{}", guest.diagnostics(phase)));
+        eprintln!("{phase}: {output:?}");
+        assert_eq!(output.exit_code, 0, "{phase}: {output:?}");
+        let after = switch.stats();
+        assert!(
+            after.frames_from_guest_mac >= before + 2,
+            "{phase}: no fresh DHCP exchange: {after:?}\n{}",
+            guest.diagnostics(phase)
+        );
+    };
+
+    exchange(&mut agent, &guest, "before snapshot save");
+    assert!(matches!(
+        guest
+            .control
+            .call(Ctrl::SnapshotSave { name: "nic".into() })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    exchange(&mut agent, &guest, "after snapshot save");
+    assert!(matches!(
+        guest
+            .control
+            .call(Ctrl::SnapshotLoad { name: "nic".into() })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    drop(agent);
+    let mut agent = agent_ready(&guest);
+    exchange(&mut agent, &guest, "after snapshot load");
+
+    guest.quit_and_exit_zero();
+}
+
+#[test]
 fn quit_exits_cleanly_while_booting() {
     let Some(assets) = check() else { return };
 
