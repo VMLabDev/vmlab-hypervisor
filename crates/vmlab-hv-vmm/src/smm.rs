@@ -53,6 +53,7 @@ pub fn inject_smi(vcpu: &VcpuFd) -> Result<(), VmmError> {
 /// MCH SMRAMC/ESMRAMC policy. TSEGMB is derived, read-only, and MiB aligned.
 #[derive(Clone)]
 pub struct SmramControl {
+    default_smbase: u8,
     smramc: u8,
     esmramc: u8,
     low_ram_end: u64,
@@ -70,6 +71,7 @@ impl SmramControl {
             return Err(VmmError::InvalidMachine("invalid TSEG geometry".into()));
         }
         Ok(Self {
+            default_smbase: 0,
             smramc: 2,
             esmramc: 0x38,
             low_ram_end,
@@ -79,6 +81,7 @@ impl SmramControl {
 
     pub fn read_config(&self, offset: usize) -> Option<u8> {
         match offset {
+            0x9c => Some(self.default_smbase),
             0x50..=0x51 => Some(self.extended_mb.to_le_bytes()[offset - 0x50]),
             0x9d => Some(self.smramc),
             0x9e => Some(self.esmramc),
@@ -90,6 +93,11 @@ impl SmramControl {
     /// Returns true for an owned config byte, including read-only registers.
     pub fn write_config(&mut self, offset: usize, value: u8) -> bool {
         match offset {
+            0x9c => {
+                if self.default_smbase != 2 {
+                    self.default_smbase = if value == 0xff { 1 } else { value & 2 };
+                }
+            }
             0x9d if self.smramc & 0x10 == 0 => {
                 self.smramc = (value & 0x78) | 2;
                 if self.smramc & 0x10 != 0 {
@@ -120,17 +128,22 @@ impl SmramControl {
     pub fn open(&self) -> bool {
         self.smramc & 0x78 == 0x48
     }
+    pub fn tseg_open(&self) -> bool {
+        self.esmramc & 1 == 0 && self.smramc & 0x10 == 0
+    }
+    pub fn default_smbase_open(&self) -> bool {
+        self.default_smbase != 2
+    }
     pub fn enabled(&self) -> bool {
         self.smramc & 8 != 0
     }
 
-    /// Legacy SMRAM and enabled TSEG. The default SMBASE save area at 0x30000
-    /// remains in mirrored RAM until firmware relocates it.
+    /// Private default-SMBASE backing, legacy SMRAM and enabled TSEG.
     pub fn ranges(&self) -> Vec<(u64, usize)> {
         if !self.enabled() {
             return Vec::new();
         }
-        let mut ranges = vec![(0xa0000, 0x20000)];
+        let mut ranges = vec![(0x30000, 0x20000), (0xa0000, 0x20000)];
         if self.tseg_size() != 0 {
             ranges.push((self.tseg_base(), self.tseg_size() as usize));
         }
@@ -143,11 +156,12 @@ impl Snapshot for SmramControl {
         "smm-mch".into()
     }
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
-        Ok(vec![1, self.smramc, self.esmramc])
+        Ok(vec![2, self.smramc, self.esmramc, self.default_smbase])
     }
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
-        if state.len() != 3
-            || state[0] != 1
+        if state.len() != 4
+            || state[0] != 2
+            || state[3] > 2
             || state[1] & !0x78 != 2
             || state[2] & !7 != 0x38
             || state[1] & 0x50 == 0x50
@@ -156,6 +170,7 @@ impl Snapshot for SmramControl {
         }
         self.smramc = state[1];
         self.esmramc = state[2];
+        self.default_smbase = state[3];
         Ok(())
     }
 }
@@ -166,7 +181,7 @@ pub struct Smram {
     vm: Arc<VmFd>,
     memory: GuestMemoryMmap,
     first_slot: u32,
-    open: bool,
+    open: Vec<bool>,
 }
 
 impl Smram {
@@ -191,7 +206,7 @@ impl Smram {
             vm,
             memory,
             first_slot,
-            open: false,
+            open: vec![false; ranges.len()],
         };
         smram.map(SMM_ADDRESS_SPACE, true)?;
         Ok(smram)
@@ -215,9 +230,26 @@ impl Smram {
     }
 
     pub fn set_open(&mut self, open: bool) -> Result<(), VmmError> {
-        if self.open != open {
-            self.map(0, open)?;
-            self.open = open;
+        for index in 0..self.open.len() {
+            self.set_region_open(index, open)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_region_open(&mut self, index: usize, open: bool) -> Result<(), VmmError> {
+        if self.open[index] != open {
+            let region = self.memory.iter().nth(index).unwrap();
+            let slot = kvm_userspace_memory_region {
+                slot: self.first_slot + index as u32,
+                guest_phys_addr: region.start_addr().raw_value(),
+                memory_size: if open { region.len() } else { 0 },
+                userspace_addr: region.as_ptr() as u64,
+                flags: 0,
+            };
+            // SAFETY: backing is retained here and all vCPUs are outside KVM.
+            unsafe { self.vm.set_user_memory_region(slot) }
+                .map_err(|e| VmmError::ioctl("KVM_SET_USER_MEMORY_REGION(SMRAM alias)", e))?;
+            self.open[index] = open;
         }
         Ok(())
     }
@@ -248,7 +280,9 @@ impl Snapshot for Smram {
         "smm-ram".into()
     }
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
-        let mut state = vec![1, self.open as u8];
+        let mut state = vec![2];
+        state.extend((self.open.len() as u32).to_le_bytes());
+        state.extend(self.open.iter().map(|open| *open as u8));
         for region in self.memory.iter() {
             state.extend(region.start_addr().raw_value().to_le_bytes());
             state.extend(region.len().to_le_bytes());
@@ -262,10 +296,15 @@ impl Snapshot for Smram {
     }
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
         let invalid = || DeviceError::State("invalid SMRAM state".into());
-        if state.len() < 2 || state[0] != 1 || state[1] > 1 {
+        let count = self.open.len();
+        if state.len() < 5 + count
+            || state[0] != 2
+            || u32::from_le_bytes(state[1..5].try_into().unwrap()) as usize != count
+            || state[5..5 + count].iter().any(|b| *b > 1)
+        {
             return Err(invalid());
         }
-        let mut rest = &state[2..];
+        let mut rest = &state[5 + count..];
         let mut buffers = Vec::new();
         for region in self.memory.iter() {
             let header = rest.get(..16).ok_or_else(invalid)?;
@@ -284,8 +323,10 @@ impl Snapshot for Smram {
         if !rest.is_empty() {
             return Err(invalid());
         }
-        self.set_open(state[1] != 0)
-            .map_err(|e| DeviceError::State(e.to_string()))?;
+        for index in 0..count {
+            self.set_region_open(index, state[5 + index] != 0)
+                .map_err(|e| DeviceError::State(e.to_string()))?;
+        }
         for (region, data) in self.memory.iter().zip(buffers) {
             region
                 .write_slice(data, vm_memory::MemoryRegionAddress(0))

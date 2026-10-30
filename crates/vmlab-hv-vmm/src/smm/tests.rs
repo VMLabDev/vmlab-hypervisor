@@ -3,6 +3,79 @@ use kvm_ioctls::VcpuExit;
 use vmlab_hv_firmware::fw_cfg::FwCfg;
 
 #[test]
+fn ovmf_opens_tseg_independently_of_legacy_smram() {
+    let mut control = SmramControl::new(0x80000000, 64).unwrap();
+    control.write_config(0x9e, 7);
+    control.write_config(0x9d, 8);
+    assert!(!control.open());
+    assert!(!control.tseg_open());
+    control.write_config(0x9e, 6);
+    assert!(!control.open());
+    assert!(control.tseg_open());
+    control.write_config(0x9d, 0x18);
+    assert!(!control.tseg_open());
+}
+
+#[test]
+fn default_smbase_query_lock_and_restore() {
+    let mut control = SmramControl::new(0x80000000, 64).unwrap();
+    assert_eq!(control.read_config(0x9c), Some(0));
+    control.write_config(0x9c, 0xff);
+    assert_eq!(control.read_config(0x9c), Some(1));
+    assert!(control.default_smbase_open());
+    control.write_config(0x9c, 2);
+    assert!(!control.default_smbase_open());
+    control.write_config(0x9c, 0xff);
+    assert_eq!(control.read_config(0x9c), Some(2));
+    let saved = control.save_state().unwrap();
+    let mut restored = SmramControl::new(0x80000000, 64).unwrap();
+    restored.restore_state(&saved).unwrap();
+    assert!(!restored.default_smbase_open());
+}
+
+#[test]
+fn kvm_tseg_alias_executes_and_snapshots_without_opening_legacy_smram() {
+    let kvm = match crate::kvm::KvmVm::new() {
+        Ok(kvm) => kvm,
+        Err(error) => {
+            eprintln!("skipping TSEG mapping: {error}");
+            return;
+        }
+    };
+    let mut smram = Smram::new(
+        kvm.vm.clone(),
+        &[(0xa0000, 0x20000), (0x100000, 0x1000)],
+        30,
+    )
+    .unwrap();
+    smram
+        .memory()
+        .write_slice(&[0xb0, 0x5a, 0xe6, 0xe9, 0xf4], GuestAddress(0x100000))
+        .unwrap();
+    smram.set_region_open(1, true).unwrap();
+    let saved = smram.save_state().unwrap();
+    smram.set_region_open(1, false).unwrap();
+    smram.restore_state(&saved).unwrap();
+    assert_eq!(smram.open, [false, true]);
+    let mut vcpu = kvm.create_vcpu(0).unwrap();
+    let mut sregs = vcpu.get_sregs().unwrap();
+    sregs.cs.base = 0x100000;
+    sregs.cs.selector = 0;
+    vcpu.set_sregs(&sregs).unwrap();
+    vcpu.set_regs(&kvm_bindings::kvm_regs {
+        rip: 0,
+        rflags: 2,
+        ..Default::default()
+    })
+    .unwrap();
+    match vcpu.run().unwrap() {
+        VcpuExit::IoOut(0xe9, bytes) => assert_eq!(bytes, [0x5a]),
+        exit => panic!("TSEG execution: {exit:?}"),
+    }
+    drop(vcpu);
+}
+
+#[test]
 fn mch_lock_tseg_sizes_and_snapshot() {
     let mut control = SmramControl::new(0x80000000, 64).unwrap();
     assert!(!control.open());
@@ -15,7 +88,11 @@ fn mch_lock_tseg_sizes_and_snapshot() {
     assert!(control.open());
     assert_eq!(
         control.ranges(),
-        [(0xa0000, 0x20000), (0x7c000000, 64 << 20)]
+        [
+            (0x30000, 0x20000),
+            (0xa0000, 0x20000),
+            (0x7c000000, 64 << 20)
+        ]
     );
     control.write_config(0x9d, 0x58);
     assert!(!control.open());
