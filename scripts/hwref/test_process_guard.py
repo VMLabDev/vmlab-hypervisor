@@ -15,16 +15,31 @@ class ProcessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             pid_file = Path(temporary) / "pid"
             environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parent))
-            parent = subprocess.Popen([sys.executable, "-c",
-                "from process_guard import spawn_process; import os, pathlib, sys; "
-                "child=spawn_process(['sleep', '600']); "
-                "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); os._exit(0)", str(pid_file)], env=environment)
+            ready = Path(temporary) / "ready"
+            parent_code = """
+from process_guard import spawn_process
+import os, pathlib, sys, time
+child = spawn_process([sys.executable, '-c',
+    'import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); time.sleep(600)', sys.argv[2]])
+deadline = time.monotonic() + 5
+while not pathlib.Path(sys.argv[2]).exists():
+    assert child.poll() is None and time.monotonic() < deadline
+    time.sleep(0.01)
+pathlib.Path(sys.argv[1]).write_text(str(child.pid))
+os._exit(0)
+"""
+            parent = subprocess.Popen([sys.executable, "-c", parent_code,
+                                       str(pid_file), str(ready)], env=environment)
             parent.wait(timeout=5)
             pid = int(pid_file.read_text())
             deadline = time.monotonic() + 5
             try:
-                while Path(f"/proc/{pid}/stat").exists():
-                    if Path(f"/proc/{pid}/stat").read_text().split()[2] == "Z":
+                while True:
+                    try:
+                        state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+                    except FileNotFoundError:
+                        break
+                    if state == "Z":
                         break
                     self.assertLess(time.monotonic(), deadline)
                     time.sleep(0.01)
@@ -72,9 +87,13 @@ class ProcessTests(unittest.TestCase):
                 pid = int(pid_file.read_text())
                 stop_process(process)
                 deadline = time.monotonic() + 5
-                while Path(f"/proc/{pid}/stat").exists():
+                while True:
+                    try:
+                        state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+                    except FileNotFoundError:
+                        break
                     # Reparented descendants are reaped by init; a zombie owns no RAM.
-                    if Path(f"/proc/{pid}/stat").read_text().split()[2] == "Z":
+                    if state == "Z":
                         break
                     self.assertLess(time.monotonic(), deadline)
                     time.sleep(0.01)
