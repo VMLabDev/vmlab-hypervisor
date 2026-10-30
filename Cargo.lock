@@ -1016,6 +1016,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vmlab-hv-display"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "vmlab-hv-firmware"
 version = "0.1.0"
 dependencies = [
