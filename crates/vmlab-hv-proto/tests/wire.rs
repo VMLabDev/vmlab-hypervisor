@@ -377,9 +377,7 @@ fn machine_description_without_audio_omits_the_section() {
 
 #[test]
 fn audio_microphone_defaults_to_off() {
-    let json = concat!(
-        r#"{"device":"virtio_snd","node_name":"vmlab.lab.web-1","node_description":"vmlab lab/web-1"}"#
-    );
+    let json = r#"{"device":"virtio_snd","node_name":"vmlab.lab.web-1","node_description":"vmlab lab/web-1"}"#;
     assert_eq!(
         serde_json::from_str::<Audio>(json).unwrap(),
         Audio {
@@ -393,9 +391,8 @@ fn audio_microphone_defaults_to_off() {
 
 #[test]
 fn audio_section_rejects_unknown_fields() {
-    let json = concat!(
-        r#"{"device":"hda","microphone":true,"node_name":"n","node_description":"d","sink":"x"}"#
-    );
+    let json =
+        r#"{"device":"hda","microphone":true,"node_name":"n","node_description":"d","sink":"x"}"#;
     assert!(serde_json::from_str::<Audio>(json).is_err());
 }
 

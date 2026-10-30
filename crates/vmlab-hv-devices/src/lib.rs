@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+pub mod audio;
 pub mod serial;
 pub mod virtio;
 
