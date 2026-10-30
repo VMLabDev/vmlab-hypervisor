@@ -856,6 +856,15 @@ impl Vm {
     /// Block until the machine exits, joining the vCPU threads; returns why.
     pub fn wait(mut self) -> ExitReason {
         let reason = self.shared.wait_exit();
+        while self.vcpus.iter().any(|vcpu| !vcpu.is_finished()) {
+            // A kick delivered just before KVM_RUN can be consumed before
+            // the ioctl blocks, including an AP waiting for SIPI.
+            self.shared.kick_all();
+            let mut state = self.shared.state.lock();
+            self.shared
+                .state_cv
+                .wait_for(&mut state, std::time::Duration::from_millis(1));
+        }
         for vcpu in self.vcpus.drain(..) {
             vcpu.join();
         }

@@ -54,16 +54,18 @@ fn nic_rom_decode_requires_enable_and_memory_space() {
 fn seabios_executes_ipxe_option_rom() {
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware/ipxe/boot.py");
-    let output = std::process::Command::new("python3")
-        .arg(script)
-        .args(["--binary", env!("CARGO_BIN_EXE_vmlab-hv")])
-        .output()
-        .expect("run iPXE firmware boot probe");
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    for _ in 0..3 {
+        let output = std::process::Command::new("python3")
+            .arg(&script)
+            .args(["--binary", env!("CARGO_BIN_EXE_vmlab-hv")])
+            .output()
+            .expect("run iPXE firmware boot probe");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprint!("{}", String::from_utf8_lossy(&output.stdout));
+    }
 }

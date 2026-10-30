@@ -72,6 +72,10 @@ impl VcpuThread {
             let _ = handle.join();
         }
     }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+    }
 }
 
 /// The KVM_RUN loop of one vCPU. The fd is locked across the ioctl only, so
