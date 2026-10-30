@@ -323,6 +323,38 @@ fn captured_platform() -> Platform {
 }
 
 #[test]
+fn ovmf_smm_cpu_eject_namespace_and_loader_order_match_the_capture() {
+    let mut p = captured_platform();
+    p.vcpus = 4;
+    p.max_cpus = 4;
+    p.ram_regions = vec![(0, 2 << 30), (1 << 32, 6 << 30)];
+    p.ecam_base = 0xe0000000;
+    p.pci64_base = Some(0x380000000000);
+    p.tpm = true;
+    p.smm = true;
+    p.pci_devices.retain(|d| d.device != 5);
+    for device in &mut p.pci_devices {
+        device.vga = false;
+    }
+    let generated = generate(&p).unwrap();
+    let installed = install(&generated.loader, &mut files(&generated));
+    let mut actual = read_table(&installed["etc/acpi/tables"].data, 64).to_vec();
+    let mut expected =
+        include_bytes!("../../../docs/hwref/q35-ovmf-win11-secureboot/guest/acpi/DSDT").to_vec();
+    actual[9] = 0;
+    expected[9] = 0;
+    assert!(
+        actual == expected,
+        "SMM DSDT differs: actual {} bytes, expected {}",
+        actual.len(),
+        expected.len()
+    );
+    let records = generated.loader.as_chunks::<128>().0;
+    assert_eq!(name(&records[1][4..60]), "etc/tpm/log");
+    assert_eq!(name(&records[2][4..60]), "etc/acpi/tables");
+}
+
+#[test]
 fn generated_capture_configuration_matches_observed_raw_tables() {
     let p = captured_platform();
     let tables = generate(&p).unwrap();
