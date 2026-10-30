@@ -11,6 +11,7 @@ mod display;
 pub mod e820;
 pub mod error;
 pub mod factory;
+pub mod hyperv;
 pub mod kvm;
 pub mod layout;
 pub mod loader;

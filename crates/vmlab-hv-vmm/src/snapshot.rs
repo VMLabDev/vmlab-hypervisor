@@ -400,6 +400,10 @@ fn save_kernel_state(
         sections.push((p("fpu"), encode_fpu(&fd.get_fpu().map_err(io)?)));
         sections.push((p("xsave"), encode_xsave(&fd.get_xsave().map_err(io)?)));
         let mut indices = MIGRATABLE_MSRS.to_vec();
+        indices.extend(
+            crate::hyperv::snapshot_msr_indices(&shared.kvm.kvm, &fd)
+                .map_err(|e| SnapshotError::Internal(e.to_string()))?,
+        );
         if shared.chipset.lock().is_some() {
             indices.push(0x9e);
         } // SMBASE
@@ -679,6 +683,16 @@ fn encode_msrs(fd: &VcpuFd, indices: &[u32]) -> Result<Vec<u8>, SnapshotError> {
     let filled = fd
         .get_msrs(&mut msrs)
         .map_err(|e| SnapshotError::Internal(format!("KVM_GET_MSRS: {e}")))?;
+    if filled != indices.len()
+        && indices
+            .iter()
+            .any(|n| (0x4000_0000..0x4000_0200).contains(n))
+    {
+        return Err(SnapshotError::Internal(format!(
+            "KVM_GET_MSRS: saved {filled} of {} MSRs, including Hyper-V state",
+            indices.len()
+        )));
+    }
     let mut out = Vec::with_capacity(4 + filled * 12);
     format::push_u32(&mut out, filled as u32);
     for entry in &msrs.as_slice()[..filled] {
