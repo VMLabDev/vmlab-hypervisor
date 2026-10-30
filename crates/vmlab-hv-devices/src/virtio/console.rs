@@ -41,7 +41,7 @@ const DEVICE_ID: u32 = 3;
 const F_MULTIPORT: u64 = 1 << 1;
 /// `VIRTIO_F_VERSION_1` (feature bit 32): this is a modern virtio device.
 const F_VERSION_1: u64 = 1 << 32;
-/// Queue size offered for every virtqueue (QEMU's virtio-serial default).
+/// Queue size offered for data virtqueues.
 const QUEUE_SIZE: u16 = 128;
 /// Config space size: `cols`, `rows`, `max_nr_ports`, `emerg_wr`.
 const CONFIG_LEN: usize = 12;
@@ -167,9 +167,11 @@ impl Console {
                 let shared = shared.clone();
                 move || run(listeners, shared, rx, wake_worker)
             })?;
+        let mut queue_sizes = vec![QUEUE_SIZE; 2 * (ports.len() + 2)];
+        queue_sizes[2..4].fill(32);
         Ok(Console {
             id: id.into(),
-            queue_sizes: vec![QUEUE_SIZE; 2 * (ports.len() + 2)],
+            queue_sizes,
             ports,
             shared,
             kicks,
@@ -1264,8 +1266,11 @@ mod tests {
             .unwrap();
             let mem = GuestMemory::from_ranges(&[(GuestAddress(0), MEM_SIZE as usize)]).unwrap();
             let irq = Arc::new(TestInterrupt::default());
-            let vqs: Vec<TestVq> = (0..8)
-                .map(|i| TestVq::new(0x1000 + 0x1_0000 * u64::from(i as u32), 128))
+            let vqs: Vec<TestVq> = dev
+                .queue_max_sizes()
+                .iter()
+                .enumerate()
+                .map(|(i, &size)| TestVq::new(0x1000 + 0x1_0000 * i as u64, size))
                 .collect();
             let mut f = Fixture {
                 _dir: dir,
@@ -1360,6 +1365,10 @@ mod tests {
         let f = Fixture::new();
         assert_eq!(f.dev.device_type(), 3);
         assert_eq!(f.dev.queue_max_sizes().len(), 8);
+        assert_eq!(
+            f.dev.queue_max_sizes(),
+            &[128, 128, 32, 32, 128, 128, 128, 128]
+        );
         assert!(f.dev.queue_max_sizes().iter().all(|&n| n > 0));
         assert_ne!(f.dev.features() & (1 << 1), 0); // VIRTIO_CONSOLE_F_MULTIPORT
         let mut config = [0u8; 12];
