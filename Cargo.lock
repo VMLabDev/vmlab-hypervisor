@@ -1005,6 +1005,7 @@ dependencies = [
  "tempfile",
  "vmlab-disk",
  "vmlab-hv-devices",
+ "vmlab-hv-display",
  "vmlab-hv-proto",
  "vmlab-hv-tests",
  "vmlab-hv-vmm",
