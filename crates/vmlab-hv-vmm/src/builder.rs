@@ -231,12 +231,38 @@ pub fn build(
     }
 
     let q35 = desc.machine == Machine::Q35;
-    let layout = if q35 {
+    let ovmf = matches!(
+        desc.boot,
+        Boot::Firmware {
+            firmware: FirmwareKind::Ovmf,
+            ..
+        }
+    );
+    let mut layout = if q35 {
         MemLayout::q35(desc.memory_mib)
     } else {
         MemLayout::new(desc.memory_mib)
     }
     .map_err(VmmError::InvalidMachine)?;
+    let physical_low_end = layout.low_ram_top();
+    let secure_smm = matches!(
+        desc.boot,
+        Boot::Firmware {
+            firmware: FirmwareKind::Ovmf,
+            secure_boot: true,
+            ..
+        }
+    );
+    if secure_smm {
+        if physical_low_end < 128 << 20 {
+            return Err(VmmError::InvalidMachine(
+                "secure OVMF requires at least 128 MiB RAM".into(),
+            ));
+        }
+        layout.regions[1].1 -= 64 << 20;
+        layout.regions[0] = (0, 0x30000);
+        layout.regions.insert(1, (0x50000, 0x50000));
+    }
     // A machine with shares hands its RAM to virtiofsd: back it with a
     // shared memfd. Everything else maps anonymous private memory.
     let mut ram = if desc.shares.is_empty() {
@@ -319,6 +345,12 @@ pub fn build(
     } else {
         None
     };
+    if let Some(chipset) = &chipset {
+        chipset
+            .rtc
+            .lock()
+            .set_memory_layout(physical_low_end, layout.ram - physical_low_end);
+    }
     let pirqs = chipset
         .as_ref()
         .map(|c| c.pirqs.clone())
@@ -369,12 +401,24 @@ pub fn build(
     };
     let mut snap_disks = Vec::new();
     let mut snap_nodes = Vec::new();
-    let mch = if let Boot::Firmware { firmware, code, .. } = &desc.boot {
-        if *firmware != FirmwareKind::Seabios || desc.tpm.is_some() {
-            return Err(VmmError::InvalidMachine(
-                "OVMF and TPM require phase 2c".into(),
-            ));
-        }
+    let mut pflash = None;
+    if q35 {
+        let inventory = Arc::new(Mutex::new(
+            vmlab_hv_devices::chipset::cpu::CpuInventory::new(desc.vcpus),
+        ));
+        io_bus
+            .register(0xcd8, 12, inventory.clone())
+            .map_err(VmmError::Other)?;
+        snap_nodes.push(DeviceNode::Plain(inventory));
+    }
+    let mch = if let Boot::Firmware {
+        firmware,
+        code,
+        vars,
+        secure_boot,
+        ..
+    } = &desc.boot
+    {
         let image = std::fs::read(code)
             .map_err(|e| VmmError::Other(format!("reading firmware {}: {e}", code.display())))?;
         let first_slot = layout.regions.len() as u32;
@@ -390,24 +434,61 @@ pub fn build(
                 Arc::new(Mutex::new(crate::q35::DebugPort(debug_log))),
             )
             .map_err(VmmError::Other)?;
-        ram.firmware_rom = Some(crate::q35::map_bios(&kvm.vm, &image, first_slot)?);
-        let pam = Arc::new(Mutex::new(crate::q35::Pam::new(
-            &image,
-            Some(kvm.vm.clone()),
-            first_slot + 1,
-        )?));
+        ram.firmware_rom = Some(if *firmware == FirmwareKind::Ovmf {
+            let flash = Arc::new(Mutex::new(
+                vmlab_hv_devices::pflash::Pflash::open(code, vars.as_ref().unwrap(), *secure_boot)
+                    .map_err(|e| VmmError::Other(e.to_string()))?,
+            ));
+            mmio_bus
+                .register(
+                    vmlab_hv_devices::pflash::BASE,
+                    vmlab_hv_devices::pflash::SIZE as u64,
+                    flash.clone(),
+                )
+                .map_err(VmmError::Other)?;
+            snap_nodes.push(DeviceNode::Plain(flash.clone()));
+            pflash = Some(flash);
+            crate::q35::map_pflash_code(&kvm.vm, &image, first_slot)?
+        } else {
+            crate::q35::map_bios(&kvm.vm, &image, first_slot)?
+        });
+        let pam = Arc::new(Mutex::new(if secure_smm {
+            crate::q35::Pam::with_isolated_smram(&image, kvm.vm.clone(), first_slot + 1)?
+        } else {
+            crate::q35::Pam::new(&image, Some(kvm.vm.clone()), first_slot + 1)?
+        }));
         ram.mem = ram
             .mem
             .insert_region(pam.lock().shadow_region())
             .map_err(|e| VmmError::Memory(e.to_string()))?;
-        ram.mem = ram
-            .mem
-            .insert_region(pam.lock().smram_region())
-            .map_err(|e| VmmError::Memory(e.to_string()))?;
+        if !secure_smm {
+            ram.mem = ram
+                .mem
+                .insert_region(pam.lock().smram_region())
+                .map_err(|e| VmmError::Memory(e.to_string()))?;
+        }
         mmio_bus
             .register(0xc0000, 0x40000, pam.clone())
             .map_err(VmmError::Other)?;
-        let mch = Arc::new(Mutex::new(crate::q35::Mch::new(pam)));
+        let mut mch = crate::q35::Mch::new(pam);
+        if secure_smm {
+            let control = crate::smm::SmramControl::new(physical_low_end, 64)?;
+            let mut geometry = control.clone();
+            geometry.write_config(0x9e, 7);
+            geometry.write_config(0x9d, 8);
+            let memory = Arc::new(Mutex::new(crate::smm::Smram::new(
+                kvm.vm.clone(),
+                &geometry.ranges(),
+                first_slot + 15,
+            )?));
+            let control = Arc::new(Mutex::new(control));
+            memory.lock().set_region_open(0, true)?;
+            memory.lock().set_region_open(2, true)?;
+            snap_nodes.push(DeviceNode::Plain(control.clone()));
+            snap_nodes.push(DeviceNode::Plain(memory.clone()));
+            mch = mch.with_smm(control, memory);
+        }
+        let mch = Arc::new(Mutex::new(mch));
         pci_root
             .lock()
             .add_device_at(0, 0, mch.clone())
@@ -676,8 +757,26 @@ pub fn build(
             reason: "q35 audio is assigned to phase 2e".into(),
         });
     }
+    let tpm = if let Some(tpm) = &desc.tpm {
+        let device = Arc::new(Mutex::new(
+            vmlab_hv_devices::tpm::TpmTis::connect(&tpm.socket, None)
+                .map_err(|e| VmmError::Other(e.to_string()))?,
+        ));
+        mmio_bus
+            .register(
+                vmlab_hv_devices::tpm::MMIO_BASE,
+                vmlab_hv_devices::tpm::MMIO_SIZE,
+                device.clone(),
+            )
+            .map_err(VmmError::Other)?;
+        snap_nodes.push(DeviceNode::Plain(device.clone()));
+        Some(device)
+    } else {
+        None
+    };
+    let mut smi_fwcfg = None;
     if let Boot::Firmware { bootorder, .. } = &desc.boot {
-        let mut ram_regions = vec![(0, layout.low_ram_top())];
+        let mut ram_regions = vec![(0, physical_low_end)];
         ram_regions.extend(
             layout
                 .regions
@@ -703,23 +802,30 @@ pub fn build(
                     }),
                 })
                 .collect(),
-            ecam_base: 0xb0000000,
-            pci64_base: Some(kvm.seabios_pci64_base(layout.ram_top() > 1 << 32)),
-            tpm: false,
+            ecam_base: if ovmf { 0xe0000000 } else { 0xb0000000 },
+            pci64_base: Some(if ovmf {
+                kvm.ovmf_pci64_base()
+            } else {
+                kvm.seabios_pci64_base(layout.ram_top() > 1 << 32)
+            }),
+            tpm: tpm.is_some(),
+            smm: secure_smm,
         };
         let options = vmlab_hv_firmware::FirmwareOptions {
             bootorder: bootorder.clone(),
             nographic: desc.display.is_none(),
             ..Default::default()
         };
+        let fw_cfg = vmlab_hv_firmware::FwCfg::for_platform(ram.mem.clone(), &platform, &options)
+            .map_err(VmmError::Other)?;
         let fw_cfg = Arc::new(Mutex::new(
-            vmlab_hv_firmware::FwCfg::for_platform(ram.mem.clone(), &platform, &options)
-                .map_err(VmmError::Other)?,
+            crate::smm::SmiFwCfg::new(fw_cfg, ram.mem.clone()).map_err(VmmError::Other)?,
         ));
         io_bus
             .register(0x510, 0xc, fw_cfg.clone())
             .map_err(VmmError::Other)?;
-        snap_nodes.push(DeviceNode::Plain(fw_cfg));
+        snap_nodes.push(DeviceNode::Plain(fw_cfg.clone()));
+        smi_fwcfg = Some(fw_cfg);
     }
 
     let shared = VmShared::new(
@@ -735,6 +841,9 @@ pub fn build(
     *shared.chipset.lock() = chipset;
     *shared.vga.lock() = vga;
     *shared.xhci.lock() = xhci;
+    *shared.pflash.lock() = pflash;
+    *shared.tpm.lock() = tpm;
+    *shared.smi_fwcfg.lock() = smi_fwcfg;
     shared.set_snapshot_registry(Arc::new(SnapshotRegistry {
         digest: machine_digest(desc),
         disks: snap_disks,

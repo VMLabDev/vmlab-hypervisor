@@ -97,6 +97,10 @@ pub struct VmShared {
     pub(crate) chipset: Mutex<Option<Arc<crate::chipset::Chipset>>>,
     pub(crate) vga: Mutex<Option<crate::display::Video>>,
     pub(crate) xhci: Mutex<Option<Arc<Mutex<vmlab_hv_devices::usb::XhciController>>>>,
+    pub(crate) pflash: Mutex<Option<Arc<Mutex<vmlab_hv_devices::pflash::Pflash>>>>,
+    pub(crate) tpm: Mutex<Option<Arc<Mutex<vmlab_hv_devices::tpm::TpmTis>>>>,
+    pub(crate) smi_fwcfg: Mutex<Option<Arc<Mutex<crate::smm::SmiFwCfg>>>>,
+    pending_smis: Mutex<std::collections::BTreeSet<u8>>,
 }
 
 impl VmShared {
@@ -147,6 +151,10 @@ impl VmShared {
             chipset: Mutex::new(None),
             vga: Mutex::new(None),
             xhci: Mutex::new(None),
+            pflash: Mutex::new(None),
+            tpm: Mutex::new(None),
+            smi_fwcfg: Mutex::new(None),
+            pending_smis: Mutex::new(std::collections::BTreeSet::new()),
         })
     }
 
@@ -517,6 +525,21 @@ impl VmShared {
         self.mmio_bus.lock().write(addr, data);
     }
 
+    pub(crate) fn flash_address(&self, addr: u64) -> bool {
+        (vmlab_hv_devices::pflash::BASE..1 << 32).contains(&addr) && self.pflash.lock().is_some()
+    }
+
+    pub(crate) fn write_flash(&self, addr: u64, data: &[u8], in_smm: bool) {
+        if let Some(flash) = self.pflash.lock().as_ref()
+            && let Err(e) =
+                flash
+                    .lock()
+                    .write_access(addr - vmlab_hv_devices::pflash::BASE, data, in_smm)
+        {
+            self.request_exit(ExitReason::Error(e.to_string()));
+        }
+    }
+
     fn in_pci_window(&self, addr: u64) -> bool {
         if self.mch.lock().is_some() {
             return true;
@@ -683,6 +706,30 @@ impl VmShared {
         })
     }
 
+    pub(crate) fn dispatch_smi(&self, issuer: u8) -> bool {
+        let broadcast = self
+            .smi_fwcfg
+            .lock()
+            .as_ref()
+            .is_some_and(|cfg| cfg.lock().broadcast());
+        let targets: Vec<_> = self
+            .vcpus
+            .lock()
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| broadcast || *id == 0)
+            .collect();
+        self.pending_smis
+            .lock()
+            .extend(targets.iter().copied().filter(|id| *id != issuer));
+        self.kick_all();
+        targets.contains(&issuer)
+    }
+
+    pub(crate) fn take_pending_smi(&self, id: u8) -> bool {
+        self.pending_smis.lock().remove(&id)
+    }
+
     fn trace_io(&self, port: u16, data: &[u8], write: bool) {
         if let Some(trace) = &self.io_trace {
             let mut trace = trace.lock();
@@ -802,7 +849,24 @@ impl Vm {
         if let Some(timer) = self.timer.take() {
             let _ = timer.join();
         }
+        if let Some(tpm) = self.shared.tpm.lock().as_ref()
+            && let Err(e) = tpm.lock().shutdown()
+        {
+            return ExitReason::Error(format!("TPM shutdown: {e}"));
+        }
         if std::env::var_os("VMLAB_HV_DIAGNOSTICS").is_some() {
+            if let Some(mch) = self.shared.mch.lock().as_ref() {
+                use vmlab_hv_devices::PciDevice;
+                let mut mch = mch.lock();
+                eprintln!(
+                    "MCH SMRAM: {:x?}",
+                    [
+                        mch.config_read(0x50 / 4),
+                        mch.config_read(0x9c / 4),
+                        mch.config_read(0xac / 4)
+                    ]
+                );
+            }
             for (id, vcpu) in self.shared.vcpus.lock().iter() {
                 let fd = vcpu.lock();
                 if let (Ok(regs), Ok(sregs)) = (fd.get_regs(), fd.get_sregs()) {

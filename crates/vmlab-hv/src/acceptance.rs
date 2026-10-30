@@ -1,6 +1,5 @@
 //! P1 firmware/template acceptance through the executable's control socket.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -19,6 +18,13 @@ impl Drop for Process {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Firmware {
+    SeaBios,
+    Ovmf,
+    SecureOvmf,
+}
+
 fn template(name: &str, variable: &str) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(variable) {
         return Some(path.into());
@@ -33,7 +39,13 @@ fn template(name: &str, variable: &str) -> Option<PathBuf> {
         .filter(|path| path.is_file())
         .collect();
     versions.sort();
-    versions.pop()
+    let disk = versions.pop()?;
+    let standard = disk.parent()?.join("variants/standard/disk.qcow2");
+    Some(if name == "windows-10" && standard.is_file() {
+        standard
+    } else {
+        disk
+    })
 }
 
 fn boot_template(
@@ -42,6 +54,7 @@ fn boot_template(
     snapshot: bool,
     bus: vmlab_hv_proto::machine::DiskBus,
     display_test: bool,
+    firmware: Firmware,
 ) {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("skipping {name}: /dev/kvm is unavailable");
@@ -56,7 +69,7 @@ fn boot_template(
         eprintln!("skipping P3: tesseract is unavailable for firmware/console frame recognition");
         return;
     }
-    if !Path::new("/usr/share/qemu/bios-256k.bin").is_file()
+    if (firmware == Firmware::SeaBios && !Path::new("/usr/share/qemu/bios-256k.bin").is_file())
         || !Path::new("/usr/share/qemu/vgabios-virtio.bin").is_file()
     {
         eprintln!("skipping {name}: SeaBIOS or SeaVGABIOS is not installed");
@@ -71,7 +84,38 @@ fn boot_template(
         "template {} does not exist",
         template.display()
     );
-    let dir = tempfile::Builder::new().prefix("hv-p1-").tempdir().unwrap();
+    let mut dir = tempfile::Builder::new().prefix("hv-p1-").tempdir().unwrap();
+    if std::env::var_os("VMLAB_HV_ACCEPTANCE_KEEP").is_some() {
+        dir.disable_cleanup(true);
+        eprintln!("{name} acceptance artifacts: {}", dir.path().display());
+    }
+    let windows = name.starts_with("windows-");
+    let tpm = name == "windows-server-2022";
+    let _swtpm = tpm.then(|| {
+        let socket = dir.path().join("tpm.sock");
+        let state = dir.path().join("tpm");
+        std::fs::create_dir(&state).unwrap();
+        let mut child = Process(
+            Command::new("swtpm")
+                .args(["socket", "--tpm2", "--tpmstate"])
+                .arg(format!("dir={}", state.display()))
+                .arg("--ctrl")
+                .arg(format!("type=unixio,path={}", socket.display()))
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "swtpm exited before binding"
+            );
+            assert!(Instant::now() < deadline, "swtpm did not bind");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child
+    });
     let disk = dir.path().join("disk.qcow2");
     vmlab_disk::ops::create_linked_clone(&template, &disk).unwrap();
     let control = dir.path().join("control.sock");
@@ -90,6 +134,60 @@ fn boot_template(
         "tablet":{"bus":0,"device":5,"function":0},
         "ports":[{"name":"vmlab.agent.0", "socket":agent}], "nics":[],"serial_log":serial
     });
+    if windows {
+        description["vcpus"] = 4.into();
+        description["memory_mib"] = 8192.into();
+        description["hyperv"] = serde_json::json!([
+            "relaxed",
+            "vapic",
+            "spinlocks",
+            "vpindex",
+            "runtime",
+            "time",
+            "synic",
+            "stimer",
+            "frequencies",
+            "reset",
+            "tlbflush",
+            "ipi",
+            "avic"
+        ]);
+    }
+    if tpm {
+        description["tpm"] = serde_json::json!({"socket":dir.path().join("tpm.sock")});
+    }
+    if firmware != Firmware::SeaBios {
+        let root = std::env::var_os("VMLAB_HV_FIRMWARE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "/home/wil/dev/vmlab/guest/dist/firmware/x86_64".into());
+        let vars = dir.path().join("OVMF_VARS.fd");
+        let secure = firmware == Firmware::SecureOvmf;
+        let template_vars = template
+            .ancestors()
+            .skip(1)
+            .find(|path| path.join("template.wcl").is_file())
+            .unwrap_or_else(|| template.parent().unwrap())
+            .join("OVMF_VARS.fd");
+        std::fs::copy(
+            if template_vars.is_file() {
+                template_vars
+            } else {
+                root.join(if secure {
+                    "OVMF_VARS_4M.ms.fd"
+                } else {
+                    "OVMF_VARS_4M.fd"
+                })
+            },
+            &vars,
+        )
+        .unwrap();
+        description["boot"] = serde_json::json!({
+            "kind":"firmware", "firmware":"ovmf", "code":root.join(if secure {"OVMF_CODE_4M.secboot.fd"} else {"OVMF_CODE_4M.fd"}), "vars":vars, "secure_boot":secure
+        });
+        if name == "debian-13" {
+            description["memory_mib"] = 2048.into();
+        }
+    }
     if display_test {
         description["display"]["socket"] = serde_json::to_value(&native).unwrap();
         description["display"]["vnc_socket"] = serde_json::to_value(&rfb).unwrap();
@@ -122,19 +220,28 @@ fn boot_template(
                 .unwrap()
                 .join("vmlab-hv")
         });
-    let mut process = Process(
-        Command::new(&binary)
-            .arg("--machine")
-            .arg(&machine)
-            .arg("--control")
-            .arg(&control)
-            .arg("--paused")
-            .env("VMLAB_HV_DIAGNOSTICS", "1")
-            .stdout(Stdio::null())
-            .stderr(File::create(&stderr).unwrap())
-            .spawn()
-            .unwrap(),
-    );
+    let spawn = || {
+        Process(
+            Command::new(&binary)
+                .arg("--machine")
+                .arg(&machine)
+                .arg("--control")
+                .arg(&control)
+                .arg("--paused")
+                .env("VMLAB_HV_DIAGNOSTICS", "1")
+                .stdout(Stdio::null())
+                .stderr(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&stderr)
+                        .unwrap(),
+                )
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let mut process = spawn();
     let diagnostics = || {
         format!(
             "stderr: {}\nserial: {}",
@@ -172,27 +279,112 @@ fn boot_template(
         .ok()
         .map(|v| v.parse().unwrap())
         .unwrap_or(120);
-    let mut guest =
-        AgentClient::connect(&agent, Duration::from_secs(timeout)).unwrap_or_else(|e| {
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    let mut reboots = 0;
+    let mut guest = loop {
+        if let Ok(guest) = AgentClient::connect(&agent, Duration::from_secs(3)) {
+            break guest;
+        }
+        if let Some(status) = process.0.try_wait().unwrap() {
+            let mut reset = false;
+            while let Ok(Some(event)) = client.wait_event() {
+                reset |= event
+                    == vmlab_hv_proto::control::Event::Shutdown {
+                        reason: vmlab_hv_proto::control::ShutdownReason::GuestReset,
+                    };
+            }
+            assert!(
+                windows && status.success() && reset && reboots < 3,
+                "{name} exited before agent ready: {}",
+                diagnostics()
+            );
+            reboots += 1;
+            eprintln!("{name}: restarting after guest reset {reboots}");
+            for socket in [
+                &control,
+                &agent,
+                &native,
+                &rfb,
+                &dir.path().join("display.sock"),
+                &dir.path().join("vnc.sock"),
+            ] {
+                if socket.exists() {
+                    std::fs::remove_file(socket).unwrap();
+                }
+            }
+            process = spawn();
+            let ready = Instant::now() + Duration::from_secs(20);
+            client = loop {
+                if let Ok(client) = Client::connect(&control) {
+                    break client;
+                }
+                assert!(
+                    process.0.try_wait().unwrap().is_none() && Instant::now() < ready,
+                    "{name} restart failed: {}",
+                    diagnostics()
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert!(matches!(
+                client.call(Control::Resume).unwrap(),
+                Outcome::Ok { .. }
+            ));
+        }
+        if Instant::now() >= deadline {
             let _ = client.call(Control::Quit);
             let _ = process.0.wait();
-            panic!("{name} agent: {e}; {}", diagnostics())
-        });
+            panic!("{name} agent timeout: {}", diagnostics());
+        }
+    };
+    let shell = if windows { "cmd.exe" } else { "/bin/sh" };
+    let flag = if windows { "/C" } else { "-c" };
     let result = guest
         .exec(
-            &["/bin/sh", "-c", "printf firmware-agent-ready"],
+            &[
+                shell,
+                flag,
+                if windows {
+                    "echo firmware-agent-ready"
+                } else {
+                    "printf firmware-agent-ready"
+                },
+            ],
             Duration::from_secs(20),
         )
         .unwrap();
     assert_eq!(result.exit_code, 0);
-    assert_eq!(result.stdout, b"firmware-agent-ready");
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout).trim(),
+        "firmware-agent-ready"
+    );
+    if firmware == Firmware::SecureOvmf {
+        let secure = guest.exec(&["/bin/sh", "-c", "od -An -tu1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"], Duration::from_secs(20)).unwrap();
+        assert_eq!(secure.exit_code, 0, "{:?}", secure);
+        assert_eq!(
+            secure
+                .stdout
+                .split(|c| c.is_ascii_whitespace())
+                .rfind(|s| !s.is_empty()),
+            Some(&b"1"[..]),
+            "{:?}",
+            secure
+        );
+    }
     if let Some(display) = &display {
         display.exercise(&mut guest, &rfb);
     }
     if snapshot {
         guest
             .exec(
-                &["/bin/sh", "-c", "printf before >/run/vmlab-hv-snapshot"],
+                &[
+                    shell,
+                    flag,
+                    if windows {
+                        "echo before>C:\\Windows\\Temp\\vmlab-hv-snapshot"
+                    } else {
+                        "printf before >/run/vmlab-hv-snapshot"
+                    },
+                ],
                 Duration::from_secs(20),
             )
             .unwrap();
@@ -207,7 +399,15 @@ fn boot_template(
         );
         guest
             .exec(
-                &["/bin/sh", "-c", "printf after >/run/vmlab-hv-snapshot"],
+                &[
+                    shell,
+                    flag,
+                    if windows {
+                        "echo after>C:\\Windows\\Temp\\vmlab-hv-snapshot"
+                    } else {
+                        "printf after >/run/vmlab-hv-snapshot"
+                    },
+                ],
                 Duration::from_secs(20),
             )
             .unwrap();
@@ -223,9 +423,20 @@ fn boot_template(
         drop(guest);
         let mut guest = AgentClient::connect(&agent, Duration::from_secs(30)).unwrap();
         let restored = guest
-            .exec(&["cat", "/run/vmlab-hv-snapshot"], Duration::from_secs(20))
+            .exec(
+                &[
+                    shell,
+                    flag,
+                    if windows {
+                        "type C:\\Windows\\Temp\\vmlab-hv-snapshot"
+                    } else {
+                        "cat /run/vmlab-hv-snapshot"
+                    },
+                ],
+                Duration::from_secs(20),
+            )
             .unwrap();
-        assert_eq!(restored.stdout, b"before");
+        assert_eq!(String::from_utf8_lossy(&restored.stdout).trim(), "before");
     }
     assert!(matches!(
         client.call(Control::Quit).unwrap(),
@@ -250,6 +461,7 @@ fn ubuntu_26_04_firmware_agent_and_snapshot() {
         true,
         vmlab_hv_proto::machine::DiskBus::Virtio,
         false,
+        Firmware::SeaBios,
     );
 }
 
@@ -261,6 +473,7 @@ fn almalinux_10_firmware_agent() {
         false,
         vmlab_hv_proto::machine::DiskBus::Virtio,
         false,
+        Firmware::SeaBios,
     );
 }
 
@@ -272,6 +485,7 @@ fn ubuntu_26_04_ahci_firmware_agent() {
         false,
         vmlab_hv_proto::machine::DiskBus::Ahci,
         false,
+        Firmware::SeaBios,
     );
 }
 
@@ -283,5 +497,66 @@ fn ubuntu_26_04_native_display_input_and_rfb() {
         false,
         vmlab_hv_proto::machine::DiskBus::Virtio,
         true,
+        Firmware::SeaBios,
+    );
+}
+
+#[test]
+fn debian_13_ovmf_agent() {
+    boot_template(
+        "debian-13",
+        "VMLAB_HV_TEMPLATE_DEBIAN_13",
+        false,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+        false,
+        Firmware::Ovmf,
+    );
+}
+
+#[test]
+fn ubuntu_24_04_secure_ovmf_agent() {
+    boot_template(
+        "ubuntu-24.04",
+        "VMLAB_HV_TEMPLATE_UBUNTU_24_04",
+        false,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+        false,
+        Firmware::SecureOvmf,
+    );
+}
+
+#[test]
+fn ubuntu_24_04_ovmf_agent() {
+    boot_template(
+        "ubuntu-24.04",
+        "VMLAB_HV_TEMPLATE_UBUNTU_24_04",
+        false,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+        false,
+        Firmware::Ovmf,
+    );
+}
+
+#[test]
+fn windows_10_ovmf_agent_and_snapshot() {
+    boot_template(
+        "windows-10",
+        "VMLAB_HV_TEMPLATE_WINDOWS_10",
+        true,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+        false,
+        Firmware::Ovmf,
+    );
+}
+
+#[test]
+fn windows_server_2022_ovmf_tpm_agent() {
+    boot_template(
+        "windows-server-2022",
+        "VMLAB_HV_TEMPLATE_WINDOWS_SERVER_2022",
+        false,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+        false,
+        Firmware::Ovmf,
     );
 }

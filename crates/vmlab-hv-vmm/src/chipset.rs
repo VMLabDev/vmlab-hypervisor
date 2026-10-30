@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::Instant;
 
@@ -17,7 +17,7 @@ use vmlab_hv_devices::chipset::{
     rtc::Rtc,
     smbus::Smbus,
 };
-use vmlab_hv_devices::{BusDevice, IrqLine};
+use vmlab_hv_devices::{BusDevice, IrqLine, PciDevice};
 
 use crate::{error::VmmError, layout::MemLayout, q35::PirqRouter};
 
@@ -72,7 +72,7 @@ impl IrqLine for RtcGate {
 }
 
 pub struct Chipset {
-    pub smi_enable: AtomicU32,
+    pub smi: Mutex<crate::smm::SmiControl>,
     pub smi_pending: AtomicBool,
     pub lpc: Arc<Mutex<Lpc>>,
     pub rtc: Arc<Mutex<Rtc>>,
@@ -93,20 +93,10 @@ impl vmlab_hv_devices::Snapshot for ChipsetRegisters {
         "q35-platform-registers".into()
     }
     fn save_state(&self) -> Result<Vec<u8>, vmlab_hv_devices::DeviceError> {
-        Ok(self
-            .0
-            .smi_enable
-            .load(Ordering::SeqCst)
-            .to_le_bytes()
-            .to_vec())
+        self.0.smi.lock().save_state()
     }
     fn restore_state(&mut self, bytes: &[u8]) -> Result<(), vmlab_hv_devices::DeviceError> {
-        let bytes: [u8; 4] = bytes
-            .try_into()
-            .map_err(|_| vmlab_hv_devices::DeviceError::State("invalid SMI enable state".into()))?;
-        self.0
-            .smi_enable
-            .store(u32::from_le_bytes(bytes), Ordering::SeqCst);
+        self.0.smi.lock().restore_state(bytes)?;
         self.0.smi_pending.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -187,7 +177,7 @@ impl Chipset {
             .map_err(VmmError::Other)?,
         )));
         Ok(Arc::new(Self {
-            smi_enable: AtomicU32::new(0),
+            smi: Mutex::new(crate::smm::SmiControl::default()),
             smi_pending: AtomicBool::new(false),
             lpc,
             rtc: Arc::new(Mutex::new(rtc)),
@@ -230,7 +220,10 @@ impl Chipset {
     }
 
     pub fn sync_pirqs(&self) {
-        let lpc = self.lpc.lock();
+        let mut lpc = self.lpc.lock();
+        if lpc.config_read(0xa0 / 4) & (1 << 4) != 0 {
+            self.smi.lock().lock();
+        }
         let mut router = self.pirqs.lock();
         for i in 0..8 {
             router.set_route(i, lpc.pirq_route(i).unwrap_or(0x80));
@@ -239,9 +232,8 @@ impl Chipset {
 
     pub fn io_read(&self, port: u16, data: &mut [u8]) -> bool {
         self.advance();
-        if self.smi_register(port, data.len()) {
-            let bytes = self.smi_enable.load(Ordering::SeqCst).to_le_bytes();
-            let offset = port.wrapping_sub(self.lpc.lock().pm_base()) as usize - 0x30;
+        if let Some((register, offset)) = self.smi_register(port, data.len()) {
+            let bytes = self.smi.lock().read(register).unwrap().to_le_bytes();
             data.copy_from_slice(&bytes[offset..offset + data.len()]);
             return true;
         }
@@ -288,18 +280,20 @@ impl Chipset {
 
     pub fn io_write(&self, port: u16, data: &[u8]) -> bool {
         self.advance();
-        if self.smi_register(port, data.len()) {
-            let mut bytes = self.smi_enable.load(Ordering::SeqCst).to_le_bytes();
-            let offset = port.wrapping_sub(self.lpc.lock().pm_base()) as usize - 0x30;
+        if let Some((register, offset)) = self.smi_register(port, data.len()) {
+            let mut smi = self.smi.lock();
+            let mut bytes = if register == 0x34 {
+                [0; 4]
+            } else {
+                smi.read(register).unwrap().to_le_bytes()
+            };
             bytes[offset..offset + data.len()].copy_from_slice(data);
-            self.smi_enable
-                .store(u32::from_le_bytes(bytes), Ordering::SeqCst);
+            if smi.write(register, u32::from_le_bytes(bytes)) {
+                self.smi_pending.store(true, Ordering::SeqCst);
+            }
             return true;
         }
         if self.lpc.lock().write_port(port, data) {
-            if port == 0xb2 && self.smi_enable.load(Ordering::SeqCst) & 0x21 == 0x21 {
-                self.smi_pending.store(true, Ordering::SeqCst);
-            }
             return true;
         }
         match port {
@@ -325,10 +319,17 @@ impl Chipset {
         true
     }
 
-    fn smi_register(&self, port: u16, len: usize) -> bool {
+    fn smi_register(&self, port: u16, len: usize) -> Option<(u16, usize)> {
+        if matches!(port, 0xb2 | 0xb3) && len == 1 {
+            return Some((port, 0));
+        }
         let lpc = self.lpc.lock();
         let offset = port.wrapping_sub(lpc.pm_base()) as usize;
-        lpc.pm_enabled() && (0x30..0x34).contains(&offset) && len <= 0x34 - offset
+        if lpc.pm_enabled() && (0x30..0x38).contains(&offset) && len <= 4 - (offset & 3) {
+            Some(((offset & !3) as u16, offset & 3))
+        } else {
+            None
+        }
     }
 }
 
