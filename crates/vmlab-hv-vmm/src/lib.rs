@@ -14,11 +14,14 @@ pub mod loader;
 pub mod memory;
 pub mod pci;
 pub mod pm;
+pub mod snapshot;
 pub mod vcpu;
 pub mod vm;
 
 #[cfg(test)]
 mod kvm_tests;
+#[cfg(test)]
+mod snapshot_tests;
 
 pub use builder::{build, validate};
 pub use error::{DeviceUnavailable, VmmError};

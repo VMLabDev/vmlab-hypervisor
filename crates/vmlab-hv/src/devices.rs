@@ -17,10 +17,10 @@ use vmlab_hv_devices::virtio::block::Block;
 use vmlab_hv_devices::virtio::console::{Console, PortConfig};
 use vmlab_hv_devices::virtio::net::{Net, NetConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
-use vmlab_hv_devices::{BusDevice, GuestMemory, IrqLine, MsiSink, PciDevice, VirtioDevice};
+use vmlab_hv_devices::{GuestMemory, IrqLine, MsiSink, VirtioDevice};
 use vmlab_hv_proto::machine::{Disk, DiskFormat, FsShare, Nic, NicAttachment, SerialPort};
-
-use vmlab_hv_vmm::error::DeviceUnavailable;
+use vmlab_hv_vmm::DeviceUnavailable;
+use vmlab_hv_vmm::factory::{BuiltBlk, BuiltPci, BuiltSerial, SharedDisk, SharedImage};
 
 /// The device set the binary ships.
 #[derive(Debug, Default)]
@@ -33,14 +33,18 @@ impl DeviceSet {
         device: Box<dyn VirtioDevice>,
         mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
-        Ok(Arc::new(Mutex::new(VirtioPciDevice::new(
+    ) -> Result<BuiltPci, DeviceUnavailable> {
+        let dev = Arc::new(Mutex::new(VirtioPciDevice::new(
             id,
             device,
             mem.clone(),
             Some(msi),
             None,
-        ))))
+        )));
+        Ok(BuiltPci {
+            function: dev.clone(),
+            snapshot: Some(dev),
+        })
     }
 }
 
@@ -49,7 +53,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         &self,
         log_path: &Path,
         irq: Arc<dyn IrqLine>,
-    ) -> Result<Arc<Mutex<dyn BusDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltSerial, DeviceUnavailable> {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -60,11 +64,15 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
                     format!("cannot open serial log {}: {e}", log_path.display()),
                 )
             })?;
-        Ok(Arc::new(Mutex::new(Serial::new(
+        let dev = Arc::new(Mutex::new(Serial::new(
             "serial0",
             SerialOut::new(Box::new(file)),
             irq,
-        ))))
+        )));
+        Ok(BuiltSerial {
+            device: dev.clone(),
+            snapshot: Some(dev),
+        })
     }
 
     fn virtio_blk(
@@ -72,27 +80,36 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         disk: &Disk,
         mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltBlk, DeviceUnavailable> {
         let format = match disk.format {
             DiskFormat::Raw => Format::Raw,
             DiskFormat::Qcow2 => Format::Qcow2,
         };
-        let image = vmlab_disk::open(&disk.path, format, disk.read_only).map_err(|e| {
-            DeviceUnavailable::new(
-                "virtio-blk",
-                format!(
-                    "cannot open disk {} (id `{}`): {e}",
-                    disk.path.display(),
-                    disk.id
-                ),
-            )
-        })?;
-        self.wrap(
+        // One open image shared by the device and the VMM's snapshot
+        // orchestration (D14): the block device runs on a SharedDisk
+        // forwarding to the same handle the registry keeps.
+        let image: SharedImage = Arc::new(Mutex::new(
+            vmlab_disk::open(&disk.path, format, disk.read_only).map_err(|e| {
+                DeviceUnavailable::new(
+                    "virtio-blk",
+                    format!(
+                        "cannot open disk {} (id `{}`): {e}",
+                        disk.path.display(),
+                        disk.id
+                    ),
+                )
+            })?,
+        ));
+        let pci = self.wrap(
             disk.id.clone(),
-            Box::new(Block::new(disk.id.clone(), image)),
+            Box::new(Block::new(
+                disk.id.clone(),
+                Box::new(SharedDisk(image.clone())),
+            )),
             mem,
             msi,
-        )
+        )?;
+        Ok(BuiltBlk { pci, disk: image })
     }
 
     fn virtio_console(
@@ -100,7 +117,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         ports: &[SerialPort],
         mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltPci, DeviceUnavailable> {
         let ports = ports
             .iter()
             .map(|p| PortConfig {
@@ -122,7 +139,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         nic: &Nic,
         mem: &GuestMemory,
         msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltPci, DeviceUnavailable> {
         let mac = parse_mac(&nic.mac)?;
         let id = format!("nic-{}", nic.mac);
         let switch = match &nic.attachment {
@@ -144,7 +161,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         share: &FsShare,
         _mem: &GuestMemory,
         _msi: Arc<dyn MsiSink>,
-    ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
+    ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "vhost-user-fs",
             format!(
@@ -157,18 +174,13 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
 
 /// `aa:bb:cc:dd:ee:ff` to bytes.
 fn parse_mac(mac: &str) -> Result<[u8; 6], DeviceUnavailable> {
-    let mut bytes = [0u8; 6];
-    let parts: Vec<_> = mac.split(':').collect();
-    if parts.len() != 6 {
-        return Err(DeviceUnavailable::new(
-            "virtio-net",
-            format!("malformed MAC address {mac:?}"),
-        ));
-    }
-    for (slot, part) in bytes.iter_mut().zip(parts) {
-        *slot = u8::from_str_radix(part, 16).map_err(|_| {
-            DeviceUnavailable::new("virtio-net", format!("malformed MAC address {mac:?}"))
-        })?;
-    }
+    let bytes = mac
+        .split(':')
+        .map(|part| u8::from_str_radix(part, 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| DeviceUnavailable::new("virtio-net", format!("bad MAC {mac:?}: {e}")))?;
+    let bytes: [u8; 6] = bytes
+        .try_into()
+        .map_err(|_| DeviceUnavailable::new("virtio-net", format!("bad MAC {mac:?}")))?;
     Ok(bytes)
 }

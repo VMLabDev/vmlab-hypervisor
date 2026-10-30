@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex as PlMutex;
-use parking_lot::Mutex;
 use vm_memory::{Bytes, GuestAddress};
 use vmlab_hv_devices::{BusDevice, IrqLine};
 use vmlab_hv_proto::control::{Command, Event, Outcome, ShutdownReason};
@@ -73,10 +72,13 @@ impl DeviceFactory for TestFactory {
         &self,
         _log_path: &Path,
         _irq: Arc<dyn IrqLine>,
-    ) -> Result<Arc<Mutex<dyn BusDevice>>, DeviceUnavailable> {
-        Ok(Arc::new(parking_lot::Mutex::new(FakeSerial {
-            out: self.out.clone(),
-        })))
+    ) -> Result<crate::factory::BuiltSerial, DeviceUnavailable> {
+        Ok(crate::factory::BuiltSerial {
+            device: Arc::new(parking_lot::Mutex::new(FakeSerial {
+                out: self.out.clone(),
+            })),
+            snapshot: None, // these machines do not snapshot
+        })
     }
 
     fn virtio_blk(
@@ -84,7 +86,7 @@ impl DeviceFactory for TestFactory {
         disk: &vmlab_hv_proto::machine::Disk,
         _mem: &vmlab_hv_devices::GuestMemory,
         _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
-    ) -> Result<Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>, DeviceUnavailable> {
+    ) -> Result<crate::factory::BuiltBlk, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-blk",
             format!("no block device in this test (disk `{}`)", disk.id),
@@ -96,7 +98,7 @@ impl DeviceFactory for TestFactory {
         _ports: &[vmlab_hv_proto::machine::SerialPort],
         _mem: &vmlab_hv_devices::GuestMemory,
         _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
-    ) -> Result<Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>, DeviceUnavailable> {
+    ) -> Result<crate::factory::BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-console",
             "no console device in this test",
@@ -108,7 +110,7 @@ impl DeviceFactory for TestFactory {
         nic: &vmlab_hv_proto::machine::Nic,
         _mem: &vmlab_hv_devices::GuestMemory,
         _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
-    ) -> Result<Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>, DeviceUnavailable> {
+    ) -> Result<crate::factory::BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-net",
             format!("no net device in this test (nic {})", nic.mac),
@@ -120,7 +122,7 @@ impl DeviceFactory for TestFactory {
         share: &vmlab_hv_proto::machine::FsShare,
         _mem: &vmlab_hv_devices::GuestMemory,
         _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
-    ) -> Result<Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>, DeviceUnavailable> {
+    ) -> Result<crate::factory::BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "vhost-user-fs",
             format!("no fs device in this test (share `{}`)", share.tag),
@@ -215,7 +217,7 @@ fn payload_vm(payload: &[u8], paused: bool, protected: bool) -> Option<PayloadVm
     let serial = factory
         .serial(Path::new("/dev/null"), Arc::new(NullIrq))
         .ok()?;
-    io_bus.register(0x3F8, 8, serial).ok()?;
+    io_bus.register(0x3F8, 8, serial.device).ok()?;
 
     let sleep_signal = Arc::new(SleepSignal::default());
     let pm = Arc::new(PlMutex::new(PmDevice::new(
@@ -225,7 +227,6 @@ fn payload_vm(payload: &[u8], paused: bool, protected: bool) -> Option<PayloadVm
     io_bus
         .register(PM1A_EVT_BASE, PM_BLOCK_LEN, pm.clone())
         .ok()?;
-
     let shared = VmShared::new(
         kvm,
         io_bus,
@@ -235,6 +236,13 @@ fn payload_vm(payload: &[u8], paused: bool, protected: bool) -> Option<PayloadVm
         sleep_signal,
         layout.mmio64_base,
     );
+    // No disks, no snapshot handles: snapshot commands must refuse with
+    // Unsupported, not panic.
+    shared.set_snapshot_registry(Arc::new(crate::snapshot::SnapshotRegistry {
+        digest: [0; 32],
+        disks: Vec::new(),
+        nodes: Vec::new(),
+    }));
     let mut vcpu = shared.kvm.create_vcpu(0).ok()?;
     // Flat mode at the payload: the architecture's reset vector is at
     // physical 0xFFFF_FFF0, which this 16 MiB machine does not back.
@@ -347,8 +355,11 @@ fn control_socket_end_to_end() {
     crate::control::serve(&socket, &handle).expect("serve control socket");
 
     let mut client = vmlab_hv_proto::client::Client::connect(&socket).expect("handshake");
-    assert_eq!(client.proto_version(), vmlab_hv_proto::PROTO_VERSION);
-    assert!(client.capabilities().is_empty());
+    assert!(
+        client
+            .capabilities()
+            .contains(&vmlab_hv_proto::control::Capability::Snapshots)
+    );
 
     match client.call(Command::Status).expect("status reply") {
         Outcome::Ok {

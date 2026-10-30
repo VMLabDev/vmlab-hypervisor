@@ -25,8 +25,8 @@ use parking_lot::Mutex;
 use virtio_queue::{Queue, QueueT};
 
 use crate::{
-    BarInfo, BarKind, DeviceError, GuestMemory, IrqLine, MsiMessage, MsiSink, PciDevice, Snapshot,
-    VirtioDevice, VirtioInterrupt,
+    BarInfo, BarKind, DeviceError, GuestMemory, IrqLine, MsiMessage, MsiSink, PciDevice,
+    PciSnapshot, Snapshot, VirtioDevice, VirtioInterrupt,
 };
 
 /// Virtio PCI vendor id.
@@ -1080,6 +1080,28 @@ impl Snapshot for VirtioPciDevice {
             self.driver_status = driver_status;
         }
         Ok(())
+    }
+}
+
+impl PciSnapshot for VirtioPciDevice {
+    fn snapshot_id(&self) -> String {
+        Snapshot::state_id(self)
+    }
+
+    fn save_function_state(&self) -> Result<Vec<u8>, DeviceError> {
+        Snapshot::save_state(self)
+    }
+
+    fn save_wrapped_state(&self) -> Result<Vec<u8>, DeviceError> {
+        self.device().save_state()
+    }
+
+    fn restore_function_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
+        Snapshot::restore_state(self, state)
+    }
+
+    fn restore_wrapped_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
+        self.device_mut().restore_state(state)
     }
 }
 
