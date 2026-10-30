@@ -70,7 +70,7 @@ impl KvmVm {
             .create_vcpu(id as u64)
             .map_err(|e| E::ioctl("KVM_CREATE_VCPU", e))?;
         let mut cpuid = self.cpuid.clone();
-        filter_cpuid(&mut cpuid, id, count, policy);
+        filter_cpuid(&mut cpuid, id, count, policy)?;
         vcpu.set_cpuid2(&cpuid)
             .map_err(|e| E::ioctl("KVM_SET_CPUID2", e))?;
         Ok(vcpu)
@@ -100,12 +100,32 @@ impl KvmVm {
 
 /// One socket, `count` cores, one thread per core. Preserve KVM's supported
 /// feature set while removing host topology and nested virtualization leaks.
-pub fn filter_cpuid(
+fn filter_cpuid(
     cpuid: &mut CpuId,
     id: u8,
     count: u32,
     policy: vmlab_hv_proto::machine::CpuPolicy,
-) {
+) -> Result<(), VmmError> {
+    let mut entries = cpuid.as_slice().to_vec();
+    for function in [0xb, 0x1f] {
+        if entries.iter().any(|entry| entry.function == function) {
+            for index in 0..=2 {
+                if !entries
+                    .iter()
+                    .any(|entry| entry.function == function && entry.index == index)
+                {
+                    entries.push(kvm_bindings::kvm_cpuid_entry2 {
+                        function,
+                        index,
+                        flags: kvm_bindings::KVM_CPUID_FLAG_SIGNIFCANT_INDEX,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+    *cpuid = CpuId::from_entries(&entries)
+        .map_err(|e| VmmError::Other(format!("building CPUID topology: {e}")))?;
     let shift = count.next_power_of_two().trailing_zeros();
     for entry in cpuid.as_mut_slice() {
         match entry.function {
@@ -153,6 +173,7 @@ pub fn filter_cpuid(
             _ => {}
         }
     }
+    Ok(())
 }
 
 /// A legacy interrupt line routed into the in-kernel irqchip.
@@ -205,6 +226,70 @@ impl vmlab_hv_devices::MsiSink for KvmMsiSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn topology_adds_core_level_when_kvm_supplies_only_thread_level() {
+        let mut cpuid = CpuId::from_entries(&[kvm_bindings::kvm_cpuid_entry2 {
+            function: 0xb, flags: kvm_bindings::KVM_CPUID_FLAG_SIGNIFCANT_INDEX, ..Default::default()
+        }]).unwrap();
+        filter_cpuid(&mut cpuid, 1, 2, vmlab_hv_proto::machine::CpuPolicy::Host).unwrap();
+        let core = cpuid.as_slice().iter().find(|entry| entry.function == 0xb && entry.index == 1).unwrap();
+        assert_eq!((core.eax, core.ebx, core.ecx, core.edx), (1, 2, 0x201, 1));
+        let end = cpuid.as_slice().iter().find(|entry| entry.function == 0xb && entry.index == 2).unwrap();
+        assert_eq!((end.eax, end.ebx, end.ecx, end.edx), (0, 0, 2, 1));
+    }
+
+    #[test]
+    fn cpuid_masks_nested_features_and_replaces_host_topology() {
+        use kvm_bindings::kvm_cpuid_entry2;
+        use vmlab_hv_proto::machine::CpuPolicy;
+        let entries = [
+            kvm_cpuid_entry2 {
+                function: 1,
+                ecx: u32::MAX,
+                edx: u32::MAX,
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: 0x80000001,
+                ecx: u32::MAX,
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: 0xb,
+                index: 0,
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: 0xb,
+                index: 1,
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: 0x80000008,
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: 0x8000001e,
+                ..Default::default()
+            },
+        ];
+        let mut cpuid = CpuId::from_entries(&entries).unwrap();
+        filter_cpuid(&mut cpuid, 5, 6, CpuPolicy::Host).unwrap();
+        let e = cpuid.as_slice();
+        assert_eq!(e[0].ecx & (1 << 5), 0);
+        assert_eq!(e[1].ecx & (1 << 2), 0);
+        assert_eq!(e[0].ebx >> 16, 0x0506);
+        assert_eq!((e[2].eax, e[2].ebx, e[2].edx), (0, 1, 5));
+        assert_eq!((e[3].eax, e[3].ebx, e[3].edx), (3, 6, 5));
+        assert_eq!(e[4].ecx, 0x3005);
+        assert_eq!((e[5].eax, e[5].ebx, e[5].ecx), (5, 5, 0));
+        let mut cpuid = CpuId::from_entries(&entries).unwrap();
+        filter_cpuid(&mut cpuid, 0, 1, CpuPolicy::Nested).unwrap();
+        assert_ne!(cpuid.as_slice()[0].ecx & (1 << 5), 0);
+        assert_ne!(cpuid.as_slice()[1].ecx & (1 << 2), 0);
+        assert_eq!(cpuid.as_slice()[0].edx & (1 << 28), 0);
+    }
 
     fn kvm_or_skip() -> Option<KvmVm> {
         if !std::path::Path::new("/dev/kvm").exists() {
