@@ -195,13 +195,9 @@ impl PciDevice for VirtioVga {
             self.transport.config_write(16, 2, &control.to_le_bytes());
         }
         for (i, byte) in data.iter().enumerate() {
-            if let p @ (0x0c
-            | 0x10..=0x13
-            | 0x18..=0x23
-            | 0x30..=0x33
-            | 0x3c
-            | 0x88
-            | 0x8c..=0x93) = at + i
+            if let p
+            @ (0x0c | 0x10..=0x13 | 0x18..=0x23 | 0x30..=0x33 | 0x3c | 0x88 | 0x8c..=0x93) =
+                at + i
             {
                 self.config[p] = *byte;
             }
