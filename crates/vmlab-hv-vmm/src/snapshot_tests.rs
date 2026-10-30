@@ -477,3 +477,85 @@ fn snapshot_at_io(instruction: &[u8], expected: u16) {
         "post-save I/O leaked into restored CPU"
     );
 }
+
+#[test]
+fn snapshot_restores_tsc_deadline_after_lapic() {
+    use kvm_bindings::{Msrs, kvm_msr_entry};
+    let Some(m) = machine(&counter_payload(), 8) else {
+        return;
+    };
+    m.handle.pause().unwrap();
+    m.handle
+        .shared()
+        .wait_quiesced(Duration::from_secs(5))
+        .unwrap();
+    let fds = m.handle.shared().vcpus.lock().clone();
+    let fd = fds[0].1.lock();
+    let cpuid = fd.get_cpuid2(256).unwrap();
+    if !cpuid
+        .as_slice()
+        .iter()
+        .any(|entry| entry.function == 1 && entry.ecx & (1 << 24) != 0)
+    {
+        eprintln!("SKIP: KVM does not expose TSC-deadline mode");
+        return;
+    }
+    let mut lapic = fd.get_lapic().unwrap();
+    for (offset, value) in [(0xf0, 0x1ffu32), (0x320, (2 << 17) | 0x40)] {
+        for (byte, value) in lapic.regs[offset..offset + 4]
+            .iter_mut()
+            .zip(value.to_le_bytes())
+        {
+            *byte = value as i8;
+        }
+    }
+    fd.set_lapic(&lapic).unwrap();
+    let deadline = u64::MAX / 2;
+    let msrs = Msrs::from_entries(&[kvm_msr_entry {
+        index: 0x6e0,
+        data: deadline,
+        ..Default::default()
+    }])
+    .unwrap();
+    assert_eq!(fd.set_msrs(&msrs).unwrap(), 1);
+    drop(fd);
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = vmlab_hv_proto::client::Client::connect(socket).unwrap();
+    for (index, command) in [
+        vmlab_hv_proto::control::Command::SnapshotSave {
+            name: "deadline".into(),
+        },
+        vmlab_hv_proto::control::Command::SnapshotLoad {
+            name: "deadline".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(matches!(
+            client.call(command).unwrap(),
+            vmlab_hv_proto::control::Outcome::Ok { .. }
+        ));
+        if index == 0 {
+            let changed = Msrs::from_entries(&[kvm_msr_entry {
+                index: 0x6e0,
+                data: 0,
+                ..Default::default()
+            }])
+            .unwrap();
+            assert_eq!(fds[0].1.lock().set_msrs(&changed).unwrap(), 1);
+        }
+    }
+    let mut msrs = Msrs::from_entries(&[kvm_msr_entry {
+        index: 0x6e0,
+        ..Default::default()
+    }])
+    .unwrap();
+    assert_eq!(fds[0].1.lock().get_msrs(&mut msrs).unwrap(), 1);
+    assert_eq!(
+        msrs.as_slice()[0].data,
+        deadline,
+        "restore disarmed the guest timer"
+    );
+}
