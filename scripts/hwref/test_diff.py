@@ -25,6 +25,19 @@ REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_truncated_fwcfg_transfer_cannot_pass_the_diff_gate(self):
+        with tempfile.TemporaryDirectory(prefix="hwref-truncated-") as tmp:
+            root = Path(tmp) / "capture"
+            shutil.copytree(REFERENCE, root)
+            sizes = root / "guest/fwcfg/sizes.txt"
+            sizes.write_text(sizes.read_text() + "etc/test-transfer 65536\n")
+            blob = root / "guest/fwcfg/blobs/etc/test-transfer"
+            blob.write_bytes(bytes(24576))
+            with self.assertRaisesRegex(ValueError, "incomplete fw_cfg blob etc/test-transfer"):
+                diff.load_capture(root)
+            blob.write_bytes(bytes(65536))
+            self.assertTrue(diff.load_capture(root))
+
     def test_option_rom_identity_ignores_code_but_keeps_pci_identity(self):
         image = bytearray(512)
         image[:2] = b"\x55\xaa"
@@ -330,7 +343,8 @@ class DiffTests(unittest.TestCase):
         self.assertIn("genroms/kvmvapic.bin: reference only", diff.compare(REFERENCE, self.root, None))
         path = self.root / "guest/fwcfg/blobs/etc/e820"
         path.write_bytes(path.read_bytes() + b"\0")
-        self.assertIn("=== fwcfg/blobs/etc/e820 ===", diff.compare(REFERENCE, self.root))
+        with self.assertRaisesRegex(ValueError, "incomplete fw_cfg blob etc/e820"):
+            diff.compare(REFERENCE, self.root)
 
     def test_deferred_file_changes_and_new_files_remain_failures(self):
         path = self.root / "guest/fwcfg/blobs/etc/smi/features-ok"

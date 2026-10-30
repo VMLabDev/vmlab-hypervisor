@@ -314,6 +314,11 @@ def load_capture(root: Path) -> dict[str, str]:
         raise ValueError(f"{root}: no PCI functions in capture")
     if not re.search(r"^0x[0-9a-f]{8} 0x[0-9a-f]+:", (guest / "cpuid.txt").read_text(), re.M):
         raise ValueError(f"{root}: no CPUID leaves in capture")
+    for line in (guest / "fwcfg/sizes.txt").read_text().splitlines():
+        name, size = line.rsplit(maxsplit=1)
+        blob = guest / "fwcfg/blobs" / name
+        if int(size) <= 65536 and blob.is_file() and blob.stat().st_size != int(size):
+            raise ValueError(f"{root}: incomplete fw_cfg blob {name}: expected {size}, got {blob.stat().st_size}")
     result = {}
     allocations = allocation_map(guest)
     for path in sorted(guest.rglob("*")):
