@@ -391,6 +391,13 @@ fn save_kernel_state(
 
     sections.push(("pci-root".into(), to_json(&shared.save_pci_bars())?));
 
+    let deadline_supported = shared
+        .kvm
+        .kvm
+        .get_msr_index_list()
+        .map_err(io)?
+        .as_slice()
+        .contains(&0x6e0);
     let vcpus = shared.vcpus.lock().clone();
     for (id, fd) in &vcpus {
         let fd = fd.lock();
@@ -400,6 +407,9 @@ fn save_kernel_state(
         sections.push((p("fpu"), encode_fpu(&fd.get_fpu().map_err(io)?)));
         sections.push((p("xsave"), encode_xsave(&fd.get_xsave().map_err(io)?)));
         let mut indices = MIGRATABLE_MSRS.to_vec();
+        if deadline_supported {
+            indices.push(0x6e0); // IA32_TSC_DEADLINE
+        }
         indices.extend(
             crate::hyperv::snapshot_msr_indices(&shared.kvm.kvm, &fd)
                 .map_err(|e| SnapshotError::Internal(e.to_string()))?,
@@ -796,7 +806,9 @@ fn restore_kernel_state(
         unsafe {
             fd.set_xsave(&xsave).map_err(io)?;
         }
-        let entries = decode_msrs(get("msrs")?)?;
+        let mut entries = decode_msrs(get("msrs")?)?;
+        let deadline = entries.iter().find(|entry| entry.index == 0x6e0).copied();
+        entries.retain(|entry| entry.index != 0x6e0);
         let msrs = Msrs::from_entries(&entries)
             .map_err(|e| SnapshotError::Internal(format!("building the MSR list: {e}")))?;
         let written = fd
@@ -810,6 +822,17 @@ fn restore_kernel_state(
         }
         let lapic = decode_lapic(get("lapic")?)?;
         fd.set_lapic(&lapic).map_err(io)?;
+        // The LVT timer must be in deadline mode before the MSR is written.
+        // SET_LAPIC can also cancel a previously armed deadline.
+        if let Some(deadline) = deadline {
+            let msrs = Msrs::from_entries(&[deadline])
+                .map_err(|e| SnapshotError::Internal(format!("building deadline MSR: {e}")))?;
+            if fd.set_msrs(&msrs).map_err(io)? != 1 {
+                return Err(SnapshotError::Internal(format!(
+                    "vcpu {id}: restoring TSC deadline"
+                )));
+            }
+        }
         let events: kvm_vcpu_events = from_json(get("events")?, "events")?;
         fd.set_vcpu_events(&events).map_err(io)?;
     }

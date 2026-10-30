@@ -85,6 +85,29 @@ struct Machine {
     log: Log,
     disk_path: std::path::PathBuf,
     _dir: tempfile::TempDir,
+    _pause_target: Arc<PlMutex<Option<VmHandle>>>,
+}
+
+struct PauseOnIo(std::sync::Weak<PlMutex<Option<VmHandle>>>, u8);
+
+impl vmlab_hv_devices::BusDevice for PauseOnIo {
+    fn read(&mut self, _: u64, data: &mut [u8]) {
+        data.fill(self.1);
+        self.1 = self.1.wrapping_add(1);
+        if let Some(target) = self.0.upgrade()
+            && let Some(handle) = target.lock().as_ref()
+        {
+            handle.pause().unwrap();
+        }
+    }
+
+    fn write(&mut self, _: u64, _: &[u8]) {
+        if let Some(target) = self.0.upgrade()
+            && let Some(handle) = target.lock().as_ref()
+        {
+            handle.pause().unwrap();
+        }
+    }
 }
 
 fn kvm_or_skip() -> Option<KvmVm> {
@@ -126,7 +149,22 @@ fn machine(payload: &[u8], disk_mib: u64) -> Option<Machine> {
     let snap_serial: Arc<PlMutex<dyn vmlab_hv_devices::Snapshot>> = serial.clone();
 
     let mut io_bus = crate::bus::IoBus::new();
-    let mmio_bus = crate::bus::MmioBus::new();
+    let mut mmio_bus = crate::bus::MmioBus::new();
+    let pause_target = Arc::new(PlMutex::new(None));
+    io_bus
+        .register(
+            0x80,
+            1,
+            Arc::new(PlMutex::new(PauseOnIo(Arc::downgrade(&pause_target), 0x42))),
+        )
+        .ok()?;
+    mmio_bus
+        .register(
+            0x1000_0000,
+            4096,
+            Arc::new(PlMutex::new(PauseOnIo(Arc::downgrade(&pause_target), 0x42))),
+        )
+        .ok()?;
     let pci_root = Arc::new(PlMutex::new(PciRoot::new(layout.mmio64_base)));
     io_bus.register(0x3F8, 8, bus_serial).ok()?;
 
@@ -160,7 +198,11 @@ fn machine(payload: &[u8], disk_mib: u64) -> Option<Machine> {
     }));
     let mut vcpu = shared.kvm.create_vcpu(0).ok()?;
     crate::loader::init_real_mode(&mut vcpu, 0x8000).ok()?;
+    let mut sregs = vcpu.get_sregs().ok()?;
+    sregs.ds.limit = u32::MAX;
+    vcpu.set_sregs(&sregs).ok()?;
     let mut vm = Vm::from_parts(shared, vec![(0, vcpu)], ram).ok()?;
+    *pause_target.lock() = Some(vm.handle());
     vm.start();
     let handle = vm.handle();
     Some(Machine {
@@ -169,6 +211,7 @@ fn machine(payload: &[u8], disk_mib: u64) -> Option<Machine> {
         log,
         disk_path,
         _dir: dir,
+        _pause_target: pause_target,
     })
 }
 
@@ -341,4 +384,178 @@ fn paused_snapshots_stay_paused() {
     let before = m.observed().len();
     settle(&m);
     assert!(m.observed().len() > before, "machine runs after resume");
+}
+
+#[test]
+fn io_instruction_completed_before_snapshot() {
+    snapshot_at_io(&[0xec], 0x42);
+}
+
+#[test]
+fn mmio_instruction_completed_before_snapshot() {
+    snapshot_at_io(&[0x67, 0xa0, 0, 0, 0, 0x10], 0x42);
+}
+
+#[test]
+fn output_instruction_completed_before_snapshot() {
+    snapshot_at_io(&[0xee], 0x11);
+}
+
+#[test]
+fn mmio_write_instruction_completed_before_snapshot() {
+    snapshot_at_io(&[0x67, 0xa2, 0, 0, 0, 0x10], 0x11);
+}
+
+fn snapshot_at_io(instruction: &[u8], expected: u16) {
+    // Pause in the device callback, before KVM completes the instruction.
+    let mut payload = vec![
+        0xba, 0x80, 0x00, // mov dx, 0x80
+        0xb0, 0x11, // mov al, 0x11
+    ];
+    payload.extend_from_slice(instruction);
+    payload.extend_from_slice(&[
+        0xa2,
+        0x00,
+        0x90, // mov [0x9000], al
+        0xeb,
+        (-(instruction.len() as i8 + 5)) as u8, // repeat
+    ]);
+    let Some(m) = machine(&payload, 8) else {
+        return;
+    };
+    let wait = || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while m.handle.status() != vmlab_hv_proto::control::RunState::Paused {
+            assert!(std::time::Instant::now() < deadline, "I/O did not pause");
+            std::thread::yield_now();
+        }
+        m.handle
+            .shared()
+            .wait_quiesced(Duration::from_secs(5))
+            .unwrap();
+    };
+    wait();
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = vmlab_hv_proto::client::Client::connect(&socket).unwrap();
+    let call = |client: &mut vmlab_hv_proto::client::Client, command| {
+        assert!(matches!(
+            client.call(command).unwrap(),
+            vmlab_hv_proto::control::Outcome::Ok { .. }
+        ));
+    };
+    call(
+        &mut client,
+        vmlab_hv_proto::control::Command::SnapshotSave { name: "io".into() },
+    );
+    let regs = m.handle.shared().vcpus.lock()[0]
+        .1
+        .lock()
+        .get_regs()
+        .unwrap();
+    assert_eq!(
+        regs.rax & 0xff,
+        expected as u64,
+        "snapshot captured incomplete I/O"
+    );
+    assert_eq!(
+        regs.rip,
+        0x8005 + instruction.len() as u64,
+        "snapshot captured I/O before completion"
+    );
+    call(&mut client, vmlab_hv_proto::control::Command::Resume);
+    wait();
+    call(
+        &mut client,
+        vmlab_hv_proto::control::Command::SnapshotLoad { name: "io".into() },
+    );
+    call(&mut client, vmlab_hv_proto::control::Command::Resume);
+    wait();
+    assert_eq!(
+        m.counter() & 0xff,
+        expected,
+        "post-save I/O leaked into restored CPU"
+    );
+}
+
+#[test]
+fn snapshot_restores_tsc_deadline_after_lapic() {
+    use kvm_bindings::{Msrs, kvm_msr_entry};
+    let Some(m) = machine(&counter_payload(), 8) else {
+        return;
+    };
+    m.handle.pause().unwrap();
+    m.handle
+        .shared()
+        .wait_quiesced(Duration::from_secs(5))
+        .unwrap();
+    let fds = m.handle.shared().vcpus.lock().clone();
+    let fd = fds[0].1.lock();
+    let cpuid = fd.get_cpuid2(256).unwrap();
+    if !cpuid
+        .as_slice()
+        .iter()
+        .any(|entry| entry.function == 1 && entry.ecx & (1 << 24) != 0)
+    {
+        eprintln!("SKIP: KVM does not expose TSC-deadline mode");
+        return;
+    }
+    let mut lapic = fd.get_lapic().unwrap();
+    for (offset, value) in [(0xf0, 0x1ffu32), (0x320, (2 << 17) | 0x40)] {
+        for (byte, value) in lapic.regs[offset..offset + 4]
+            .iter_mut()
+            .zip(value.to_le_bytes())
+        {
+            *byte = value as i8;
+        }
+    }
+    fd.set_lapic(&lapic).unwrap();
+    let deadline = u64::MAX / 2;
+    let msrs = Msrs::from_entries(&[kvm_msr_entry {
+        index: 0x6e0,
+        data: deadline,
+        ..Default::default()
+    }])
+    .unwrap();
+    assert_eq!(fd.set_msrs(&msrs).unwrap(), 1);
+    drop(fd);
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = vmlab_hv_proto::client::Client::connect(socket).unwrap();
+    for (index, command) in [
+        vmlab_hv_proto::control::Command::SnapshotSave {
+            name: "deadline".into(),
+        },
+        vmlab_hv_proto::control::Command::SnapshotLoad {
+            name: "deadline".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(matches!(
+            client.call(command).unwrap(),
+            vmlab_hv_proto::control::Outcome::Ok { .. }
+        ));
+        if index == 0 {
+            let changed = Msrs::from_entries(&[kvm_msr_entry {
+                index: 0x6e0,
+                data: 0,
+                ..Default::default()
+            }])
+            .unwrap();
+            assert_eq!(fds[0].1.lock().set_msrs(&changed).unwrap(), 1);
+        }
+    }
+    let mut msrs = Msrs::from_entries(&[kvm_msr_entry {
+        index: 0x6e0,
+        ..Default::default()
+    }])
+    .unwrap();
+    assert_eq!(fds[0].1.lock().get_msrs(&mut msrs).unwrap(), 1);
+    assert_eq!(
+        msrs.as_slice()[0].data,
+        deadline,
+        "restore disarmed the guest timer"
+    );
 }
