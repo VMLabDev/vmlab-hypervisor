@@ -260,6 +260,10 @@ impl VirtioPciDevice {
             }
             return;
         }
+        if !matches!(offset, 0 | 4 | 8 | 12 | 14 | 16 | 18 | 19 | 20 | 22) {
+            data.fill(if data.len() == 1 { 0xff } else { 0 });
+            return;
+        }
         let mut bytes = [0u8; 24];
         bytes[..4].copy_from_slice(&(self.offered_features() as u32).to_le_bytes());
         bytes[4..8].copy_from_slice(&(self.driver_features as u32).to_le_bytes());

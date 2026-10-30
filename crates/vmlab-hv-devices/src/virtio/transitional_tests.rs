@@ -13,6 +13,16 @@ const HEADER: u64 = 0x21000;
 const STATUS: u64 = 0x22000;
 
 #[test]
+fn legacy_unaligned_reads_do_not_expose_register_fragments() {
+    let mut pci = Driver::new().pci;
+    for offset in [1, 5, 7] {
+        assert_eq!(read::<1>(&mut pci, 0, offset), [0xff]);
+        assert_eq!(read::<2>(&mut pci, 0, offset), [0; 2]);
+        assert_eq!(read::<4>(&mut pci, 0, offset), [0; 4]);
+    }
+}
+
+#[test]
 fn pci_command_does_not_claim_memory_write_invalidate() {
     let mut driver = Driver::new();
     config_write(&mut driver.pci, 4, &[0xff; 2]);
