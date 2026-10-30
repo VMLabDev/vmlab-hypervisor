@@ -1,0 +1,12 @@
+00:00.0 Class [0600]: Device [8086:29c0]
+00:01.0 Class [0780]: Device [1af4:1003]
+00:02.0 Class [0100]: Device [1af4:1001]
+00:03.0 Class [0200]: Device [1af4:1000]
+00:04.0 Class [0300]: Device [1af4:1050] (rev 01)
+00:1d.0 Class [0c03]: Device [8086:2934] (rev 03)
+00:1d.1 Class [0c03]: Device [8086:2935] (rev 03)
+00:1d.2 Class [0c03]: Device [8086:2936] (rev 03)
+00:1d.7 Class [0c03]: Device [8086:293a] (rev 03)
+00:1f.0 Class [0601]: Device [8086:2918] (rev 02)
+00:1f.2 Class [0106]: Device [8086:2922] (rev 02)
+00:1f.3 Class [0c05]: Device [8086:2930] (rev 02)

@@ -1,0 +1,16 @@
+bios-geometry 0
+bootorder 0
+etc/acpi/rsdp 20
+etc/acpi/tables 131072
+etc/boot-fail-wait 4
+etc/e820 80
+etc/smbios/smbios-anchor 31
+etc/smbios/smbios-tables 345
+etc/smi/features-ok 1
+etc/smi/requested-features 8
+etc/smi/supported-features 8
+etc/system-states 6
+etc/table-loader 4096
+etc/tpm/config 6
+etc/tpm/log 65536
+genroms/kvmvapic.bin 9216

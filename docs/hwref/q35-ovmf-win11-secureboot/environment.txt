@@ -1,0 +1,18 @@
+host kernel: 7.2.10-1-cachyos
+host cpu: AMD Ryzen 9 9950X 16-Core Processor
+kvm_amd avic: Y
+kvm_amd nested: 1
+asset: vmlinuz (sha256 26f146f664ad057be3b39b211422b03b1f94cb2c3d66522fd4841811a224bfd5)
+asset: initramfs.cpio.gz (sha256 54a1eaaefa7158197cc8d07e8a59e09e3db675ed0021271a8d948bbc39ebd790)
+asset: linuxx64.efi.stub (sha256 fafec0d2adf3dd9669cfae049ec11b801c9a94000e0cd86a2cbc02bc60d8e277)
+asset: alpine-minirootfs-3.22.7-x86_64.tar.gz (sha256 57e364a241bab0699cd8a760c0fd7b270e9cbcbd3cee822cb2b07ca6d925c16c)
+asset: dmidecode-3.6-r0.apk (sha256 b527092b9bab0d339bb959c0f6c2e4d982ef2fd627b0c51f35230253bc5d0a3e)
+asset: iasl-20230628-r0.apk (sha256 85d83d70e35af005ac1020cfea6333debe734e47875fb9fef663afdbcaf0098e)
+asset: linux-virt-6.12.114-r0.apk (sha256 82b7fee968e553fb34df7102e9622c969872810b729068106ed49a03c0ba4b8a)
+asset: pciutils-3.13.0-r1.apk (sha256 d171475af624d64ef101afd5dbceefe0d2b008d11dab30fcf528c479b8b59963)
+asset: pciutils-libs-3.13.0-r1.apk (sha256 93268cc527173599275862094aac127cbf49851acfd5cc9ddfae0e959c966250)
+vmlab source: /home/wil/dev/vmlab/src/qemu/cmdline.rs (sha256 0fe18c5d77c814ea7de6f0fee07435566a41593a878f50a5fc54c53b77833994)
+vmlab source: /home/wil/dev/vmlab/src/profiles/shipped.wcl (sha256 705ba01bbd07fc16a1fffc7d8ae2337143a8f411563f834bb8d96aeb404c219b)
+firmware CODE: OVMF_CODE_4M.secboot.fd (sha256 b3cdbd705066cdf2bb0c0b40b77c341dc2a19e0db56c9af0a54fa1737ff3ee5b)
+firmware VARS: OVMF_VARS_4M.fd (sha256 5d2ac383371b408398accee7ec27c8c09ea5b74a0de0ceea6513388b15be5d1e)
+enforcing VARS (NOT booted, refuses unsigned probes): OVMF_VARS_4M.ms.fd (sha256 42ca3d90cbabb32c797f0253c26bead4bee9790f18cccf43993a88fa033ffa29)

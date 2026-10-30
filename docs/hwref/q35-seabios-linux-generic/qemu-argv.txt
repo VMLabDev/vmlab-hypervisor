@@ -1,0 +1,59 @@
+# QEMU argv (argv[0] then one argument per line), a mirror of
+# vmlab's src/qemu/cmdline.rs build_args() for this profile shape.
+/usr/bin/qemu-system-x86_64
+-name
+vmlab:hwref/q35-seabios-linux-generic
+-machine
+q35
+-accel
+kvm
+-cpu
+host,vmx=off,svm=off
+-smp
+2
+-m
+2048M
+-display
+none
+-vnc
+unix:/tmp/hwref-a_pj9ewm/vnc.sock,share=ignore
+-qmp
+unix:/tmp/hwref-a_pj9ewm/qmp.sock,server=on,wait=off
+-monitor
+none
+-serial
+file:/home/wil/dev/vmlab-hypervisor-wt/hwref/docs/hwref/q35-seabios-linux-generic/serial.log
+-chardev
+socket,id=vagent0,path=/tmp/hwref-a_pj9ewm/agent.sock,server=on,wait=off
+-device
+virtio-serial-pci
+-device
+virtserialport,chardev=vagent0,name=vmlab.agent.0
+-blockdev
+driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-a_pj9ewm/disk0.qcow2
+-device
+virtio-blk-pci,drive=disk0,bootindex=50
+-netdev
+stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-a_pj9ewm/nic0.sock
+-device
+virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01
+-device
+VGA
+-usb
+-device
+qemu-xhci,id=usbx
+-device
+usb-tablet
+-S
+-kernel
+/home/wil/dev/vmlab/guest/dist/x86_64/vmlinuz
+-initrd
+/home/wil/dev/vmlab-hypervisor-wt/hwref/scripts/hwref/.cache/initramfs.cpio.gz
+-append
+console=ttyS0 loglevel=7 panic=-1 reboot=t hwref.out=/dev/vport0p1
+
+# -kernel/-initrd/-append are this capture's probe boot; vmlab
+# appends qemu_args in this position and boots a real guest disk.
+
+# one line:
+/usr/bin/qemu-system-x86_64 -name vmlab:hwref/q35-seabios-linux-generic -machine q35 -accel kvm -cpu host,vmx=off,svm=off -smp 2 -m 2048M -display none -vnc unix:/tmp/hwref-a_pj9ewm/vnc.sock,share=ignore -qmp unix:/tmp/hwref-a_pj9ewm/qmp.sock,server=on,wait=off -monitor none -serial file:/home/wil/dev/vmlab-hypervisor-wt/hwref/docs/hwref/q35-seabios-linux-generic/serial.log -chardev socket,id=vagent0,path=/tmp/hwref-a_pj9ewm/agent.sock,server=on,wait=off -device virtio-serial-pci -device virtserialport,chardev=vagent0,name=vmlab.agent.0 -blockdev driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-a_pj9ewm/disk0.qcow2 -device virtio-blk-pci,drive=disk0,bootindex=50 -netdev stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-a_pj9ewm/nic0.sock -device virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01 -device VGA -usb -device qemu-xhci,id=usbx -device usb-tablet -S -kernel /home/wil/dev/vmlab/guest/dist/x86_64/vmlinuz -initrd /home/wil/dev/vmlab-hypervisor-wt/hwref/scripts/hwref/.cache/initramfs.cpio.gz -append 'console=ttyS0 loglevel=7 panic=-1 reboot=t hwref.out=/dev/vport0p1'
