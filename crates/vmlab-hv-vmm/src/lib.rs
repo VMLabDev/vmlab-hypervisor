@@ -19,6 +19,7 @@ pub mod memory;
 pub mod pci;
 pub mod pm;
 pub mod q35;
+pub mod smm;
 pub mod snapshot;
 pub mod vcpu;
 pub mod vm;
