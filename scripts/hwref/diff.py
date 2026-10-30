@@ -426,7 +426,7 @@ def compare(reference: Path, candidate: Path, allow: Path | None = DEFAULT_ALLOW
             raise ValueError("allow-list requires D6, reference_only object, and candidate_only_ids list")
         def metadata(entry):
             return (isinstance(entry, dict) and isinstance(entry.get("reason"), str) and bool(entry["reason"])
-                    and entry.get("category") in ("D6", "deferred to 2c", "pending owner decision"))
+                    and entry.get("category") in ("D6", "deferred to 2c", "pending owner decision", "approved"))
         for slot, entry in rules["reference_only"].items():
             if (not re.fullmatch(BDF, slot) or not metadata(entry)
                     or not isinstance(entry.get("identity"), str)

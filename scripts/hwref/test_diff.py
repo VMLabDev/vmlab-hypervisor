@@ -192,7 +192,7 @@ class DiffTests(unittest.TestCase):
     def test_phase_2a_omissions_have_categories_and_preserve_other_failures(self):
         rules = json.loads(diff.DEFAULT_ALLOW.read_text())
         self.assertEqual({entry["category"] for entry in rules["artifact_omissions"]},
-                         {"deferred to 2c", "pending owner decision"})
+                         {"deferred to 2c", "approved"})
         names = {"etc/smi/features-ok", "etc/smi/requested-features", "etc/smi/supported-features",
                  "etc/tpm/log", "genroms/kvmvapic.bin", "genroms/linuxboot_dma.bin"}
         for name in names:

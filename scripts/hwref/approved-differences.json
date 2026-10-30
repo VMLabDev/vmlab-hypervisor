@@ -1,6 +1,6 @@
 {
   "decision": "D6",
-  "reason": "Phase-2a gate: D6 omissions, explicit 2c deferrals, and ROM differences pending an owner decision",
+  "reason": "Phase-2a gate: approved D6/D14 omissions and explicit 2c deferrals",
   "reference_only": {
     "00:1d.0": {"identity": "8086:2934", "category": "D6", "reason": "ICH9 UHCI function omitted in favour of xHCI"},
     "00:1d.1": {"identity": "8086:2935", "category": "D6", "reason": "ICH9 UHCI function omitted in favour of xHCI"},
@@ -13,7 +13,7 @@
   "artifact_omissions": [
     {"pattern": "fwcfg/blobs/etc/smi/*", "category": "deferred to 2c", "reason": "SPEC.md places SMI negotiation in 2c; remove this entry when 2c lands"},
     {"pattern": "fwcfg/blobs/etc/tpm/*", "category": "deferred to 2c", "reason": "SPEC.md places TPM firmware files in 2c; remove this entry when 2c lands"},
-    {"pattern": "fwcfg/blobs/genroms/kvmvapic.bin", "category": "pending owner decision", "reason": "QEMU-built option ROM is not shipped; owner must decide whether HV-D30 permits its omission"},
-    {"pattern": "fwcfg/blobs/genroms/linuxboot_dma.bin", "category": "pending owner decision", "reason": "QEMU-built option ROM is not shipped; owner must decide whether HV-D30 permits its omission"}
+    {"pattern": "fwcfg/blobs/genroms/kvmvapic.bin", "category": "approved", "decision": "D14", "reason": "QEMU-built ROMs not shipped (D14)"},
+    {"pattern": "fwcfg/blobs/genroms/linuxboot_dma.bin", "category": "approved", "decision": "D14", "reason": "QEMU-built ROMs not shipped (D14)"}
   ]
 }
