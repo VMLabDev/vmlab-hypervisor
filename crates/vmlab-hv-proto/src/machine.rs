@@ -276,6 +276,7 @@ pub enum HyperV {
     Spinlocks,
     Vpindex,
     Runtime,
+    Time,
     Synic,
     Stimer,
     Reset,
@@ -283,5 +284,38 @@ pub enum HyperV {
     Reenlightenment,
     Tlbflush,
     Ipi,
+    Avic,
     Evmbcs,
+}
+
+#[cfg(test)]
+mod hyperv_wire_tests {
+    use super::{CpuPolicy, HyperV};
+
+    #[test]
+    fn pinned_hyperv_and_cpu_policy() {
+        let features = [
+            HyperV::Relaxed,
+            HyperV::Vapic,
+            HyperV::Spinlocks,
+            HyperV::Vpindex,
+            HyperV::Runtime,
+            HyperV::Time,
+            HyperV::Synic,
+            HyperV::Stimer,
+            HyperV::Frequencies,
+            HyperV::Reset,
+            HyperV::Tlbflush,
+            HyperV::Ipi,
+            HyperV::Avic,
+        ];
+        let json = r#"["relaxed","vapic","spinlocks","vpindex","runtime","time","synic","stimer","frequencies","reset","tlbflush","ipi","avic"]"#;
+        assert_eq!(serde_json::to_string(&features).unwrap(), json);
+        assert_eq!(serde_json::from_str::<Vec<HyperV>>(json).unwrap(), features);
+        assert_eq!(serde_json::to_string(&CpuPolicy::Host).unwrap(), "\"host\"");
+        assert_eq!(
+            serde_json::to_string(&CpuPolicy::Nested).unwrap(),
+            "\"nested\""
+        );
+    }
 }
