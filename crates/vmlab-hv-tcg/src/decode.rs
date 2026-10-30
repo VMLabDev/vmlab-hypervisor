@@ -133,7 +133,10 @@ mod tests {
         let dependencies = Dependencies::new(vmlab_hv_tcg_riscv64::model());
         assert!(dependencies.cacheable);
         for name in ["zmstatus", "zcur_privilege", "zmisa", "zvtype"] {
-            assert!(dependencies.symbols.iter().any(|symbol| symbol == name), "missing {name}");
+            assert!(
+                dependencies.symbols.iter().any(|symbol| symbol == name),
+                "missing {name}"
+            );
         }
     }
 }
