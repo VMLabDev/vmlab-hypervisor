@@ -1,10 +1,6 @@
 //! The real device wiring: builds the devices `vmlab-hv-devices` provides
 //! from a machine description. One seam, one module; the VMM's builder does
 //! the placement.
-//!
-//! Still missing here: the vhost-user-fs master (shared-memfd RAM is already
-//! prepared by the VMM when a machine has shares; the device that hands it to
-//! virtiofsd has not landed yet).
 
 use parking_lot::Mutex;
 use std::fs::OpenOptions;
@@ -15,6 +11,7 @@ use vmlab_disk::Format;
 use vmlab_hv_devices::serial::{Serial, SerialOut};
 use vmlab_hv_devices::virtio::block::Block;
 use vmlab_hv_devices::virtio::console::{Console, PortConfig};
+use vmlab_hv_devices::virtio::fs::{Fs, FsConfig};
 use vmlab_hv_devices::virtio::net::{Net, NetConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
 use vmlab_hv_devices::{BusDevice, GuestMemory, IrqLine, MsiSink, PciDevice, VirtioDevice};
@@ -142,16 +139,24 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
     fn vhost_user_fs(
         &self,
         share: &FsShare,
-        _mem: &GuestMemory,
-        _msi: Arc<dyn MsiSink>,
+        mem: &GuestMemory,
+        msi: Arc<dyn MsiSink>,
     ) -> Result<Arc<Mutex<dyn PciDevice>>, DeviceUnavailable> {
-        Err(DeviceUnavailable::new(
-            "vhost-user-fs",
-            format!(
-                "the vhost-user master for share `{}` has not landed yet",
-                share.tag
-            ),
-        ))
+        let id = format!("fs-{}", share.tag);
+        let fs = Fs::new(
+            id.clone(),
+            FsConfig {
+                tag: share.tag.clone(),
+                socket: share.socket.clone(),
+            },
+        )
+        .map_err(|e| {
+            DeviceUnavailable::new(
+                "vhost-user-fs",
+                format!("share `{}`: {e}", share.tag),
+            )
+        })?;
+        self.wrap(id, Box::new(fs), mem, msi)
     }
 }
 
