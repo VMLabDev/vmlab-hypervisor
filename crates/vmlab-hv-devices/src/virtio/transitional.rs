@@ -212,7 +212,10 @@ impl VirtioPciDevice {
         for (i, byte) in data.iter().copied().enumerate() {
             let pos = addr + i;
             match pos {
-                4..=5 => set_byte16(&mut self.command, pos - 4, byte),
+                4..=5 => {
+                    set_byte16(&mut self.command, pos - 4, byte);
+                    self.command &= 0x0507;
+                }
                 0x10..=0x13 => set_byte32(&mut legacy.bar0, pos - 0x10, byte),
                 0x14..=0x17 => set_byte32(&mut legacy.bar1, pos - 0x14, byte),
                 0x20..=0x27 => {
@@ -255,6 +258,10 @@ impl VirtioPciDevice {
                 let len = data.len().min((config_len - rel) as usize);
                 self.device.read_config(rel, &mut data[..len]);
             }
+            return;
+        }
+        if !matches!(offset, 0 | 4 | 8 | 12 | 14 | 16 | 18 | 19 | 20 | 22) {
+            data.fill(if data.len() == 1 { 0xff } else { 0 });
             return;
         }
         let mut bytes = [0u8; 24];

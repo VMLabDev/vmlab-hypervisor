@@ -802,6 +802,7 @@ impl PciDevice for VirtioPciDevice {
                 0x04 | 0x05 => {
                     let shift = (addr - 4) * 8;
                     self.command = (self.command & !(0xFF << shift)) | (*byte as u16) << shift;
+                    self.command &= 0x0507;
                 }
                 0x20..=0x27 => {
                     let shift = (addr - 0x20) * 8;

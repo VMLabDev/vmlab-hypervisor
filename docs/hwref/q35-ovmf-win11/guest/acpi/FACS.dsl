@@ -3,7 +3,7 @@
  * AML/ASL+ Disassembler version 20230628 (64-bit version)
  * Copyright (c) 2000 - 2023 Intel Corporation
  * 
- * Disassembly of ../acpi/FACS, Fri Oct 30 10:12:05 2026
+ * Disassembly of ../acpi/FACS, Fri Oct 30 16:39:23 2026
  *
  * ACPI Data Table [FACS]
  *

@@ -15,17 +15,13 @@
 00812000-00812fff : Reserved
 00813000-00813fff : System RAM
 00814000-01a0ffff : ACPI Non-volatile Storage
-01a10000-7882cfff : System RAM
-  0a000000-0adfffff : Kernel code
-  0ae00000-0b70ffff : Kernel rodata
-  0b800000-0b9f483f : Kernel data
-  0c0c8000-0c1fffff : Kernel bss
-7882d000-7882ffff : ACPI Tables
-78830000-78830017 : System RAM
-78830018-78838e57 : System RAM
-78838e58-78839017 : System RAM
-78839018-78860457 : System RAM
-78860458-799fafff : System RAM
+01a10000-78631017 : System RAM
+78631018-78639e57 : System RAM
+78639e58-7863a017 : System RAM
+7863a018-78661457 : System RAM
+78661458-78e5dfff : System RAM
+78e5e000-78e60fff : ACPI Tables
+78e61000-799fafff : System RAM
 799fb000-79a03fff : Reserved
 79a04000-7bc45fff : System RAM
 7bc46000-7bec5fff : Reserved
@@ -57,6 +53,10 @@ fed40000-fed44fff : MSFT0101:00
   fed40000-fed44fff : PCI Bus 0000:00
 feffc000-feffffff : Reserved
 100000000-27fffffff : System RAM
+  21a000000-21adfffff : Kernel code
+  21ae00000-21b70ffff : Kernel rodata
+  21b800000-21b9f483f : Kernel data
+  21c0c8000-21c1fffff : Kernel bss
 fd00000000-ffffffffff : Reserved
 380000000000-3807ffffffff : PCI Bus 0000:00
   380000000000-380000003fff : 0000:00:01.0

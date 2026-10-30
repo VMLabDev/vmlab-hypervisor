@@ -4,6 +4,23 @@ q35 + OVMF, Windows 11 profile devices, TPM (no secure boot).
 
 Base profile: `windows-server (the windows-11 device set, secure boot off)`. The exact QEMU argv is in `qemu-argv.txt`; host facts (QEMU version, CPU, KVM parameters, firmware hashes) in `environment.txt`.
 
+## Refresh provenance
+
+Refreshed on 2026-10-31 for the current probe and NIC ROM-header collector.
+The QEMU argv matches the capture at commit `710125e`, with only temporary
+socket, disk, VARS and output paths replaced. QEMU 11.1.2, the kernel and the
+CODE/VARS inputs are unchanged. The raw DSDT is byte-identical.
+
+The previous initramfs SHA-256 was
+`54a1eaaefa7158197cc8d07e8a59e09e3db675ed0021271a8d948bbc39ebd790`;
+the new hash and all current asset hashes are in `environment.txt`.
+The previous environment-file SHA-256 was
+`26f8bedb6e7dde5f73c5ede3e9a33305f12ff7235b540581e017c067635c4aa9`;
+the previous argv-file SHA-256 was
+`8ac9d7c4373b1b92930901cf02eea6ddcfc7414d744b67b79d412c2d8c2e78e8`.
+Git history retains the previous capture. The updated probe inventories NIC
+ROM headers and permits bounded, length-checked fw_cfg PIO transfers.
+
 ## Contents
 
 `guest/` — collected inside the guest:

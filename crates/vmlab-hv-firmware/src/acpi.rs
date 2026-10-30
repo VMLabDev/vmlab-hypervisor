@@ -12,6 +12,8 @@ const FACS: &[u8] = include_bytes!("../../../docs/hwref/q35-seabios-linux-generi
 const HPET: &[u8] = include_bytes!("../../../docs/hwref/q35-seabios-linux-generic/guest/acpi/HPET");
 const WAET: &[u8] = include_bytes!("../../../docs/hwref/q35-seabios-linux-generic/guest/acpi/WAET");
 const TPM_DSDT: &[u8] = include_bytes!("../../../docs/hwref/q35-ovmf-win11/guest/acpi/DSDT");
+const SMM_DSDT: &[u8] =
+    include_bytes!("../../../docs/hwref/q35-ovmf-win11-secureboot/guest/acpi/DSDT");
 pub const TABLES_FILE: &str = "etc/acpi/tables";
 pub const RSDP_FILE: &str = "etc/acpi/rsdp";
 
@@ -34,6 +36,8 @@ pub struct Platform {
     /// Firmware-selected 64-bit PCI window; None places it above RAM.
     pub pci64_base: Option<u64>,
     pub tpm: bool,
+    /// Firmware negotiates the SMM CPU-hotplug SMI protocol.
+    pub smm: bool,
 }
 
 impl Default for Platform {
@@ -63,6 +67,7 @@ impl Default for Platform {
             ecam_base: 0xb000_0000,
             pci64_base: None,
             tpm: false,
+            smm: false,
         }
     }
 }
@@ -80,6 +85,9 @@ pub fn generate(platform: &Platform) -> Result<AcpiTables, String> {
     let mut tables = Vec::new();
     let mut loader = TableLoader::default();
     loader.allocate(RSDP_FILE, 16, Zone::Fseg);
+    if platform.tpm {
+        loader.allocate("etc/tpm/log", 1, Zone::High);
+    }
     loader.allocate(TABLES_FILE, 64, Zone::High);
     let facs = append(&mut tables, FACS);
     let dsdt = append(&mut tables, &dsdt(platform));
@@ -97,16 +105,8 @@ pub fn generate(platform: &Platform) -> Result<AcpiTables, String> {
     checksum(&mut tables, &mut loader, madt);
     let hpet = append(&mut tables, HPET);
     checksum(&mut tables, &mut loader, hpet);
-    let mut mcfg = table(*b"MCFG", 1, 24);
-    put(&mut mcfg, 44, platform.ecam_base, 8);
-    mcfg[55] = 255;
-    let mcfg = append(&mut tables, &mcfg);
-    checksum(&mut tables, &mut loader, mcfg);
-    let waet = append(&mut tables, WAET);
-    checksum(&mut tables, &mut loader, waet);
-    let mut entries = vec![fadt, madt, hpet, mcfg, waet];
+    let mut entries = vec![fadt, madt, hpet];
     if platform.tpm {
-        loader.allocate("etc/tpm/log", 1, Zone::High);
         let mut tpm = table(*b"TPM2", 4, 40);
         put(&mut tpm, 48, 6, 4);
         put(&mut tpm, 64, 0x10000, 4);
@@ -115,6 +115,14 @@ pub fn generate(platform: &Platform) -> Result<AcpiTables, String> {
         checksum(&mut tables, &mut loader, tpm);
         entries.push(tpm);
     }
+    let mut mcfg = table(*b"MCFG", 1, 24);
+    put(&mut mcfg, 44, platform.ecam_base, 8);
+    mcfg[55] = 255;
+    let mcfg = append(&mut tables, &mcfg);
+    checksum(&mut tables, &mut loader, mcfg);
+    let waet = append(&mut tables, WAET);
+    checksum(&mut tables, &mut loader, waet);
+    entries.extend([mcfg, waet]);
     let mut rsdt = table(*b"RSDT", 1, entries.len() * 4);
     for (index, address) in entries.iter().enumerate() {
         put(&mut rsdt, 36 + index * 4, *address as u64, 4);
@@ -314,10 +322,17 @@ fn dsdt(p: &Platform) -> Vec<u8> {
         notify.extend(package(&[0xa0], &condition));
     }
     cpus.extend(method(b"CTFY", 2, &notify));
-    let mut control = source[0x1a0a..0x1d1a].to_vec();
+    let mut control = if p.smm {
+        let mut control = source[0x1a0a..0x1a73].to_vec();
+        control.extend_from_slice(&SMM_DSDT[0x1ae3..0x1d1d]);
+        control.extend_from_slice(&source[0x1c7c..0x1d1a]);
+        control
+    } else {
+        source[0x1a0a..0x1d1a].to_vec()
+    };
     let position = control
-        .windows(4)
-        .position(|w| w == [0x95, 0x63, 0x0a, 2])
+        .windows(3)
+        .position(|w| w == [0x95, 0x63, 0x0a])
         .unwrap();
     control[position + 3] = p.max_cpus as u8;
     cpus.extend(control);
@@ -358,7 +373,21 @@ fn dsdt(p: &Platform) -> Vec<u8> {
     scope.extend(package(&[0x5b, 0x82], &cpus));
     let mut b = source[..0x1922].to_vec();
     b.extend(package(&[0x10], &scope));
-    b.extend_from_slice(&source[0x1d9b..0x1f7b]);
+    if p.tpm {
+        b.extend_from_slice(&source[0x1d9b..0x1db7]);
+        let mut resources = source[0x1dce..0x1e82].to_vec();
+        resources.extend_from_slice(&TPM_DSDT[0x1f2e..0x1f3a]);
+        resources.extend_from_slice(&[0x79, 0]);
+        let mut buffer = vec![0x0a, resources.len() as u8];
+        buffer.extend(resources);
+        let mut scope = source[0x1dba..0x1dc9].to_vec();
+        scope.extend(package(&[0x11], &buffer));
+        scope.extend_from_slice(&source[0x1e84..0x1f15]);
+        b.extend(package(&[0x10], &scope));
+        b.extend_from_slice(&source[0x1f15..0x1f7b]);
+    } else {
+        b.extend_from_slice(&source[0x1d9b..0x1f7b]);
+    }
     let mut pci = b"PCI0".to_vec();
     let mut devices = p.pci_devices.clone();
     devices.sort_by_key(|d| (d.device, d.function));
@@ -378,10 +407,11 @@ fn dsdt(p: &Platform) -> Vec<u8> {
             }
         }
         if d.device == 31 && d.function == 0 {
-            node.extend_from_slice(&source[0x205d..0x2198]);
+            node.extend_from_slice(&source[0x205d..0x20ac]);
             if p.tpm {
                 node.extend(tpm_device());
             }
+            node.extend_from_slice(&source[0x20ac..0x2198]);
         }
         pci.extend(package(&[0x5b, 0x82], &node));
     }
@@ -389,6 +419,11 @@ fn dsdt(p: &Platform) -> Vec<u8> {
     scope.extend(package(&[0x10], &pci));
     b.extend(package(&[0x10], &scope));
     b.extend_from_slice(&source[0x21ba..]);
+    if p.smm {
+        let mut scope = source[0x71..0x1aa].to_vec();
+        scope.extend_from_slice(&SMM_DSDT[0x1aa..0x202]);
+        b.splice(0x6e..0x1aa, package(&[0x10], &scope));
+    }
     let length = b.len() as u32;
     b[4..8].copy_from_slice(&length.to_le_bytes());
     b[9] = 0;

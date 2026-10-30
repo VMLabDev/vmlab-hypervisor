@@ -50,7 +50,6 @@ impl Lpc {
         config[0x60..0x64].fill(0x80);
         config[0x68..0x6c].fill(0x80);
         config[0x82] = 5;
-        config[0xa0] = 0x10;
         let device = Self {
             config,
             pm_status: 0,
@@ -87,7 +86,7 @@ impl Lpc {
     }
 
     pub fn pm_enabled(&self) -> bool {
-        self.config[0x44] & 0x80 != 0 && self.config[4] & 1 != 0
+        self.config[0x44] & 0x80 != 0
     }
 
     /// Advance only while the machine runs. The counter is 24 bits, as FACP
@@ -261,6 +260,7 @@ impl PciDevice for Lpc {
             let mask = match index {
                 4 => 0x0f,
                 5 => 1,
+                0x3c => 0xff,
                 0x40 => 0x80,
                 0x41 => 0xff,
                 0x44 => 0x80,
@@ -362,6 +362,31 @@ mod tests {
     }
 
     #[test]
+    fn ovmf_can_assign_the_lpc_interrupt_line() {
+        let (mut lpc, _, _) = fixture();
+        lpc.config_write(0x3c / 4, 0, &[0xff]);
+        assert_eq!(lpc.config_read(0x3c / 4) & 0xff, 0xff);
+    }
+
+    #[test]
+    fn smi_lock_is_clear_at_reset() {
+        let (mut lpc, _, _) = fixture();
+        assert_eq!(lpc.config_read(0xa0 / 4) & 0x10, 0);
+    }
+
+    #[test]
+    fn ovmf_pm_decode_does_not_require_pci_command_io_enable() {
+        let (mut lpc, _, _) = fixture();
+        lpc.config_write(0x40 / 4, 0, &0x601u32.to_le_bytes());
+        lpc.config_write(0x44 / 4, 0, &[0x80]);
+        assert_eq!(lpc.config_read(1) & 1, 0);
+        lpc.advance(1_000_000_000);
+        let mut data = [0; 4];
+        assert!(lpc.read_port(0x608, &mut data));
+        assert_eq!(u32::from_le_bytes(data), 3_579_545);
+    }
+
+    #[test]
     fn firmware_can_program_the_complete_rcba_address() {
         let (mut lpc, _, _) = fixture();
         lpc.config_write(0xf0 / 4, 0, &0xfed1c001u32.to_le_bytes());
@@ -390,7 +415,7 @@ mod tests {
         }
         lpc.config_write(0x40 / 4, 0, &[1, 6]);
         lpc.config_write(0x44 / 4, 0, &[0x80]);
-        assert!(!lpc.write_port(0x602, &[1, 1]));
+        assert!(lpc.write_port(0x602, &[1, 1]));
         lpc.config_write(1, 0, &[1]);
         assert_eq!(lpc.pm_base(), 0x600);
         assert!(lpc.write_port(0x602, &[1, 1]));

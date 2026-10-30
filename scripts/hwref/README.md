@@ -50,7 +50,8 @@ source hashes are recorded in `environment.txt`. Selected captures replace
 previous results. The script exits nonzero on a failed guest capture.
 
 The fw_cfg collector inventories every named blob and copies blobs up to 64 KiB
-with a five-second timeout. Raw ACPI tables are captured independently.
+with a 120-second timeout. Incomplete transfers fail capture validation.
+Raw ACPI tables are captured independently.
 `iasl` writes disassemblies beside raw tables in `guest/acpi/`; diagnostics are
 in `guest/acpi-dsl/iasl.log`. The generated `docs/hwref/README.md` contains the
 PCI, ACPI, and SMBIOS summaries.

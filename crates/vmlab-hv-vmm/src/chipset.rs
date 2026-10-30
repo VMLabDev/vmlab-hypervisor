@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::Instant;
 
@@ -17,12 +17,12 @@ use vmlab_hv_devices::chipset::{
     rtc::Rtc,
     smbus::Smbus,
 };
-use vmlab_hv_devices::{BusDevice, IrqLine};
+use vmlab_hv_devices::{BusDevice, IrqLine, PciDevice};
 
 use crate::{error::VmmError, layout::MemLayout, q35::PirqRouter};
 
 struct IrqHub {
-    vm: Arc<VmFd>,
+    deliver: Box<dyn Fn(u32, bool) + Send + Sync>,
     sources: Mutex<BTreeMap<(u32, u32), bool>>,
 }
 
@@ -35,12 +35,15 @@ struct Source {
 impl IrqLine for Source {
     fn set_level(&self, high: bool) {
         let mut sources = self.hub.sources.lock();
+        let previous = sources
+            .iter()
+            .any(|((_, gsi), active)| *gsi == self.gsi && *active);
         sources.insert((self.id, self.gsi), high);
         let level = sources
             .iter()
             .any(|((_, gsi), active)| *gsi == self.gsi && *active);
-        if let Err(e) = self.hub.vm.set_irq_line(self.gsi, level) {
-            eprintln!("q35 IRQ {}: {e}", self.gsi);
+        if previous != level {
+            (self.hub.deliver)(self.gsi, level);
         }
     }
 }
@@ -69,7 +72,7 @@ impl IrqLine for RtcGate {
 }
 
 pub struct Chipset {
-    pub smi_enable: AtomicU32,
+    pub smi: Mutex<crate::smm::SmiControl>,
     pub smi_pending: AtomicBool,
     pub lpc: Arc<Mutex<Lpc>>,
     pub rtc: Arc<Mutex<Rtc>>,
@@ -80,6 +83,7 @@ pub struct Chipset {
     pub pirqs: Arc<Mutex<PirqRouter>>,
     pub power: Arc<Mutex<Option<PowerAction>>>,
     pub error: Arc<Mutex<Option<String>>>,
+    secure_smm: bool,
     clock: Mutex<(Instant, bool)>,
     vm: Arc<VmFd>,
 }
@@ -90,30 +94,30 @@ impl vmlab_hv_devices::Snapshot for ChipsetRegisters {
         "q35-platform-registers".into()
     }
     fn save_state(&self) -> Result<Vec<u8>, vmlab_hv_devices::DeviceError> {
-        Ok(self
-            .0
-            .smi_enable
-            .load(Ordering::SeqCst)
-            .to_le_bytes()
-            .to_vec())
+        self.0.smi.lock().save_state()
     }
     fn restore_state(&mut self, bytes: &[u8]) -> Result<(), vmlab_hv_devices::DeviceError> {
-        let bytes: [u8; 4] = bytes
-            .try_into()
-            .map_err(|_| vmlab_hv_devices::DeviceError::State("invalid SMI enable state".into()))?;
-        self.0
-            .smi_enable
-            .store(u32::from_le_bytes(bytes), Ordering::SeqCst);
+        self.0.smi.lock().restore_state(bytes)?;
         self.0.smi_pending.store(false, Ordering::SeqCst);
         Ok(())
     }
 }
 
 impl Chipset {
-    pub fn new(vm: Arc<VmFd>, layout: &MemLayout, rtc_base: i64) -> Result<Arc<Self>, VmmError> {
+    pub fn new(
+        vm: Arc<VmFd>,
+        layout: &MemLayout,
+        rtc_base: i64,
+        secure_smm: bool,
+    ) -> Result<Arc<Self>, VmmError> {
         install_irq_routes(&vm)?;
+        let irq_vm = vm.clone();
         let hub = Arc::new(IrqHub {
-            vm: vm.clone(),
+            deliver: Box::new(move |gsi, level| {
+                if let Err(error) = irq_vm.set_irq_line(gsi, level) {
+                    eprintln!("q35 IRQ {gsi}: {error}");
+                }
+            }),
             sources: Mutex::new(BTreeMap::new()),
         });
         let pirqs = PirqRouter::new(std::array::from_fn(|gsi| hub.line(0, gsi as u32)));
@@ -181,7 +185,7 @@ impl Chipset {
             .map_err(VmmError::Other)?,
         )));
         Ok(Arc::new(Self {
-            smi_enable: AtomicU32::new(0),
+            smi: Mutex::new(crate::smm::SmiControl::default()),
             smi_pending: AtomicBool::new(false),
             lpc,
             rtc: Arc::new(Mutex::new(rtc)),
@@ -192,6 +196,7 @@ impl Chipset {
             pirqs,
             power,
             error,
+            secure_smm,
             clock: Mutex::new((Instant::now(), false)),
             vm,
         }))
@@ -224,7 +229,10 @@ impl Chipset {
     }
 
     pub fn sync_pirqs(&self) {
-        let lpc = self.lpc.lock();
+        let mut lpc = self.lpc.lock();
+        if lpc.config_read(0xa0 / 4) & (1 << 4) != 0 {
+            self.smi.lock().lock();
+        }
         let mut router = self.pirqs.lock();
         for i in 0..8 {
             router.set_route(i, lpc.pirq_route(i).unwrap_or(0x80));
@@ -233,9 +241,8 @@ impl Chipset {
 
     pub fn io_read(&self, port: u16, data: &mut [u8]) -> bool {
         self.advance();
-        if self.smi_register(port, data.len()) {
-            let bytes = self.smi_enable.load(Ordering::SeqCst).to_le_bytes();
-            let offset = port.wrapping_sub(self.lpc.lock().pm_base()) as usize - 0x30;
+        if let Some((register, offset)) = self.smi_register(port, data.len()) {
+            let bytes = self.smi.lock().read(register).unwrap().to_le_bytes();
             data.copy_from_slice(&bytes[offset..offset + data.len()]);
             return true;
         }
@@ -282,18 +289,23 @@ impl Chipset {
 
     pub fn io_write(&self, port: u16, data: &[u8]) -> bool {
         self.advance();
-        if self.smi_register(port, data.len()) {
-            let mut bytes = self.smi_enable.load(Ordering::SeqCst).to_le_bytes();
-            let offset = port.wrapping_sub(self.lpc.lock().pm_base()) as usize - 0x30;
+        if let Some((register, offset)) = self.smi_register(port, data.len()) {
+            if register == 0xb2 && !self.secure_smm {
+                self.lpc.lock().write_port(port, data);
+            }
+            let mut smi = self.smi.lock();
+            let mut bytes = if register == 0x34 {
+                [0; 4]
+            } else {
+                smi.read(register).unwrap().to_le_bytes()
+            };
             bytes[offset..offset + data.len()].copy_from_slice(data);
-            self.smi_enable
-                .store(u32::from_le_bytes(bytes), Ordering::SeqCst);
+            if smi.write(register, u32::from_le_bytes(bytes)) {
+                self.smi_pending.store(true, Ordering::SeqCst);
+            }
             return true;
         }
         if self.lpc.lock().write_port(port, data) {
-            if port == 0xb2 && self.smi_enable.load(Ordering::SeqCst) & 0x21 == 0x21 {
-                self.smi_pending.store(true, Ordering::SeqCst);
-            }
             return true;
         }
         match port {
@@ -319,10 +331,17 @@ impl Chipset {
         true
     }
 
-    fn smi_register(&self, port: u16, len: usize) -> bool {
+    fn smi_register(&self, port: u16, len: usize) -> Option<(u16, usize)> {
+        if matches!(port, 0xb2 | 0xb3) && len == 1 {
+            return Some((port, 0));
+        }
         let lpc = self.lpc.lock();
         let offset = port.wrapping_sub(lpc.pm_base()) as usize;
-        lpc.pm_enabled() && (0x30..0x34).contains(&offset) && len <= 0x34 - offset
+        if lpc.pm_enabled() && (0x30..0x38).contains(&offset) && len <= 4 - (offset & 3) {
+            Some(((offset & !3) as u16, offset & 3))
+        } else {
+            None
+        }
     }
 }
 
@@ -392,13 +411,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn apmc_enables_acpi_without_smm() {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("skipping APMC routing test: /dev/kvm is unavailable");
+            return;
+        }
+        let kvm = crate::kvm::KvmVm::new().unwrap();
+        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0, false).unwrap();
+        chipset
+            .lpc
+            .lock()
+            .config_write(0x40 / 4, 0, &0x601u32.to_le_bytes());
+        chipset.lpc.lock().config_write(0x44 / 4, 0, &[0x80]);
+        assert!(chipset.io_write(0x630, &0x21u32.to_le_bytes()));
+        assert!(chipset.io_write(0xb2, &[2]));
+        assert!(chipset.smi_pending.load(Ordering::SeqCst));
+        let mut control = [0; 2];
+        assert!(chipset.io_read(0x604, &mut control));
+        assert_eq!(u16::from_le_bytes(control) & 1, 1);
+        assert!(chipset.io_write(0xb2, &[3]));
+        assert!(chipset.io_read(0x604, &mut control));
+        assert_eq!(u16::from_le_bytes(control) & 1, 0);
+    }
+
+    #[test]
+    fn apmc_leaves_acpi_enable_to_smm_when_available() {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("skipping APMC routing test: /dev/kvm is unavailable");
+            return;
+        }
+        let kvm = crate::kvm::KvmVm::new().unwrap();
+        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0, true).unwrap();
+        chipset
+            .lpc
+            .lock()
+            .config_write(0x40 / 4, 0, &0x601u32.to_le_bytes());
+        chipset.lpc.lock().config_write(0x44 / 4, 0, &[0x80]);
+        assert!(chipset.io_write(0x630, &0x21u32.to_le_bytes()));
+        assert!(chipset.io_write(0xb2, &[2]));
+        assert!(chipset.smi_pending.load(Ordering::SeqCst));
+        let mut command = [0];
+        assert!(chipset.io_read(0xb2, &mut command));
+        assert_eq!(command, [2]);
+        let mut control = [0; 2];
+        assert!(chipset.io_read(0x604, &mut control));
+        assert_eq!(u16::from_le_bytes(control) & 1, 0);
+    }
+
+    #[test]
     fn hpet_legacy_timer_uses_pic_irq0_and_ioapic_pin2() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("skipping HPET routing test: /dev/kvm is unavailable");
             return;
         }
         let kvm = crate::kvm::KvmVm::new().unwrap();
-        let chipset = Chipset::new(kvm.vm.clone(), &MemLayout::q35(64).unwrap(), 0).unwrap();
+        let chipset = Chipset::new(kvm.vm.clone(), &MemLayout::q35(64).unwrap(), 0, false).unwrap();
         let mut hpet = chipset.hpet.lock();
         hpet.write(0x100, &4u64.to_le_bytes());
         hpet.write(0x108, &100u64.to_le_bytes());
@@ -438,7 +505,7 @@ mod tests {
         let layout = MemLayout::q35(64).unwrap();
         let ram = crate::memory::GuestRam::anonymous(layout.clone()).unwrap();
         crate::memory::register_memslots(&kvm.vm, &ram).unwrap();
-        let _chipset = Chipset::new(kvm.vm.clone(), &layout, 0).unwrap();
+        let _chipset = Chipset::new(kvm.vm.clone(), &layout, 0, false).unwrap();
         let mut vcpu = kvm.create_vcpu(0).unwrap();
         let mut sregs = vcpu.get_sregs().unwrap();
         sregs.cs.base = 0;
@@ -487,6 +554,25 @@ mod tests {
         );
     }
     #[test]
+    fn unchanged_levels_do_not_repeat_kvm_irq_delivery() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let output = events.clone();
+        let hub = Arc::new(IrqHub {
+            deliver: Box::new(move |gsi, level| output.lock().push((gsi, level))),
+            sources: Mutex::new(BTreeMap::new()),
+        });
+        let first = hub.line(1, 9);
+        let second = hub.line(2, 9);
+        for _ in 0..65536 {
+            first.set_level(false);
+        }
+        first.set_level(true);
+        second.set_level(true);
+        first.set_level(false);
+        second.set_level(false);
+        assert_eq!(*events.lock(), [(9, true), (9, false)]);
+    }
+    #[test]
     fn platform_timers_freeze_between_pause_and_resume() {
         let kvm = match crate::kvm::KvmVm::new() {
             Ok(kvm) => kvm,
@@ -495,7 +581,7 @@ mod tests {
                 return;
             }
         };
-        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0).unwrap();
+        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0, false).unwrap();
         let base = chipset.clock.lock().0;
         chipset.clock_step_at(base, Some(true));
         chipset.clock_step_at(base + std::time::Duration::from_secs(1), Some(false));

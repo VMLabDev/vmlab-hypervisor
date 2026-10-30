@@ -390,6 +390,7 @@ fn save_kernel_state(
     sections.push(("kvmclock".into(), to_json(&clock)?));
 
     sections.push(("pci-root".into(), to_json(&shared.save_pci_bars())?));
+    sections.push(("pending-smis".into(), to_json(&shared.save_pending_smis())?));
 
     let deadline_supported = shared
         .kvm
@@ -754,6 +755,14 @@ fn restore_kernel_state(
     let vm = &shared.kvm.vm;
     let io = |e: kvm_ioctls::Error| SnapshotError::Internal(format!("KVM ioctl: {e}"));
     let missing = |key: &str| SnapshotError::Internal(format!("snapshot lacks section {key:?}"));
+    let pending = sections
+        .get("pending-smis")
+        .map(|bytes| from_json(bytes, "pending-smis"))
+        .transpose()?
+        .unwrap_or_default();
+    shared
+        .restore_pending_smis(pending)
+        .map_err(SnapshotError::Internal)?;
 
     for (id, chip) in [
         ("pic-master", KVM_IRQCHIP_PIC_MASTER),

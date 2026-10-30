@@ -25,6 +25,75 @@ REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_delay_loop_calibration_is_run_dependent(self):
+        line = "Calibrating delay loop (skipped) preset value.. 8583.91 BogoMIPS (lpj=4291956)\n"
+        original = diff.normalize_text("dmesg.txt", line)
+        self.assertEqual(original, diff.normalize_text("dmesg.txt", line.replace("4291956", "4291932")))
+        changed = line.replace("(skipped) preset value", "using timer specific routine")
+        self.assertNotEqual(original, diff.normalize_text("dmesg.txt", changed))
+        unrelated = "device calibration lpj=4291956\n"
+        self.assertNotEqual(diff.normalize_text("dmesg.txt", unrelated),
+                            diff.normalize_text("dmesg.txt", unrelated.replace("4291956", "4291932")))
+
+    def test_setup_data_splits_do_not_change_usable_ram_coverage(self):
+        with tempfile.TemporaryDirectory(prefix="hwref-setup-ram-") as tmp:
+            root = Path(tmp)
+            def normalize(start, size, gap=0, kind="System RAM", ceiling=0x7fffff):
+                end = start + size - 1
+                (root / "dmesg.txt").write_text(
+                    f"e820: update [mem {start:#x}-{end:#x}] usable ==> usable\n")
+                data = (f"00100000-{start-1:08x} : System RAM\n"
+                        "  00100000-001fffff : Kernel code\n"
+                        f"{start+gap:08x}-{end:08x} : {kind}\n"
+                        f"{end+1:08x}-{ceiling:08x} : System RAM\n").encode()
+                return diff.mask_boundaries("iomem.txt", data, diff.allocation_map(root))
+            first = normalize(0x300000, 0x1000)
+            self.assertEqual(first, normalize(0x500000, 0x2000))
+            self.assertNotEqual(first, normalize(0x500000, 0x2000, gap=1))
+            self.assertNotEqual(first, normalize(0x500000, 0x2000, kind="Reserved"))
+            self.assertNotEqual(first, normalize(0x500000, 0x2000, ceiling=0x8fffff))
+            unrelated = b"00100000-003fffff : System RAM\n00400000-007fffff : System RAM\n"
+            self.assertEqual(diff.mask_boundaries("iomem.txt", unrelated, {}), unrelated)
+
+    def test_efi_descriptor_indices_are_run_dependent(self):
+        line = "efi: Remove mem125: MMIO range=[0xffc00000-0xffffffff] (4MB) from e820 map\n"
+        for artifact in ("dmesg.txt", "e820-dmesg.txt"):
+            original = diff.normalize_text(artifact, line)
+            self.assertEqual(original, diff.normalize_text(artifact, line.replace("mem125", "mem122")))
+            self.assertNotEqual(original, diff.normalize_text(artifact, line.replace("4MB", "8MB")))
+
+    def test_tpm_event_log_relocation_keeps_the_declared_length(self):
+        path = ROOT / "docs/hwref/q35-ovmf-win11/guest/acpi/TPM2"
+        original = path.read_bytes()
+        moved = bytearray(original)
+        struct.pack_into("<Q", moved, 68, struct.unpack_from("<Q", moved, 68)[0] + 0x20000)
+        self.assertEqual(diff.acpi(original), diff.acpi(moved))
+        struct.pack_into("<I", moved, 64, 0x20000)
+        self.assertNotEqual(diff.acpi(original), diff.acpi(moved))
+        text = "[044h 0068 008h] Log Address : 000000007FEBB000\n[040h 0064 004h] Minimum Log Length : 00010000\n"
+        normal = diff.normalize_text("acpi/TPM2.dsl", text)
+        self.assertEqual(normal, diff.normalize_text("acpi/TPM2.dsl", text.replace("7FEBB000", "7FE9B000")))
+        self.assertNotEqual(normal, diff.normalize_text("acpi/TPM2.dsl", text.replace("00010000", "00020000")))
+
+    def test_fwcfg_inventory_order_is_not_a_blob_size_difference(self):
+        first = "etc/a 8\netc/b 65536\n"
+        second = "etc/b 65536\netc/a 8\n"
+        self.assertEqual(diff.normalize_text("fwcfg/sizes.txt", first), diff.normalize_text("fwcfg/sizes.txt", second))
+        self.assertNotEqual(diff.normalize_text("fwcfg/sizes.txt", first), diff.normalize_text("fwcfg/sizes.txt", second.replace("65536", "32768")))
+
+    def test_truncated_fwcfg_transfer_cannot_pass_the_diff_gate(self):
+        with tempfile.TemporaryDirectory(prefix="hwref-truncated-") as tmp:
+            root = Path(tmp) / "capture"
+            shutil.copytree(REFERENCE, root)
+            sizes = root / "guest/fwcfg/sizes.txt"
+            sizes.write_text(sizes.read_text() + "etc/test-transfer 65536\n")
+            blob = root / "guest/fwcfg/blobs/etc/test-transfer"
+            blob.write_bytes(bytes(24576))
+            with self.assertRaisesRegex(ValueError, "incomplete fw_cfg blob etc/test-transfer"):
+                diff.load_capture(root)
+            blob.write_bytes(bytes(65536))
+            self.assertTrue(diff.load_capture(root))
+
     def test_option_rom_identity_ignores_code_but_keeps_pci_identity(self):
         image = bytearray(512)
         image[:2] = b"\x55\xaa"
@@ -114,6 +183,10 @@ class NormalizeTests(unittest.TestCase):
         right = {"dmesg.txt": generic + "other mouse changed\n", "lspci-nn.txt": nic, "iomem.txt": "000d0000-000d0fff : Adapter ROM\n"}
         diff.approved_platform(left, right, rules)
         self.assertEqual(left["dmesg.txt"], right["dmesg.txt"])
+        plain_left = {"dmesg.txt": mouse * 2}
+        plain = {"dmesg.txt": generic.replace("ImExPS/2 Generic Explorer", "PS/2 Generic")}
+        diff.approved_platform(plain_left, plain, rules)
+        self.assertEqual(plain_left["dmesg.txt"], plain["dmesg.txt"])
         self.assertIn("000c9000-000c9dff : Adapter ROM", left["iomem.txt"])
         self.assertNotIn("000ca000-000cc3ff : Adapter ROM", left["iomem.txt"])
         bad = {"dmesg.txt": generic.replace("ImEx", "Other")}
@@ -311,17 +384,16 @@ class DiffTests(unittest.TestCase):
         path.write_bytes(changed)
         self.assertIn("=== acpi/DSDT ===", diff.compare(REFERENCE, self.root))
 
-    def test_phase_2a_omissions_have_categories_and_preserve_other_failures(self):
+    def test_approved_rom_omissions_preserve_other_failures(self):
         rules = json.loads(diff.DEFAULT_ALLOW.read_text())
         self.assertEqual({entry["category"] for entry in rules["artifact_omissions"]},
-                         {"deferred to 2c", "approved"})
-        names = {"etc/smi/features-ok", "etc/smi/requested-features", "etc/smi/supported-features",
-                 "etc/tpm/log", "genroms/kvmvapic.bin", "genroms/linuxboot_dma.bin"}
+                         {"approved"})
+        names = {"genroms/kvmvapic.bin", "genroms/linuxboot_dma.bin"}
         for name in names:
             (self.root / "guest/fwcfg/blobs" / name).unlink()
         # A missing blob whose sysfs name still exists is a failed capture,
         # not an approved missing firmware interface.
-        self.assertIn("fwcfg/blobs/etc/smi/features-ok: reference only", diff.compare(REFERENCE, self.root))
+        self.assertIn("fwcfg/blobs/genroms/kvmvapic.bin: reference only", diff.compare(REFERENCE, self.root))
         for filename in ("files.txt", "sizes.txt"):
             path = self.root / "guest/fwcfg" / filename
             path.write_text("".join(line for line in path.read_text().splitlines(True)
@@ -330,15 +402,26 @@ class DiffTests(unittest.TestCase):
         self.assertIn("genroms/kvmvapic.bin: reference only", diff.compare(REFERENCE, self.root, None))
         path = self.root / "guest/fwcfg/blobs/etc/e820"
         path.write_bytes(path.read_bytes() + b"\0")
-        self.assertIn("=== fwcfg/blobs/etc/e820 ===", diff.compare(REFERENCE, self.root))
+        with self.assertRaisesRegex(ValueError, "incomplete fw_cfg blob etc/e820"):
+            diff.compare(REFERENCE, self.root)
 
-    def test_deferred_file_changes_and_new_files_remain_failures(self):
+    def test_smi_file_changes_and_new_files_remain_failures(self):
         path = self.root / "guest/fwcfg/blobs/etc/smi/features-ok"
         path.write_bytes(b"\0")
         self.assertIn("=== fwcfg/blobs/etc/smi/features-ok ===", diff.compare(REFERENCE, self.root))
         path = self.root / "guest/fwcfg/blobs/etc/smi/new-feature"
         path.write_bytes(b"\1")
         self.assertIn("etc/smi/new-feature: candidate only", diff.compare(REFERENCE, self.root))
+
+    def test_smi_and_tpm_omissions_are_no_longer_deferred(self):
+        for name in ("etc/smi/features-ok", "etc/tpm/log"):
+            with self.subTest(name=name):
+                path = self.root / "guest/fwcfg/blobs" / name
+                data = path.read_bytes()
+                path.unlink()
+                self.assertIn(f"fwcfg/blobs/{name}: reference only",
+                              diff.compare(REFERENCE, self.root))
+                path.write_bytes(data)
 
     def test_missing_capture_and_missing_or_new_artifact(self):
         (self.root / "guest/cpuid.txt").unlink()
@@ -392,6 +475,18 @@ class DiffTests(unittest.TestCase):
 
 
 class HvCaptureTests(unittest.TestCase):
+    def test_ovmf_recapture_keeps_the_recorded_default_rom_configuration(self):
+        class Assets:
+            esp = Path("/assets/esp.raw")
+        with tempfile.TemporaryDirectory(prefix="hwref-ovmf-argv-") as tmp:
+            run = Path(tmp)
+            for name in ("q35-ovmf-win11", "q35-ovmf-win11-secureboot"):
+                with patch.object(capture, "sh"), patch.object(capture.shutil, "copy2"):
+                    argv = capture.build_argv(capture.CONFIGS[name], capture.RunPaths(run, run, 1), Assets(), run, name)
+                self.assertNotIn("kvm-apic.vapic=false", argv)
+                self.assertIn("virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01", argv)
+                self.assertFalse(any("romfile=" in arg for arg in argv))
+
     def test_modern_seabios_disk_boot_matches_production_profile_argv(self):
         class Assets:
             bios_disk = Path("/assets/bios-disk.img")

@@ -3,7 +3,7 @@
  * AML/ASL+ Disassembler version 20230628 (64-bit version)
  * Copyright (c) 2000 - 2023 Intel Corporation
  * 
- * Disassembly of ../acpi/BGRT, Fri Oct 30 10:12:18 2026
+ * Disassembly of ../acpi/BGRT, Fri Oct 30 16:39:35 2026
  *
  * ACPI Data Table [BGRT]
  *

@@ -214,6 +214,25 @@ pub fn compose_cpuid(
         .copied()
         .filter(|e| !(BASE..BASE + 0x100).contains(&e.function))
         .collect();
+    if base
+        .as_slice()
+        .iter()
+        .any(|entry| entry.function == BASE && entry.ebx == 0x4b4d564b)
+    {
+        entries.extend(
+            base.as_slice()
+                .iter()
+                .filter(|entry| matches!(entry.function, 0x40000000 | 0x40000001))
+                .map(|entry| {
+                    let mut shifted = *entry;
+                    shifted.function += 0x100;
+                    if entry.function == BASE {
+                        shifted.eax += 0x100;
+                    }
+                    shifted
+                }),
+        );
+    }
     if let Some(version) = entries.iter_mut().find(|e| e.function == 1) {
         version.ecx |= 1 << 31;
     }
@@ -353,6 +372,45 @@ mod tests {
             leaf(4, u32::MAX, 0, 0, 0),
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn hyperv_preserves_secondary_kvm_discovery() {
+        let original = CpuId::from_entries(&[
+            kvm_cpuid_entry2 {
+                function: BASE,
+                eax: BASE + 1,
+                ebx: 0x4b4d564b,
+                ecx: 0x564b4d56,
+                edx: 0x4d,
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: BASE + 1,
+                eax: 0x0100007f,
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        let result = compose_cpuid(&original, &full_support(), WINDOWS_FEATURES).unwrap();
+        let vendor = result
+            .as_slice()
+            .iter()
+            .find(|e| e.function == BASE + 0x100)
+            .unwrap();
+        assert_eq!(
+            (vendor.eax, vendor.ebx, vendor.ecx, vendor.edx),
+            (BASE + 0x101, 0x4b4d564b, 0x564b4d56, 0x4d)
+        );
+        assert_eq!(
+            result
+                .as_slice()
+                .iter()
+                .find(|e| e.function == BASE + 0x101)
+                .unwrap()
+                .eax,
+            0x0100007f
+        );
     }
 
     #[test]

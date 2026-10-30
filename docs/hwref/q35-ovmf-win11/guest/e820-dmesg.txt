@@ -7,9 +7,9 @@
 [    0.000000] BIOS-e820: [mem 0x0000000000812000-0x0000000000812fff] reserved
 [    0.000000] BIOS-e820: [mem 0x0000000000813000-0x0000000000813fff] usable
 [    0.000000] BIOS-e820: [mem 0x0000000000814000-0x00000000008fffff] ACPI NVS
-[    0.000000] BIOS-e820: [mem 0x0000000000900000-0x000000007cb79fff] usable
-[    0.000000] BIOS-e820: [mem 0x000000007cb7a000-0x000000007cb7cfff] ACPI data
-[    0.000000] BIOS-e820: [mem 0x000000007cb7d000-0x000000007eb3efff] usable
+[    0.000000] BIOS-e820: [mem 0x0000000000900000-0x000000007c97ffff] usable
+[    0.000000] BIOS-e820: [mem 0x000000007c980000-0x000000007c982fff] ACPI data
+[    0.000000] BIOS-e820: [mem 0x000000007c983000-0x000000007eb3efff] usable
 [    0.000000] BIOS-e820: [mem 0x000000007eb3f000-0x000000007ebfffff] reserved
 [    0.000000] BIOS-e820: [mem 0x000000007ec00000-0x000000007fbc1fff] usable
 [    0.000000] BIOS-e820: [mem 0x000000007fbc2000-0x000000007fe41fff] reserved
@@ -23,21 +23,21 @@
 [    0.000000] BIOS-e820: [mem 0x00000000ffc00000-0x00000000ffffffff] reserved
 [    0.000000] BIOS-e820: [mem 0x0000000100000000-0x000000027fffffff] usable
 [    0.000000] BIOS-e820: [mem 0x000000fd00000000-0x000000ffffffffff] reserved
-[    0.000000] e820: update [mem 0x7cb86018-0x7cbad457] usable ==> usable
-[    0.000000] e820: update [mem 0x7cb7d018-0x7cb85e57] usable ==> usable
-[    0.000000] efi: Remove mem127: MMIO range=[0xffc00000-0xffffffff] (4MB) from e820 map
+[    0.000000] e820: update [mem 0x7c98c018-0x7c9b3457] usable ==> usable
+[    0.000000] e820: update [mem 0x7c983018-0x7c98be57] usable ==> usable
+[    0.000000] efi: Remove mem125: MMIO range=[0xffc00000-0xffffffff] (4MB) from e820 map
 [    0.000000] e820: remove [mem 0xffc00000-0xffffffff] reserved
-[    0.000177] e820: update [mem 0x00000000-0x00000fff] usable ==> reserved
-[    0.000180] e820: remove [mem 0x000a0000-0x000fffff] usable
-[    0.013715] e820: update [mem 0x7dd49000-0x7dd51fff] usable ==> reserved
-[    0.315907] PCI: Ignoring E820 reservations for host bridge windows
-[    0.485150] e820: reserve RAM buffer [mem 0x0080b000-0x008fffff]
-[    0.485153] e820: reserve RAM buffer [mem 0x00812000-0x008fffff]
-[    0.485154] e820: reserve RAM buffer [mem 0x00814000-0x008fffff]
-[    0.485154] e820: reserve RAM buffer [mem 0x7cb7a000-0x7fffffff]
-[    0.485155] e820: reserve RAM buffer [mem 0x7cb7d018-0x7fffffff]
-[    0.485155] e820: reserve RAM buffer [mem 0x7cb86018-0x7fffffff]
-[    0.485156] e820: reserve RAM buffer [mem 0x7dd49000-0x7fffffff]
-[    0.485156] e820: reserve RAM buffer [mem 0x7eb3f000-0x7fffffff]
-[    0.485157] e820: reserve RAM buffer [mem 0x7fbc2000-0x7fffffff]
-[    0.485157] e820: reserve RAM buffer [mem 0x7fedc000-0x7fffffff]
+[    0.000188] e820: update [mem 0x00000000-0x00000fff] usable ==> reserved
+[    0.000191] e820: remove [mem 0x000a0000-0x000fffff] usable
+[    0.018406] e820: update [mem 0x7dd39000-0x7dd41fff] usable ==> reserved
+[    0.332718] PCI: Ignoring E820 reservations for host bridge windows
+[    0.517831] e820: reserve RAM buffer [mem 0x0080b000-0x008fffff]
+[    0.517850] e820: reserve RAM buffer [mem 0x00812000-0x008fffff]
+[    0.517851] e820: reserve RAM buffer [mem 0x00814000-0x008fffff]
+[    0.517851] e820: reserve RAM buffer [mem 0x7c980000-0x7fffffff]
+[    0.517852] e820: reserve RAM buffer [mem 0x7c983018-0x7fffffff]
+[    0.517853] e820: reserve RAM buffer [mem 0x7c98c018-0x7fffffff]
+[    0.517853] e820: reserve RAM buffer [mem 0x7dd39000-0x7fffffff]
+[    0.517854] e820: reserve RAM buffer [mem 0x7eb3f000-0x7fffffff]
+[    0.517854] e820: reserve RAM buffer [mem 0x7fbc2000-0x7fffffff]
+[    0.517855] e820: reserve RAM buffer [mem 0x7fedc000-0x7fffffff]

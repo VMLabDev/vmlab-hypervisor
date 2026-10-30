@@ -96,6 +96,11 @@ pub struct VmShared {
     pub(crate) chipset: Mutex<Option<Arc<crate::chipset::Chipset>>>,
     pub(crate) vga: Mutex<Option<crate::display::Video>>,
     pub(crate) xhci: Mutex<Option<Arc<Mutex<vmlab_hv_devices::usb::XhciController>>>>,
+    pub(crate) pflash: Mutex<Option<Arc<Mutex<vmlab_hv_devices::pflash::Pflash>>>>,
+    pub(crate) tpm: Mutex<Option<Arc<Mutex<vmlab_hv_devices::tpm::TpmTis>>>>,
+    pub(crate) smi_fwcfg: Mutex<Option<Arc<Mutex<crate::smm::SmiFwCfg>>>>,
+    pending_smis: Mutex<std::collections::BTreeSet<u8>>,
+    smi_delivery: Condvar,
 }
 
 impl VmShared {
@@ -145,6 +150,11 @@ impl VmShared {
             chipset: Mutex::new(None),
             vga: Mutex::new(None),
             xhci: Mutex::new(None),
+            pflash: Mutex::new(None),
+            tpm: Mutex::new(None),
+            smi_fwcfg: Mutex::new(None),
+            pending_smis: Mutex::new(std::collections::BTreeSet::new()),
+            smi_delivery: Condvar::new(),
         })
     }
 
@@ -515,6 +525,21 @@ impl VmShared {
         self.mmio_bus.lock().write(addr, data);
     }
 
+    pub(crate) fn flash_address(&self, addr: u64) -> bool {
+        (vmlab_hv_devices::pflash::BASE..1 << 32).contains(&addr) && self.pflash.lock().is_some()
+    }
+
+    pub(crate) fn write_flash(&self, addr: u64, data: &[u8], in_smm: bool) {
+        if let Some(flash) = self.pflash.lock().as_ref()
+            && let Err(e) =
+                flash
+                    .lock()
+                    .write_access(addr - vmlab_hv_devices::pflash::BASE, data, in_smm)
+        {
+            self.request_exit(ExitReason::Error(e.to_string()));
+        }
+    }
+
     fn in_pci_window(&self, addr: u64) -> bool {
         if self.mch.lock().is_some() {
             return true;
@@ -680,6 +705,61 @@ impl VmShared {
         })
     }
 
+    pub(crate) fn dispatch_smi(&self, issuer: u8) -> bool {
+        let broadcast = self
+            .smi_fwcfg
+            .lock()
+            .as_ref()
+            .is_some_and(|cfg| cfg.lock().broadcast());
+        let targets: Vec<_> = self
+            .vcpus
+            .lock()
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| broadcast || *id == 0)
+            .collect();
+        self.pending_smis.lock().extend(targets.iter().copied());
+        self.kick_all();
+        targets.contains(&issuer)
+    }
+
+    pub(crate) fn take_pending_smi(&self, id: u8) -> bool {
+        let removed = self.pending_smis.lock().remove(&id);
+        self.smi_delivery.notify_all();
+        removed
+    }
+
+    pub(crate) fn has_pending_smi(&self, id: u8) -> bool {
+        self.pending_smis.lock().contains(&id)
+    }
+
+    pub(crate) fn wait_smi_delivery(&self) {
+        // Queue the broadcast on every KVM vCPU before any target runs its
+        // handler. Retry kicks that raced with entry into KVM_RUN.
+        let mut pending = self.pending_smis.lock();
+        while !pending.is_empty() && self.should_run() {
+            self.kick_all();
+            self.smi_delivery
+                .wait_for(&mut pending, std::time::Duration::from_millis(1));
+        }
+    }
+
+    pub(crate) fn save_pending_smis(&self) -> Vec<u8> {
+        self.pending_smis.lock().iter().copied().collect()
+    }
+
+    pub(crate) fn restore_pending_smis(&self, targets: Vec<u8>) -> Result<(), String> {
+        let vcpus = self.vcpus.lock();
+        if targets
+            .iter()
+            .any(|target| !vcpus.iter().any(|(id, _)| id == target))
+        {
+            return Err("snapshot SMI targets an absent vCPU".into());
+        }
+        *self.pending_smis.lock() = targets.into_iter().collect();
+        Ok(())
+    }
+
     fn trace_io(&self, port: u16, data: &[u8], write: bool) {
         if let Some(trace) = &self.io_trace {
             let mut trace = trace.lock();
@@ -797,7 +877,24 @@ impl Vm {
     pub fn wait(mut self) -> ExitReason {
         let reason = self.shared.wait_exit();
         self.join_workers();
+        if let Some(tpm) = self.shared.tpm.lock().as_ref()
+            && let Err(e) = tpm.lock().shutdown()
+        {
+            return ExitReason::Error(format!("TPM shutdown: {e}"));
+        }
         if std::env::var_os("VMLAB_HV_DIAGNOSTICS").is_some() {
+            if let Some(mch) = self.shared.mch.lock().as_ref() {
+                use vmlab_hv_devices::PciDevice;
+                let mut mch = mch.lock();
+                eprintln!(
+                    "MCH SMRAM: {:x?}",
+                    [
+                        mch.config_read(0x50 / 4),
+                        mch.config_read(0x9c / 4),
+                        mch.config_read(0xac / 4)
+                    ]
+                );
+            }
             for (id, vcpu) in self.shared.vcpus.lock().iter() {
                 let fd = vcpu.lock();
                 if let (Ok(regs), Ok(sregs)) = (fd.get_regs(), fd.get_sregs()) {
@@ -1003,6 +1100,49 @@ mod tests {
     }
 
     #[test]
+    fn smi_delivery_waits_for_all_targets_and_preserves_queued_targets_on_pause() {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("skipping SMI delivery test: /dev/kvm is unavailable");
+            return;
+        }
+        let kvm = KvmVm::new().unwrap();
+        let signal = Arc::new(SleepSignal::default());
+        let shared = VmShared::new(
+            kvm,
+            IoBus::new(),
+            MmioBus::new(),
+            Arc::new(Mutex::new(PciRoot::new(1 << 32))),
+            Arc::new(Mutex::new(PmDevice::new(Arc::new(NullIrq), signal.sink()))),
+            signal,
+            1 << 32,
+        );
+        for pause in [false, true] {
+            *shared.state.lock() = RunState::Running;
+            *shared.pending_smis.lock() = [0, 1].into_iter().collect();
+            let (sent, received) = std::sync::mpsc::channel();
+            let waiter = shared.clone();
+            let thread = std::thread::spawn(move || {
+                waiter.wait_smi_delivery();
+                sent.send(()).unwrap();
+            });
+            assert!(received.recv_timeout(Duration::from_millis(10)).is_err());
+            assert!(shared.take_pending_smi(0));
+            assert!(received.recv_timeout(Duration::from_millis(10)).is_err());
+            if pause {
+                *shared.state.lock() = RunState::Paused;
+            } else {
+                assert!(shared.take_pending_smi(1));
+            }
+            received.recv_timeout(Duration::from_secs(1)).unwrap();
+            thread.join().unwrap();
+            assert_eq!(
+                shared.save_pending_smis(),
+                if pause { vec![1] } else { vec![] }
+            );
+        }
+    }
+
+    #[test]
     fn display_publication_without_clients_is_rate_limited() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use vmlab_hv_display::{DisplayServer, Frame, FrameSource, InputSink, Pixels};
@@ -1060,6 +1200,15 @@ mod tests {
 
     #[test]
     fn quiesce_recovers_a_kick_lost_before_entering_kvm() {
+        lost_kick(false);
+    }
+
+    #[test]
+    fn shutdown_recovers_a_kick_lost_before_entering_kvm() {
+        lost_kick(true);
+    }
+
+    fn lost_kick(shutdown: bool) {
         if !std::path::Path::new("/dev/kvm").exists() {
             return;
         }
@@ -1086,6 +1235,16 @@ mod tests {
         let mut vm = Vm::from_parts(shared.clone(), vec![(0, cpu)], ram).unwrap();
         vm.start();
         std::thread::sleep(Duration::from_millis(50));
+        if shutdown {
+            // Record quit without a pending signal, modeling an exit kick
+            // consumed just before the blocked KVM_RUN.
+            *shared.state.lock() = RunState::ShuttingDown;
+            *shared.exit.lock() = Some(ExitReason::Shutdown(ShutdownReason::HostRequest));
+            let start = std::time::Instant::now();
+            vm.wait();
+            assert!(start.elapsed() < Duration::from_millis(250));
+            return;
+        }
         // Model a kick consumed between the run-state check and KVM_RUN:
         // the vCPU is blocked in HLT, with a paused state and no pending signal.
         *shared.state.lock() = RunState::Paused;

@@ -79,6 +79,45 @@ fn scratch_directories_are_isolated_across_processes() {
     assert_eq!(std::fs::read(&marker).unwrap(), b"parent");
 }
 
+#[test]
+fn s2_vmstate_grows_refcount_coverage_without_recursive_table_growth() {
+    if !qemu_img_available() {
+        eprintln!("skipping S2: qemu-img is unavailable");
+        return;
+    }
+    let dir = tmpdir("refcount-growth");
+    for size in [512 << 10, 10 << 20] {
+        let path = dir.path().join(format!("disk-{size}.qcow2"));
+        qemu_img(&[
+            "create",
+            "-f",
+            "qcow2",
+            "-o",
+            "cluster_size=512",
+            path.to_str().unwrap(),
+            "8M",
+        ]);
+        let data = pattern(size, 37);
+        let mut image = vmlab_disk::open(&path, Format::Qcow2, false).unwrap();
+        image.write_vmstate(0, &data).unwrap();
+        image
+            .snapshot_create("growth", data.len() as u64, 0)
+            .unwrap();
+        image.flush().unwrap();
+        drop(image);
+        qemu_check(&path);
+        let mut image = vmlab_disk::open(&path, Format::Qcow2, false).unwrap();
+        image.snapshot_apply("growth").unwrap();
+        let mut restored = vec![0; data.len()];
+        image.read_vmstate(0, &mut restored).unwrap();
+        assert_eq!(restored, data);
+        image.flush().unwrap();
+        drop(image);
+        qemu_check(&path);
+        assert!(std::fs::metadata(&path).unwrap().len() < 2 * size as u64);
+    }
+}
+
 fn run(bin: &str, args: &[&str]) -> std::process::Output {
     let out = Command::new(bin).args(args).output().expect(bin);
     assert!(
@@ -836,6 +875,37 @@ fn s2_read_only_never_modifies() {
 
 /// Discard frees clusters, reads as zeros (or backing), and keeps the image
 /// checkable.
+#[test]
+fn s2_subcluster_discard_preserves_neighboring_metadata() {
+    require_qemu_img!();
+    let temp = tmpdir("partial-discard");
+    let path = temp.path().join("active.qcow2");
+    let reference = temp.path().join("qemu.qcow2");
+    ops::create_qcow2(&path, 1 << 20, None, None).unwrap();
+    write_pattern(&path, Format::Qcow2, 0, &vec![0x77; 1 << 20]);
+    std::fs::copy(&path, &reference).unwrap();
+    run(
+        QEMU_IO,
+        &[
+            "-f",
+            "qcow2",
+            "-c",
+            "discard 512 512",
+            reference.to_str().unwrap(),
+        ],
+    );
+    {
+        let mut image = vmlab_disk::open(&path, Format::Qcow2, false).unwrap();
+        image.discard(512, 512).unwrap();
+        image.flush().unwrap();
+    }
+    let actual = read_all(&path, Format::Qcow2);
+    assert!(actual[..512].iter().all(|b| *b == 0x77));
+    assert!(actual[1024..].iter().all(|b| *b == 0x77));
+    assert_eq!(actual, read_all(&reference, Format::Qcow2));
+    qemu_check(&path);
+}
+
 #[test]
 fn s2_discard_and_zero_semantics() {
     require_qemu_img!();

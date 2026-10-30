@@ -32,6 +32,7 @@ def acpi(data: bytes) -> bytes:
         b"RSDT": [(36, len(data) - 36)],
         b"XSDT": [(36, len(data) - 36)],
         b"BGRT": [(40, 8)],
+        b"TPM2": [(68, 8)],
     }.get(signature, [])
     if data.startswith(b"RSD PTR "):
         fields = [(8, 1), (16, 4), (24, 8), (32, 1)]
@@ -156,7 +157,7 @@ def normalize_text(name: str, text: str) -> str:
         text = "\n".join(rows) + "\n"
     if name.endswith(".dsl") or name == "acpi-dsl/iasl.log":
         text = re.sub(r"(?m)^.*(?:Disassembly of|Disassembling to|Parsing completed|disassembly completed|Compilation of|Input file|Output file|ASL Output|Binary Output|AML Output|Table checksum|Checksum :|File appears to be binary: found).*$", "", text)
-        text = re.sub(r"(FACS Address|DSDT Address|Image Address)(\s*:\s*)[0-9A-F]+", r"\1\2<allocation>", text)
+        text = re.sub(r"(FACS Address|DSDT Address|Image Address|Log Address)(\s*:\s*)[0-9A-F]+", r"\1\2<allocation>", text)
         # iasl includes a redundant raw table dump after the decoded fields.
         text = text.split("Raw Table Data:")[0]
     if name in ("dmesg.txt", "e820-dmesg.txt"):
@@ -167,11 +168,14 @@ def normalize_text(name: str, text: str) -> str:
         text = re.sub(r"0x[0-9a-fA-F]{6,16}\b", "<address>", text)
         text = re.sub(r"\b[0-9a-f]{8,16}\b", "<address>", text)
         text = re.sub(r"(?<![:0-9a-fA-F])\b\d+\.\d+\b(?![.:0-9a-fA-F])", "<measurement>", text)
+        text = re.sub(r"(?m)^(Calibrating delay loop .* BogoMIPS \(lpj=)\d+(\))$",
+                      r"\1<measurement>\2", text)
         text = re.sub(r"(?m)^sched_clock: Marking stable .*", "sched_clock: Marking stable <time>", text)
         text = re.sub(r"(/input/input)\d+\b", r"\1<index>", text)
         text = re.sub(r"(Memory: )\d+K/", r"\1<available>K/", text)
         text = re.sub(r"\b\d+K reserved\b", "<reserved>K reserved", text)
         text = re.sub(r"(efi: Freeing EFI boot services memory: )\d+K", r"\1<allocation>K", text)
+        text = re.sub(r"(efi: Remove mem)\d+(: MMIO range=)", r"\1<index>\2", text)
         text = "\n".join(sorted(text.splitlines())) + "\n"
     if name == "iomem.txt":
         text = re.sub(r"(?m)^(\s*)[0-9a-f]+-[0-9a-f]+( : Kernel (?:code|rodata|data|bss))$",
@@ -181,6 +185,8 @@ def normalize_text(name: str, text: str) -> str:
         text += "\n" + "\n".join(kernel)
     if name == "fwcfg/listing.txt":
         text = re.sub(r"\w{3}\s+\d+\s+\d\d:\d\d", "<time>", text)
+    if name == "fwcfg/sizes.txt":
+        text = "\n".join(sorted(text.splitlines())) + "\n"
     if name == "usb.txt":
         text = re.sub(r"Bus \d+ Device \d+:", "USB device:", text)
         text = re.sub(r"/sys/bus/usb/devices/(?:usb\d+|\d+-[\d.]+)", "<usb-path>", text)
@@ -285,6 +291,23 @@ def mask_boundaries(name: str, data: bytes, allocations: dict[int, str]) -> byte
         return text.encode()
     if name in ("iomem.txt", "ioports.txt"):
         text = data.decode()
+        if name == "iomem.txt":
+            blocks = []
+            for line in text.splitlines(True):
+                match = re.fullmatch(r"([0-9a-f]+)-([0-9a-f]+) : System RAM\n", line)
+                if match and blocks:
+                    start, end = int(match[1], 16), int(match[2], 16)
+                    previous = re.fullmatch(r"([0-9a-f]+)-([0-9a-f]+) : System RAM\n", blocks[-1][0])
+                    role = allocations.get(start, "")
+                    if (previous and int(previous[2], 16) + 1 == start
+                            and role.startswith("<setup-") and "-usable:" in role):
+                        blocks[-1][0] = f"{previous[1]}-{end:08x} : System RAM\n"
+                        continue
+                if line.startswith(" ") and blocks:
+                    blocks[-1].append(line)
+                else:
+                    blocks.append([line])
+            text = "".join(line for block in blocks for line in block)
         def region(match):
             start = allocations.get(int(match[2], 16), match[2])
             end = allocations.get(int(match[3], 16), match[3])
@@ -314,6 +337,11 @@ def load_capture(root: Path) -> dict[str, str]:
         raise ValueError(f"{root}: no PCI functions in capture")
     if not re.search(r"^0x[0-9a-f]{8} 0x[0-9a-f]+:", (guest / "cpuid.txt").read_text(), re.M):
         raise ValueError(f"{root}: no CPUID leaves in capture")
+    for line in (guest / "fwcfg/sizes.txt").read_text().splitlines():
+        name, size = line.rsplit(maxsplit=1)
+        blob = guest / "fwcfg/blobs" / name
+        if int(size) <= 65536 and blob.is_file() and blob.stat().st_size != int(size):
+            raise ValueError(f"{root}: incomplete fw_cfg blob {name}: expected {size}, got {blob.stat().st_size}")
     result = {}
     allocations = allocation_map(guest)
     for path in sorted(guest.rglob("*")):
@@ -467,10 +495,12 @@ def approved_platform(left: dict[str, str], right: dict[str, str], rules: dict) 
     devices = {entry["device"] for entry in rules.get("platform_omissions", [])}
     if "vmport/vmmouse" in devices:
         original = "input: VirtualPS/2 VMware VMMouse as /devices/platform/i8042/serio1/input/input<index>\n"
-        replacement = "input: ImExPS/2 Generic Explorer Mouse as /devices/platform/i8042/serio1/input/input<index>\n"
-        if left.get("dmesg.txt", "").count(original) == 2 and right.get("dmesg.txt", "").count(replacement) == 1:
-            left["dmesg.txt"] = left["dmesg.txt"].replace(original, "")
-            right["dmesg.txt"] = right["dmesg.txt"].replace(replacement, "")
+        replacements = [f"input: {name} Mouse as /devices/platform/i8042/serio1/input/input<index>\n"
+                        for name in ("ImExPS/2 Generic Explorer", "PS/2 Generic")]
+        for replacement in replacements:
+            if left.get("dmesg.txt", "").count(original) == 2 and right.get("dmesg.txt", "").count(replacement) == 1:
+                left["dmesg.txt"] = left["dmesg.txt"].replace(original, "")
+                right["dmesg.txt"] = right["dmesg.txt"].replace(replacement, "")
     # These two initialized legacy ROM copies have distinct observed sizes.
     # Their BARs and every other legacy ROM remain compared.
     sizes = set()

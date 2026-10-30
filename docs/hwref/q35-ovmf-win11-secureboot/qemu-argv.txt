@@ -18,15 +18,15 @@ kvm-pit.lost_tick_policy=discard
 -display
 none
 -vnc
-unix:/tmp/hwref-8rbr61s6/vnc.sock,share=ignore
+unix:/tmp/hwref-uhubedd6/vnc.sock,share=ignore
 -qmp
-unix:/tmp/hwref-8rbr61s6/qmp.sock,server=on,wait=off
+unix:/tmp/hwref-uhubedd6/qmp.sock,server=on,wait=off
 -monitor
 none
 -serial
-file:/home/wil/dev/vmlab-hypervisor-wt/hwref/docs/hwref/q35-ovmf-win11-secureboot/serial.log
+file:/home/wil/dev/vmlab-hypervisor-wt/p2-2c/.scratch/qemu-ovmf-exact/q35-ovmf-win11-secureboot/serial.log
 -chardev
-socket,id=vagent0,path=/tmp/hwref-8rbr61s6/agent.sock,server=on,wait=off
+socket,id=vagent0,path=/tmp/hwref-uhubedd6/agent.sock,server=on,wait=off
 -device
 virtio-serial-pci
 -device
@@ -34,19 +34,19 @@ virtserialport,chardev=vagent0,name=vmlab.agent.0
 -drive
 if=pflash,format=raw,readonly=on,file=/home/wil/dev/vmlab/guest/dist/firmware/x86_64/OVMF_CODE_4M.secboot.fd
 -drive
-if=pflash,format=raw,file=/tmp/hwref-8rbr61s6/OVMF_VARS.fd
+if=pflash,format=raw,file=/tmp/hwref-uhubedd6/OVMF_VARS.fd
 -global
 driver=cfi.pflash01,property=secure,value=on
 -blockdev
-driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-8rbr61s6/disk0.qcow2
+driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-uhubedd6/disk0.qcow2
 -device
 virtio-blk-pci,drive=disk0
 -netdev
-stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-8rbr61s6/nic0.sock
+stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-uhubedd6/nic0.sock
 -device
 virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01
 -chardev
-socket,id=chrtpm,path=/tmp/hwref-8rbr61s6/swtpm.sock
+socket,id=chrtpm,path=/tmp/hwref-uhubedd6/swtpm.sock
 -tpmdev
 emulator,id=tpm0,chardev=chrtpm
 -device
@@ -62,4 +62,4 @@ usb-tablet
 # at \EFI\BOOT\BOOTX64.EFI) — no probe additions to the argv.
 
 # one line:
-/usr/bin/qemu-system-x86_64 -name vmlab:hwref/q35-ovmf-win11-secureboot -machine q35 -accel kvm -cpu host,vmx=off,svm=off,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-vpindex,hv-runtime,hv-time,hv-synic,hv-stimer,hv-frequencies,hv-reset,hv-tlbflush,hv-ipi,hv-avic -smp 4 -m 8192M -global kvm-pit.lost_tick_policy=discard -display none -vnc unix:/tmp/hwref-8rbr61s6/vnc.sock,share=ignore -qmp unix:/tmp/hwref-8rbr61s6/qmp.sock,server=on,wait=off -monitor none -serial file:/home/wil/dev/vmlab-hypervisor-wt/hwref/docs/hwref/q35-ovmf-win11-secureboot/serial.log -chardev socket,id=vagent0,path=/tmp/hwref-8rbr61s6/agent.sock,server=on,wait=off -device virtio-serial-pci -device virtserialport,chardev=vagent0,name=vmlab.agent.0 -drive if=pflash,format=raw,readonly=on,file=/home/wil/dev/vmlab/guest/dist/firmware/x86_64/OVMF_CODE_4M.secboot.fd -drive if=pflash,format=raw,file=/tmp/hwref-8rbr61s6/OVMF_VARS.fd -global driver=cfi.pflash01,property=secure,value=on -blockdev driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-8rbr61s6/disk0.qcow2 -device virtio-blk-pci,drive=disk0 -netdev stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-8rbr61s6/nic0.sock -device virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01 -chardev socket,id=chrtpm,path=/tmp/hwref-8rbr61s6/swtpm.sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 -device virtio-vga -usb -device usb-tablet -S
+/usr/bin/qemu-system-x86_64 -name vmlab:hwref/q35-ovmf-win11-secureboot -machine q35 -accel kvm -cpu host,vmx=off,svm=off,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-vpindex,hv-runtime,hv-time,hv-synic,hv-stimer,hv-frequencies,hv-reset,hv-tlbflush,hv-ipi,hv-avic -smp 4 -m 8192M -global kvm-pit.lost_tick_policy=discard -display none -vnc unix:/tmp/hwref-uhubedd6/vnc.sock,share=ignore -qmp unix:/tmp/hwref-uhubedd6/qmp.sock,server=on,wait=off -monitor none -serial file:/home/wil/dev/vmlab-hypervisor-wt/p2-2c/.scratch/qemu-ovmf-exact/q35-ovmf-win11-secureboot/serial.log -chardev socket,id=vagent0,path=/tmp/hwref-uhubedd6/agent.sock,server=on,wait=off -device virtio-serial-pci -device virtserialport,chardev=vagent0,name=vmlab.agent.0 -drive if=pflash,format=raw,readonly=on,file=/home/wil/dev/vmlab/guest/dist/firmware/x86_64/OVMF_CODE_4M.secboot.fd -drive if=pflash,format=raw,file=/tmp/hwref-uhubedd6/OVMF_VARS.fd -global driver=cfi.pflash01,property=secure,value=on -blockdev driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-uhubedd6/disk0.qcow2 -device virtio-blk-pci,drive=disk0 -netdev stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-uhubedd6/nic0.sock -device virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01 -chardev socket,id=chrtpm,path=/tmp/hwref-uhubedd6/swtpm.sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 -device virtio-vga -usb -device usb-tablet -S

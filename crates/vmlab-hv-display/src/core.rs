@@ -336,11 +336,26 @@ impl DisplayServer {
         let mut led_seen = 0;
         let mut cpu_mode = !caps.has(Capabilities::DMABUF_OK);
         loop {
-            let (closed, cpu_copy) = {
+            let (closed, cpu_copy, can_send_frame) = {
                 let s = local.lock().unwrap();
-                (s.closed, s.cpu_copy)
+                (
+                    s.closed,
+                    s.cpu_copy,
+                    caps.has(Capabilities::FRAMES) && s.held.len() < 3,
+                )
             };
-            let (frame, seq, cursor, cs, leds, ls) = self.snapshot();
+            // Keep metadata flowing when the ring is full without pinning skipped pixels.
+            let (frame, seq, cursor, cs, leds, ls) = {
+                let s = self.shared.state.lock().unwrap();
+                (
+                    can_send_frame.then(|| s.frame.clone()),
+                    s.seq,
+                    s.cursor.clone(),
+                    s.cursor_seq,
+                    s.leds,
+                    s.led_seq,
+                )
+            };
             if closed || self.shared.closed.load(Ordering::SeqCst) {
                 return Ok(());
             }
@@ -371,7 +386,9 @@ impl DisplayServer {
                 send(stream, &Message::LedState { mask: leds }, &[])?;
                 led_seen = ls;
             }
-            if caps.has(Capabilities::FRAMES) && (seq != last || cpu_copy) {
+            if let Some(frame) = frame
+                && (seq != last || cpu_copy)
+            {
                 cpu_mode |= cpu_copy;
                 let dma = matches!(frame.pixels, Pixels::Dmabuf { .. })
                     && caps.has(Capabilities::DMABUF_OK)

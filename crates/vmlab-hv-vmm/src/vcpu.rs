@@ -99,6 +99,14 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
         // the dispatch; nothing else takes this mutex while the thread runs
         // (the snapshot path waits for the thread to park first).
         let mut guard = vcpu.lock();
+        if running && !pending_completion && shared.has_pending_smi(id) {
+            if let Err(e) = crate::smm::inject_smi(&guard) {
+                shared.request_exit(crate::vm::ExitReason::Error(e.to_string()));
+                return;
+            }
+            shared.take_pending_smi(id);
+            shared.wait_smi_delivery();
+        }
         guard.set_kvm_immediate_exit(u8::from(!running));
         let run_ptr = guard.get_kvm_run() as *const kvm_bindings::kvm_run;
         let permit = shared.enter_kvm();
@@ -150,14 +158,33 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                     }
                     guard.set_kvm_immediate_exit(0);
                     pending_completion = false;
-                    if let Err(e) = guard.smi() {
-                        shared.request_exit(crate::vm::ExitReason::Error(format!("KVM_SMI: {e}")));
-                        return;
+                    if shared.dispatch_smi(id) {
+                        if let Err(e) = guard.smi() {
+                            shared.request_exit(crate::vm::ExitReason::Error(format!(
+                                "KVM_SMI: {e}"
+                            )));
+                            return;
+                        }
+                        shared.take_pending_smi(id);
+                        shared.wait_smi_delivery();
                     }
                 }
             }
             Ok(VcpuExit::MmioRead(addr, data)) => shared.mmio_read(addr, data),
-            Ok(VcpuExit::MmioWrite(addr, data)) => shared.mmio_write(addr, data),
+            Ok(VcpuExit::MmioWrite(addr, data)) => {
+                if shared.flash_address(addr) {
+                    let bytes = data.to_vec();
+                    match crate::smm::in_smm(&guard) {
+                        Ok(in_smm) => shared.write_flash(addr, &bytes, in_smm),
+                        Err(error) => {
+                            shared.request_exit(crate::vm::ExitReason::Error(error.to_string()));
+                            return;
+                        }
+                    }
+                } else {
+                    shared.mmio_write(addr, data);
+                }
+            }
             Ok(VcpuExit::Hlt) => {
                 // With the in-kernel irqchip the vCPU wakes on the next
                 // interrupt; re-enter and let the state check handle pauses.
@@ -181,6 +208,17 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                 shared.request_exit(crate::vm::ExitReason::Shutdown(
                     vmlab_hv_proto::control::ShutdownReason::GuestReset,
                 ));
+                return;
+            }
+            Ok(VcpuExit::InternalError) => {
+                let run = guard.get_kvm_run();
+                // SAFETY: KVM_EXIT_INTERNAL_ERROR selects this union member.
+                let error = unsafe { run.__bindgen_anon_1.internal };
+                shared.request_exit(crate::vm::ExitReason::Error(format!(
+                    "vcpu {id}: KVM internal error {}: {:x?}",
+                    error.suberror,
+                    &error.data[..(error.ndata as usize).min(error.data.len())]
+                )));
                 return;
             }
             Ok(exit) => {

@@ -10,8 +10,8 @@ use crate::error::{VmmError, VmmError as E};
 
 /// Addresses KVM manages inside the PCI hole for real-mode emulation
 /// (kernel memory mapped there, not guest RAM).
-const KVM_TSS_ADDR: usize = 0xFFFBD000;
-const KVM_IDENTITY_MAP_ADDR: u64 = 0xFFFB_C000;
+const KVM_TSS_ADDR: usize = 0xFEFFD000;
+const KVM_IDENTITY_MAP_ADDR: u64 = 0xFEFF_C000;
 
 /// One KVM virtual machine.
 pub struct KvmVm {
@@ -66,6 +66,18 @@ impl KvmVm {
             .clamp(32, 44);
         let top = 1u64 << bits;
         top - if high_ram { top / 8 } else { 1 << 30 }
+    }
+
+    pub(crate) fn ovmf_pci64_base(&self) -> u64 {
+        let bits = self
+            .cpuid
+            .as_slice()
+            .iter()
+            .find(|e| e.function == 0x8000_0008)
+            .map_or(36, |e| e.eax & 0xff)
+            .clamp(32, 46);
+        let top = 1u64 << bits;
+        top - top / 8
     }
 
     /// Create vCPU `id` with the host's supported CPUID passed through.

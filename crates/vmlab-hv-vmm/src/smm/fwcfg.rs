@@ -14,7 +14,8 @@ struct Negotiation {
 }
 
 /// Wrap the platform fw_cfg before registering it on the I/O bus. Only
-/// broadcast SMI is advertised; CPU hotplug is intentionally unsupported.
+/// broadcast and the CPU-hotplug SMI protocol are advertised. The machine's
+/// CPU inventory is fixed, so no insertion or removal events are generated.
 pub struct SmiFwCfg {
     inner: FwCfg,
     memory: vmlab_hv_devices::GuestMemory,
@@ -27,7 +28,7 @@ impl SmiFwCfg {
     pub fn new(mut inner: FwCfg, memory: vmlab_hv_devices::GuestMemory) -> Result<Self, String> {
         inner.add_file(
             "etc/smi/supported-features",
-            SMI_BROADCAST.to_le_bytes().to_vec(),
+            SMI_SUPPORTED.to_le_bytes().to_vec(),
             false,
         )?;
         let requested_key = inner.add_file("etc/smi/requested-features", vec![0; 8], true)?;
@@ -54,7 +55,7 @@ impl SmiFwCfg {
 
     fn validate(&mut self) -> u8 {
         let requested = u64::from_le_bytes(self.negotiation.requested);
-        if requested & !SMI_BROADCAST != 0
+        if requested & !SMI_SUPPORTED != 0
             || self.negotiation.locked.is_some_and(|old| old != requested)
         {
             return 0;

@@ -119,6 +119,16 @@ fn p4_tpm2_log_relocation_and_namespace_match_ovmf_capture() {
         blob,
         u32_at(&installed["etc/acpi/rsdp"].data, 16) as usize - base,
     );
+    let signatures: Vec<_> = rsdt[36..]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|entry| &read_table(blob, u32_at(entry, 0) as usize - base)[..4])
+        .collect();
+    assert_eq!(
+        signatures,
+        [b"FACP", b"APIC", b"HPET", b"TPM2", b"MCFG", b"WAET"]
+    );
     let tpm = rsdt[36..]
         .as_chunks::<4>()
         .0
@@ -142,6 +152,21 @@ fn p4_tpm2_log_relocation_and_namespace_match_ovmf_capture() {
     let dsdt = read_table(blob, 64);
     let captured = include_bytes!("../../../docs/hwref/q35-ovmf-win11/guest/acpi/DSDT");
     let captured_node = &captured[0x2138..0x23a4];
+    let resource = &captured[0x1f2e..0x1f3a];
+    assert!(
+        dsdt.windows(resource.len())
+            .any(|window| window == resource),
+        "PCI0._CRS must reserve the TIS aperture"
+    );
+    let tpm_offset = dsdt
+        .windows(captured_node.len())
+        .position(|node| node == captured_node)
+        .unwrap();
+    let keyboard_offset = dsdt.windows(4).position(|name| name == b"KBD_").unwrap();
+    assert!(
+        tpm_offset < keyboard_offset,
+        "captured LPC namespace places TPM before legacy devices"
+    );
     assert!(
         dsdt.windows(captured_node.len())
             .any(|node| node == captured_node)
@@ -305,6 +330,38 @@ fn captured_platform() -> Platform {
         });
     }
     p
+}
+
+#[test]
+fn ovmf_smm_cpu_eject_namespace_and_loader_order_match_the_capture() {
+    let mut p = captured_platform();
+    p.vcpus = 4;
+    p.max_cpus = 4;
+    p.ram_regions = vec![(0, 2 << 30), (1 << 32, 6 << 30)];
+    p.ecam_base = 0xe0000000;
+    p.pci64_base = Some(0x380000000000);
+    p.tpm = true;
+    p.smm = true;
+    p.pci_devices.retain(|d| d.device != 5);
+    for device in &mut p.pci_devices {
+        device.vga = false;
+    }
+    let generated = generate(&p).unwrap();
+    let installed = install(&generated.loader, &mut files(&generated));
+    let mut actual = read_table(&installed["etc/acpi/tables"].data, 64).to_vec();
+    let mut expected =
+        include_bytes!("../../../docs/hwref/q35-ovmf-win11-secureboot/guest/acpi/DSDT").to_vec();
+    actual[9] = 0;
+    expected[9] = 0;
+    assert!(
+        actual == expected,
+        "SMM DSDT differs: actual {} bytes, expected {}",
+        actual.len(),
+        expected.len()
+    );
+    let records = generated.loader.as_chunks::<128>().0;
+    assert_eq!(name(&records[1][4..60]), "etc/tpm/log");
+    assert_eq!(name(&records[2][4..60]), "etc/acpi/tables");
 }
 
 #[test]

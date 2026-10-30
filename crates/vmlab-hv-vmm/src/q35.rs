@@ -50,6 +50,7 @@ pub struct Pam {
     attributes: [u8; 13],
     smram: GuestMemoryMmap,
     smram_open: bool,
+    isolated_smram: bool,
 }
 
 impl Pam {
@@ -72,6 +73,23 @@ impl Pam {
         )
     }
     pub fn new(image: &[u8], vm: Option<Arc<VmFd>>, first_slot: u32) -> Result<Self, VmmError> {
+        Self::build(image, vm, first_slot, false)
+    }
+
+    pub fn with_isolated_smram(
+        image: &[u8],
+        vm: Arc<VmFd>,
+        first_slot: u32,
+    ) -> Result<Self, VmmError> {
+        Self::build(image, Some(vm), first_slot, true)
+    }
+
+    fn build(
+        image: &[u8],
+        vm: Option<Arc<VmFd>>,
+        first_slot: u32,
+        isolated_smram: bool,
+    ) -> Result<Self, VmmError> {
         let shadow = GuestMemoryMmap::from_ranges(&[(GuestAddress(ALIAS), ALIAS_SIZE)])
             .map_err(|e| VmmError::Memory(e.to_string()))?;
         let rom = GuestMemoryMmap::from_ranges(&[(GuestAddress(ALIAS), ALIAS_SIZE)])
@@ -91,11 +109,14 @@ impl Pam {
             attributes: [0; 13],
             smram,
             smram_open: false,
+            isolated_smram,
         };
         for bank in 0..13 {
             pam.map_bank(bank, false)?;
         }
-        if let Some(vm) = &pam.vm {
+        if let Some(vm) = &pam.vm
+            && !isolated_smram
+        {
             let region = kvm_userspace_memory_region {
                 slot: (1 << 16) | (first_slot + 13),
                 guest_phys_addr: 0xa0000,
@@ -160,7 +181,7 @@ impl Pam {
 
     fn update(&mut self, config: &[u8; 4096]) -> Result<(), VmmError> {
         let open = config[0x9d] & 0x40 != 0;
-        if open != self.smram_open {
+        if !self.isolated_smram && open != self.smram_open {
             if let Some(vm) = &self.vm {
                 let region = kvm_userspace_memory_region {
                     slot: self.first_slot + 13,
@@ -233,20 +254,24 @@ impl BusDevice for Pam {
     }
 }
 
+struct SmmWiring {
+    control: Arc<Mutex<crate::smm::SmramControl>>,
+    memory: Arc<Mutex<crate::smm::Smram>>,
+}
+
 pub struct Mch {
     config: [u8; 4096],
     pub pam: Arc<Mutex<Pam>>,
     /// Mapping errors cannot be returned through PciDevice; the run loop checks
     /// this latch immediately after configuration writes.
     pub error: Option<String>,
+    smm: Option<SmmWiring>,
 }
 
 impl Mch {
     pub fn new(pam: Arc<Mutex<Pam>>) -> Self {
         let mut config = [0; 4096];
         config[..4].copy_from_slice(&0x29c0_8086u32.to_le_bytes());
-        config[4] = 0x03;
-        config[5] = 0x01;
         config[0xb] = 0x06;
         config[0x2c..0x30].copy_from_slice(&0x1100_1af4u32.to_le_bytes());
         config[0x50..0x52].copy_from_slice(&64u16.to_le_bytes());
@@ -256,7 +281,17 @@ impl Mch {
             config,
             pam,
             error: None,
+            smm: None,
         }
+    }
+
+    pub fn with_smm(
+        mut self,
+        control: Arc<Mutex<crate::smm::SmramControl>>,
+        memory: Arc<Mutex<crate::smm::Smram>>,
+    ) -> Self {
+        self.smm = Some(SmmWiring { control, memory });
+        self
     }
 
     /// PCIEXBAR enable, base and length (256/128/64 MiB encodings).
@@ -280,6 +315,15 @@ impl PciDevice for Mch {
         if reg >= 64 {
             return u32::MAX;
         }
+        if let Some(smm) = &self.smm {
+            let control = smm.control.lock();
+            let bytes = std::array::from_fn(|i| {
+                control
+                    .read_config(reg * 4 + i)
+                    .unwrap_or(self.config[reg * 4 + i])
+            });
+            return u32::from_le_bytes(bytes);
+        }
         self.config
             .get(reg * 4..reg * 4 + 4)
             .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
@@ -289,9 +333,25 @@ impl PciDevice for Mch {
         let start = reg * 4 + offset as usize;
         for (index, byte) in data.iter().enumerate() {
             let pos = start + index;
+            if let Some(smm) = &self.smm {
+                let mut control = smm.control.lock();
+                if control.write_config(pos, *byte) {
+                    let mut memory = smm.memory.lock();
+                    if let Err(e) = memory
+                        .set_region_open(0, control.default_smbase_open())
+                        .and_then(|()| memory.set_region_open(1, control.open()))
+                        .and_then(|()| memory.set_region_open(2, control.tseg_open()))
+                    {
+                        self.error = Some(e.to_string());
+                    }
+                    continue;
+                }
+            }
             let mask = match pos {
                 4 => 0x07,
-                5 => 0x01,
+                5 => 0x05,
+                0x3c => 0xff,
+                0x52 => 0xff,
                 0x60 => 0x07,
                 0x63 => 0xfc,
                 0x64 => 0x0f,
@@ -356,6 +416,18 @@ pub fn map_bios(vm: &VmFd, image: &[u8], slot: u32) -> Result<GuestMemoryMmap, V
         ));
     }
     let base = (1u64 << 32) - image.len() as u64;
+    map_rom(vm, image, slot, base)
+}
+
+/// Executable immutable CODE backing; VARS remains on the flash MMIO path.
+pub fn map_pflash_code(vm: &VmFd, image: &[u8], slot: u32) -> Result<GuestMemoryMmap, VmmError> {
+    if image.len() != vmlab_hv_devices::pflash::CODE_SIZE {
+        return Err(VmmError::InvalidMachine("invalid OVMF CODE length".into()));
+    }
+    map_rom(vm, image, slot, vmlab_hv_devices::pflash::CODE_BASE)
+}
+
+fn map_rom(vm: &VmFd, image: &[u8], slot: u32, base: u64) -> Result<GuestMemoryMmap, VmmError> {
     let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(base), image.len())])
         .map_err(|e| VmmError::Memory(e.to_string()))?;
     memory
@@ -483,6 +555,23 @@ mod tests {
     fn mch() -> Mch {
         let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
         Mch::new(Arc::new(Mutex::new(pam)))
+    }
+
+    #[test]
+    fn ovmf_can_disable_integrated_graphics_in_ggc() {
+        let mut mch = mch();
+        mch.config_write(0x50 / 4, 2, &[2]);
+        assert_eq!(mch.config_read(0x50 / 4) >> 16 & 0xff, 2);
+    }
+
+    #[test]
+    fn host_bridge_pci_command_reset_mask_and_interrupt_line_match_qemu() {
+        let mut mch = mch();
+        assert_eq!(mch.config_read(1) & 0xffff, 0);
+        mch.config_write(1, 0, &[0xff; 2]);
+        assert_eq!(mch.config_read(1) & 0xffff, 0x507);
+        mch.config_write(0x3c / 4, 0, &[0xff]);
+        assert_eq!(mch.config_read(0x3c / 4) & 0xff, 0xff);
     }
 
     #[test]

@@ -214,7 +214,7 @@ for entry in /sys/firmware/qemu_fw_cfg/by_key/*; do
   # Inventory every blob, but avoid port-I/O copies of large boot assets.
   [ "$size" -le 65536 ] || continue
   mkdir -p "fwcfg/blobs/$(dirname "$name")"
-  timeout 5 cat "$entry/raw" >"fwcfg/blobs/$name" 2>>fwcfg/read-errors.log
+  timeout 120 cat "$entry/raw" >"fwcfg/blobs/$name" 2>>fwcfg/read-errors.log
 done
 
 # PNP/ISA devices
@@ -756,6 +756,7 @@ CONFIGS: dict[str, dict] = {
     # pairing): q35 + OVMF + swtpm tpm-tis + virtio + virtio-vga + Hyper-V
     # enlightenments (host KVM has AVIC, so hv-avic and the PIT global ride).
     "q35-ovmf-win11": {
+        "exact_profile": True,
         "title": "q35 + OVMF, Windows 11 profile devices, TPM (no secure boot)",
         "profile": "windows-server (the windows-11 device set, secure boot off)",
         "machine": "q35", "smp": 4, "mem": 8192, "cpu": CPU_WIN11,
@@ -771,6 +772,7 @@ CONFIGS: dict[str, dict] = {
     # blank VARS (Pairing::Setup) because the enforcing .ms VARS refuses
     # every unsigned image — see this config's README for the deviation.
     "q35-ovmf-win11-secureboot": {
+        "exact_profile": True,
         "title": "q35 + OVMF secure boot, Windows 11 profile devices, TPM",
         "profile": "windows-11",
         "machine": "q35", "smp": 4, "mem": 8192, "cpu": CPU_WIN11,
@@ -891,33 +893,39 @@ def qmp_cont(sock: Path, log) -> None:
     deadline = time.time() + 20
     last: Exception | None = None
     while time.time() < deadline:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.settimeout(2)
             s.connect(str(sock))
             break
         except OSError as e:
+            s.close()
             last = e
             time.sleep(0.1)
     else:
         raise RuntimeError(f"QMP socket never came up: {last}")
-    s.settimeout(10)
-    f = s.makefile("rwb")
-    log.write(f.readline())  # greeting
-    for cmd in ("qmp_capabilities", "cont"):
-        f.write(json.dumps({"execute": cmd}).encode() + b"\n")
-        f.flush()
-        while True:
-            line = f.readline()
-            if not line:
-                raise RuntimeError(f"QMP closed during {cmd}")
-            log.write(line)
-            msg = json.loads(line)
-            if "return" in msg or "error" in msg:
-                if "error" in msg:
-                    raise RuntimeError(f"QMP {cmd}: {msg['error']}")
-                break
-    s.close()
+    try:
+        s.settimeout(10)
+        f = s.makefile("rwb")
+        try:
+            log.write(f.readline())  # greeting
+            for cmd in ("qmp_capabilities", "cont"):
+                f.write(json.dumps({"execute": cmd}).encode() + b"\n")
+                f.flush()
+                while True:
+                    line = f.readline()
+                    if not line:
+                        raise RuntimeError(f"QMP closed during {cmd}")
+                    log.write(line)
+                    msg = json.loads(line)
+                    if "return" in msg or "error" in msg:
+                        if "error" in msg:
+                            raise RuntimeError(f"QMP {cmd}: {msg['error']}")
+                        break
+        finally:
+            f.close()
+    finally:
+        s.close()
 
 
 def decode_stream(raw: bytes) -> bytes | None:
@@ -975,13 +983,13 @@ def run_capture(cfg_name: str, cfg: dict, assets: Assets) -> bool:
                           f"--tpmstate=dir={p.swtpm_dir}",
                           f"--ctrl=type=unixio,path={p.swtpm_sock}",
                           "--terminate"]
-            swtpm_log = open(out_dir / "swtpm.log", "wb")
-            swtpm_proc = spawn_process(swtpm_argv, stdout=swtpm_log,
-                                      stderr=subprocess.STDOUT)
+            with open(out_dir / "swtpm.log", "wb") as swtpm_log:
+                swtpm_proc = spawn_process(swtpm_argv, stdout=swtpm_log,
+                                              stderr=subprocess.STDOUT)
             (out_dir / "swtpm-argv.txt").write_text(shlex.join(swtpm_argv) + "\n")
             time.sleep(1.5)  # let it bind the control socket
-        qemu_log = open(out_dir / "qemu-stderr.log", "wb")
-        proc = spawn_process([QEMU] + argv, stdout=qemu_log, stderr=subprocess.STDOUT)
+        with open(out_dir / "qemu-stderr.log", "wb") as qemu_log:
+            proc = spawn_process([QEMU] + argv, stdout=qemu_log, stderr=subprocess.STDOUT)
         reader = ChanReader(p.agent_sock)
         reader.start()
         with open(out_dir / "qmp.log", "wb") as qmp_log:
