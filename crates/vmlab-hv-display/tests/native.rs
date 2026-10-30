@@ -189,13 +189,11 @@ fn frame_allocations_plateau_without_clients_and_with_unreleased_buffers() {
         allocations.push(Arc::downgrade(pixels));
         *source.0.lock().unwrap() = next;
         server.publish().unwrap();
-        assert!(
-            allocations
-                .iter()
-                .filter(|frame| frame.strong_count() != 0)
-                .count()
-                <= 4
-        );
+        let live = allocations
+            .iter()
+            .filter(|frame| frame.strong_count() != 0)
+            .count();
+        assert!(live <= 4, "{live} pixel allocations remain live");
     };
     for value in (0..2000).map(|value| value as u8) {
         publish(value);
