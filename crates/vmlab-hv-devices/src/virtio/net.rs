@@ -19,15 +19,15 @@
 //! worker stops reading the socket while frames are waiting for receiveq
 //! buffers.
 
+use parking_lot::{Mutex, MutexGuard};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use parking_lot::{Mutex, MutexGuard};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -163,13 +163,11 @@ impl Net {
         }));
         let negotiated = Arc::new(AtomicU64::new(0));
         let switch = config.switch.clone();
-        let worker = thread::Builder::new()
-            .name("virtio-net".into())
-            .spawn({
-                let shared = shared.clone();
-                let negotiated = negotiated.clone();
-                move || run(switch, retry, shared, negotiated, rx, wake_worker)
-            })?;
+        let worker = thread::Builder::new().name("virtio-net".into()).spawn({
+            let shared = shared.clone();
+            let negotiated = negotiated.clone();
+            move || run(switch, retry, shared, negotiated, rx, wake_worker)
+        })?;
         Ok(Net {
             config,
             negotiated,
@@ -274,10 +272,10 @@ fn run(
             // A wakeup is also the device saying shared state changed
             // (activation, restore): give pending work another chance.
             place_rx_frames(&shared, hdr);
-            if let Some(s) = stream.as_mut() {
-                if flush_tx(&shared, s).is_err() {
-                    drop_link(&mut stream, &shared);
-                }
+            if let Some(s) = stream.as_mut()
+                && flush_tx(&shared, s).is_err()
+            {
+                drop_link(&mut stream, &shared);
             }
         }
 
@@ -293,13 +291,12 @@ fn run(
                     }
                 }
             }
-            if revents & libc::POLLOUT != 0 {
-                if let Some(s) = stream.as_mut() {
-                    if flush_tx(&shared, s).is_err() {
-                        drop_link(&mut stream, &shared);
-                        continue;
-                    }
-                }
+            if revents & libc::POLLOUT != 0
+                && let Some(s) = stream.as_mut()
+                && flush_tx(&shared, s).is_err()
+            {
+                drop_link(&mut stream, &shared);
+                continue;
             }
             if dead {
                 drop_link(&mut stream, &shared);
@@ -311,6 +308,9 @@ fn run(
                 Ok(conn) => {
                     let _ = conn.set_nonblocking(true);
                     stream = Some(conn);
+                    // If this connection later dies, wait a full interval
+                    // before reaching for the switch again.
+                    next_try = Instant::now() + retry;
                     // Volatile read state belongs to the old connection.
                     {
                         let mut sh = lock(&shared);
@@ -461,13 +461,12 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
             let head = chain.head_index();
             let need = hdr.len() + frame.len();
             let mut written = 0;
-            if let Ok(mut writer) = chain.writer(mem) {
-                if writer.available_bytes() >= need
-                    && writer.write_all(&hdr).is_ok()
-                    && writer.write_all(&frame).is_ok()
-                {
-                    written = need as u32;
-                }
+            if let Ok(mut writer) = chain.writer(mem)
+                && writer.available_bytes() >= need
+                && writer.write_all(&hdr).is_ok()
+                && writer.write_all(&frame).is_ok()
+            {
+                written = need as u32;
             }
             if q.add_used(mem, head, written).is_err() {
                 break;
@@ -533,10 +532,10 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
     if let Some((irq, queue)) = irq {
         irq.notify_queue(queue);
     }
-    if let Some(stream_ref) = stream.as_mut() {
-        if flush_tx(shared, stream_ref).is_err() {
-            drop_link(stream, shared);
-        }
+    if let Some(stream_ref) = stream.as_mut()
+        && flush_tx(shared, stream_ref).is_err()
+    {
+        drop_link(stream, shared);
     }
 }
 
@@ -573,7 +572,6 @@ impl VirtioDevice for Net {
     fn queue_max_sizes(&self) -> &[u16] {
         &[QUEUE_SIZE, QUEUE_SIZE]
     }
-
 
     fn features(&self) -> u64 {
         let mut features = F_MAC | F_STATUS | F_VERSION_1;
@@ -848,10 +846,485 @@ impl Dec<'_> {
         Ok(u64::from_le_bytes(b.try_into().unwrap()))
     }
     fn raw(&mut self, n: usize) -> Result<&[u8], DeviceError> {
-        self.take(n).map(|s| s)
+        self.take(n)
     }
     fn bytes(&mut self) -> Result<Vec<u8>, DeviceError> {
         let len = self.u32()? as usize;
         Ok(self.take(len)?.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::AtomicU32;
+    use std::time::Instant;
+    use vm_memory::{Bytes, GuestAddress};
+
+    /// Guest memory: 288 MiB, room for the queues' rings plus buffers.
+    const MEM_SIZE: u64 = 288 * 1024 * 1024;
+    /// Where the tests put data buffers, above the rings.
+    const DATA_BASE: u64 = 0x1000_0000;
+    /// A short reconnect interval so the tests do not crawl.
+    const RETRY: Duration = Duration::from_millis(50);
+
+    const VRING_DESC_F_NEXT: u16 = 1;
+    const VRING_DESC_F_WRITE: u16 = 2;
+
+    static DIR_SEQ: AtomicU32 = AtomicU32::new(0);
+
+    /// A throwaway directory for the switch socket.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> TempDir {
+            let path = std::env::temp_dir().join(format!(
+                "vmlab-hv-net-{}-{}",
+                std::process::id(),
+                DIR_SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            TempDir(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Records queue and config interrupts; the test double the brief asks
+    /// for.
+    #[derive(Default)]
+    struct TestInterrupt {
+        queues: Mutex<Vec<u16>>,
+        config: AtomicU32,
+    }
+
+    impl TestInterrupt {
+        fn config_count(&self) -> u32 {
+            self.config.load(Ordering::Relaxed)
+        }
+    }
+
+    impl VirtioInterrupt for TestInterrupt {
+        fn notify_queue(&self, queue: u16) {
+            self.queues.lock().push(queue);
+        }
+        fn notify_config(&self) {
+            self.config.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Poll `cond` until it holds or five seconds pass, then panic.
+    fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !cond() {
+            if Instant::now() > deadline {
+                panic!("timed out waiting for {what}");
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A driver-side split virtqueue, hand-built in guest memory.
+    struct TestVq {
+        size: u16,
+        desc: u64,
+        avail: u64,
+        used: u64,
+        next_desc: u16,
+    }
+
+    impl TestVq {
+        fn new(base: u64, size: u16) -> TestVq {
+            let desc = base;
+            let avail = (desc + 16 * u64::from(size) + 15) & !15;
+            let used = (avail + 8 + 2 * u64::from(size) + 3) & !3;
+            TestVq {
+                size,
+                desc,
+                avail,
+                used,
+                next_desc: 0,
+            }
+        }
+
+        /// A device-side `Queue` configured against this ring.
+        fn queue(&self) -> Queue {
+            let mut q = Queue::new(self.size).unwrap();
+            q.try_set_size(self.size).unwrap();
+            q.try_set_desc_table_address(GuestAddress(self.desc))
+                .unwrap();
+            q.try_set_avail_ring_address(GuestAddress(self.avail))
+                .unwrap();
+            q.try_set_used_ring_address(GuestAddress(self.used))
+                .unwrap();
+            q.set_event_idx(false);
+            q.set_ready(true);
+            q
+        }
+
+        /// Add one descriptor chain of `(addr, len, device-writable)` legs.
+        fn add_chain(&mut self, mem: &GuestMemory, descs: &[(u64, u32, bool)]) -> u16 {
+            let head = self.next_desc;
+            for (j, &(addr, len, write)) in descs.iter().enumerate() {
+                let idx = head + j as u16;
+                let last = j + 1 == descs.len();
+                let mut flags = if write { VRING_DESC_F_WRITE } else { 0 };
+                if !last {
+                    flags |= VRING_DESC_F_NEXT;
+                }
+                let next = if last { 0 } else { idx + 1 };
+                let mut raw = [0u8; 16];
+                raw[0..8].copy_from_slice(&addr.to_le_bytes());
+                raw[8..12].copy_from_slice(&len.to_le_bytes());
+                raw[12..14].copy_from_slice(&flags.to_le_bytes());
+                raw[14..16].copy_from_slice(&next.to_le_bytes());
+                mem.write_slice(&raw, GuestAddress(self.desc + 16 * u64::from(idx)))
+                    .unwrap();
+            }
+            self.next_desc += descs.len() as u16;
+            let avail_idx: u16 = mem.read_obj(GuestAddress(self.avail + 2)).unwrap();
+            mem.write_obj(
+                head,
+                GuestAddress(self.avail + 4 + 2 * u64::from(avail_idx)),
+            )
+            .unwrap();
+            mem.write_obj(avail_idx.wrapping_add(1), GuestAddress(self.avail + 2))
+                .unwrap();
+            head
+        }
+
+        fn used_idx(&self, mem: &GuestMemory) -> u16 {
+            mem.read_obj::<u16>(GuestAddress(self.used + 2)).unwrap()
+        }
+
+        /// `(head, written length)` of one used entry.
+        fn used_entry(&self, mem: &GuestMemory, i: u16) -> (u32, u32) {
+            let base = self.used + 4 + 8 * u64::from(i);
+            (
+                mem.read_obj(GuestAddress(base)).unwrap(),
+                mem.read_obj(GuestAddress(base + 4)).unwrap(),
+            )
+        }
+    }
+
+    /// One NIC wired to a switch listener the tests drive by hand.
+    struct Fixture {
+        _dir: TempDir,
+        switch_path: PathBuf,
+        mem: GuestMemory,
+        dev: Net,
+        irq: Arc<TestInterrupt>,
+        vqs: Vec<TestVq>,
+        switch: Option<UnixListener>,
+        accepted: Option<UnixStream>,
+    }
+
+    impl Fixture {
+        fn new() -> Fixture {
+            let dir = TempDir::new();
+            let switch_path = dir.0.join("switch.sock");
+            let switch = UnixListener::bind(&switch_path).unwrap();
+            switch.set_nonblocking(true).unwrap();
+            let dev = Net::with_retry_interval(
+                NetConfig {
+                    id: "nic0".into(),
+                    mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+                    mtu: 1500,
+                    switch: switch_path.clone(),
+                },
+                RETRY,
+            )
+            .unwrap();
+            let mem = GuestMemory::from_ranges(&[(GuestAddress(0), MEM_SIZE as usize)]).unwrap();
+            let irq = Arc::new(TestInterrupt::default());
+            let vqs = vec![TestVq::new(0x1000, 256), TestVq::new(0x2_0000, 256)];
+            let mut f = Fixture {
+                _dir: dir,
+                switch_path: switch_path.clone(),
+                mem,
+                dev,
+                irq,
+                vqs,
+                switch: Some(switch),
+                accepted: None,
+            };
+            // What a modern transport negotiates: the whole feature set.
+            f.dev.ack_features(f.dev.features());
+            f.activate();
+            f
+        }
+
+        fn activate(&mut self) {
+            let queues: Vec<Queue> = self.vqs.iter().map(|v| v.queue()).collect();
+            self.dev
+                .activate(self.mem.clone(), self.irq.clone(), queues)
+                .unwrap();
+        }
+
+        /// The address of scratch data buffer `i`.
+        fn data(&self, i: u64) -> u64 {
+            DATA_BASE + 0x1_0000 * i
+        }
+
+        /// The config status field.
+        fn status(&self) -> u16 {
+            let mut bytes = [0u8; 2];
+            self.dev.read_config(6, &mut bytes);
+            u16::from_le_bytes(bytes)
+        }
+
+        /// Wait for the device to connect and hand the switch-side stream
+        /// over (owned, so the fixture stays usable while it is held).
+        fn take_switch_side(&mut self) -> UnixStream {
+            if self.accepted.is_none() {
+                let mut stream = None;
+                wait_for("device to connect to the switch", || {
+                    match self.switch.as_ref().unwrap().accept() {
+                        Ok((s, _)) => {
+                            stream = Some(s);
+                            true
+                        }
+                        Err(_) => false,
+                    }
+                });
+                self.accepted = stream;
+            }
+            self.accepted.take().unwrap()
+        }
+
+        /// Stop serving the switch: connections die and new ones are
+        /// refused, like a switch process that went away.
+        fn switch_down(&mut self) {
+            self.accepted = None;
+            self.switch = None;
+            let _ = std::fs::remove_file(&self.switch_path);
+        }
+
+        /// Serve the switch again.
+        fn switch_up(&mut self) {
+            let listener = UnixListener::bind(&self.switch_path).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            self.switch = Some(listener);
+        }
+
+        /// Queue one packet for transmit: a zeroed 12-byte header descriptor
+        /// chained to a frame descriptor.
+        fn queue_tx(&mut self, frame: &[u8]) {
+            let hdr_addr = self.data(0);
+            let frame_addr = self.data(1);
+            self.mem
+                .write_slice(frame, GuestAddress(frame_addr))
+                .unwrap();
+            self.vqs[1].add_chain(
+                &self.mem,
+                &[
+                    (hdr_addr, 12, false),
+                    (frame_addr, frame.len() as u32, false),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn config_space_carries_mac_status_and_mtu() {
+        let dir = TempDir::new();
+        let switch = dir.0.join("switch.sock");
+        let big = Net::new(NetConfig {
+            id: "mtu".into(),
+            mac: [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc],
+            mtu: 9000,
+            switch: switch.clone(),
+        })
+        .unwrap();
+        assert_eq!(big.device_type(), 1);
+        assert_eq!(big.queue_max_sizes(), &[256, 256]);
+        let features = big.features();
+        assert_ne!(features & F_MTU, 0);
+        assert_ne!(features & F_MAC, 0);
+        assert_ne!(features & F_STATUS, 0);
+        assert_ne!(features & F_VERSION_1, 0);
+        let mut config = [0u8; 10];
+        big.read_config(0, &mut config);
+        assert_eq!(&config[0..6], &[0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc]);
+        assert_eq!(u16::from_le_bytes(config[8..10].try_into().unwrap()), 9000);
+        drop(big);
+
+        // The default MTU keeps the field out of the config space.
+        let normal = Net::new(NetConfig {
+            id: "mtu".into(),
+            mac: [0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc],
+            mtu: 1500,
+            switch,
+        })
+        .unwrap();
+        assert_eq!(normal.features() & F_MTU, 0);
+        let mut config = [0u8; 10];
+        normal.read_config(0, &mut config);
+        assert_eq!(&config[8..10], &[0, 0]);
+    }
+
+    #[test]
+    fn guest_tx_reaches_the_switch_with_length_framing() {
+        let mut f = Fixture::new();
+        let mut switch = f.take_switch_side();
+        switch
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let frame = b"an ethernet frame";
+        f.queue_tx(frame);
+        f.dev.queue_notify(1);
+
+        let mut prefix = [0u8; 4];
+        switch.read_exact(&mut prefix).unwrap();
+        assert_eq!(u32::from_be_bytes(prefix), frame.len() as u32);
+        let mut got = vec![0u8; frame.len()];
+        switch.read_exact(&mut got).unwrap();
+        assert_eq!(&got, &frame[..]);
+
+        wait_for("tx buffer returned", || f.vqs[1].used_idx(&f.mem) == 1);
+        let (_, len) = f.vqs[1].used_entry(&f.mem, 0);
+        assert_eq!(len as usize, 12 + frame.len());
+    }
+
+    #[test]
+    fn switch_rx_reaches_the_guest_behind_a_zeroed_header() {
+        let mut f = Fixture::new();
+        let mut switch = f.take_switch_side();
+        switch
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let frame = b"frame from the switch";
+        let addr = f.data(2);
+        f.vqs[0].add_chain(&f.mem, &[(addr, (12 + frame.len()) as u32, true)]);
+        // The driver kicks after adding receive buffers, as the spec
+        // requires; the device relies on it to refresh its poll interest.
+        f.dev.queue_notify(0);
+
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+        wire.extend_from_slice(frame);
+        switch.write_all(&wire).unwrap();
+
+        wait_for("rx buffer used", || f.vqs[0].used_idx(&f.mem) == 1);
+        let (_, len) = f.vqs[0].used_entry(&f.mem, 0);
+        assert_eq!(len as usize, 12 + frame.len());
+        let mut got = vec![0u8; 12 + frame.len()];
+        f.mem.read_slice(&mut got, GuestAddress(addr)).unwrap();
+        assert_eq!(&got[0..10], &[0u8; 10]); // no offloads, no hash
+        assert_eq!(&got[10..12], &[1, 0]); // num_buffers = 1, little-endian
+        assert_eq!(&got[12..], &frame[..]);
+    }
+
+    #[test]
+    fn link_drops_and_reconnects_with_frames_discarded_while_down() {
+        let mut f = Fixture::new();
+        let switch = f.take_switch_side();
+        drop(switch);
+        wait_for("link up", || f.status() & S_LINK_UP != 0);
+
+        // The switch process dies: the connection drops and nothing accepts
+        // a new one until it comes back.
+        let configs_before = f.irq.config_count();
+        f.switch_down();
+        wait_for("link down", || f.status() & S_LINK_UP == 0);
+        wait_for("config-change interrupt", || {
+            f.irq.config_count() > configs_before
+        });
+
+        // Transmit while down: the buffer returns, the frame is dropped.
+        f.queue_tx(b"into the void");
+        f.dev.queue_notify(1);
+        wait_for("tx buffer returned", || f.vqs[1].used_idx(&f.mem) == 1);
+
+        // The switch comes back and the device reconnects on its own.
+        f.switch_up();
+        let mut reconnected = f.take_switch_side();
+        wait_for("link up again", || f.status() & S_LINK_UP != 0);
+
+        let frame = b"after reconnect";
+        f.queue_tx(frame);
+        f.dev.queue_notify(1);
+        let mut prefix = [0u8; 4];
+        reconnected.read_exact(&mut prefix).unwrap();
+        assert_eq!(u32::from_be_bytes(prefix), frame.len() as u32);
+        let mut got = vec![0u8; frame.len()];
+        reconnected.read_exact(&mut got).unwrap();
+        assert_eq!(&got, &frame[..]);
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_queues_and_pending_frames() {
+        let mut f = Fixture::new();
+        let mut switch = f.take_switch_side();
+        switch
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        // One delivered frame, then one frame left pending: no receiveq
+        // buffer is posted for it, so it waits inside the device.
+        let frame = b"delivered";
+        let addr = f.data(2);
+        f.vqs[0].add_chain(&f.mem, &[(addr, (12 + frame.len()) as u32, true)]);
+        f.dev.queue_notify(0);
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+        wire.extend_from_slice(frame);
+        wire.extend_from_slice(&(7u32).to_be_bytes());
+        wire.extend_from_slice(b"pending");
+        switch.write_all(&wire).unwrap();
+        wait_for("first rx frame delivered", || {
+            f.vqs[0].used_idx(&f.mem) == 1
+        });
+        thread::sleep(Duration::from_millis(100));
+        let used_before = f.vqs[0].used_idx(&f.mem);
+        let state = f.dev.save_state().unwrap();
+
+        // A fresh device takes the state over and reconnects to the switch.
+        let Fixture {
+            _dir,
+            switch_path,
+            mem,
+            dev,
+            irq,
+            vqs,
+            switch: _,
+            accepted: _,
+        } = f;
+        drop(dev);
+        let mut dev2 = Net::with_retry_interval(
+            NetConfig {
+                id: "nic0".into(),
+                mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+                mtu: 1500,
+                switch: switch_path,
+            },
+            RETRY,
+        )
+        .unwrap();
+        dev2.ack_features(dev2.features());
+        dev2.restore_state(&state).unwrap();
+        let queues: Vec<Queue> = vqs.iter().map(|v| v.queue()).collect();
+        dev2.activate(mem.clone(), irq, queues).unwrap();
+
+        // The driver reposts a receiveq buffer and the pending frame lands,
+        // with the used ring continuing where the snapshot left it.
+        let addr = DATA_BASE + 0x1_0000 * 3;
+        let mut vqs = vqs;
+        vqs[0].add_chain(&mem, &[(addr, 64, true)]);
+        dev2.queue_notify(0);
+        let want = used_before + 1;
+        wait_for("pending frame delivered", || vqs[0].used_idx(&mem) == want);
+        let mut got = [0u8; 7];
+        mem.read_slice(&mut got, GuestAddress(addr + 12)).unwrap();
+        assert_eq!(&got, b"pending");
+        let (_, len) = vqs[0].used_entry(&mem, used_before);
+        assert_eq!(len, 12 + 7);
     }
 }

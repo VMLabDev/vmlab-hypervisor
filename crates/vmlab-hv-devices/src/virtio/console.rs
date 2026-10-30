@@ -20,15 +20,15 @@
 //! free descriptor chain, and undelivered bytes wait in a staging buffer
 //! instead of being dropped.
 
+use parking_lot::{Mutex, MutexGuard};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
-use parking_lot::{Mutex, MutexGuard};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use virtio_queue::{Queue, QueueState, QueueT};
@@ -210,10 +210,10 @@ impl Drop for Console {
 /// Bind one port's listener, replacing any socket file a previous machine
 /// left behind, exactly as a respawned QEMU rebinds its ports.
 fn bind_listener(path: &Path) -> io::Result<UnixListener> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(path);
     UnixListener::bind(path)
@@ -384,10 +384,11 @@ fn run(
                     None => {}
                 }
             }
-            if clients[i].is_some() && revents & libc::POLLOUT != 0 {
-                if let Some(client) = clients[i].as_mut() {
-                    flush_tx(&shared, i, client);
-                }
+            if clients[i].is_some()
+                && revents & libc::POLLOUT != 0
+                && let Some(client) = clients[i].as_mut()
+            {
+                flush_tx(&shared, i, client);
             }
             if clients[i].is_some() && revents & (libc::POLLHUP | libc::POLLERR) != 0 {
                 disconnect(&shared, &mut clients, i);
@@ -435,11 +436,11 @@ fn handle_kick(shared: &Arc<Mutex<Shared>>, clients: &mut [Option<UnixStream>], 
         }
         3 => process_ctrl_tx(shared),
         _ => {
-            if let Some(port) = rx_port(queue) {
-                if port >= 1 {
-                    let mut sh = lock(shared);
-                    drain_rx_stage(&mut sh, port as usize - 1);
-                }
+            if let Some(port) = rx_port(queue)
+                && port >= 1
+            {
+                let mut sh = lock(shared);
+                drain_rx_stage(&mut sh, port as usize - 1);
             }
             if let Some(port) = tx_port(queue) {
                 process_tx(shared, clients, port);
@@ -472,7 +473,11 @@ fn drain_rx_stage(sh: &mut Shared, i: usize) {
         let Some(mem) = sh.mem.as_ref() else {
             return;
         };
-        let Some(q) = sh.queues.get_mut(usize::from(queue)).and_then(|q| q.as_mut()) else {
+        let Some(q) = sh
+            .queues
+            .get_mut(usize::from(queue))
+            .and_then(|q| q.as_mut())
+        else {
             return;
         };
         while !sh.ports[i].rx_stage.is_empty() {
@@ -514,7 +519,11 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, clients: &mut [Option<UnixStream>], p
         let Some(mem) = sh.mem.as_ref() else {
             return;
         };
-        let Some(q) = sh.queues.get_mut(usize::from(queue)).and_then(|q| q.as_mut()) else {
+        let Some(q) = sh
+            .queues
+            .get_mut(usize::from(queue))
+            .and_then(|q| q.as_mut())
+        else {
             return;
         };
         while let Some(chain) = q.pop_descriptor_chain(mem) {
@@ -598,15 +607,16 @@ fn process_ctrl_tx(shared: &Arc<Mutex<Shared>>) {
             let head = chain.head_index();
             let mut buf = [0u8; CTRL_LEN];
             let mut len = 0;
-            if let Ok(mut reader) = chain.reader(mem) {
-                if reader.available_bytes() >= CTRL_LEN && reader.read_exact(&mut buf).is_ok() {
-                    len = CTRL_LEN as u32;
-                    msgs.push((
-                        u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-                        u16::from_le_bytes(buf[4..6].try_into().unwrap()),
-                        u16::from_le_bytes(buf[6..8].try_into().unwrap()),
-                    ));
-                }
+            if let Ok(mut reader) = chain.reader(mem)
+                && reader.available_bytes() >= CTRL_LEN
+                && reader.read_exact(&mut buf).is_ok()
+            {
+                len = CTRL_LEN as u32;
+                msgs.push((
+                    u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+                    u16::from_le_bytes(buf[4..6].try_into().unwrap()),
+                    u16::from_le_bytes(buf[6..8].try_into().unwrap()),
+                ));
             }
             if q.add_used(mem, head, len).is_err() {
                 break;
@@ -910,13 +920,19 @@ impl Snapshot for Console {
             let event = dec.u16()?;
             let value = dec.u16()?;
             let name = if dec.u8()? == 1 {
-                Some(String::from_utf8(dec.bytes()?).map_err(|_| {
-                    DeviceError::State("invalid port name in snapshot".into())
-                })?)
+                Some(
+                    String::from_utf8(dec.bytes()?)
+                        .map_err(|_| DeviceError::State("invalid port name in snapshot".into()))?,
+                )
             } else {
                 None
             };
-            pending.push_back(CtrlMsg { id, event, value, name });
+            pending.push_back(CtrlMsg {
+                id,
+                event,
+                value,
+                name,
+            });
         }
         let nqueues = dec.u32()? as usize;
         if nqueues != self.queue_count() {
@@ -1042,7 +1058,7 @@ impl Dec<'_> {
         Ok(u64::from_le_bytes(b.try_into().unwrap()))
     }
     fn raw(&mut self, n: usize) -> Result<&[u8], DeviceError> {
-        self.take(n).map(|s| s)
+        self.take(n)
     }
     fn bytes(&mut self) -> Result<Vec<u8>, DeviceError> {
         let len = self.u32()? as usize;
@@ -1151,9 +1167,12 @@ mod tests {
         fn queue(&self) -> Queue {
             let mut q = Queue::new(self.size).unwrap();
             q.try_set_size(self.size).unwrap();
-            q.try_set_desc_table_address(GuestAddress(self.desc)).unwrap();
-            q.try_set_avail_ring_address(GuestAddress(self.avail)).unwrap();
-            q.try_set_used_ring_address(GuestAddress(self.used)).unwrap();
+            q.try_set_desc_table_address(GuestAddress(self.desc))
+                .unwrap();
+            q.try_set_avail_ring_address(GuestAddress(self.avail))
+                .unwrap();
+            q.try_set_used_ring_address(GuestAddress(self.used))
+                .unwrap();
             q.set_event_idx(false);
             q.set_ready(true);
             q
@@ -1180,13 +1199,13 @@ mod tests {
             }
             self.next_desc += descs.len() as u16;
             let avail_idx: u16 = mem.read_obj(GuestAddress(self.avail + 2)).unwrap();
-            mem.write_obj(head, GuestAddress(self.avail + 4 + 2 * u64::from(avail_idx)))
-                .unwrap();
             mem.write_obj(
-                avail_idx.wrapping_add(1),
-                GuestAddress(self.avail + 2),
+                head,
+                GuestAddress(self.avail + 4 + 2 * u64::from(avail_idx)),
             )
             .unwrap();
+            mem.write_obj(avail_idx.wrapping_add(1), GuestAddress(self.avail + 2))
+                .unwrap();
             head
         }
 
@@ -1300,9 +1319,7 @@ mod tests {
                     let (head, len) = self.vqs[2].used_entry(&self.mem, i as u16);
                     let addr = self.vqs[2].desc_addr(&self.mem, head as u16);
                     let mut body = vec![0u8; len as usize];
-                    self.mem
-                        .read_slice(&mut body, GuestAddress(addr))
-                        .unwrap();
+                    self.mem.read_slice(&mut body, GuestAddress(addr)).unwrap();
                     (
                         u32::from_le_bytes(body[0..4].try_into().unwrap()),
                         u16::from_le_bytes(body[4..6].try_into().unwrap()),
@@ -1352,15 +1369,9 @@ mod tests {
         assert_eq!(msgs[1], (0, EV_CONSOLE_PORT, 1, Vec::new()));
         // The named ports, ctl first (vmlab's order).
         assert_eq!(msgs[2], (1, EV_PORT_ADD, 0, Vec::new()));
-        assert_eq!(
-            msgs[3],
-            (1, EV_PORT_NAME, 0, b"vmlab.ctl.0".to_vec())
-        );
+        assert_eq!(msgs[3], (1, EV_PORT_NAME, 0, b"vmlab.ctl.0".to_vec()));
         assert_eq!(msgs[4], (2, EV_PORT_ADD, 0, Vec::new()));
-        assert_eq!(
-            msgs[5],
-            (2, EV_PORT_NAME, 0, b"vmlab.agent.0".to_vec())
-        );
+        assert_eq!(msgs[5], (2, EV_PORT_NAME, 0, b"vmlab.agent.0".to_vec()));
         // The used length of a name message covers header plus name.
         let (_, len) = f.vqs[2].used_entry(&f.mem, 3);
         assert_eq!(len as usize, 8 + "vmlab.ctl.0".len());
@@ -1373,12 +1384,16 @@ mod tests {
         f.post_ctrl_rx(8);
         let client = UnixStream::connect(&f.agent_sock).unwrap();
         wait_for("PORT_OPEN(2,1)", || {
-            f.ctrl_delivered().last().is_some_and(|m| *m == (2, EV_PORT_OPEN, 1, Vec::new()))
+            f.ctrl_delivered()
+                .last()
+                .is_some_and(|m| *m == (2, EV_PORT_OPEN, 1, Vec::new()))
         });
         drop(client);
         f.post_ctrl_rx(9);
         wait_for("PORT_OPEN(2,0)", || {
-            f.ctrl_delivered().last().is_some_and(|m| *m == (2, EV_PORT_OPEN, 0, Vec::new()))
+            f.ctrl_delivered()
+                .last()
+                .is_some_and(|m| *m == (2, EV_PORT_OPEN, 0, Vec::new()))
         });
     }
 
@@ -1386,13 +1401,16 @@ mod tests {
     fn guest_output_reaches_the_connected_client() {
         let mut f = Fixture::new();
         let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         // Bring-up with the client connected: the announcement carries the
         // port-open state, and proves the worker accepted the client.
         f.device_ready(8, 7);
-        assert!(f
-            .ctrl_delivered()
-            .contains(&(1, EV_PORT_OPEN, 1, Vec::new())));
+        assert!(
+            f.ctrl_delivered()
+                .contains(&(1, EV_PORT_OPEN, 1, Vec::new()))
+        );
 
         let addr = f.data(1);
         f.mem.write_slice(b"hello ctl", GuestAddress(addr)).unwrap();
@@ -1411,7 +1429,9 @@ mod tests {
     fn host_input_reaches_the_guest_receiveq() {
         let mut f = Fixture::new();
         let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         f.device_ready(8, 7);
 
         let addr = f.data(2);
@@ -1434,7 +1454,9 @@ mod tests {
     fn guest_output_without_a_client_is_discarded() {
         let mut f = Fixture::new();
         let addr = f.data(1);
-        f.mem.write_slice(b"nobody home", GuestAddress(addr)).unwrap();
+        f.mem
+            .write_slice(b"nobody home", GuestAddress(addr))
+            .unwrap();
         f.vqs[5].add_chain(&f.mem, &[(addr, 11, false)]);
         f.dev.queue_notify(5);
         // The buffer still returns to the driver.
@@ -1442,7 +1464,9 @@ mod tests {
 
         // A client connecting afterwards receives nothing.
         let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
-        client.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
         let mut got = [0u8; 11];
         assert!(client.read_exact(&mut got).is_err());
     }
@@ -1451,7 +1475,9 @@ mod tests {
     fn host_input_waits_for_a_receiveq_buffer() {
         let mut f = Fixture::new();
         let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
-        client.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         f.device_ready(8, 7);
 
         // Bytes with no receiveq buffer wait under backpressure, they are
@@ -1550,7 +1576,6 @@ mod tests {
         let (_, len) = vqs[4].used_entry(&mem, used_before);
         assert_eq!(len, 4);
     }
-
 
     #[test]
     fn reset_stops_using_the_queues() {
