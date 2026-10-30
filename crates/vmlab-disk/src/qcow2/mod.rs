@@ -7,6 +7,7 @@
 mod refcount;
 mod snapshot;
 
+use self::refcount::FreeClusters;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -59,20 +60,25 @@ impl TableCache {
         self.map.get(&key)
     }
 
-    fn put(&mut self, key: u64, data: Vec<u8>, dirty: bool) {
+    /// Insert an entry, returning any dirty entries evicted to make room.
+    /// The caller must write those to disk before their clusters can be
+    /// handed out again — dropping a dirty table would silently lose
+    /// refcount or L2 updates.
+    fn put(&mut self, key: u64, data: Vec<u8>, dirty: bool) -> Vec<(u64, Vec<u8>)> {
+        let mut evicted = Vec::new();
         if !self.map.contains_key(&key) {
             while self.map.len() >= self.cap {
-                let evict = self.order.pop_front();
-                match evict {
-                    Some(k) => {
-                        self.map.remove(&k);
-                    }
-                    None => break,
+                let Some(k) = self.order.pop_front() else { break };
+                if let Some((buf, dirty)) = self.map.remove(&k)
+                    && dirty
+                {
+                    evicted.push((k, buf));
                 }
             }
         }
         self.touch(key);
         self.map.insert(key, (data, dirty));
+        evicted
     }
 
     fn mark_dirty(&mut self, key: u64) {
@@ -140,12 +146,10 @@ pub struct Qcow2Image {
 
     l2_cache: TableCache,
     refblock_cache: TableCache,
-
+    free: FreeClusters,
     header_dirty: bool,
     l1_dirty: bool,
     refcount_table_dirty: bool,
-    /// Host cluster index the free-cluster search starts from.
-    free_hint: u64,
 }
 
 impl Qcow2Image {
@@ -368,7 +372,7 @@ impl Qcow2Image {
             None
         };
 
-        let mut img = Qcow2Image {
+        let img = Qcow2Image {
             file,
             path: path.to_path_buf(),
             read_only,
@@ -393,16 +397,9 @@ impl Qcow2Image {
             header_dirty: false,
             l1_dirty: false,
             refcount_table_dirty: false,
-            free_hint: 1, // cluster 0 is the header
+            free: FreeClusters::default(),
         };
-        img.recompute_free_hint();
         Ok(img)
-    }
-
-    /// Point the free-cluster search just past the highest refcounted
-    /// cluster; frees move the hint back down as they happen.
-    fn recompute_free_hint(&mut self) {
-        self.recompute_free_hint_from_tables();
     }
 
     fn open_backing(&mut self, depth: usize) -> Result<()> {
@@ -488,7 +485,9 @@ impl Qcow2Image {
         }
         let mut buf = vec![0u8; self.cluster_size as usize];
         self.read_file(host_offset, &mut buf)?;
-        self.l2_cache.put(host_offset, buf, false);
+        for (host, table) in self.l2_cache.put(host_offset, buf, false) {
+            self.write_file(host, &table)?;
+        }
         Ok(())
     }
 
@@ -928,7 +927,7 @@ impl Qcow2Image {
             header_dirty: false,
             l1_dirty: false,
             refcount_table_dirty: false,
-            free_hint: 3 + l1_clusters,
+            free: FreeClusters::default(),
         };
         // Refcounts for the metadata clusters themselves.
         for idx in 0u64..(3 + l1_clusters) {
@@ -1279,6 +1278,63 @@ mod tests {
         assert_eq!(img.vmstate_base(), 512 * 1024 * 1024);
         img.size = 600 * 1024 * 1024;
         assert_eq!(img.vmstate_base(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn freed_clusters_are_reused_lowest_first() {
+        let mut img = testsupport::blank(8 * 1024 * 1024);
+        let a = img.alloc_cluster().unwrap();
+        let b = img.alloc_cluster().unwrap();
+        let c = img.alloc_cluster().unwrap();
+        assert_eq!(b, a + img.cluster_size);
+        img.dec_refcount(a / img.cluster_size).unwrap();
+        img.dec_refcount(c / img.cluster_size).unwrap();
+        // The lowest hole goes first, then the next.
+        assert_eq!(img.alloc_cluster().unwrap(), a);
+        assert_eq!(img.alloc_cluster().unwrap(), c);
+    }
+
+    #[test]
+    fn holes_from_a_previous_session_are_reused_on_reopen() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp-unit");
+        std::fs::create_dir_all(&dir).expect("create target dir");
+        let path = dir.join(format!("reuse-{}.qcow2", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        Qcow2Image::create(&path, 8 * 1024 * 1024, 16, None)
+            .expect("create")
+            .flush()
+            .expect("flush create");
+
+        // Fill a region, then free it: snapshot, overwrite (the snapshot
+        // pins the old clusters), delete the snapshot.
+        {
+            let mut img = Qcow2Image::open(&path, false).unwrap();
+            img.write_at(0, &vec![0xa5; 256 * 1024]).unwrap();
+            img.flush().unwrap();
+            img.snapshot_create("s", 0, 0).unwrap();
+            img.write_at(0, &vec![0x5a; 256 * 1024]).unwrap();
+            img.snapshot_delete("s").unwrap();
+            img.flush().unwrap();
+        }
+        let len_freed = std::fs::metadata(&path).unwrap().len();
+
+        // A fresh open must see the holes in the refblocks, not a hint
+        // past the highest refcounted cluster.
+        {
+            let mut img = Qcow2Image::open(&path, false).unwrap();
+            img.write_at(2 * 1024 * 1024, &vec![0x3c; 256 * 1024])
+                .unwrap();
+            img.flush().unwrap();
+        }
+        let len_after = std::fs::metadata(&path).unwrap().len();
+        assert!(
+            len_after <= len_freed + img_cluster_size(&path),
+            "reopen did not reuse freed holes: {len_freed} -> {len_after}"
+        );
+    }
+
+    fn img_cluster_size(path: &Path) -> u64 {
+        Qcow2Image::open(path, true).unwrap().cluster_size_bytes()
     }
 }
 
