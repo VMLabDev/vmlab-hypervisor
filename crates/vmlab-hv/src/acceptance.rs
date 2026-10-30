@@ -2,8 +2,9 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use vmlab_hv_tests::process::ManagedChild;
 
 use vmlab_hv_proto::{
     client::Client,
@@ -11,7 +12,7 @@ use vmlab_hv_proto::{
 };
 use vmlab_hv_tests::agent::AgentClient;
 
-struct Process(Child);
+struct Process(ManagedChild);
 impl Drop for Process {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -132,17 +133,18 @@ fn boot_template(
                 .join("vmlab-hv")
         });
     let mut process = Process(
-        Command::new(&binary)
-            .arg("--machine")
-            .arg(&machine)
-            .arg("--control")
-            .arg(&control)
-            .arg("--paused")
-            .env("VMLAB_HV_DIAGNOSTICS", "1")
-            .stdout(Stdio::null())
-            .stderr(File::create(&stderr).unwrap())
-            .spawn()
-            .unwrap(),
+        ManagedChild::spawn(
+            Command::new(&binary)
+                .arg("--machine")
+                .arg(&machine)
+                .arg("--control")
+                .arg(&control)
+                .arg("--paused")
+                .env("VMLAB_HV_DIAGNOSTICS", "1")
+                .stdout(Stdio::null())
+                .stderr(File::create(&stderr).unwrap()),
+        )
+        .unwrap(),
     );
     let diagnostics = || {
         format!(
@@ -182,12 +184,8 @@ fn boot_template(
         .ok()
         .map(|v| v.parse().unwrap())
         .unwrap_or(120);
-    let mut guest =
-        AgentClient::connect(&agent, Duration::from_secs(timeout)).unwrap_or_else(|e| {
-            let _ = client.call(Control::Quit);
-            let _ = process.0.wait();
-            panic!("{name} agent: {e}; {}", diagnostics())
-        });
+    let mut guest = AgentClient::connect(&agent, Duration::from_secs(timeout))
+        .unwrap_or_else(|e| panic!("{name} agent: {e}; {}", diagnostics()));
     let result = guest
         .exec(
             &["/bin/sh", "-c", "printf firmware-agent-ready"],

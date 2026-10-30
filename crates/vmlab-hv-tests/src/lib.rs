@@ -10,10 +10,12 @@
 
 pub mod agent;
 pub mod ctl;
+pub mod process;
 pub mod switch;
 
+use process::ManagedChild;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use vmlab_hv_proto::client::Client;
@@ -187,6 +189,7 @@ pub struct MachineSpec {
     pub vcpus: u32,
     pub paused: bool,
     pub rtc_base: Option<String>,
+    pub extra_ports: Vec<String>,
 }
 
 impl MachineSpec {
@@ -199,6 +202,7 @@ impl MachineSpec {
             vcpus: 1,
             paused: false,
             rtc_base: None,
+            extra_ports: Vec::new(),
         }
     }
 
@@ -242,7 +246,7 @@ impl MachineSpec {
 /// sockets live at. Dropping it stops the process and removes the directory.
 pub struct Guest {
     dir: Option<tempfile::TempDir>,
-    pub child: Child,
+    pub child: ManagedChild,
     pub control: Client,
     pub ctl_sock: PathBuf,
     pub agent_sock: PathBuf,
@@ -348,7 +352,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         (None, None)
     };
 
-    let desc = MachineDescription {
+    let mut desc = MachineDescription {
         machine: Default::default(),
         cpu: Default::default(),
         hyperv: vec![],
@@ -419,6 +423,12 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         audio: None,
         rtc_base: spec.rtc_base.clone(),
     };
+    for (index, name) in spec.extra_ports.iter().enumerate() {
+        desc.ports.push(SerialPort {
+            name: name.clone(),
+            socket: dir.join(format!("extra-{index}.sock")),
+        });
+    }
     let machine_path = dir.join("machine.json");
     std::fs::write(
         &machine_path,
@@ -429,16 +439,17 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
     let hv_log_path = dir.join("hv.log");
     let hv_log = std::fs::File::create(&hv_log_path).expect("create hv log");
     let control_path = dir.join("control.sock");
-    let mut child = Command::new(hv_binary())
-        .arg("--machine")
-        .arg(&machine_path)
-        .arg("--control")
-        .arg(&control_path)
-        .args(spec.paused.then_some("--paused"))
-        .stdout(Stdio::from(hv_log.try_clone().expect("clone hv log")))
-        .stderr(Stdio::from(hv_log))
-        .spawn()
-        .expect("spawn vmlab-hv");
+    let mut child = ManagedChild::spawn(
+        Command::new(hv_binary())
+            .arg("--machine")
+            .arg(&machine_path)
+            .arg("--control")
+            .arg(&control_path)
+            .args(spec.paused.then_some("--paused"))
+            .stdout(Stdio::from(hv_log.try_clone().expect("clone hv log")))
+            .stderr(Stdio::from(hv_log)),
+    )
+    .expect("spawn vmlab-hv");
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let control = loop {

@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use vmlab_hv_tests::process::ManagedChild;
 
 use vmlab_hv_proto::client::Client;
 use vmlab_hv_proto::control::{Command as Ctrl, Event, Outcome, RunState, ShutdownReason};
@@ -66,7 +67,7 @@ impl Dir {
     }
 }
 
-fn wait_for_exit(mut child: std::process::Child, timeout: Duration) -> std::process::ExitStatus {
+fn wait_for_exit(mut child: ManagedChild, timeout: Duration) -> std::process::ExitStatus {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait().unwrap() {
@@ -94,6 +95,7 @@ fn display_startup_failure_preserves_targets_and_never_advertises_control() {
         return;
     }
     for occupied in [true, false] {
+        let _permit = vmlab_hv_tests::process::VmPermit::acquire().unwrap();
         let dir = Dir::new("display-startup");
         let machine = dir.machine();
         let native = dir.path.join("native.sock");
@@ -137,6 +139,45 @@ fn display_startup_failure_preserves_targets_and_never_advertises_control() {
 }
 
 #[test]
+fn panic_after_control_ready_kills_and_reaps_vm() {
+    if !kernel_available() {
+        eprintln!("skipping: /dev/kvm or container kernel is absent");
+        return;
+    }
+    let dir = Dir::new("unwind");
+    let mut pid = 0;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let child = ManagedChild::spawn(
+            Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+                .arg("--machine")
+                .arg(dir.machine())
+                .arg("--control")
+                .arg(dir.control())
+                .arg("--paused")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if Client::connect(dir.control()).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "control startup timeout");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("injected failure after VM startup");
+    }));
+    assert!(result.is_err());
+    assert_ne!(pid, 0);
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "VM survived panic"
+    );
+}
+
+#[test]
 fn boots_kernel_and_exits_zero_on_guest_reset() {
     if !kernel_available() {
         eprintln!("skipping: /dev/kvm or the container kernel is not present");
@@ -145,15 +186,16 @@ fn boots_kernel_and_exits_zero_on_guest_reset() {
     let dir = Dir::new("reset");
     let machine = dir.machine();
 
-    let child = Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
-        .arg("--machine")
-        .arg(&machine)
-        .arg("--control")
-        .arg(dir.control())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn vmlab-hv");
+    let child = ManagedChild::spawn(
+        Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+            .arg("--machine")
+            .arg(&machine)
+            .arg("--control")
+            .arg(dir.control())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .expect("spawn vmlab-hv");
 
     let status = wait_for_exit(child, Duration::from_secs(60));
     assert!(status.success(), "guest reset must exit 0: {status}");
@@ -173,16 +215,17 @@ fn paused_machine_resumes_over_the_control_socket() {
     let dir = Dir::new("paused");
     let machine = dir.machine();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
-        .arg("--machine")
-        .arg(&machine)
-        .arg("--control")
-        .arg(dir.control())
-        .arg("--paused")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn vmlab-hv");
+    let mut child = ManagedChild::spawn(
+        Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+            .arg("--machine")
+            .arg(&machine)
+            .arg("--control")
+            .arg(dir.control())
+            .arg("--paused")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .expect("spawn vmlab-hv");
 
     // The control socket exists before the vCPUs run.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -246,16 +289,17 @@ fn quit_stops_the_machine_with_exit_zero() {
     let dir = Dir::new("quit");
     let machine = dir.machine();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
-        .arg("--machine")
-        .arg(&machine)
-        .arg("--control")
-        .arg(dir.control())
-        .arg("--paused")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn vmlab-hv");
+    let mut child = ManagedChild::spawn(
+        Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+            .arg("--machine")
+            .arg(&machine)
+            .arg("--control")
+            .arg(dir.control())
+            .arg("--paused")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .expect("spawn vmlab-hv");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut client = loop {
@@ -318,15 +362,16 @@ fn virtio_devices_are_enumerated_through_the_pci_root() {
     let machine = dir.path.join("machine.json");
     std::fs::write(&machine, json).unwrap();
 
-    let child = Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
-        .arg("--machine")
-        .arg(&machine)
-        .arg("--control")
-        .arg(dir.control())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn vmlab-hv");
+    let child = ManagedChild::spawn(
+        Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+            .arg("--machine")
+            .arg(&machine)
+            .arg("--control")
+            .arg(dir.control())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .expect("spawn vmlab-hv");
 
     let status = wait_for_exit(child, Duration::from_secs(60));
     assert!(status.success(), "{status}");

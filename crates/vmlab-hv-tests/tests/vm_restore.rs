@@ -1,8 +1,9 @@
 //! S1/P1: restore a firmware-booted VM during filesystem writes.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use vmlab_hv_tests::process::ManagedChild;
 
 use serde_json::json;
 use vmlab_hv_proto::client::Client;
@@ -11,7 +12,7 @@ use vmlab_hv_proto::machine::MachineDescription;
 use vmlab_hv_tests::agent::{AgentClient, ExecOutput};
 
 struct Vm {
-    child: Child,
+    child: ManagedChild,
     dir: tempfile::TempDir,
     control: Client,
 }
@@ -139,15 +140,16 @@ fn launch() -> Option<Vm> {
     )
     .unwrap();
     let log = std::fs::File::create(path.join("hv.log")).unwrap();
-    let mut child = Command::new(vmlab_hv_tests::hv_binary())
-        .arg("--machine")
-        .arg(path.join("machine.json"))
-        .arg("--control")
-        .arg(path.join("control.sock"))
-        .stdout(Stdio::from(log.try_clone().unwrap()))
-        .stderr(Stdio::from(log))
-        .spawn()
-        .unwrap();
+    let mut child = ManagedChild::spawn(
+        Command::new(vmlab_hv_tests::hv_binary())
+            .arg("--machine")
+            .arg(path.join("machine.json"))
+            .arg("--control")
+            .arg(path.join("control.sock"))
+            .stdout(Stdio::from(log.try_clone().unwrap()))
+            .stderr(Stdio::from(log)),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     let control = loop {
         if let Ok(control) = Client::connect(path.join("control.sock")) {

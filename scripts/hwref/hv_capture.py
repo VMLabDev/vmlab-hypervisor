@@ -14,6 +14,7 @@ import tempfile
 import time
 
 import capture
+from process_guard import VmPermit, spawn_process, stop_process
 
 
 def unsupported_firmware(stderr: str) -> bool:
@@ -115,9 +116,11 @@ def capture_hv(args, assets) -> int:
     process = None
     reader = None
     sinks = []
+    permit = None
     with tempfile.TemporaryDirectory(prefix="hwref-hv-") as tmp:
         run = Path(tmp)
         try:
+            permit = VmPermit()
             description = prepare_machine(machine, run, output, assets)
             path = output / "machine.json"
             path.write_text(json.dumps(description, indent=2) + "\n")
@@ -129,7 +132,7 @@ def capture_hv(args, assets) -> int:
                     "--control", str(run / "control.sock"), "--paused"]
             (output / "hv-argv.json").write_text(json.dumps(argv, indent=2) + "\n")
             with (output / "hv-stderr.log").open("wb") as log:
-                process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
+                process = spawn_process(argv, stdout=log, stderr=subprocess.STDOUT)
                 # Connect the guest stream while vCPUs are paused.
                 reader = capture.ChanReader(run / "agent.sock")
                 reader.start()
@@ -164,9 +167,9 @@ def capture_hv(args, assets) -> int:
             print(f"FAIL vmlab-hv: {error}\n{stderr}")
             return 1
         finally:
-            if process is not None and process.poll() is None:
-                process.kill()
-                process.wait()
+            stop_process(process)
+            if permit:
+                permit.close()
             if reader is not None:
                 reader.close()
                 reader.join(timeout=2)

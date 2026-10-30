@@ -15,6 +15,7 @@ vmlab-hv-proto = { workspace = true }
 vmlab-disk = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+libc = { workspace = true }
 
 # vmlab's wire contracts (guest/cinit-proto, guest/agent-proto), pinned to a
 # vmlab commit. They are wire types only — nothing depends on vmlab
