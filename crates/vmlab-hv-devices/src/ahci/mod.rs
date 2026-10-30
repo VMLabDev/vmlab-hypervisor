@@ -632,10 +632,10 @@ impl Ahci {
         let write = flags & 0x40 != 0;
         match fis[2] {
             0xec if matches!(drive, Drive::Disk(_)) && !write => {
-                Ok(Payload::Bytes(drive.identify()))
+                Ok(Payload::Bytes(drive.identify(port)))
             }
             0xa1 if matches!(drive, Drive::Cdrom(_)) && !write => {
-                Ok(Payload::Bytes(drive.identify()))
+                Ok(Payload::Bytes(drive.identify(port)))
             }
             0xa0 if flags & 0x20 != 0 && (!write || matches!(packet[0], 0x2a | 0xaa)) => {
                 match drive {
@@ -698,6 +698,15 @@ impl Ahci {
                 Ok(Payload::Bytes(log))
             }
             0xef => {
+                if fis[3] == 3
+                    && matches!(fis[12], 0x00 | 0x01 | 0x08..=0x0c | 0x20..=0x22 | 0x40..=0x45)
+                {
+                    match drive {
+                        Drive::Disk(disk) => disk.transfer_mode = fis[12],
+                        Drive::Cdrom(optical) => optical.transfer_mode = fis[12],
+                    }
+                    return Ok(Payload::Bytes(Vec::new()));
+                }
                 let Drive::Disk(disk) = drive else {
                     return Err(4);
                 };
@@ -706,9 +715,6 @@ impl Ahci {
                     0x82 => {
                         disk.image.flush().map_err(|_| 0x40)?;
                         disk.write_cache = false;
-                    }
-                    3 if matches!(fis[12], 0x00 | 0x01 | 0x08..=0x0c | 0x20..=0x22 | 0x40..=0x45) => {
-                        disk.transfer_mode = fis[12]
                     }
                     _ => return Err(4),
                 }
@@ -923,7 +929,7 @@ impl Snapshot for Ahci {
         self.id.clone()
     }
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
-        let mut state = b"AHC2".to_vec();
+        let mut state = b"AHC3".to_vec();
         state.extend(self.config);
         state.extend(self.regs);
         state.extend(self.index.to_le_bytes());
@@ -950,6 +956,7 @@ impl Snapshot for Ahci {
                         &optical.image.as_ref().map_or(0, |i| i.size()).to_le_bytes(),
                     );
                     bytes[16..24].copy_from_slice(&optical.generation.to_le_bytes());
+                    bytes[24] = optical.transfer_mode;
                 }
             }
             state.extend(bytes);
@@ -959,7 +966,7 @@ impl Snapshot for Ahci {
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
         let invalid =
             || DeviceError::State("AHCI snapshot version, topology or media mismatch".into());
-        if state.len() != 4 + 256 + REGS + 4 + PORTS * 48 || &state[..4] != b"AHC2" {
+        if state.len() != 4 + 256 + REGS + 4 + PORTS * 48 || &state[..4] != b"AHC3" {
             return Err(invalid());
         }
         let config: [u8; 256] = state[4..260].try_into().unwrap();
@@ -990,6 +997,7 @@ impl Snapshot for Ahci {
                         && bytes[1..4].iter().all(|b| *b <= 1)
                         && le64(&bytes[8..]) == optical.image.as_ref().map_or(0, |i| i.size())
                         && le64(&bytes[16..]) == optical.generation
+                        && matches!(bytes[24], 0 | 1 | 0x08..=0x0c | 0x20..=0x22 | 0x40..=0x45)
                 }
             };
             if !valid {
@@ -1013,6 +1021,7 @@ impl Snapshot for Ahci {
                 optical.attention = bytes[3] != 0;
                 optical.event = bytes[4];
                 optical.sense.copy_from_slice(&bytes[5..8]);
+                optical.transfer_mode = bytes[24];
             }
         }
         self.msi_pending = 0;

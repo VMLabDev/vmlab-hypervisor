@@ -217,6 +217,52 @@ impl Driver {
 }
 
 #[test]
+fn atapi_identify_identity_and_transfer_mode_match_qtest_observations() {
+    let mut d = Driver::cdrom();
+    d.prepare(0xa1, 0, 0, 0, None, &[(0x4000, 512, false)]);
+    assert_eq!(d.issue(0), 0x50);
+    let identify = d.bytes(0x4000, 512);
+    let word =
+        |index: usize| u16::from_le_bytes(identify[index * 2..index * 2 + 2].try_into().unwrap());
+    for (index, value) in [
+        (0, 0x85c0),
+        (20, 3),
+        (21, 512),
+        (22, 4),
+        (48, 1),
+        (65, 180),
+        (67, 300),
+        (75, 31),
+        (76, 0x100),
+        (80, 0x1e),
+        (88, 0x203f),
+    ] {
+        assert_eq!(word(index), value, "IDENTIFY PACKET word {index}");
+    }
+    let decode = |offset: usize, len: usize| {
+        identify[offset..offset + len]
+            .chunks_exact(2)
+            .flat_map(|pair| [pair[1], pair[0]])
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(decode(54, 40), b"QEMU DVD-ROM                            ");
+    assert_eq!(decode(46, 8), b"2.5+    ");
+    d.ack(0);
+    d.prepare(0xef, 0, 0, 0x42, None, &[]);
+    d.put(0x3003, &[3]);
+    assert_eq!(d.issue(0), 0x50);
+    let saved = d.hba.save_state().unwrap();
+    d.hba.restore_state(&saved).unwrap();
+    d.ack(0);
+    d.prepare(0xa1, 0, 0, 0, None, &[(0x4000, 512, false)]);
+    assert_eq!(d.issue(0), 0x50);
+    assert_eq!(
+        u16::from_le_bytes(d.bytes(0x4000 + 88 * 2, 2).try_into().unwrap()),
+        0x043f
+    );
+}
+
+#[test]
 fn ncq_read_write_tags_set_device_bits_and_error_log_survive_snapshot() {
     let mut d = Driver::new();
     d.hba.attach_disk(0, image(vec![0; 4096], false)).unwrap();
@@ -463,7 +509,7 @@ fn p4_atapi_iso_read10_read12_capacity_and_identify() {
     let mut d = Driver::cdrom();
     assert_eq!(d.read(0x124), 0xeb14_0101);
     assert_eq!(d.command(0xa1, 0, 0, false), 0x50);
-    assert_eq!(&d.bytes(0x4000, 2), &[0x80, 0x85]);
+    assert_eq!(&d.bytes(0x4000, 2), &[0xc0, 0x85]);
     let (status, capacity) = d.packet(&[0x25]);
     assert_eq!(status, 0x50);
     assert_eq!(capacity, [0, 0, 0, 63, 0, 0, 8, 0]);
@@ -485,7 +531,7 @@ fn atapi_inquiry_mode_sense_configuration_and_sense() {
     assert_eq!(status, 0x50);
     assert_eq!(data[0], 5);
     assert_eq!(data[1], 0x80);
-    assert_eq!(&data[8..16], b"VMLAB   ");
+    assert_eq!(&data[8..16], b"QEMU    ");
     let (_, data) = d.packet(&[0x5a, 0, 0x2a, 0, 0, 0, 0, 0, 64]);
     assert_eq!(data[3], 0x80);
     assert_eq!(data[8], 0x2a);
