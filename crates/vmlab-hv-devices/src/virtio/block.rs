@@ -104,6 +104,7 @@ pub struct Block {
     mem: Option<GuestMemory>,
     interrupt: Option<Arc<dyn VirtioInterrupt>>,
     queues: Vec<Queue>,
+    queue_sizes: Vec<u16>,
     /// Queue states restored before activation, applied by `activate`.
     pending_queues: Option<Vec<virtio_queue::QueueState>>,
 }
@@ -144,8 +145,26 @@ impl Block {
             mem: None,
             interrupt: None,
             queues: Vec::new(),
+            queue_sizes: vec![QUEUE_MAX_SIZE],
             pending_queues: None,
         }
+    }
+
+    /// Configure the request queues before transport construction.
+    pub fn with_num_queues(mut self, count: u16) -> Result<Self, DeviceError> {
+        if count == 0 || count > 256 || self.mem.is_some() {
+            return Err(DeviceError::State(
+                "invalid block queue count or active device".into(),
+            ));
+        }
+        self.queue_sizes = vec![QUEUE_MAX_SIZE; count as usize];
+        self.config[34..36].copy_from_slice(&count.to_le_bytes());
+        if count > 1 {
+            self.features |= 1 << 12;
+        } else {
+            self.features &= !(1 << 12);
+        }
+        Ok(self)
     }
 
     /// Process every available request on queue `index`, publish them on the
@@ -355,7 +374,7 @@ impl VirtioDevice for Block {
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
-        &[QUEUE_MAX_SIZE]
+        &self.queue_sizes
     }
 
     fn features(&self) -> u64 {
@@ -708,6 +727,41 @@ mod tests {
         f.submit(0);
         assert_eq!(f.status(), S_OK);
         assert_eq!(&content.lock()[3 * 512..4 * 512], &payload);
+    }
+
+    #[test]
+    fn multiqueue_processes_second_ring_and_restores_its_position() {
+        let mut f = Fixture::new(Box::new(MemDisk::new(64 * 1024)));
+        let queue = f.block.queues.remove(0);
+        f.block.reset();
+        f.block = f.block.with_num_queues(2).unwrap();
+        assert_eq!(f.block.queue_max_sizes(), &[QUEUE_MAX_SIZE; 2]);
+        assert_ne!(f.block.features() & (1 << 12), 0);
+        let mut count = [0; 2];
+        f.block.read_config(34, &mut count);
+        assert_eq!(u16::from_le_bytes(count), 2);
+        f.block.ack_features(f.block.features());
+        f.block
+            .activate(
+                f.mem.clone(),
+                f.interrupt.clone(),
+                vec![Queue::new(QUEUE_MAX_SIZE).unwrap(), queue],
+            )
+            .unwrap();
+        f.put_header(T_FLUSH, 0);
+        f.chain_hdr_status();
+        f.submit(0);
+        assert_eq!(f.used_slot(0).0, 0);
+        f.block.queue_notify(1);
+        assert_eq!(f.status(), S_OK);
+        assert_eq!(f.used_slot(0).0, 1);
+        assert_eq!(*f.interrupt.notifies.lock(), vec![1]);
+        let saved = f.block.save_state().unwrap();
+        f.block.queues[1].set_next_avail(0);
+        f.block.restore_state(&saved).unwrap();
+        assert_eq!(f.block.queues[1].next_avail(), 1);
+        f.block.queue_notify(1);
+        assert_eq!(f.used_slot(0).0, 1);
     }
 
     #[test]

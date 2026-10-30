@@ -90,10 +90,15 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         let image = vmlab_hv_vmm::factory::open_image(disk)?;
         let pci = self.wrap(
             disk.id.clone(),
-            Box::new(Block::new(
-                disk.id.clone(),
-                Box::new(SharedDisk(image.clone())),
-            )),
+            Box::new(
+                Block::new(disk.id.clone(), Box::new(SharedDisk(image.clone())))
+                    .with_num_queues(if msi.transitional {
+                        msi.msix_vectors.saturating_sub(1)
+                    } else {
+                        1
+                    })
+                    .map_err(|e| DeviceUnavailable::new("virtio-blk", e.to_string()))?,
+            ),
             mem,
             msi,
         )?;
