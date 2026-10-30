@@ -197,6 +197,25 @@ fn settle(m: &Machine) -> Vec<u8> {
 }
 
 #[test]
+fn snapshot_preserves_a_broadcast_smi_waiting_for_its_vcpu() {
+    let Some(m) = machine(&counter_payload(), 16) else {
+        return;
+    };
+    m.handle.pause().unwrap();
+    let shared = m.handle.shared();
+    assert!(!shared.dispatch_smi(1));
+    snapshot::save(&m.handle, "pending-smi").unwrap();
+    assert!(shared.take_pending_smi(0));
+    snapshot::load(&m.handle, "pending-smi").unwrap();
+    assert!(shared.take_pending_smi(0), "snapshot lost the queued SMI");
+    assert!(!shared.take_pending_smi(0));
+    snapshot::save(&m.handle, "no-smi").unwrap();
+    shared.dispatch_smi(1);
+    snapshot::load(&m.handle, "no-smi").unwrap();
+    assert!(!shared.take_pending_smi(0), "restore retained a future SMI");
+}
+
+#[test]
 fn save_load_rolls_back_counter_and_scratch() {
     let Some(m) = machine(&counter_payload(), 16) else {
         return;

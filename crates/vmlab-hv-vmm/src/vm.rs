@@ -727,6 +727,22 @@ impl VmShared {
         self.pending_smis.lock().remove(&id)
     }
 
+    pub(crate) fn save_pending_smis(&self) -> Vec<u8> {
+        self.pending_smis.lock().iter().copied().collect()
+    }
+
+    pub(crate) fn restore_pending_smis(&self, targets: Vec<u8>) -> Result<(), String> {
+        let vcpus = self.vcpus.lock();
+        if targets
+            .iter()
+            .any(|target| !vcpus.iter().any(|(id, _)| id == target))
+        {
+            return Err("snapshot SMI targets an absent vCPU".into());
+        }
+        *self.pending_smis.lock() = targets.into_iter().collect();
+        Ok(())
+    }
+
     fn trace_io(&self, port: u16, data: &[u8], write: bool) {
         if let Some(trace) = &self.io_trace {
             let mut trace = trace.lock();
