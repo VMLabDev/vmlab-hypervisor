@@ -121,6 +121,23 @@ fn filter_cpuid(
     policy: vmlab_hv_proto::machine::CpuPolicy,
 ) -> Result<(), VmmError> {
     let mut entries = cpuid.as_slice().to_vec();
+    // KVM_GET_SUPPORTED_CPUID describes capabilities, not the host brand.
+    for function in 0x8000_0002..=0x8000_0004 {
+        let brand = std::arch::x86_64::__cpuid(function);
+        let entry = kvm_bindings::kvm_cpuid_entry2 {
+            function,
+            eax: brand.eax,
+            ebx: brand.ebx,
+            ecx: brand.ecx,
+            edx: brand.edx,
+            ..Default::default()
+        };
+        if let Some(existing) = entries.iter_mut().find(|e| e.function == function) {
+            *existing = entry;
+        } else {
+            entries.push(entry);
+        }
+    }
     for function in [0xb, 0x1f] {
         if entries.iter().any(|entry| entry.function == function) {
             for index in 0..=2 {
@@ -264,6 +281,24 @@ impl vmlab_hv_devices::MsiSink for KvmMsiSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_cpu_policy_includes_the_native_brand_string() {
+        let mut cpuid = CpuId::from_entries(&[]).unwrap();
+        filter_cpuid(&mut cpuid, 0, 2, vmlab_hv_proto::machine::CpuPolicy::Host).unwrap();
+        for function in 0x8000_0002..=0x8000_0004 {
+            let native = std::arch::x86_64::__cpuid(function);
+            let e = cpuid
+                .as_slice()
+                .iter()
+                .find(|e| e.function == function)
+                .unwrap();
+            assert_eq!(
+                (e.eax, e.ebx, e.ecx, e.edx),
+                (native.eax, native.ebx, native.ecx, native.edx)
+            );
+        }
+    }
 
     #[test]
     fn amd_cache_descriptors_and_migratable_tsc_match_the_reference_model() {
