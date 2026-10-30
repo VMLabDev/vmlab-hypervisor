@@ -138,7 +138,6 @@ fn snapshot_paused_guest() {
 }
 
 #[test]
-#[ignore = "scratch qcow2 corruption after load is owned by the disk work package"]
 fn snapshot_disk_integrity() {
     snapshot_roundtrip(false, true);
 }
