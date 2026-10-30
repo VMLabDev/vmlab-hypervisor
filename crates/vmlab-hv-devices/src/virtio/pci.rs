@@ -35,6 +35,7 @@ use crate::{
 #[path = "transitional.rs"]
 mod transitional;
 use transitional::LegacyPci;
+pub use transitional::{ROM_BAR, ROM_SIZE};
 
 #[cfg(test)]
 #[path = "transitional_tests.rs"]
@@ -832,6 +833,25 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn bar_read(&mut self, bar: u8, offset: u64, data: &mut [u8]) {
+        if bar == ROM_BAR {
+            data.fill(0xff);
+            if let Some(image) = self
+                .transitional
+                .as_ref()
+                .and_then(|pci| pci.rom_image.as_ref())
+            {
+                for (i, byte) in data.iter_mut().enumerate() {
+                    if let Some(value) = offset
+                        .checked_add(i as u64)
+                        .and_then(|v| usize::try_from(v).ok())
+                        .and_then(|v| image.get(v))
+                    {
+                        *byte = *value;
+                    }
+                }
+            }
+            return;
+        }
         let offset = if self.transitional.is_some() {
             match bar {
                 0 => return self.legacy_read(offset, data),

@@ -2,10 +2,16 @@
 
 use super::*;
 
+/// Expansion ROM BAR index, shared with the PCI root and VGA devices.
+pub const ROM_BAR: u8 = 6;
+/// Captured virtio-net expansion ROM aperture.
+pub const ROM_SIZE: usize = 256 * 1024;
+
 pub(super) struct LegacyPci {
     pub(super) bar0: u32,
     pub(super) bar1: u32,
     pub(super) rom: u32,
+    pub(super) rom_image: Option<Vec<u8>>,
     pub(super) io_size: u64,
     pub(super) active: bool,
     pub(super) pci_cfg: [u8; 16],
@@ -13,7 +19,7 @@ pub(super) struct LegacyPci {
 
 impl LegacyPci {
     pub(super) fn bars(&self) -> Vec<BarInfo> {
-        vec![
+        let mut bars = vec![
             BarInfo {
                 index: 0,
                 size: self.io_size,
@@ -29,7 +35,15 @@ impl LegacyPci {
                 size: 0x4000,
                 kind: BarKind::Mmio64 { prefetchable: true },
             },
-        ]
+        ];
+        if self.rom_image.is_some() {
+            bars.push(BarInfo {
+                index: ROM_BAR,
+                size: ROM_SIZE as u64,
+                kind: BarKind::Mmio32,
+            });
+        }
+        bars
     }
 }
 
@@ -45,6 +59,22 @@ pub(super) fn modern_offset(offset: u64) -> Option<u64> {
 }
 
 impl VirtioPciDevice {
+    /// Attach an upstream virtio-net PCI ROM to a transitional NIC. BAR 6
+    /// supplies immutable bytes to the PCI root, which gates guest reads on
+    /// the ROM enable and PCI memory-space bits, as for StandardVga.
+    pub fn with_option_rom(mut self, image: &[u8]) -> Result<Self, DeviceError> {
+        if self.transitional.is_none() || self.device.device_type() != 1 {
+            return Err(DeviceError::Other(
+                "option ROM requires transitional virtio-net".into(),
+            ));
+        }
+        validate_net_rom(image)?;
+        let mut bytes = vec![0xff; ROM_SIZE];
+        bytes[..image.len()].copy_from_slice(image);
+        self.transitional.as_mut().unwrap().rom_image = Some(bytes);
+        Ok(self)
+    }
+
     /// Wrap a net (1), block (2), or console (3) device in the captured
     /// transitional layout. `msix_vectors` is independent of queue count:
     /// captures use 2 for serial, 4 for net, and vCPU count + 1 for block.
@@ -118,6 +148,7 @@ impl VirtioPciDevice {
             bar0: 0,
             bar1: 0,
             rom: 0,
+            rom_image: None,
             io_size,
             active: false,
             pci_cfg: [0; 16],
@@ -142,15 +173,14 @@ impl VirtioPciDevice {
             0x14 => bar_value(legacy.bar1 as u64, 0x1000, 0, 0xffff_fff0),
             0x20 => bar_value(self.bar4, 0x4000, BAR64_PREFETCHABLE, 0xffff_fff0),
             0x24 => (self.bar4 >> 32) as u32,
-            // A disabled ROM address is captured for net; no QEMU option-ROM
-            // bytes are supplied by this transport.
-            0x30 if self.device.device_type() == 1 => {
+            0x30 if legacy.rom_image.is_some() => {
                 if legacy.rom & 0xffff_f800 == 0xffff_f800 {
                     0xfffc_0000
                 } else {
                     legacy.rom & 0xfffc_0001
                 }
             }
+            0x30 => 0,
             0x3c => self.interrupt_line as u32 | 0x100,
             0x88..=0x90 => {
                 let off = reg * 4 - 0x88;
@@ -189,7 +219,7 @@ impl VirtioPciDevice {
                     let shift = (pos - 0x20) * 8;
                     self.bar4 = (self.bar4 & !(0xff << shift)) | ((byte as u64) << shift);
                 }
-                0x30..=0x33 if self.device.device_type() == 1 => {
+                0x30..=0x33 if legacy.rom_image.is_some() => {
                     set_byte32(&mut legacy.rom, pos - 0x30, byte)
                 }
                 0x3c => self.interrupt_line = byte,
@@ -328,6 +358,40 @@ impl VirtioPciDevice {
             8
         } else {
             self.device_cfg_len
+        }
+    }
+}
+
+fn validate_net_rom(image: &[u8]) -> Result<(), DeviceError> {
+    let bad = || DeviceError::Other("invalid 1af4:1000 PCI option ROM".into());
+    if image.is_empty() || image.len() > ROM_SIZE {
+        return Err(bad());
+    }
+    let mut offset = 0;
+    loop {
+        let data = image.get(offset..).ok_or_else(bad)?;
+        if data.len() < 0x1a || data[..2] != [0x55, 0xaa] {
+            return Err(bad());
+        }
+        let pcir = u16::from_le_bytes([data[0x18], data[0x19]]) as usize;
+        let header = data.get(pcir..pcir + 0x18).ok_or_else(bad)?;
+        if header[..8] != [b'P', b'C', b'I', b'R', 0xf4, 0x1a, 0, 0x10] {
+            return Err(bad());
+        }
+        let len = u16::from_le_bytes([header[0x10], header[0x11]]) as usize * 512;
+        if len < pcir + 0x18 || len > data.len() || !matches!(header[0x14], 0 | 3) {
+            return Err(bad());
+        }
+        if header[0x14] == 0 && data[..len].iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) != 0 {
+            return Err(bad());
+        }
+        offset += len;
+        if header[0x15] & 0x80 != 0 {
+            return if offset == image.len() {
+                Ok(())
+            } else {
+                Err(bad())
+            };
         }
     }
 }

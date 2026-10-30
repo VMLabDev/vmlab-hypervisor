@@ -142,6 +142,18 @@ lspci -nn > lspci-nn.txt 2>&1
 lspci -tv > lspci-tv.txt 2>&1
 cat /proc/bus/pci/devices > proc-pci-devices.txt 2>&1
 
+# PCI option ROM identity is compared independently of executable bytes.
+mkdir -p pci-roms
+for dev in /sys/bus/pci/devices/*; do
+  [ "$(cat "$dev/vendor")" = 0x1af4 ] || continue
+  [ "$(cat "$dev/device")" = 0x1000 ] || continue
+  if echo 1 >"$dev/rom" 2>/dev/null; then
+    cat "$dev/rom" >"pci-roms/${dev##*/}.rom" 2>"pci-roms/${dev##*/}.log"
+    echo 0 >"$dev/rom"
+    [ -s "pci-roms/${dev##*/}.rom" ] || rm -f "pci-roms/${dev##*/}.rom"
+  fi
+done
+
 # ACPI tables: raw binaries, then iasl disassembly where the table carries AML
 echo 'hwref: ACPI' >/dev/console
 mkdir -p acpi

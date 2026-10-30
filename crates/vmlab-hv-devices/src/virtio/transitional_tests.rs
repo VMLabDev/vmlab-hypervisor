@@ -53,6 +53,99 @@ fn read<const N: usize>(pci: &mut VirtioPciDevice, bar: u8, offset: u64) -> [u8;
     data
 }
 
+fn net() -> VirtioPciDevice {
+    VirtioPciDevice::new_transitional(
+        "net",
+        Box::new(
+            Net::new(NetConfig {
+                id: "net".into(),
+                mac: [2, 0, 0, 0, 0, 1],
+                mtu: 1500,
+                switch: "/nonexistent/vmlab-test-switch".into(),
+            })
+            .unwrap(),
+        ),
+        memory(),
+        None,
+        None,
+        4,
+    )
+    .unwrap()
+}
+
+fn rom() -> Vec<u8> {
+    let mut image = vec![0; 512];
+    image[..3].copy_from_slice(&[0x55, 0xaa, 1]);
+    image[0x18] = 0x20;
+    image[0x20..0x28].copy_from_slice(b"PCIR\xf4\x1a\x00\x10");
+    image[0x30] = 1;
+    image[0x35] = 0x80;
+    image[511] = 0u8.wrapping_sub(image.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
+    image
+}
+
+#[test]
+fn option_rom_identity_sizing_reads_and_snapshot() {
+    let mut absent = net();
+    config_write(&mut absent, 0x30, &u32::MAX.to_le_bytes());
+    assert_eq!(absent.config_read(12), 0);
+    assert!(!absent.bars().iter().any(|bar| bar.index == ROM_BAR));
+    let image = rom();
+    let mut pci = net().with_option_rom(&image).unwrap();
+    assert_eq!(pci.bars().last().unwrap().size, ROM_SIZE as u64);
+    config_write(&mut pci, 0x30, &u32::MAX.to_le_bytes());
+    assert_eq!(pci.config_read(12), 0xfffc_0000);
+    config_write(&mut pci, 0x30, &0xfebf_ffffu32.to_le_bytes());
+    assert_eq!(pci.config_read(12), 0xfebc_0001);
+    let state = pci.save_state().unwrap();
+    config_write(&mut pci, 0x30, &[0]);
+    assert_eq!(pci.config_read(12) & 1, 0);
+    pci.restore_state(&state).unwrap();
+    assert_eq!(pci.config_read(12), 0xfebc_0001);
+    assert_eq!(read::<3>(&mut pci, ROM_BAR, 0), [0x55, 0xaa, 1]);
+    pci.bar_write(ROM_BAR, 0, &[0; 3]);
+    assert_eq!(read::<3>(&mut pci, ROM_BAR, 0), [0x55, 0xaa, 1]);
+    assert_eq!(
+        read::<4>(&mut pci, ROM_BAR, 511),
+        [image[511], 0xff, 0xff, 0xff]
+    );
+    assert_eq!(read::<4>(&mut pci, ROM_BAR, u64::MAX), [0xff; 4]);
+    for bad in [
+        vec![],
+        vec![0; 512],
+        image[..511].to_vec(),
+        {
+            let mut bad = image.clone();
+            bad[0x26] = 1;
+            bad
+        },
+        {
+            let mut bad = image.clone();
+            bad[100] = 1;
+            bad
+        },
+    ] {
+        assert!(net().with_option_rom(&bad).is_err());
+    }
+    assert!(Driver::new().pci.with_option_rom(&image).is_err());
+}
+
+#[test]
+fn built_ipxe_rom_headers_and_bytes() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ipxe");
+    if !root.join("virtio-net.rom").exists() {
+        eprintln!("SKIP: run just firmware-ipxe-build to test upstream iPXE ROMs");
+        return;
+    }
+    for name in ["1af41000.rom", "1af41000.efirom", "virtio-net.rom"] {
+        let image = std::fs::read(root.join(name)).unwrap();
+        let mut pci = net().with_option_rom(&image).unwrap();
+        let mut bytes = vec![0; image.len()];
+        pci.bar_read(ROM_BAR, 0, &mut bytes);
+        assert_eq!(bytes, image);
+    }
+}
+
 struct Driver {
     pci: VirtioPciDevice,
     mem: GuestMemory,
@@ -357,6 +450,9 @@ fn config_bytes_match_every_q35_capture() {
                 vectors,
             )
             .unwrap();
+            if ty == 1 {
+                pci = pci.with_option_rom(&rom()).unwrap();
+            }
             // Replay firmware allocation and driver-writable config. All 256
             // resulting bytes, including the full capability chain, must match.
             for (off, len) in [
