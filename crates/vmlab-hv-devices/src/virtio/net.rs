@@ -313,11 +313,12 @@ fn run(
                     // If this connection later dies, wait a full interval
                     // before reaching for the switch again.
                     next_try = Instant::now() + retry;
-                    // Volatile read state belongs to the old connection.
+                    // Partial reads belong to the old connection. Complete
+                    // frames may have been restored before this connection;
+                    // keep them until the guest posts receive buffers.
                     {
                         let mut sh = lock(&shared);
                         sh.rx = RxRead::Idle;
-                        sh.rx_pending.clear();
                     }
                     if set_link(&shared, true) {
                         fire_config(&shared);
@@ -756,7 +757,23 @@ impl Snapshot for Net {
         sh.tx_out = tx_out;
         sh.rx = rx;
         sh.rx_pending = rx_pending;
-        self.pending_queues = Some(queues);
+        if sh.mem.is_some() {
+            sh.queues = queues
+                .into_iter()
+                .enumerate()
+                .map(|(i, state)| {
+                    state
+                        .map(Queue::try_from)
+                        .transpose()
+                        .map_err(|e| DeviceError::State(format!("queue {i}: {e}")))
+                })
+                .collect::<Result<_, _>>()?;
+            self.pending_queues = None;
+        } else {
+            self.pending_queues = Some(queues);
+        }
+        drop(sh);
+        self.wake_worker();
         Ok(())
     }
 }
@@ -1292,7 +1309,9 @@ mod tests {
         wait_for("first rx frame delivered", || {
             f.vqs[0].used_idx(&f.mem) == 1
         });
-        thread::sleep(Duration::from_millis(100));
+        wait_for("second rx frame pending", || {
+            lock(&f.dev.shared).rx_pending.len() == 1
+        });
         let used_before = f.vqs[0].used_idx(&f.mem);
         let state = f.dev.save_state().unwrap();
 
@@ -1304,16 +1323,19 @@ mod tests {
             dev,
             irq,
             vqs,
-            switch: _,
+            switch: listener,
             accepted: _,
         } = f;
         drop(dev);
+        drop(switch);
+        drop(listener);
+        std::fs::remove_file(&switch_path).unwrap();
         let mut dev2 = Net::with_retry_interval(
             NetConfig {
                 id: "nic0".into(),
                 mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
                 mtu: 1500,
-                switch: switch_path,
+                switch: switch_path.clone(),
             },
             RETRY,
         )
@@ -1322,6 +1344,24 @@ mod tests {
         dev2.restore_state(&state).unwrap();
         let queues: Vec<Queue> = vqs.iter().map(|v| v.queue()).collect();
         dev2.activate(mem.clone(), irq, queues).unwrap();
+
+        // Force the ordering that used to discard the restored frame: the
+        // worker connects after restore, before any receive buffer is posted.
+        wait_for("restored device observes disconnected switch", || {
+            !lock(&dev2.shared).link_up
+        });
+        let listener = UnixListener::bind(&switch_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut connection = None;
+        wait_for("restored device reconnects", || match listener.accept() {
+            Ok((stream, _)) => {
+                connection = Some(stream);
+                true
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => false,
+            Err(err) => panic!("accept restored device: {err}"),
+        });
+        wait_for("restored link up", || lock(&dev2.shared).link_up);
 
         // The driver reposts a receiveq buffer and the pending frame lands,
         // with the used ring continuing where the snapshot left it.
