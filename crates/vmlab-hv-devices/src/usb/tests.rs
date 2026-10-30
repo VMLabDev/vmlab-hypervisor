@@ -244,7 +244,13 @@ fn pci_identity_bar_probe_and_readonly_registers() {
     assert_eq!(d.hc.config_read(5), u32::MAX);
     d.write(0, 0);
     assert_eq!(d.read(0), 0x01000040);
-    assert_eq!(d.read(4), (8 << 24) | (1 << 8) | 64);
+    assert_eq!(d.read(4), (8 << 24) | (16 << 8) | 64);
+    assert_eq!((d.hc.config_read(0x90 / 4) >> 16) & 0x7ff, 15);
+    assert_eq!(d.hc.config_read(0x100 / 4), 0);
+    assert_eq!(d.hc.config_read(0xffc / 4), 0);
+    assert_eq!(d.hc.config_read(0x1000 / 4), u32::MAX);
+    d.hc.config_write(1, 0, &0x0107u16.to_le_bytes());
+    assert_eq!(d.hc.config_read(1) & 0x0107, 0x0107);
     assert_eq!(d.read(0x28), 0x405);
     assert_eq!(d.read(0x38), 0x401);
     d.hc.write(u64::MAX, &[1; 16]);
@@ -679,6 +685,61 @@ fn draining_events_added_while_busy_does_not_latch_a_phantom_interrupt() {
     d.trb(d.command, 0, 0, 23 << 10);
     d.write(0x2000, 0);
     assert_eq!(d.irq.0.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn secondary_interrupter_routes_tablet_dma_masks_and_snapshot_independently() {
+    let mut d = Driver::new();
+    d.enumerate();
+    d.configure();
+    let index = 15;
+    let runtime = 0x1020 + index * 32;
+    let vector = 0x3000 + index * 16;
+    d.mem64(0xb000, 0xc000);
+    d.mem32(0xb008, 256);
+    d.write(runtime + 8, 1);
+    d.write(runtime + 16, 0xb000);
+    d.write(runtime + 24, 0xc000);
+    d.write(runtime, 2);
+    d.write(vector, 0xfee01000);
+    d.write(vector + 8, 0x55);
+    d.trb(
+        d.interrupt,
+        0xa000,
+        8 | ((index as u32) << 22),
+        (1 << 10) | 32,
+    );
+    d.hc.inject_pointer(PointerEvent {
+        x: 123,
+        y: 456,
+        buttons: 1,
+        wheel: 0,
+    })
+    .unwrap();
+    let before = d.irq.0.lock().unwrap().len();
+    d.write(0x2000 + u64::from(d.slot) * 4, 3);
+    assert_eq!(Trb::read(&d.mem, 0xc000).unwrap().kind(), 32);
+    assert_eq!(d.read(0x3800), 1 << index);
+    assert_eq!(d.irq.0.lock().unwrap().len(), before);
+    let saved = d.hc.save_state().unwrap();
+    d.hc.restore_state(&saved).unwrap();
+    d.write(vector + 12, 0);
+    let messages = d.irq.0.lock().unwrap();
+    assert_eq!(messages.len(), before + 1);
+    assert_eq!(
+        messages.last(),
+        Some(&MsiMessage {
+            address: 0xfee01000,
+            data: 0x55
+        })
+    );
+    drop(messages);
+    assert_eq!(d.read(0x3800), 0);
+    assert_eq!(d.read(runtime + 24) & 8, 8);
+    d.write(0x44, 8);
+    d.write(runtime + 24, 0xc018);
+    assert_eq!(d.read(runtime + 24) & 8, 0);
+    assert_eq!(d.read(0x1020) & 1, 0);
 }
 
 #[test]

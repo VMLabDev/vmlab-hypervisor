@@ -15,6 +15,7 @@ pub const BAR_SIZE: u64 = 0x4000;
 /// Ports 1..4 are USB3; ports 5..8 are USB2, as on qemu-xhci.
 pub const TABLET_PORT: u8 = 5;
 const SLOTS: usize = 64;
+const INTERRUPTERS: usize = 16;
 const PORTS: usize = 8;
 const OP: usize = 0x40;
 const CMD: usize = OP;
@@ -63,24 +64,46 @@ impl Default for Slot {
 }
 
 #[derive(Clone)]
+struct Interrupter {
+    event_segment: usize,
+    event_index: u32,
+    event_cycle: bool,
+    event_used: usize,
+    pending: VecDeque<Trb>,
+    ehb: bool,
+    interrupt_sent: bool,
+    moderation_counter: u32,
+    moderation_clock: Instant,
+}
+
+impl Default for Interrupter {
+    fn default() -> Self {
+        Self {
+            event_segment: 0,
+            event_index: 0,
+            event_cycle: true,
+            event_used: 0,
+            pending: VecDeque::new(),
+            ehb: false,
+            interrupt_sent: false,
+            moderation_counter: 0,
+            moderation_clock: Instant::now(),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ControllerState {
     pci: [u8; 256],
     regs: Vec<u32>,
     command: Ring,
     command_running: bool,
     slots: Vec<Slot>,
-    event_segment: usize,
-    event_index: u32,
-    event_cycle: bool,
-    event_used: usize,
-    pending: VecDeque<Trb>,
     mfindex: u32,
-    ehb: bool,
-    interrupt_sent: bool,
-    moderation_counter: u32,
+    interrupters: Vec<Interrupter>,
 }
 
-/// qemu-xhci PCI presentation, one interrupter, 64 slots and eight root ports.
+/// qemu-xhci PCI presentation, 16 interrupters, 64 slots and eight root ports.
 /// Call `poll()` on backend readiness and periodically while running. Calls
 /// are serialized with MMIO and snapshots by the VMM's device lock.
 pub struct XhciController {
@@ -91,7 +114,8 @@ pub struct XhciController {
     devices: Vec<Option<Box<dyn UsbDevice>>>,
     state: ControllerState,
     clock: Instant,
-    moderation_clock: Instant,
+    // Runtime-register and event operations select a bank for their duration.
+    interrupter: usize,
 }
 
 impl XhciController {
@@ -113,7 +137,7 @@ impl XhciController {
             devices,
             state: Self::initial_state(),
             clock: Instant::now(),
-            moderation_clock: Instant::now(),
+            interrupter: 0,
         };
         this.reset_ports();
         this
@@ -129,7 +153,7 @@ impl XhciController {
             (0x34, 0x90),
             (0x3c, 0x100),
             (0x60, 0x30),
-            (0x90, 0x00a011),
+            (0x90, 0x000fa011),
             (0x94, 0x3000),
             (0x98, 0x3800),
             (0xa0, 0x00920010),
@@ -146,18 +170,13 @@ impl XhciController {
             command: Ring::default(),
             command_running: false,
             slots: vec![Slot::default(); SLOTS + 1],
-            event_segment: 0,
-            event_index: 0,
-            event_cycle: true,
-            event_used: 0,
-            pending: VecDeque::new(),
             mfindex: 0,
-            ehb: false,
-            interrupt_sent: false,
-            moderation_counter: 0,
+            interrupters: vec![Interrupter::default(); INTERRUPTERS],
         };
         state.regs[STS / 4] = 1;
-        state.regs[MSIX / 4 + 3] = 1;
+        for index in 0..INTERRUPTERS {
+            state.regs[MSIX / 4 + index * 4 + 3] = 1;
+        }
         state
     }
     fn reset_ports(&mut self) {
@@ -174,11 +193,33 @@ impl XhciController {
             self.set(PORT + p * 16, value);
         }
     }
+    fn bank_offset(&self, off: usize) -> usize {
+        if (IMAN..IMAN + 32).contains(&off) {
+            off + self.interrupter * 32
+        } else if (MSIX..MSIX + 16).contains(&off) {
+            off + self.interrupter * 16
+        } else {
+            off
+        }
+    }
     fn get(&self, off: usize) -> u32 {
-        self.state.regs[off / 4]
+        self.state.regs[self.bank_offset(off) / 4]
     }
     fn set(&mut self, off: usize, value: u32) {
+        let off = self.bank_offset(off);
         self.state.regs[off / 4] = value;
+    }
+    fn select_bank(&mut self, off: usize) -> usize {
+        self.interrupter = 0;
+        if (IMAN..IMAN + INTERRUPTERS * 32).contains(&off) {
+            self.interrupter = (off - IMAN) / 32;
+            off - self.interrupter * 32
+        } else if (MSIX..MSIX + INTERRUPTERS * 16).contains(&off) {
+            self.interrupter = (off - MSIX) / 16;
+            off - self.interrupter * 16
+        } else {
+            off
+        }
     }
     fn get64(&self, off: usize) -> u64 {
         u64::from(self.get(off)) | (u64::from(self.get(off + 4)) << 32)
@@ -303,11 +344,13 @@ impl XhciController {
         Ok(segments)
     }
     fn event(&mut self, trb: Trb) {
-        if self.state.pending.len() == 4096 {
+        if self.state.interrupters[self.interrupter].pending.len() == 4096 {
             self.dma_error();
             return;
         }
-        self.state.pending.push_back(trb);
+        self.state.interrupters[self.interrupter]
+            .pending
+            .push_back(trb);
         if self.flush_events().is_err() {
             self.dma_error();
         }
@@ -318,25 +361,32 @@ impl XhciController {
             return Ok(());
         }
         let capacity: usize = segments.iter().map(|(_, n)| *n as usize).sum();
-        while self.state.event_used < capacity.saturating_sub(1) {
-            let Some(mut event) = self.state.pending.pop_front() else {
+        while self.state.interrupters[self.interrupter].event_used < capacity.saturating_sub(1) {
+            let Some(mut event) = self.state.interrupters[self.interrupter]
+                .pending
+                .pop_front()
+            else {
                 break;
             };
-            let &(base, size) = segments.get(self.state.event_segment).ok_or_else(invalid)?;
-            if self.state.event_index >= size {
+            let &(base, size) = segments
+                .get(self.state.interrupters[self.interrupter].event_segment)
+                .ok_or_else(invalid)?;
+            if self.state.interrupters[self.interrupter].event_index >= size {
                 return Err(invalid());
             }
-            let addr = base + u64::from(self.state.event_index) * 16;
-            event.control = (event.control & !1) | u32::from(self.state.event_cycle);
+            let addr = base + u64::from(self.state.interrupters[self.interrupter].event_index) * 16;
+            event.control = (event.control & !1)
+                | u32::from(self.state.interrupters[self.interrupter].event_cycle);
             event.write(&self.mem, addr)?;
-            self.state.event_used += 1;
-            self.state.event_index += 1;
-            if self.state.event_index == size {
-                self.state.event_index = 0;
-                self.state.event_segment += 1;
-                if self.state.event_segment == segments.len() {
-                    self.state.event_segment = 0;
-                    self.state.event_cycle = !self.state.event_cycle;
+            self.state.interrupters[self.interrupter].event_used += 1;
+            self.state.interrupters[self.interrupter].event_index += 1;
+            if self.state.interrupters[self.interrupter].event_index == size {
+                self.state.interrupters[self.interrupter].event_index = 0;
+                self.state.interrupters[self.interrupter].event_segment += 1;
+                if self.state.interrupters[self.interrupter].event_segment == segments.len() {
+                    self.state.interrupters[self.interrupter].event_segment = 0;
+                    self.state.interrupters[self.interrupter].event_cycle =
+                        !self.state.interrupters[self.interrupter].event_cycle;
                 }
             }
             self.set(STS, self.get(STS) | 8);
@@ -363,9 +413,14 @@ impl XhciController {
         if let (Some(old), Some(new)) = (index(old & !15), index(new & !15)) {
             let cap: usize = seg.iter().map(|(_, n)| *n as usize).sum();
             let used = (new + cap - old) % cap;
-            self.state.event_used = self.state.event_used.saturating_sub(used);
+            self.state.interrupters[self.interrupter].event_used = self.state.interrupters
+                [self.interrupter]
+                .event_used
+                .saturating_sub(used);
         }
-        if self.state.event_used == 0 && self.state.pending.is_empty() {
+        if self.state.interrupters[self.interrupter].event_used == 0
+            && self.state.interrupters[self.interrupter].pending.is_empty()
+        {
             self.set(IMAN, self.get(IMAN) & !1);
         }
         self.flush_events()
@@ -374,43 +429,66 @@ impl XhciController {
         let active = self.get(IMAN) & 3 == 3 && self.get(CMD) & 4 != 0;
         let msix = self.pci16(0x92);
         let ready = self.moderation_counter() == 0;
-        let intx_enabled = msix & 0x8000 == 0 && self.pci16(4) & 0x400 == 0;
-        if active && intx_enabled && self.intx.is_some() && ready && !self.state.ehb {
-            self.state.interrupt_sent = true;
-            self.state.ehb = true;
+        let intx_enabled =
+            msix & 0x8000 == 0 && self.pci16(4) & 0x400 == 0 && self.interrupter == 0;
+        if active
+            && intx_enabled
+            && self.intx.is_some()
+            && ready
+            && !self.state.interrupters[self.interrupter].ehb
+        {
+            self.state.interrupters[self.interrupter].interrupt_sent = true;
+            self.state.interrupters[self.interrupter].ehb = true;
             self.start_moderation();
         }
         if let Some(irq) = &self.intx {
-            irq.set_level(active && intx_enabled && self.state.interrupt_sent);
+            irq.set_level(
+                self.state.regs[IMAN / 4] & 3 == 3
+                    && self.get(CMD) & 4 != 0
+                    && msix & 0x8000 == 0
+                    && self.pci16(4) & 0x400 == 0
+                    && self.state.interrupters[0].interrupt_sent,
+            );
         }
         if !active {
-            self.state.interrupt_sent = false;
+            self.state.interrupters[self.interrupter].interrupt_sent = false;
             return;
         }
-        if msix & 0x8000 != 0 && !self.state.interrupt_sent && !self.state.ehb && ready {
+        if msix & 0x8000 != 0
+            && !self.state.interrupters[self.interrupter].interrupt_sent
+            && !self.state.interrupters[self.interrupter].ehb
+            && ready
+        {
             if msix & 0x4000 != 0 || self.get(MSIX + 12) & 1 != 0 {
-                self.set(PBA, 1);
+                self.set(PBA, self.get(PBA) | (1 << self.interrupter));
             } else {
                 self.msi.signal(MsiMessage {
                     address: self.get64(MSIX),
                     data: self.get(MSIX + 8),
                 });
-                self.set(PBA, 0);
+                self.set(PBA, self.get(PBA) & !(1 << self.interrupter));
                 self.set(IMAN, self.get(IMAN) & !1);
-                self.state.interrupt_sent = true;
-                self.state.ehb = true;
+                self.state.interrupters[self.interrupter].interrupt_sent = true;
+                self.state.interrupters[self.interrupter].ehb = true;
                 self.start_moderation();
             }
         }
     }
     fn moderation_counter(&self) -> u32 {
-        self.state.moderation_counter.saturating_sub(
-            (self.moderation_clock.elapsed().as_nanos() / 250).min(u128::from(u32::MAX)) as u32,
-        )
+        self.state.interrupters[self.interrupter]
+            .moderation_counter
+            .saturating_sub(
+                (self.state.interrupters[self.interrupter]
+                    .moderation_clock
+                    .elapsed()
+                    .as_nanos()
+                    / 250)
+                    .min(u128::from(u32::MAX)) as u32,
+            )
     }
     fn start_moderation(&mut self) {
-        self.state.moderation_counter = self.get(IMOD) & 0xffff;
-        self.moderation_clock = Instant::now();
+        self.state.interrupters[self.interrupter].moderation_counter = self.get(IMOD) & 0xffff;
+        self.state.interrupters[self.interrupter].moderation_clock = Instant::now();
     }
     /// Resume NAKed transfers and bounded ring work. No guest-controlled
     /// traversal can monopolize the VMM thread.
@@ -418,10 +496,15 @@ impl XhciController {
         if !self.running() {
             return;
         }
-        if self.flush_events().is_err() {
-            self.dma_error();
-            return;
+        for index in 0..INTERRUPTERS {
+            self.interrupter = index;
+            if self.flush_events().is_err() {
+                self.interrupter = 0;
+                self.dma_error();
+                return;
+            }
         }
+        self.interrupter = 0;
         if self.state.command_running && self.commands().is_err() {
             self.dma_error();
             return;
@@ -438,7 +521,7 @@ impl XhciController {
     }
     fn commands(&mut self) -> Result<(), DeviceError> {
         for _ in 0..BUDGET {
-            if self.state.pending.len() >= BUDGET {
+            if self.state.interrupters[self.interrupter].pending.len() >= BUDGET {
                 break;
             }
             let Some((addr, t)) = self.state.command.pop(&self.mem)? else {
@@ -517,7 +600,14 @@ impl XhciController {
                 }
                 self.store_endpoint(slot, ep)?;
                 if let Some((addr, trb)) = stopped {
-                    self.transfer_event(slot, ep, addr, 26, trb.length() as u32, false);
+                    self.transfer_event(
+                        (slot, ep),
+                        addr,
+                        trb.status >> 22,
+                        26,
+                        trb.length() as u32,
+                        false,
+                    );
                 }
                 Ok((SUCCESS, slot))
             }
@@ -666,7 +756,7 @@ impl XhciController {
     }
     fn transfers(&mut self, slot: usize, ep: usize) -> Result<(), DeviceError> {
         for _ in 0..BUDGET {
-            if self.state.pending.len() >= BUDGET {
+            if self.state.interrupters[self.interrupter].pending.len() >= BUDGET {
                 break;
             }
             let endpoint = &self.state.slots[slot].endpoints[ep];
@@ -698,7 +788,14 @@ impl XhciController {
                     break;
                 }
                 let context = endpoint.context[0];
-                self.transfer_event(slot, ep, td[0].0, TRB_ERROR, 0, false);
+                self.transfer_event(
+                    (slot, ep),
+                    td[0].0,
+                    td[0].1.status >> 22,
+                    TRB_ERROR,
+                    0,
+                    false,
+                );
                 self.state.slots[slot].endpoints[ep].context[0] = (context & !7) | 2;
                 self.store_endpoint(slot, ep)?;
                 break;
@@ -713,6 +810,9 @@ impl XhciController {
             let mut length = 0usize;
             let mut valid = true;
             for &(addr, t) in &td {
+                if (t.status >> 22) as usize >= INTERRUPTERS {
+                    valid = false;
+                }
                 let data = if control {
                     t.kind() == 3 || t.kind() == 1
                 } else {
@@ -804,7 +904,14 @@ impl XhciController {
                 self.state.slots[slot].endpoints[ep].context[0] =
                     (self.state.slots[slot].endpoints[ep].context[0] & !7) | 2;
                 self.state.slots[slot].endpoints[ep].kicked = false;
-                self.transfer_event(slot, ep, td[0].0, cc, length as u32, false);
+                self.transfer_event(
+                    (slot, ep),
+                    td[0].0,
+                    td[0].1.status >> 22,
+                    cc,
+                    length as u32,
+                    false,
+                );
             } else {
                 self.state.slots[slot].endpoints[ep].context[0] =
                     (self.state.slots[slot].endpoints[ep].context[0] & !7) | 1;
@@ -830,9 +937,9 @@ impl XhciController {
                             0
                         };
                         self.transfer_event(
-                            slot,
-                            ep,
+                            (slot, ep),
                             if event_data { t.parameter } else { addr },
+                            t.status >> 22,
                             code,
                             residual,
                             event_data,
@@ -852,13 +959,20 @@ impl XhciController {
     }
     fn transfer_event(
         &mut self,
-        slot: usize,
-        ep: usize,
+        endpoint: (usize, usize),
         pointer: u64,
+        target: u32,
         cc: u32,
         residual: u32,
         event_data: bool,
     ) {
+        let (slot, ep) = endpoint;
+        let previous = self.interrupter;
+        self.interrupter = if (target as usize) < INTERRUPTERS {
+            target as usize
+        } else {
+            0
+        };
         self.event(Trb {
             parameter: pointer,
             status: (cc << 24) | (residual & 0xff_ffff),
@@ -867,6 +981,7 @@ impl XhciController {
                 | ((ep as u32) << 16)
                 | (u32::from(event_data) << 2),
         });
+        self.interrupter = previous;
     }
     fn microframe(&self) -> u32 {
         self.state.mfindex.wrapping_add(if self.get(CMD) & 1 != 0 {
@@ -878,7 +993,7 @@ impl XhciController {
     fn read_reg(&self, off: usize) -> u32 {
         match off {
             0 => 0x01000040,
-            4 => (8 << 24) | (1 << 8) | SLOTS as u32,
+            4 => (8 << 24) | ((INTERRUPTERS as u32) << 8) | SLOTS as u32,
             8 => 0x4f,
             // Streams are optional and are not advertised by this controller.
             0x10 => 0x00080001,
@@ -891,7 +1006,10 @@ impl XhciController {
             0x38 => 0x401,
             0x48 => 1,
             CRCR => (self.get(CRCR) & !0xe) | if self.state.command_running { 8 } else { 0 },
-            ERDP => (self.get(ERDP) & !8) | (u32::from(self.state.ehb) << 3),
+            ERDP => {
+                (self.get(ERDP) & !8)
+                    | (u32::from(self.state.interrupters[self.interrupter].ehb) << 3)
+            }
             0x1000 => self.microframe(),
             IMOD => (self.get(IMOD) & 0xffff) | (self.moderation_counter() << 16),
             _ => self.get(off),
@@ -937,13 +1055,13 @@ impl XhciController {
             CMD => {
                 if v & 2 != 0 {
                     let pci = self.state.pci;
-                    let msix = self.state.regs[MSIX / 4..MSIX / 4 + 4].to_vec();
+                    let msix = self.state.regs[MSIX / 4..MSIX / 4 + INTERRUPTERS * 4].to_vec();
                     self.state = Self::initial_state();
                     self.state.pci = pci;
-                    self.state.regs[MSIX / 4..MSIX / 4 + 4].copy_from_slice(&msix);
+                    self.state.regs[MSIX / 4..MSIX / 4 + INTERRUPTERS * 4].copy_from_slice(&msix);
                     self.reset_ports();
                     self.clock = Instant::now();
-                    self.moderation_clock = Instant::now();
+                    self.state.interrupters[self.interrupter].moderation_clock = Instant::now();
                     self.update_interrupt();
                     return;
                 }
@@ -987,7 +1105,7 @@ impl XhciController {
             IMAN => {
                 self.set(off, ((self.get(off) & 1) & !(v & 1)) | (merged & 2));
                 if v & 1 != 0 {
-                    self.state.interrupt_sent = false;
+                    self.state.interrupters[self.interrupter].interrupt_sent = false;
                 }
                 self.update_interrupt();
             }
@@ -995,8 +1113,8 @@ impl XhciController {
                 let current = self.read_reg(IMOD);
                 let merged = (current & !mask) | (v & mask);
                 self.set(IMOD, merged & 0xffff);
-                self.state.moderation_counter = merged >> 16;
-                self.moderation_clock = Instant::now();
+                self.state.interrupters[self.interrupter].moderation_counter = merged >> 16;
+                self.state.interrupters[self.interrupter].moderation_clock = Instant::now();
                 self.update_interrupt();
             }
             ERSTSZ => self.set(off, merged & 0xffff),
@@ -1012,8 +1130,8 @@ impl XhciController {
                 let old = self.get64(ERDP);
                 self.set(off, merged & !15);
                 if v & 8 != 0 {
-                    self.state.ehb = false;
-                    self.state.interrupt_sent = false;
+                    self.state.interrupters[self.interrupter].ehb = false;
+                    self.state.interrupters[self.interrupter].interrupt_sent = false;
                 }
                 if self.acknowledge_events(old, self.get64(ERDP)).is_err() {
                     self.dma_error();
@@ -1052,10 +1170,10 @@ impl XhciController {
         }
     }
     fn reset_event_ring(&mut self) {
-        self.state.event_segment = 0;
-        self.state.event_index = 0;
-        self.state.event_cycle = true;
-        self.state.event_used = 0;
+        self.state.interrupters[self.interrupter].event_segment = 0;
+        self.state.interrupters[self.interrupter].event_index = 0;
+        self.state.interrupters[self.interrupter].event_cycle = true;
+        self.state.interrupters[self.interrupter].event_used = 0;
     }
 }
 
@@ -1067,7 +1185,9 @@ impl BusDevice for XhciController {
         };
         let mut copied = 0;
         while copied < data.len() && offset < BAR_SIZE as usize {
-            let bytes = self.read_reg(offset & !3).to_le_bytes();
+            let reg = self.select_bank(offset & !3);
+            let bytes = self.read_reg(reg).to_le_bytes();
+            self.interrupter = 0;
             let n = (4 - (offset & 3)).min(data.len() - copied);
             data[copied..copied + n].copy_from_slice(&bytes[offset & 3..(offset & 3) + n]);
             offset += n;
@@ -1088,7 +1208,9 @@ impl BusDevice for XhciController {
                 v |= u32::from(*b) << shift;
                 mask |= 255 << shift;
             }
-            self.write_reg(offset & !3, v, mask);
+            let reg = self.select_bank(offset & !3);
+            self.write_reg(reg, v, mask);
+            self.interrupter = 0;
             offset += n;
             data = &data[n..];
         }
@@ -1097,6 +1219,9 @@ impl BusDevice for XhciController {
 
 impl PciDevice for XhciController {
     fn config_read(&mut self, reg: usize) -> u32 {
+        if (64..1024).contains(&reg) {
+            return 0;
+        }
         reg.checked_mul(4)
             .and_then(|off| self.state.pci.get(off..off.checked_add(4)?))
             .map_or(u32::MAX, |b| u32::from_le_bytes(b.try_into().unwrap()))
@@ -1114,7 +1239,7 @@ impl PciDevice for XhciController {
             };
             let mask = match off {
                 4 => 7,
-                5 => 4,
+                5 => 5,
                 0xc | 0xd | 0x3c => 255,
                 0x10 => 0,
                 0x11 => 0xc0,
@@ -1125,7 +1250,11 @@ impl PciDevice for XhciController {
             };
             self.state.pci[off] = (self.state.pci[off] & !mask) | (b & mask);
         }
-        self.update_interrupt();
+        for index in 0..INTERRUPTERS {
+            self.interrupter = index;
+            self.update_interrupt();
+        }
+        self.interrupter = 0;
     }
     fn bars(&self) -> Vec<BarInfo> {
         vec![BarInfo {
@@ -1156,7 +1285,7 @@ impl Snapshot for XhciController {
     }
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
         let s = &self.state;
-        let mut w = Writer(b"VHVXHC01".to_vec());
+        let mut w = Writer(b"VHVXHC02".to_vec());
         w.bytes(&s.pci);
         for &v in &s.regs {
             w.u64(u64::from(v));
@@ -1177,20 +1306,24 @@ impl Snapshot for XhciController {
                 w.u64(u64::from(ep.kicked));
             }
         }
-        w.u64(s.event_segment as u64);
-        w.u64(u64::from(s.event_index));
-        w.u64(u64::from(s.event_cycle));
-        w.u64(s.event_used as u64);
-        w.u64(s.pending.len() as u64);
-        for t in &s.pending {
-            w.u64(t.parameter);
-            w.u64(u64::from(t.status));
-            w.u64(u64::from(t.control));
-        }
         w.u64(u64::from(self.microframe()));
-        w.u64(u64::from(s.ehb));
-        w.u64(u64::from(s.interrupt_sent));
-        w.u64(u64::from(self.moderation_counter()));
+        for intr in &s.interrupters {
+            w.u64(intr.event_segment as u64);
+            w.u64(u64::from(intr.event_index));
+            w.u64(u64::from(intr.event_cycle));
+            w.u64(intr.event_used as u64);
+            w.u64(intr.pending.len() as u64);
+            for t in &intr.pending {
+                w.u64(t.parameter);
+                w.u64(u64::from(t.status));
+                w.u64(u64::from(t.control));
+            }
+            w.u64(u64::from(intr.ehb));
+            w.u64(u64::from(intr.interrupt_sent));
+            let elapsed =
+                (intr.moderation_clock.elapsed().as_nanos() / 250).min(u128::from(u32::MAX)) as u32;
+            w.u64(u64::from(intr.moderation_counter.saturating_sub(elapsed)));
+        }
         for d in &self.devices {
             w.u64(u64::from(d.is_some()));
             if let Some(d) = d {
@@ -1202,7 +1335,7 @@ impl Snapshot for XhciController {
     }
     fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceError> {
         let mut r = Reader(bytes);
-        if r.take(8)? != b"VHVXHC01" {
+        if r.take(8)? != b"VHVXHC02" {
             return Err(invalid());
         }
         let mut state = Self::initial_state();
@@ -1229,30 +1362,32 @@ impl Snapshot for XhciController {
                 ep.kicked = r.bool()?;
             }
         }
-        state.event_segment = usize::try_from(r.u64()?).map_err(|_| invalid())?;
-        state.event_index = r.u32()?;
-        state.event_cycle = r.bool()?;
-        state.event_used = usize::try_from(r.u64()?).map_err(|_| invalid())?;
-        if state.event_segment >= 16 || state.event_index >= 4096 || state.event_used > 65536 {
-            return Err(invalid());
-        }
-        let count = r.u64()?;
-        if count > 4096 {
-            return Err(invalid());
-        }
-        for _ in 0..count {
-            state.pending.push_back(Trb {
-                parameter: r.u64()?,
-                status: r.u32()?,
-                control: r.u32()?,
-            });
-        }
         state.mfindex = r.u32()? & 0x3fff;
-        state.ehb = r.bool()?;
-        state.interrupt_sent = r.bool()?;
-        state.moderation_counter = r.u32()?;
-        if state.moderation_counter > 0xffff {
-            return Err(invalid());
+        for intr in &mut state.interrupters {
+            intr.event_segment = usize::try_from(r.u64()?).map_err(|_| invalid())?;
+            intr.event_index = r.u32()?;
+            intr.event_cycle = r.bool()?;
+            intr.event_used = usize::try_from(r.u64()?).map_err(|_| invalid())?;
+            if intr.event_segment >= 16 || intr.event_index >= 4096 || intr.event_used > 65536 {
+                return Err(invalid());
+            }
+            let count = r.u64()?;
+            if count > 4096 {
+                return Err(invalid());
+            }
+            for _ in 0..count {
+                intr.pending.push_back(Trb {
+                    parameter: r.u64()?,
+                    status: r.u32()?,
+                    control: r.u32()?,
+                });
+            }
+            intr.ehb = r.bool()?;
+            intr.interrupt_sent = r.bool()?;
+            intr.moderation_counter = r.u32()?;
+            if intr.moderation_counter > 0xffff {
+                return Err(invalid());
+            }
         }
         let mut device_states = Vec::new();
         for d in &self.devices {
@@ -1288,8 +1423,11 @@ impl Snapshot for XhciController {
         }
         self.state = state;
         self.clock = Instant::now();
-        self.moderation_clock = Instant::now();
-        self.update_interrupt();
+        for index in 0..INTERRUPTERS {
+            self.interrupter = index;
+            self.update_interrupt();
+        }
+        self.interrupter = 0;
         Ok(())
     }
 }
