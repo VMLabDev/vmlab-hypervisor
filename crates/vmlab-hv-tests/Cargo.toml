@@ -1,0 +1,28 @@
+# The S1 integration harness: spawns the built `vmlab-hv` binary with a
+# generated machine description and drives it through every seam the spec
+# names for S1 — the control socket, the cinit ctl port, the agent port and
+# the network switch socket. A test-support crate only.
+[package]
+name = "vmlab-hv-tests"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "S1 integration harness and acceptance tests for vmlab-hv"
+
+[dependencies]
+vmlab-hv-proto = { workspace = true }
+vmlab-disk = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# vmlab's wire contracts (guest/cinit-proto, guest/agent-proto): path
+# dependencies into the vmlab checkout until the repos are published, then
+# git dependencies. They are wire types only — nothing depends on vmlab
+# itself (D18).
+vmlab-cinit-proto = { path = "/home/wil/dev/vmlab/guest/cinit-proto" }
+vmlab-agent-proto = { path = "/home/wil/dev/vmlab/guest/agent-proto" }
+
+parking_lot = { workspace = true }
+[lints]
+workspace = true

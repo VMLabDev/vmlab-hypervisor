@@ -160,6 +160,40 @@ impl Client {
         }
     }
 
+    /// [`Client::wait_event`] with a deadline: `Ok(None)` also covers "the
+    /// deadline passed first", so callers cannot tell a timeout from a
+    /// closed stream — both mean no more events will arrive in time.
+    pub fn wait_event_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<Event>, ClientError> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(event) = self.events.pop_front() {
+                return Ok(Some(event));
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            self.reader
+                .get_ref()
+                .set_read_timeout(Some(remaining.min(std::time::Duration::from_millis(250))))?;
+            match codec::read_server_msg(&mut self.reader) {
+                Ok(Some(ServerMsg::Event { event })) => return Ok(Some(event)),
+                Ok(None) => return Ok(None),
+                Ok(Some(other)) => return Err(ClientError::Unexpected(Box::new(other))),
+                Err(CodecError::Io(ref e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
     /// Take the events buffered while waiting for command replies.
     pub fn take_events(&mut self) -> Vec<Event> {
         self.events.drain(..).collect()

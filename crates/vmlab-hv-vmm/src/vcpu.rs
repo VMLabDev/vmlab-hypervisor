@@ -114,8 +114,10 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                 )));
                 return;
             }
-            Err(e) if e.errno() == libc::EINTR => {
-                // Kicked: fall through and re-check the machine state.
+            Err(e) if e.errno() == libc::EINTR || e.errno() == libc::EAGAIN => {
+                // EINTR: kicked, re-check the machine state. EAGAIN: the
+                // vCPU is not runnable yet — an application processor parked
+                // before the kernel's INIT-SIPI-SIPI wakes it — retry.
             }
             Err(e) => {
                 shared.request_exit(crate::vm::ExitReason::Error(format!(
