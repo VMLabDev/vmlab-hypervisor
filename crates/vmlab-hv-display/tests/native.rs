@@ -117,6 +117,22 @@ fn held_buffers_are_immutable_and_slow_clients_skip_independently() {
 }
 
 #[test]
+fn preferred_size_requires_input_and_valid_dimensions() {
+    for (caps, width, height) in [(0, 800, 600), (C::INPUT, 0, 600), (C::INPUT, 800, 16385)] {
+        let (server, _, sink) = server();
+        let (c, h) = client(&server, caps);
+        if caps == C::INPUT {
+            assert!(matches!(c.receive().unwrap().message, M::LedState { .. }));
+        }
+        c.send(&M::RequestSize { width, height }).unwrap();
+        assert!(c.receive().is_err());
+        assert!(sink.0.lock().unwrap().is_empty());
+        drop(c);
+        h.join().unwrap().unwrap();
+    }
+}
+
+#[test]
 fn cursor_leds_and_all_input_messages() {
     let (server, _, sink) = server();
     server
