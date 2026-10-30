@@ -517,6 +517,19 @@ fn restore(
         )));
     }
 
+    // Replacing RAM also replaces page tables. Removing the slots forces
+    // KVM to invalidate translations even when the restored CR3 is unchanged.
+    for slot in 0..ram.layout().regions.len() {
+        let region = kvm_bindings::kvm_userspace_memory_region {
+            slot: slot as u32,
+            ..Default::default()
+        };
+        // SAFETY: all vCPUs are parked and this only removes a RAM slot.
+        unsafe { shared.kvm.vm.set_user_memory_region(region) }
+            .map_err(|e| SnapshotError::Internal(format!("invalidating restored RAM: {e}")))?;
+    }
+    crate::memory::register_memslots(&shared.kvm.vm, &ram)
+        .map_err(|e| SnapshotError::Internal(format!("registering restored RAM: {e}")))?;
     restore_kernel_state(shared, &sections)?;
     for node in &reg.nodes {
         node.restore(&sections).map_err(SnapshotError::Internal)?;
