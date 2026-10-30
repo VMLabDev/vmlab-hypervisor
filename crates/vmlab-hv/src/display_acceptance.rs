@@ -129,7 +129,9 @@ pub(super) fn screenshots_after_unobserved_boot(path: &Path, agent: &mut AgentCl
         &[
             "sh",
             "-c",
-            "for n in $(seq 1 300); do grep -aq 'login:' /dev/vcs1 && exit 0; sleep .1; done; cat /dev/vcs1; exit 1",
+            // Console text becomes visible in vcs1 before fbdev's deferred
+            // update reaches the scanout. Keep all display clients absent.
+            "for n in $(seq 1 300); do if grep -aq 'login:' /dev/vcs1; then sleep 1; exit 0; fi; sleep .1; done; cat /dev/vcs1; exit 1",
         ],
     );
     let image = screenshot(path);
