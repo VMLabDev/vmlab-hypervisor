@@ -697,6 +697,16 @@ impl PciDevice for VirtioPciDevice {
                 // asserted.
                 (self.command as u32) | 0x0010_0000 | if intx { 0x0008_0000 } else { 0 }
             }
+            // The MSI-X capability dword (byte 0x40, reg 16).
+            0x40 => {
+                // The message-control word (upper half) is dynamic: the
+                // driver read-modify-writes it, so a stale enable bit would
+                // silently disable MSI-X behind a live machine.
+                let control = self.msix_control();
+                (control as u32) << 16
+                    | self.config[MSI_X_CAP_OFF] as u32
+                    | (self.config[MSI_X_CAP_OFF + 1] as u32) << 8
+            }
             0x20 => {
                 // BAR sizing probe: all address bits written as ones.
                 if self.bar4 & 0xFFFF_FFF0 == 0xFFFF_FFF0 {
@@ -1449,6 +1459,26 @@ mod tests {
         assert_eq!(g.bar32_read(MSIX_TABLE_OFF + 12), 0);
         // Unwritten entry 1 reads zero.
         assert_eq!(g.bar32_read(MSIX_TABLE_OFF + 16), 0);
+    }
+
+    #[test]
+    fn msix_control_word_reads_back_dynamically() {
+        // Drivers drop the function-mask bit with a read-modify-write of
+        // the message-control word (Linux's pci_msix_clear_and_set_ctrl); a
+        // stale read-back silently disables MSI-X on a live machine.
+        let mut g = Guest::new();
+        let control = |g: &mut Guest| (g.cfg32(0x40) >> 16) as u16;
+        assert_eq!(control(&mut g) & 0xC000, 0);
+        // Enable + function mask, as drivers write while programming.
+        g.cfg16_write(0x42, 0xC000);
+        assert_eq!(control(&mut g) & 0x8000, 0x8000);
+        assert_eq!(control(&mut g) & 0x4000, 0x4000);
+        let unmask = control(&mut g) & !0x4000;
+        g.cfg16_write(0x42, unmask);
+        assert_eq!(control(&mut g) & 0xC000, 0x8000);
+        // The read-only table-size field still reads through (two vectors
+        // for one queue plus config, encoded as entries - 1).
+        assert_eq!(control(&mut g) & 0x03FF, 1);
     }
 
     #[test]
