@@ -10,6 +10,8 @@ import re
 import sys
 from pathlib import Path
 
+from aml import omit_pci_functions, omit_asl_functions, relocate_loader
+
 DEFAULT_ALLOW = Path(__file__).with_name("approved-differences.json")
 BDF = r"(?:[0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]"
 
@@ -274,7 +276,7 @@ def load_capture(root: Path) -> dict[str, str]:
     return result
 
 
-def approved_pci(left: dict[str, str], right: dict[str, str], rules: dict) -> None:
+def approved_pci(left: dict[str, str], right: dict[str, str], rules: dict) -> set[str]:
     """D6 is directional: reference USB functions may disappear, xHCI may appear.
 
     Remove only whole functions whose identity matches. Never permit edits to
@@ -333,6 +335,36 @@ def approved_pci(left: dict[str, str], right: dict[str, str], rules: dict) -> No
             captures["usb.txt"] = "".join(
                 line for line in captures["usb.txt"].splitlines(True)
                 if not any(driver in line and "Host Controller" in line for driver in drivers))
+    return removed
+
+
+def approved_aml(left: dict[str, str], right: dict[str, str], reference: Path, removed: set[str]) -> None:
+    if not removed:
+        return
+    path = reference / "guest/acpi/DSDT"
+    if not path.exists():
+        return
+    original = path.read_bytes()
+    canonical, cuts = omit_pci_functions(original, removed)
+    if not cuts:
+        return
+    left["acpi/DSDT"] = normalize_artifact("acpi/DSDT", canonical)
+    name = "acpi/DSDT.dsl"
+    if name in left:
+        left[name] = omit_asl_functions(left[name], removed)
+    for capture in (left, right):
+        if name in capture:
+            # These comments are derived from the binary, which stays compared.
+            capture[name] = re.sub(r"(?m)^( \*\s+(?:Length|Checksum))\s+.*$", r"\1 <D6-derived>", capture[name])
+            capture[name] = normalize_text(name, capture[name])
+    for name in ("acpi-dsl/iasl.log", "dmesg.txt"):
+        if name in left:
+            left[name] = re.sub(r"(ACPI: DSDT \S+ )[0-9A-Fa-f]{6}( )",
+                                lambda match: f"{match[1]}{len(canonical):06X}{match[2]}", left[name])
+    name = "fwcfg/blobs/etc/table-loader"
+    path = reference / "guest" / name
+    if path.exists():
+        left[name] = normalize_artifact(name, relocate_loader(path.read_bytes(), cuts))
 
 
 def compare(reference: Path, candidate: Path, allow: Path | None = DEFAULT_ALLOW) -> str:
@@ -349,7 +381,8 @@ def compare(reference: Path, candidate: Path, allow: Path | None = DEFAULT_ALLOW
         if not all(isinstance(identity, str) and re.fullmatch(r"[0-9a-f]{4}:[0-9a-f]{4}", identity)
                    for identity in rules["candidate_only_ids"]):
             raise ValueError("invalid candidate_only_ids PCI identity")
-        approved_pci(left, right, rules)
+        removed = approved_pci(left, right, rules)
+        approved_aml(left, right, reference, removed)
     report = []
     for name in sorted(left.keys() | right.keys()):
         if name not in left or name not in right:

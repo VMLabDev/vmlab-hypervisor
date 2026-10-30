@@ -97,9 +97,13 @@ ICH9 USB functions at `00:1d.0`, `.1`, `.2`, and `.7` only with their captured
 Intel IDs. It permits a candidate-only `1b36:000d` xHCI function. The filter
 applies to PCI inventories, config blocks, topology, resource ranges, and USB
 host-controller listings. Changes to a function present on both sides are
-never approved automatically. Dependent changes to ACPI namespaces, IRQ
-routing, or boot logs remain visible for review. The allow-list does not
-suppress arbitrary USB-related lines.
+never approved automatically. For identity-checked omissions, the AML parser
+removes only the corresponding exact `Name (_ADR)` device nodes from a
+device-only `_SB.PCI0` scope. Additional methods prevent that normalization.
+The ASL nodes, derived DSDT header/log lengths, and table-loader offsets are
+adjusted for those removed bytes. Other AML and loader fields remain compared.
+IRQ routing and other boot-log differences remain visible for review. The
+allow-list does not suppress arbitrary USB-related lines.
 
 To check that the tool retains real differences:
 

@@ -15,12 +15,49 @@ SPEC = importlib.util.spec_from_file_location("hwref_diff", Path(__file__).with_
 diff = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(diff)
 import hv_capture
+import aml
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_d6_aml_parser_removes_only_exact_pci_address_devices(self):
+        original = (REFERENCE / "guest/acpi/DSDT").read_bytes()
+        slots = {"00:1d.0", "00:1d.1", "00:1d.2", "00:1d.7"}
+        canonical, cuts = aml.omit_pci_functions(original, slots)
+        self.assertEqual(cuts, [(0x2007, 0x2018), (0x2018, 0x2029),
+                                (0x2029, 0x203a), (0x203a, 0x204b)])
+        self.assertEqual(len(original) - len(canonical), 68)
+        self.assertEqual(sum(canonical) & 255, 0)
+        changed = bytearray(original)
+        changed[0x2017] ^= 1
+        self.assertEqual(aml.omit_pci_functions(changed, slots), (changed, []))
+        changed = bytearray(original)
+        changed[0x200] ^= 1
+        self.assertNotEqual(aml.omit_pci_functions(changed, slots)[0], canonical)
+        changed = bytearray(original)
+        changed[4] ^= 1
+        self.assertEqual(aml.omit_pci_functions(changed, slots), (changed, []))
+        source = (REFERENCE / "guest/acpi/DSDT.dsl").read_text()
+        reduced = aml.omit_asl_functions(source, slots)
+        self.assertNotIn("Device (SE8)", reduced)
+        self.assertIn("Device (S28)", reduced)
+        source = source.replace("Name (_ADR, 0x001D0000)",
+                                "Name (_ADR, 0x001D0000)\nMethod (TEST) { Return (One) }")
+        self.assertIn("Device (SE8)", aml.omit_asl_functions(source, slots))
+
+    def test_d6_loader_offsets_change_without_masking_record_contents(self):
+        source = (REFERENCE / "guest/fwcfg/blobs/etc/table-loader").read_bytes()
+        dsdt = (REFERENCE / "guest/acpi/DSDT").read_bytes()
+        _, cuts = aml.omit_pci_functions(dsdt, {"00:1d.0", "00:1d.1", "00:1d.2", "00:1d.7"})
+        reduced = aml.relocate_loader(source, cuts)
+        self.assertEqual(struct.unpack_from("<I", reduced, 2 * 128 + 68)[0], len(dsdt) - 68)
+        self.assertEqual(struct.unpack_from("<I", reduced, 3 * 128 + 116)[0], 0x222b - 68)
+        changed = bytearray(source)
+        changed[3 * 128 + 120] = 8
+        self.assertNotEqual(aml.relocate_loader(changed, cuts), reduced)
+
     def test_times_counts_mac_and_kernel_addresses(self):
         pairs = [
             ("dmesg.txt", "[ 1.123] audit: audit(1234567890.123:1)\n",
@@ -130,6 +167,27 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("=== lspci-nn.txt ===", result.stdout)
         self.assertIn("+00:00.0", result.stdout)
+
+    def test_d6_aml_allowance_does_not_hide_other_acpi_changes(self):
+        slots = {"00:1d.0", "00:1d.1", "00:1d.2", "00:1d.7"}
+        inventory = self.root / "guest/lspci-nn.txt"
+        inventory.write_text("".join(line for line in inventory.read_text().splitlines(True)
+                                     if line.split()[0] not in slots))
+        path = self.root / "guest/acpi/DSDT"
+        canonical, cuts = aml.omit_pci_functions(path.read_bytes(), slots)
+        path.write_bytes(canonical)
+        dsl = self.root / "guest/acpi/DSDT.dsl"
+        dsl.write_text(aml.omit_asl_functions(dsl.read_text(), slots))
+        loader = self.root / "guest/fwcfg/blobs/etc/table-loader"
+        loader.write_bytes(aml.relocate_loader(loader.read_bytes(), cuts))
+        self.assertIn("=== acpi/DSDT ===", diff.compare(REFERENCE, self.root, None))
+        report = diff.compare(REFERENCE, self.root)
+        self.assertNotIn("=== acpi/DSDT", report)
+        self.assertNotIn("=== fwcfg/blobs/etc/table-loader", report)
+        changed = bytearray(canonical)
+        changed[0x200] ^= 1
+        path.write_bytes(changed)
+        self.assertIn("=== acpi/DSDT ===", diff.compare(REFERENCE, self.root))
 
     def test_missing_capture_and_missing_or_new_artifact(self):
         (self.root / "guest/cpuid.txt").unlink()
