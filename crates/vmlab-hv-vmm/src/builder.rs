@@ -684,6 +684,7 @@ pub fn build(
                 })
                 .collect(),
             ecam_base: 0xb0000000,
+            pci64_base: Some(kvm.seabios_pci64_base(layout.ram_top() > 1 << 32)),
             tpm: false,
         };
         let options = vmlab_hv_firmware::FirmwareOptions {

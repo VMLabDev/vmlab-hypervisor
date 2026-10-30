@@ -31,6 +31,8 @@ pub struct Platform {
     pub ram_regions: Vec<(u64, u64)>,
     pub pci_devices: Vec<PciDevice>,
     pub ecam_base: u64,
+    /// Firmware-selected 64-bit PCI window; None places it above RAM.
+    pub pci64_base: Option<u64>,
     pub tpm: bool,
 }
 
@@ -59,6 +61,7 @@ impl Default for Platform {
             })
             .collect(),
             ecam_base: 0xb000_0000,
+            pci64_base: None,
             tpm: false,
         }
     }
@@ -160,6 +163,13 @@ fn validate(p: &Platform) -> Result<(), String> {
             return Err("RAM ranges must be sorted, nonempty and outside ECAM".into());
         }
         previous_end = end;
+    }
+    if p.pci64_base.is_some_and(|base| {
+        base < previous_end.max(1 << 32)
+            || base & ((1 << 30) - 1) != 0
+            || base.checked_add(32 << 30).is_none()
+    }) {
+        return Err("64-bit PCI window must be GiB aligned above RAM without overflow".into());
     }
     if p.ram_regions
         .first()
@@ -285,7 +295,9 @@ fn dsdt(p: &Platform) -> Vec<u8> {
         .max()
         .unwrap()
         .max(1 << 32);
-    let high_base = high_end.div_ceil(1 << 30) * (1 << 30);
+    let high_base = p
+        .pci64_base
+        .unwrap_or_else(|| high_end.div_ceil(1 << 30) * (1 << 30));
     put(&mut source, 0x1e62, high_base, 8);
     put(&mut source, 0x1e6a, high_base + (32 << 30) - 1, 8);
     let mut cpus = source[0x19ca..0x19ed].to_vec();

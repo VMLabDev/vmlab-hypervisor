@@ -54,6 +54,20 @@ impl KvmVm {
         self.kvm.get_max_vcpus()
     }
 
+    /// SeaBIOS places this platform's small prefetchable BARs near the top
+    /// of its usable physical address space, with padding when high RAM exists.
+    pub(crate) fn seabios_pci64_base(&self, high_ram: bool) -> u64 {
+        let bits = self
+            .cpuid
+            .as_slice()
+            .iter()
+            .find(|e| e.function == 0x8000_0008)
+            .map_or(36, |e| e.eax & 0xff)
+            .clamp(32, 44);
+        let top = 1u64 << bits;
+        top - if high_ram { top / 8 } else { 1 << 30 }
+    }
+
     /// Create vCPU `id` with the host's supported CPUID passed through.
     pub fn create_vcpu(&self, id: u8) -> Result<VcpuFd, VmmError> {
         self.create_vcpu_with_policy(id, 1, vmlab_hv_proto::machine::CpuPolicy::Host)
