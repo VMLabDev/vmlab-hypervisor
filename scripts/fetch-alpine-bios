@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+image="${CARGO_TARGET_DIR:-target}/s1/alpine-bios.qcow2"
+url=https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.4-x86_64-bios-cloudinit-r0.qcow2
+sha=39fc293200534b03cf805620a099f2f68265220215434fde687536f67a955bc3
+mkdir -p "$(dirname "$image")"
+if [ ! -f "$image" ]; then
+    curl -fL --retry 2 -o "$image" "$url"
+fi
+printf '%s  %s\n' "$sha" "$image" | sha256sum -c -

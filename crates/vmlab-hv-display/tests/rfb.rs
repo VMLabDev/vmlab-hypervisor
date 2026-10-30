@@ -76,6 +76,22 @@ fn update(s: &mut UnixStream) -> Vec<R> {
 }
 
 #[test]
+fn first_rfb_frame_captures_changes_without_connected_clients() {
+    let (server, source, _) = server();
+    for value in [7, 9] {
+        *source.0.lock().unwrap() = frame(value, 4, 3);
+        let (a, mut b) = socket();
+        let s = server.clone();
+        let h = std::thread::spawn(move || s.serve_rfb(a));
+        handshake(&mut b);
+        request(&mut b, false);
+        assert_eq!(update(&mut b)[0].p, [value, value, value, 0].repeat(12));
+        drop(b);
+        h.join().unwrap().unwrap();
+    }
+}
+
+#[test]
 fn rfb38_raw_resize_cursors_leds_and_input() {
     let (server, source, sink) = server();
     server
