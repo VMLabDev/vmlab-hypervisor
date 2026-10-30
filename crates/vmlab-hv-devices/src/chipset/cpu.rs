@@ -80,7 +80,7 @@ impl Snapshot for CpuInventory {
         }
         self.command = state[1];
         self.selector = u32::from_le_bytes(state[6..10].try_into().unwrap());
-        for (ost, bytes) in self.ost.iter_mut().zip(state[10..].chunks_exact(8)) {
+        for (ost, bytes) in self.ost.iter_mut().zip(state[10..].as_chunks::<8>().0) {
             ost[0] = u32::from_le_bytes(bytes[..4].try_into().unwrap());
             ost[1] = u32::from_le_bytes(bytes[4..].try_into().unwrap());
         }
@@ -100,6 +100,11 @@ mod tests {
             let mut enabled = [0];
             cpu.read(4, &mut enabled);
             assert_eq!(enabled, [u8::from(id < 4)]);
+            assert_eq!(
+                enabled[0] & 0x16,
+                0,
+                "fixed CPUs have no insertion, removal or eject events"
+            );
             let mut data = [0; 4];
             cpu.read(8, &mut data);
             assert_eq!(u32::from_le_bytes(data), if id < 4 { id } else { 0 });

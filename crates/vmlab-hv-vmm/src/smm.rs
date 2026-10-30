@@ -16,6 +16,7 @@ use crate::VmmError;
 
 pub const SMM_ADDRESS_SPACE: u32 = 1 << 16;
 pub const SMI_BROADCAST: u64 = 1;
+pub const SMI_SUPPORTED: u64 = 7;
 
 mod fwcfg;
 pub use fwcfg::SmiFwCfg;

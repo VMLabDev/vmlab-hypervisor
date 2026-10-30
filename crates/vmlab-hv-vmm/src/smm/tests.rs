@@ -154,7 +154,7 @@ fn edk2_stream_negotiation_rejection_lock_and_snapshot() {
     let (mut fw, _) = firmware();
     let request = selector(&mut fw, "etc/smi/requested-features");
     let ok = selector(&mut fw, "etc/smi/features-ok");
-    for (features, expected) in [(2u64, 0), (1, 1), (0, 0), (1, 1)] {
+    for (features, expected) in [(8u64, 0), (1, 1), (0, 0), (1, 1)] {
         fw.write(0, &request.to_le_bytes());
         for byte in features.to_le_bytes() {
             fw.write(1, &[byte]);
@@ -200,7 +200,7 @@ fn edk2_dma_negotiation() {
     let request = selector(&mut fw, "etc/smi/requested-features");
     let ok = selector(&mut fw, "etc/smi/features-ok");
     memory
-        .write_slice(&1u64.to_le_bytes(), GuestAddress(0x2000))
+        .write_slice(&7u64.to_le_bytes(), GuestAddress(0x2000))
         .unwrap();
     dma(&mut fw, &memory, request, 16, 8);
     dma(&mut fw, &memory, ok, 2, 1);
