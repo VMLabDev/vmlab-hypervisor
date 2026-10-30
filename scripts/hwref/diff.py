@@ -173,6 +173,7 @@ def normalize_text(name: str, text: str) -> str:
         text = re.sub(r"(Memory: )\d+K/", r"\1<available>K/", text)
         text = re.sub(r"\b\d+K reserved\b", "<reserved>K reserved", text)
         text = re.sub(r"(efi: Freeing EFI boot services memory: )\d+K", r"\1<allocation>K", text)
+        text = re.sub(r"(efi: Remove mem)\d+(: MMIO range=)", r"\1<index>\2", text)
         text = "\n".join(sorted(text.splitlines())) + "\n"
     if name == "iomem.txt":
         text = re.sub(r"(?m)^(\s*)[0-9a-f]+-[0-9a-f]+( : Kernel (?:code|rodata|data|bss))$",

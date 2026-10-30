@@ -25,6 +25,13 @@ REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_efi_descriptor_indices_are_run_dependent(self):
+        line = "efi: Remove mem125: MMIO range=[0xffc00000-0xffffffff] (4MB) from e820 map\n"
+        for artifact in ("dmesg.txt", "e820-dmesg.txt"):
+            original = diff.normalize_text(artifact, line)
+            self.assertEqual(original, diff.normalize_text(artifact, line.replace("mem125", "mem122")))
+            self.assertNotEqual(original, diff.normalize_text(artifact, line.replace("4MB", "8MB")))
+
     def test_tpm_event_log_relocation_keeps_the_declared_length(self):
         path = ROOT / "docs/hwref/q35-ovmf-win11/guest/acpi/TPM2"
         original = path.read_bytes()
