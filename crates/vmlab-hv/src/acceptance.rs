@@ -94,7 +94,12 @@ fn boot_template(
         .map(PathBuf::from)
         .unwrap_or_else(|| "/home/wil/dev/vmlab/guest/dist/firmware/x86_64".into());
     let secure = firmware == Firmware::SecureOvmf;
+    let rom = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/ipxe/virtio-net.rom");
     if firmware != Firmware::SeaBios {
+        if !rom.is_file() {
+            eprintln!("skipping {name}: run just firmware-ipxe-build for the OVMF NIC ROM");
+            return;
+        }
         for file in if secure {
             ["OVMF_CODE_4M.secboot.fd", "OVMF_VARS_4M.ms.fd"]
         } else {
@@ -195,6 +200,11 @@ fn boot_template(
     }
     if firmware != Firmware::SeaBios {
         let root = firmware_root;
+        description["nics"] = serde_json::json!([{
+            "pci":{"bus":0,"device":3,"function":0}, "mac":"52:54:00:00:00:01",
+            "attachment":{"kind":"stream","socket":dir.path().join("switch.sock")},
+            "rom":rom
+        }]);
         let vars = dir.path().join("OVMF_VARS.fd");
         let template_vars = template
             .ancestors()
@@ -415,6 +425,21 @@ fn boot_template(
             "{:?}",
             secure
         );
+        let keys = guest
+            .exec(
+                &[
+                    "/bin/sh",
+                    "-c",
+                    "cd /sys/firmware/efi/efivars && \
+                     test \"$(od -An -tu1 -j4 -N1 SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c)\" -eq 0 && \
+                     test -s PK-8be4df61-93ca-11d2-aa0d-00e098032b8c && \
+                     test -s KEK-8be4df61-93ca-11d2-aa0d-00e098032b8c && \
+                     test -s db-d719b2cb-3d3a-4596-a3bc-dad00e67656f",
+                ],
+                Duration::from_secs(20),
+            )
+            .unwrap();
+        assert_eq!(keys.exit_code, 0, "enrolled secure-boot keys: {keys:?}");
     }
     if matches!(display_test, DisplayTest::Screenshot(_)) {
         crate::display_acceptance::screenshots_after_unobserved_boot(&native, &mut guest);
