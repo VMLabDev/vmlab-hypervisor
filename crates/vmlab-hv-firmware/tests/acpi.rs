@@ -109,6 +109,23 @@ fn read_table(blob: &[u8], offset: usize) -> &[u8] {
 }
 
 #[test]
+fn loader_matches_captured_seabios_order_and_packed_offsets() {
+    let mut platform = Platform::default();
+    platform
+        .pci_devices
+        .extend([0, 1, 2, 7].map(|function| PciDevice {
+            device: 29,
+            function,
+            vga: false,
+        }));
+    let generated = generate(&platform).unwrap();
+    let captured = include_bytes!(
+        "../../../docs/hwref/q35-seabios-linux-generic/guest/fwcfg/blobs/etc/table-loader"
+    );
+    assert_eq!(generated.loader, captured);
+}
+
+#[test]
 fn firmware_installs_relocated_checksummed_tables() {
     for p in [
         Platform::default(),

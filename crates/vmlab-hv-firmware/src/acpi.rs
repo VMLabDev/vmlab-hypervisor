@@ -76,10 +76,11 @@ pub fn generate(platform: &Platform) -> Result<AcpiTables, String> {
     validate(platform)?;
     let mut tables = Vec::new();
     let mut loader = TableLoader::default();
-    loader.allocate(TABLES_FILE, 64, Zone::High);
     loader.allocate(RSDP_FILE, 16, Zone::Fseg);
+    loader.allocate(TABLES_FILE, 64, Zone::High);
     let facs = append(&mut tables, FACS);
     let dsdt = append(&mut tables, &dsdt(platform));
+    checksum(&mut tables, &mut loader, dsdt);
     let mut fadt = FADT.to_vec();
     put(&mut fadt, 36, facs as u64, 4);
     put(&mut fadt, 40, dsdt as u64, 4);
@@ -88,18 +89,25 @@ pub fn generate(platform: &Platform) -> Result<AcpiTables, String> {
     for (offset, width) in [(36, 4), (40, 4), (140, 8)] {
         loader.add_pointer(TABLES_FILE, TABLES_FILE, (fadt + offset) as u32, width);
     }
+    checksum(&mut tables, &mut loader, fadt);
     let madt = append(&mut tables, &madt(platform));
+    checksum(&mut tables, &mut loader, madt);
     let hpet = append(&mut tables, HPET);
+    checksum(&mut tables, &mut loader, hpet);
     let mut mcfg = table(*b"MCFG", 1, 24);
     put(&mut mcfg, 44, platform.ecam_base, 8);
     mcfg[55] = 255;
     let mcfg = append(&mut tables, &mcfg);
+    checksum(&mut tables, &mut loader, mcfg);
     let waet = append(&mut tables, WAET);
+    checksum(&mut tables, &mut loader, waet);
     let mut entries = vec![fadt, madt, hpet, mcfg, waet];
     if platform.tpm {
         let mut tpm = table(*b"TPM2", 4, 40);
         put(&mut tpm, 48, 6, 4);
-        entries.push(append(&mut tables, &tpm));
+        let tpm = append(&mut tables, &tpm);
+        checksum(&mut tables, &mut loader, tpm);
+        entries.push(tpm);
     }
     let mut rsdt = table(*b"RSDT", 1, entries.len() * 4);
     for (index, address) in entries.iter().enumerate() {
@@ -109,14 +117,7 @@ pub fn generate(platform: &Platform) -> Result<AcpiTables, String> {
     for index in 0..entries.len() {
         loader.add_pointer(TABLES_FILE, TABLES_FILE, (rsdt + 36 + index * 4) as u32, 4);
     }
-    for start in [dsdt, fadt, madt, hpet, mcfg, waet, rsdt]
-        .into_iter()
-        .chain(entries.iter().skip(5).copied())
-    {
-        tables[start + 9] = 0;
-        let length = u32::from_le_bytes(tables[start + 4..start + 8].try_into().unwrap());
-        loader.add_checksum(TABLES_FILE, (start + 9) as u32, start as u32, length);
-    }
+    checksum(&mut tables, &mut loader, rsdt);
     let mut rsdp = vec![0; 20];
     rsdp[..8].copy_from_slice(b"RSD PTR ");
     rsdp[9..15].copy_from_slice(b"BOCHS ");
@@ -170,10 +171,15 @@ fn validate(p: &Platform) -> Result<(), String> {
 }
 
 fn append(blob: &mut Vec<u8>, bytes: &[u8]) -> usize {
-    blob.resize(blob.len().div_ceil(64) * 64, 0);
     let start = blob.len();
     blob.extend_from_slice(bytes);
     start
+}
+
+fn checksum(tables: &mut [u8], loader: &mut TableLoader, start: usize) {
+    tables[start + 9] = 0;
+    let length = u32::from_le_bytes(tables[start + 4..start + 8].try_into().unwrap());
+    loader.add_checksum(TABLES_FILE, (start + 9) as u32, start as u32, length);
 }
 
 fn table(signature: [u8; 4], revision: u8, body_len: usize) -> Vec<u8> {
