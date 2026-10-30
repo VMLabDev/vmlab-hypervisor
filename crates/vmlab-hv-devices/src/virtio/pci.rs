@@ -1,4 +1,7 @@
-//! The modern virtio-pci transport (VIRTIO 1.2 §4.1).
+//! Modern and transitional virtio-pci transports (VIRTIO 1.2 §4.1).
+//!
+//! [`VirtioPciDevice::new_transitional`] selects the captured q35 layout:
+//! legacy I/O in BAR0, MSI-X in BAR1, and modern regions in BAR4.
 //!
 //! [`VirtioPciDevice`] wraps any [`Box<dyn VirtioDevice>`](crate::VirtioDevice)
 //! as a PCI function: vendor 0x1af4, device 0x1040 + virtio device type,
@@ -28,6 +31,14 @@ use crate::{
     BarInfo, BarKind, DeviceError, GuestMemory, IrqLine, MsiMessage, MsiSink, PciDevice,
     PciSnapshot, Snapshot, VirtioDevice, VirtioInterrupt,
 };
+
+#[path = "transitional.rs"]
+mod transitional;
+use transitional::LegacyPci;
+
+#[cfg(test)]
+#[path = "transitional_tests.rs"]
+mod transitional_tests;
 
 /// Virtio PCI vendor id.
 pub const VIRTIO_VENDOR_ID: u16 = 0x1af4;
@@ -274,6 +285,7 @@ pub struct VirtioPciDevice {
     command: u16,
     bar4: u64,
     interrupt_line: u8,
+    transitional: Option<LegacyPci>,
 }
 
 impl VirtioPciDevice {
@@ -379,6 +391,7 @@ impl VirtioPciDevice {
             command: 0,
             bar4: 0,
             interrupt_line: 0,
+            transitional: None,
             id,
         }
     }
@@ -399,7 +412,13 @@ impl VirtioPciDevice {
 
     /// Every feature the transport offers on the device's behalf.
     fn offered_features(&self) -> u64 {
-        self.device.features() | F_VERSION_1
+        self.device.features()
+            | F_VERSION_1
+            | if self.transitional.is_some() {
+                1 << 27
+            } else {
+                0
+            }
     }
 
     /// Reset to the power-on state (driver wrote status 0).
@@ -412,6 +431,9 @@ impl VirtioPciDevice {
         self.queue_select = 0;
         self.queue_cfg.fill(QueueCfg::default());
         self.activated = false;
+        if let Some(legacy) = &mut self.transitional {
+            legacy.active = false;
+        }
         let mut int = self.int.lock();
         int.config_vector = NO_VECTOR;
         int.queue_vectors.fill(NO_VECTOR);
@@ -452,8 +474,17 @@ impl VirtioPciDevice {
         // driver retries with a subset.
         let activating = status & device_status::DRIVER_OK != 0
             && self.driver_status & device_status::DRIVER_OK == 0;
+        if activating && self.transitional.as_ref().is_some_and(|s| s.active) {
+            if self.driver_features & !self.offered_features() != 0 {
+                status |= device_status::FAILED;
+                status &= !device_status::DRIVER_OK;
+            } else {
+                self.negotiated = Some(self.driver_features);
+                self.device.ack_features(self.driver_features);
+            }
+        }
         self.driver_status = status;
-        if activating {
+        if activating && status & device_status::DRIVER_OK != 0 {
             self.activate();
         }
     }
@@ -580,6 +611,9 @@ impl VirtioPciDevice {
         }
         if touches(common::DEVICE_STATUS as usize, 1) {
             let status = buf[common::DEVICE_STATUS as usize];
+            if let Some(legacy) = &mut self.transitional {
+                legacy.active = false;
+            }
             self.status_write(status);
         }
         if touches(common::QUEUE_SELECT as usize, 2) {
@@ -686,6 +720,9 @@ impl PciDevice for VirtioPciDevice {
         if reg >= PCI_CONFIG_SIZE / 4 {
             return 0;
         }
+        if self.transitional.is_some() {
+            return self.transitional_config_read(reg);
+        }
         match reg * 4 {
             0x04 => {
                 let intx = {
@@ -741,6 +778,10 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn config_write(&mut self, reg: usize, offset: u64, data: &[u8]) {
+        if self.transitional.is_some() {
+            self.transitional_config_write(reg, offset, data);
+            return;
+        }
         let mut msix_control: Option<[u8; 2]> = None;
         for (i, byte) in data.iter().enumerate() {
             let addr = reg as u64 * 4 + offset + i as u64;
@@ -768,6 +809,9 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn bars(&self) -> Vec<BarInfo> {
+        if let Some(legacy) = &self.transitional {
+            return legacy.bars();
+        }
         vec![BarInfo {
             index: BAR_INDEX,
             size: BAR_SIZE,
@@ -776,6 +820,25 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn bar_read(&mut self, bar: u8, offset: u64, data: &mut [u8]) {
+        let offset = if self.transitional.is_some() {
+            match bar {
+                0 => return self.legacy_read(offset, data),
+                1 => return self.msix_region_read(offset, data),
+                4 => match transitional::modern_offset(offset) {
+                    Some(offset) => offset,
+                    None => {
+                        data.fill(0);
+                        return;
+                    }
+                },
+                _ => {
+                    data.fill(0);
+                    return;
+                }
+            }
+        } else {
+            offset
+        };
         if bar != BAR_INDEX {
             data.fill(0);
             return;
@@ -806,6 +869,19 @@ impl PciDevice for VirtioPciDevice {
     }
 
     fn bar_write(&mut self, bar: u8, offset: u64, data: &[u8]) {
+        let offset = if self.transitional.is_some() {
+            match bar {
+                0 => return self.legacy_write(offset, data),
+                1 => return self.msix_region_write(offset, data),
+                4 => match transitional::modern_offset(offset) {
+                    Some(offset) => offset,
+                    None => return,
+                },
+                _ => return,
+            }
+        } else {
+            offset
+        };
         if bar != BAR_INDEX || data.is_empty() {
             return;
         }
@@ -819,7 +895,7 @@ impl PciDevice for VirtioPciDevice {
             }
             o if (0x1000..0x2000).contains(&o) => {
                 let queue = (o - NOTIFY_OFF) / NOTIFY_OFF_MULTIPLIER;
-                if queue < self.num_queues() as u64 {
+                if self.activated && queue < self.num_queues() as u64 {
                     self.device.queue_notify(queue as u16);
                 }
             }
@@ -840,22 +916,33 @@ impl VirtioPciDevice {
     /// Reads inside the MSI-X table or PBA (offset ≥ 0x4000).
     fn msix_region_read(&mut self, offset: u64, data: &mut [u8]) {
         data.fill(0);
-        let table_end = MSIX_TABLE_OFF + (self.int.lock().entries.len() * 16) as u64;
-        let pba_off = table_end.div_ceil(64) * 64;
-        if (MSIX_TABLE_OFF..table_end).contains(&offset) {
-            let entry = (offset - MSIX_TABLE_OFF) / 16;
-            let dword = ((offset - MSIX_TABLE_OFF) % 16 / 4) as usize;
+        let table_off = if self.transitional.is_some() {
+            0
+        } else {
+            MSIX_TABLE_OFF
+        };
+        let table_end = table_off + (self.int.lock().entries.len() * 16) as u64;
+        let pba_off = if self.transitional.is_some() {
+            0x800
+        } else {
+            table_end.div_ceil(64) * 64
+        };
+        if (table_off..table_end).contains(&offset) {
             let int = self.int.lock();
-            let e = int.entries[entry as usize];
-            let value: u32 = match dword {
-                0 => e.address as u32,
-                1 => (e.address >> 32) as u32,
-                2 => e.data,
-                _ => e.masked as u32,
-            };
-            let bytes = value.to_le_bytes();
-            let n = data.len().min(4);
-            data[..n].copy_from_slice(&bytes[..n]);
+            for (i, byte) in data.iter_mut().enumerate() {
+                let Some(pos) = offset.checked_add(i as u64) else {
+                    break;
+                };
+                if pos >= table_end {
+                    break;
+                }
+                let e = int.entries[((pos - table_off) / 16) as usize];
+                let mut bytes = [0u8; 16];
+                bytes[..8].copy_from_slice(&e.address.to_le_bytes());
+                bytes[8..12].copy_from_slice(&e.data.to_le_bytes());
+                bytes[12] = e.masked as u8;
+                *byte = bytes[((pos - table_off) % 16) as usize];
+            }
         } else if (pba_off..pba_off + 8).contains(&offset) {
             let int = self.int.lock();
             let bytes = int.pba.to_le_bytes();
@@ -868,40 +955,47 @@ impl VirtioPciDevice {
     /// Writes inside the MSI-X table or PBA.
     fn msix_region_write(&mut self, offset: u64, data: &[u8]) {
         let mut int = self.int.lock();
-        let table_end = MSIX_TABLE_OFF + (int.entries.len() * 16) as u64;
-        if !(MSIX_TABLE_OFF..table_end).contains(&offset) {
+        let table_off = if self.transitional.is_some() {
+            0
+        } else {
+            MSIX_TABLE_OFF
+        };
+        let table_end = table_off + (int.entries.len() * 16) as u64;
+        if !(table_off..table_end).contains(&offset) {
             return; // beyond the table (the PBA) is read-only
         }
-        let entry = ((offset - MSIX_TABLE_OFF) / 16) as usize;
-        let dword = ((offset - MSIX_TABLE_OFF) % 16 / 4) as usize;
-        let value = {
-            let mut bytes = [0u8; 4];
-            let len = data.len().min(4);
-            bytes[..len].copy_from_slice(&data[..len]);
-            u32::from_le_bytes(bytes)
-        };
-        match dword {
-            0 => {
-                int.entries[entry].address =
-                    (int.entries[entry].address & !0xFFFF_FFFF) | value as u64
+        for (i, byte) in data.iter().copied().enumerate() {
+            let Some(pos) = offset.checked_add(i as u64) else {
+                break;
+            };
+            if pos >= table_end {
+                break;
             }
-            1 => {
-                int.entries[entry].address =
-                    (int.entries[entry].address & 0xFFFF_FFFF) | ((value as u64) << 32)
-            }
-            2 => int.entries[entry].data = value,
-            _ => {
-                int.entries[entry].masked = value & 1 != 0;
-                if !int.entries[entry].masked {
-                    int.deliver_pending();
+            let e = &mut int.entries[((pos - table_off) / 16) as usize];
+            let field = (pos - table_off) % 16;
+            match field {
+                0..=7 => {
+                    let shift = field * 8;
+                    e.address = (e.address & !(0xff << shift)) | ((byte as u64) << shift);
                 }
+                8..=11 => {
+                    let shift = (field - 8) * 8;
+                    e.data = (e.data & !(0xff << shift)) | ((byte as u32) << shift);
+                }
+                12 => e.masked = byte & 1 != 0,
+                _ => {}
             }
         }
+        int.deliver_pending();
     }
 }
 
 /// Copy from `src` at `start` into `data`, zero-filling beyond `src`.
 fn copy_clamped(src: &[u8], start: usize, data: &mut [u8]) {
+    if start >= src.len() {
+        data.fill(0);
+        return;
+    }
     let len = data.len().min(src.len().saturating_sub(start));
     data[..len].copy_from_slice(&src[start..start + len]);
     data[len..].fill(0);
@@ -919,7 +1013,7 @@ impl Snapshot for VirtioPciDevice {
         let int = self.int.lock();
         let mut out = Vec::with_capacity(64 + self.queue_cfg.len() * 29);
         out.extend_from_slice(&SNAPSHOT_MAGIC.to_le_bytes());
-        out.push(1); // format version
+        out.push(if self.transitional.is_some() { 2 } else { 1 });
         out.push(self.driver_status);
         out.push(int.config_generation);
         out.push(self.activated as u8);
@@ -952,6 +1046,13 @@ impl Snapshot for VirtioPciDevice {
             out.extend_from_slice(&e.data.to_le_bytes());
             out.push(e.masked as u8);
         }
+        if let Some(legacy) = &self.transitional {
+            out.push(legacy.active as u8);
+            out.extend_from_slice(&legacy.bar0.to_le_bytes());
+            out.extend_from_slice(&legacy.bar1.to_le_bytes());
+            out.extend_from_slice(&legacy.rom.to_le_bytes());
+            out.extend_from_slice(&legacy.pci_cfg);
+        }
         Ok(out)
     }
 
@@ -961,10 +1062,11 @@ impl Snapshot for VirtioPciDevice {
         {
             return Err(bad());
         }
-        if state[4] != 1 {
+        let expected_version = if self.transitional.is_some() { 2 } else { 1 };
+        if state[4] != expected_version {
             return Err(DeviceError::State(format!(
-                "{}: transport state version {} is not 1",
-                self.id, state[4]
+                "{}: transport state version {} does not match {}",
+                self.id, state[4], expected_version
             )));
         }
         let mut cur: usize = 5;
@@ -991,11 +1093,9 @@ impl Snapshot for VirtioPciDevice {
         let device_feature_select = u32at(take(4)?)?;
         let guest_feature_select = u32at(take(4)?)?;
         let driver_features = u64at(take(8)?)?;
-        let negotiated = if u8at(take(1)?)? != 0 {
-            Some(u64at(take(8)?)?)
-        } else {
-            None
-        };
+        let has_negotiated = u8at(take(1)?)? != 0;
+        let negotiated_bits = u64at(take(8)?)?;
+        let negotiated = has_negotiated.then_some(negotiated_bits);
         let queue_select = u16at(take(2)?)?;
         let command = u16at(take(2)?)?;
         let bar4 = u64at(take(8)?)?;
@@ -1025,6 +1125,9 @@ impl Snapshot for VirtioPciDevice {
         let isr = u8at(take(1)?)?;
         let pba = u64at(take(8)?)?;
         let n_entries = u16at(take(2)?)? as usize;
+        if n_entries != self.int.lock().entries.len() {
+            return Err(bad());
+        }
         let mut entries = Vec::with_capacity(n_entries);
         for _ in 0..n_entries {
             let address = u64at(take(8)?)?;
@@ -1036,6 +1139,17 @@ impl Snapshot for VirtioPciDevice {
                 masked,
             });
         }
+        let legacy_state = if self.transitional.is_some() {
+            Some((
+                u8at(take(1)?)? != 0,
+                u32at(take(4)?)?,
+                u32at(take(4)?)?,
+                u32at(take(4)?)?,
+                <[u8; 16]>::try_from(take(16)?).map_err(|_| bad())?,
+            ))
+        } else {
+            None
+        };
         if cur != state.len() {
             return Err(bad());
         }
@@ -1054,6 +1168,15 @@ impl Snapshot for VirtioPciDevice {
         self.command = command;
         self.bar4 = bar4;
         self.interrupt_line = interrupt_line;
+        if let (Some(legacy), Some((active, bar0, bar1, rom, pci_cfg))) =
+            (&mut self.transitional, legacy_state)
+        {
+            legacy.active = active;
+            legacy.bar0 = bar0;
+            legacy.bar1 = bar1;
+            legacy.rom = rom;
+            legacy.pci_cfg = pci_cfg;
+        }
         {
             let mut int = self.int.lock();
             int.msix_enabled = msix_enabled;
