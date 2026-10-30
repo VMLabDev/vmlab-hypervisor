@@ -351,6 +351,7 @@ impl PciDevice for Mch {
                 4 => 0x07,
                 5 => 0x05,
                 0x3c => 0xff,
+                0x52 => 0xff,
                 0x60 => 0x07,
                 0x63 => 0xfc,
                 0x64 => 0x0f,
@@ -554,6 +555,13 @@ mod tests {
     fn mch() -> Mch {
         let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
         Mch::new(Arc::new(Mutex::new(pam)))
+    }
+
+    #[test]
+    fn ovmf_can_disable_integrated_graphics_in_ggc() {
+        let mut mch = mch();
+        mch.config_write(0x50 / 4, 2, &[2]);
+        assert_eq!(mch.config_read(0x50 / 4) >> 16 & 0xff, 2);
     }
 
     #[test]
