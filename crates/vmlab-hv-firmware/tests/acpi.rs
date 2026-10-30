@@ -100,8 +100,70 @@ fn files(t: &AcpiTables) -> BTreeMap<String, Vec<u8>> {
     [
         ("etc/acpi/tables".into(), t.tables.clone()),
         ("etc/acpi/rsdp".into(), t.rsdp.clone()),
+        ("etc/tpm/log".into(), vec![0; 0x10000]),
     ]
     .into()
+}
+
+#[test]
+fn p4_tpm2_log_relocation_and_namespace_match_ovmf_capture() {
+    let p = Platform {
+        tpm: true,
+        ..Platform::default()
+    };
+    let generated = generate(&p).unwrap();
+    let installed = install(&generated.loader, &mut files(&generated));
+    let blob = &installed["etc/acpi/tables"].data;
+    let base = installed["etc/acpi/tables"].address as usize;
+    let rsdt = read_table(
+        blob,
+        u32_at(&installed["etc/acpi/rsdp"].data, 16) as usize - base,
+    );
+    let tpm = rsdt[36..]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|entry| read_table(blob, u32_at(entry, 0) as usize - base))
+        .find(|table| &table[..4] == b"TPM2")
+        .unwrap();
+    assert_eq!(sum(tpm), 0);
+    assert_eq!(
+        u64::from_le_bytes(tpm[68..76].try_into().unwrap()),
+        installed["etc/tpm/log"].address
+    );
+    let mut expected =
+        include_bytes!("../../../docs/hwref/q35-ovmf-win11/guest/acpi/TPM2").to_vec();
+    let mut actual = tpm.to_vec();
+    for bytes in [&mut actual, &mut expected] {
+        bytes[9] = 0;
+        bytes[68..76].fill(0);
+    }
+    assert_eq!(actual, expected);
+    let dsdt = read_table(blob, 64);
+    let captured = include_bytes!("../../../docs/hwref/q35-ovmf-win11/guest/acpi/DSDT");
+    let captured_node = &captured[0x2138..0x23a4];
+    assert!(
+        dsdt.windows(captured_node.len())
+            .any(|node| node == captured_node)
+    );
+    let firmware = vmlab_hv_firmware::FwCfg::for_platform(
+        vmlab_hv_devices::GuestMemory::from_ranges(&[(vm_memory::GuestAddress(0), 0x1000)])
+            .unwrap(),
+        &p,
+        &vmlab_hv_firmware::FirmwareOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        firmware.file("etc/tpm/config").unwrap(),
+        include_bytes!("../../../docs/hwref/q35-ovmf-win11/guest/fwcfg/blobs/etc/tpm/config")
+    );
+    assert_eq!(firmware.file("etc/tpm/log").unwrap(), &[0; 0x10000]);
+    let absent = vmlab_hv_firmware::platform::ancillary_files(
+        &Platform::default(),
+        &vmlab_hv_firmware::FirmwareOptions::default(),
+    )
+    .unwrap();
+    assert!(absent.iter().all(|(name, _)| !name.starts_with("etc/tpm/")));
 }
 
 fn read_table(blob: &[u8], offset: usize) -> &[u8] {
