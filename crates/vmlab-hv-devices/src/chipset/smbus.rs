@@ -120,7 +120,7 @@ impl PciDevice for Smbus {
                 break;
             };
             match offset {
-                4 => self.config[4] = byte & 3,
+                4 => self.config[4] = byte & 7,
                 5 => self.config[5] = byte & 5,
                 0x20 => self.config[offset] = (byte & 0xc0) | 1,
                 0x21..=0x23 | 0x3c => self.config[offset] = byte,
@@ -217,6 +217,13 @@ mod tests {
         assert_eq!(device.config_read(1), 0x103);
         device.config_write(0, 0, &[0; 4]);
         assert_eq!(device.config_read(0), 0x2930_8086);
+    }
+
+    #[test]
+    fn ovmf_can_enable_bus_mastering_without_unsupported_command_bits() {
+        let (mut device, _) = controller();
+        device.config_write(1, 0, &[0xff; 2]);
+        assert_eq!(device.config_read(1) & 0xffff, 0x507);
     }
 
     #[test]
