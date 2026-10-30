@@ -133,6 +133,14 @@ paths remain exact. ACPI log relocation masking handles uppercase hexadecimal
 addresses too. Clock stabilization timestamps are masked. PCI function numbers
 are preserved when normalizing decimal measurements.
 
+TPM2 event-log pointers are firmware allocations. Their addresses and the
+decoded `Log Address` field are masked, while the log length remains compared.
+The fw_cfg size inventory is sorted by filename; blob sizes remain exact.
+EFI memory-descriptor indices vary between identical QEMU boots and are masked.
+Contiguous System RAM ranges split at known usable Linux setup-data boundaries
+are coalesced before address normalization. Reservations, gaps, child resources,
+RAM ceilings, and unrelated boundaries remain compared.
+
 VMware's vmport/vmmouse interface is an **approved D15 omission**. The filter
 permits only the observed VMware-to-Explorer PS/2 enumeration substitution.
 D14 permits the 9216-byte initialized kvmvapic ROM copy. D16 compares the
@@ -140,9 +148,8 @@ separately built upstream iPXE ROM by presence, ROM BAR size and PCI ROM
 identity rather than executable bytes; its absence is no longer permitted.
 Other ROM sizes and mouse models remain failures.
 
-The 2a gate also records category and reason metadata for two temporary groups:
-`etc/smi/*` and `etc/tpm/*` are **deferred to 2c** and must be removed from the
-allow-list when 2c lands. `genroms/kvmvapic.bin` and
+Phase 2c requires `etc/smi/*` and `etc/tpm/*`; neither interface is deferred.
+`genroms/kvmvapic.bin` and
 `genroms/linuxboot_dma.bin` are **approved under D14** because QEMU-built ROMs
 are not shipped. These rules permit only reference-only files;
 changed files, candidate-only files and failed blob collection still fail.
