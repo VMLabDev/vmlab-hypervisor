@@ -19,6 +19,7 @@ serde_json = "1"
 thiserror = "2"
 anyhow = "1"
 vm-memory = { version = "0.18", features = ["backend-mmap", "backend-bitmap"] }
+flate2 = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
