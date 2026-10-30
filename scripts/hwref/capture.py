@@ -755,6 +755,7 @@ CONFIGS: dict[str, dict] = {
     # pairing): q35 + OVMF + swtpm tpm-tis + virtio + virtio-vga + Hyper-V
     # enlightenments (host KVM has AVIC, so hv-avic and the PIT global ride).
     "q35-ovmf-win11": {
+        "exact_profile": True,
         "title": "q35 + OVMF, Windows 11 profile devices, TPM (no secure boot)",
         "profile": "windows-server (the windows-11 device set, secure boot off)",
         "machine": "q35", "smp": 4, "mem": 8192, "cpu": CPU_WIN11,
@@ -770,6 +771,7 @@ CONFIGS: dict[str, dict] = {
     # blank VARS (Pairing::Setup) because the enforcing .ms VARS refuses
     # every unsigned image — see this config's README for the deviation.
     "q35-ovmf-win11-secureboot": {
+        "exact_profile": True,
         "title": "q35 + OVMF secure boot, Windows 11 profile devices, TPM",
         "profile": "windows-11",
         "machine": "q35", "smp": 4, "mem": 8192, "cpu": CPU_WIN11,

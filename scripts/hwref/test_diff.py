@@ -406,6 +406,18 @@ class DiffTests(unittest.TestCase):
 
 
 class HvCaptureTests(unittest.TestCase):
+    def test_ovmf_recapture_keeps_the_recorded_default_rom_configuration(self):
+        class Assets:
+            esp = Path("/assets/esp.raw")
+        with tempfile.TemporaryDirectory(prefix="hwref-ovmf-argv-") as tmp:
+            run = Path(tmp)
+            for name in ("q35-ovmf-win11", "q35-ovmf-win11-secureboot"):
+                with patch.object(capture, "sh"), patch.object(capture.shutil, "copy2"):
+                    argv = capture.build_argv(capture.CONFIGS[name], capture.RunPaths(run, run, 1), Assets(), run, name)
+                self.assertNotIn("kvm-apic.vapic=false", argv)
+                self.assertIn("virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01", argv)
+                self.assertFalse(any("romfile=" in arg for arg in argv))
+
     def test_modern_seabios_disk_boot_matches_production_profile_argv(self):
         class Assets:
             bios_disk = Path("/assets/bios-disk.img")
