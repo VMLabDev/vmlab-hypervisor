@@ -83,6 +83,7 @@ pub struct Chipset {
     pub pirqs: Arc<Mutex<PirqRouter>>,
     pub power: Arc<Mutex<Option<PowerAction>>>,
     pub error: Arc<Mutex<Option<String>>>,
+    secure_smm: bool,
     clock: Mutex<(Instant, bool)>,
     vm: Arc<VmFd>,
 }
@@ -103,7 +104,12 @@ impl vmlab_hv_devices::Snapshot for ChipsetRegisters {
 }
 
 impl Chipset {
-    pub fn new(vm: Arc<VmFd>, layout: &MemLayout, rtc_base: i64) -> Result<Arc<Self>, VmmError> {
+    pub fn new(
+        vm: Arc<VmFd>,
+        layout: &MemLayout,
+        rtc_base: i64,
+        secure_smm: bool,
+    ) -> Result<Arc<Self>, VmmError> {
         install_irq_routes(&vm)?;
         let irq_vm = vm.clone();
         let hub = Arc::new(IrqHub {
@@ -190,6 +196,7 @@ impl Chipset {
             pirqs,
             power,
             error,
+            secure_smm,
             clock: Mutex::new((Instant::now(), false)),
             vm,
         }))
@@ -283,6 +290,9 @@ impl Chipset {
     pub fn io_write(&self, port: u16, data: &[u8]) -> bool {
         self.advance();
         if let Some((register, offset)) = self.smi_register(port, data.len()) {
+            if register == 0xb2 && !self.secure_smm {
+                self.lpc.lock().write_port(port, data);
+            }
             let mut smi = self.smi.lock();
             let mut bytes = if register == 0x34 {
                 [0; 4]
@@ -401,13 +411,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn apmc_enables_acpi_without_smm() {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("skipping APMC routing test: /dev/kvm is unavailable");
+            return;
+        }
+        let kvm = crate::kvm::KvmVm::new().unwrap();
+        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0, false).unwrap();
+        chipset
+            .lpc
+            .lock()
+            .config_write(0x40 / 4, 0, &0x601u32.to_le_bytes());
+        chipset.lpc.lock().config_write(0x44 / 4, 0, &[0x80]);
+        assert!(chipset.io_write(0x630, &0x21u32.to_le_bytes()));
+        assert!(chipset.io_write(0xb2, &[2]));
+        assert!(chipset.smi_pending.load(Ordering::SeqCst));
+        let mut control = [0; 2];
+        assert!(chipset.io_read(0x604, &mut control));
+        assert_eq!(u16::from_le_bytes(control) & 1, 1);
+        assert!(chipset.io_write(0xb2, &[3]));
+        assert!(chipset.io_read(0x604, &mut control));
+        assert_eq!(u16::from_le_bytes(control) & 1, 0);
+    }
+
+    #[test]
+    fn apmc_leaves_acpi_enable_to_smm_when_available() {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("skipping APMC routing test: /dev/kvm is unavailable");
+            return;
+        }
+        let kvm = crate::kvm::KvmVm::new().unwrap();
+        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0, true).unwrap();
+        chipset
+            .lpc
+            .lock()
+            .config_write(0x40 / 4, 0, &0x601u32.to_le_bytes());
+        chipset.lpc.lock().config_write(0x44 / 4, 0, &[0x80]);
+        assert!(chipset.io_write(0x630, &0x21u32.to_le_bytes()));
+        assert!(chipset.io_write(0xb2, &[2]));
+        assert!(chipset.smi_pending.load(Ordering::SeqCst));
+        let mut command = [0];
+        assert!(chipset.io_read(0xb2, &mut command));
+        assert_eq!(command, [2]);
+        let mut control = [0; 2];
+        assert!(chipset.io_read(0x604, &mut control));
+        assert_eq!(u16::from_le_bytes(control) & 1, 0);
+    }
+
+    #[test]
     fn hpet_legacy_timer_uses_pic_irq0_and_ioapic_pin2() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("skipping HPET routing test: /dev/kvm is unavailable");
             return;
         }
         let kvm = crate::kvm::KvmVm::new().unwrap();
-        let chipset = Chipset::new(kvm.vm.clone(), &MemLayout::q35(64).unwrap(), 0).unwrap();
+        let chipset = Chipset::new(kvm.vm.clone(), &MemLayout::q35(64).unwrap(), 0, false).unwrap();
         let mut hpet = chipset.hpet.lock();
         hpet.write(0x100, &4u64.to_le_bytes());
         hpet.write(0x108, &100u64.to_le_bytes());
@@ -447,7 +505,7 @@ mod tests {
         let layout = MemLayout::q35(64).unwrap();
         let ram = crate::memory::GuestRam::anonymous(layout.clone()).unwrap();
         crate::memory::register_memslots(&kvm.vm, &ram).unwrap();
-        let _chipset = Chipset::new(kvm.vm.clone(), &layout, 0).unwrap();
+        let _chipset = Chipset::new(kvm.vm.clone(), &layout, 0, false).unwrap();
         let mut vcpu = kvm.create_vcpu(0).unwrap();
         let mut sregs = vcpu.get_sregs().unwrap();
         sregs.cs.base = 0;
@@ -523,7 +581,7 @@ mod tests {
                 return;
             }
         };
-        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0).unwrap();
+        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0, false).unwrap();
         let base = chipset.clock.lock().0;
         chipset.clock_step_at(base, Some(true));
         chipset.clock_step_at(base + std::time::Duration::from_secs(1), Some(false));

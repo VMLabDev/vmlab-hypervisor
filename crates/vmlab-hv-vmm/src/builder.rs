@@ -341,6 +341,7 @@ pub fn build(
             vm_fd.clone(),
             &layout,
             crate::clock::rtc_base(desc.rtc_base.as_deref())?,
+            secure_smm,
         )?)
     } else {
         None
