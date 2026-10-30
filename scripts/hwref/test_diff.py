@@ -183,6 +183,10 @@ class NormalizeTests(unittest.TestCase):
         right = {"dmesg.txt": generic + "other mouse changed\n", "lspci-nn.txt": nic, "iomem.txt": "000d0000-000d0fff : Adapter ROM\n"}
         diff.approved_platform(left, right, rules)
         self.assertEqual(left["dmesg.txt"], right["dmesg.txt"])
+        plain_left = {"dmesg.txt": mouse * 2}
+        plain = {"dmesg.txt": generic.replace("ImExPS/2 Generic Explorer", "PS/2 Generic")}
+        diff.approved_platform(plain_left, plain, rules)
+        self.assertEqual(plain_left["dmesg.txt"], plain["dmesg.txt"])
         self.assertIn("000c9000-000c9dff : Adapter ROM", left["iomem.txt"])
         self.assertNotIn("000ca000-000cc3ff : Adapter ROM", left["iomem.txt"])
         bad = {"dmesg.txt": generic.replace("ImEx", "Other")}

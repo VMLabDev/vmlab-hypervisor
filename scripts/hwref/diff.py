@@ -495,10 +495,12 @@ def approved_platform(left: dict[str, str], right: dict[str, str], rules: dict) 
     devices = {entry["device"] for entry in rules.get("platform_omissions", [])}
     if "vmport/vmmouse" in devices:
         original = "input: VirtualPS/2 VMware VMMouse as /devices/platform/i8042/serio1/input/input<index>\n"
-        replacement = "input: ImExPS/2 Generic Explorer Mouse as /devices/platform/i8042/serio1/input/input<index>\n"
-        if left.get("dmesg.txt", "").count(original) == 2 and right.get("dmesg.txt", "").count(replacement) == 1:
-            left["dmesg.txt"] = left["dmesg.txt"].replace(original, "")
-            right["dmesg.txt"] = right["dmesg.txt"].replace(replacement, "")
+        replacements = [f"input: {name} Mouse as /devices/platform/i8042/serio1/input/input<index>\n"
+                        for name in ("ImExPS/2 Generic Explorer", "PS/2 Generic")]
+        for replacement in replacements:
+            if left.get("dmesg.txt", "").count(original) == 2 and right.get("dmesg.txt", "").count(replacement) == 1:
+                left["dmesg.txt"] = left["dmesg.txt"].replace(original, "")
+                right["dmesg.txt"] = right["dmesg.txt"].replace(replacement, "")
     # These two initialized legacy ROM copies have distinct observed sizes.
     # Their BARs and every other legacy ROM remain compared.
     sizes = set()
