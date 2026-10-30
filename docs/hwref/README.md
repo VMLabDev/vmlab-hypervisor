@@ -14,14 +14,19 @@ Existing results for the selected configuration are replaced.
 
 ## Run the P2 differential
 
+The 2a reference is `q35-seabios-linux-modern`: disk boot, SeaBIOS, 2 vCPUs,
+4 GiB and virtio-vga, matching the Ubuntu 26.04 and AlmaLinux 10 templates.
+`q35-seabios-linux-generic` remains a historical direct-kernel fixture because
+firmware and transport regression tests consume its raw observations.
+
 Capture into fresh directories to preserve the reference data:
 
 ```sh
-python3 scripts/hwref/capture.py --output .scratch/hwref-a q35-seabios-linux-generic
-python3 scripts/hwref/capture.py --output .scratch/hwref-b q35-seabios-linux-generic
+python3 scripts/hwref/capture.py --output .scratch/hwref-a q35-seabios-linux-modern
+python3 scripts/hwref/capture.py --output .scratch/hwref-b q35-seabios-linux-modern
 python3 scripts/hwref/capture.py diff \
-  .scratch/hwref-a/q35-seabios-linux-generic \
-  .scratch/hwref-b/q35-seabios-linux-generic --no-allow-list
+  .scratch/hwref-a/q35-seabios-linux-modern \
+  .scratch/hwref-b/q35-seabios-linux-modern --no-allow-list
 ```
 
 An empty report and exit 0 mean the normalized observations match. Exit 1
@@ -37,7 +42,7 @@ python3 scripts/hwref/capture.py --backend vmlab-hv \
   --binary target/debug/vmlab-hv --machine /path/to/machine.json \
   --output .scratch/hwref-hv
 python3 scripts/hwref/capture.py diff \
-  .scratch/hwref-a/q35-seabios-linux-generic .scratch/hwref-hv
+  .scratch/hwref-a/q35-seabios-linux-modern .scratch/hwref-hv
 ```
 
 The description must select `machine = "q35"` and `boot.kind = "firmware"`.
@@ -60,10 +65,11 @@ and exit 0. A known rejection of q35 or `Boot::Firmware` also skips, with
 and incomplete archives fail. A skipped output has no `guest/` and cannot
 pass the diff command.
 
-New SeaBIOS captures boot the probe from a Syslinux FAT32 disk. They use
-SeaBIOS and SeaVGABIOS, disable the vapic ROM and NIC ROMs, and do not load
-QEMU's linuxboot ROMs. The checked-in Linux reference used direct-kernel boot.
-Its extra fw_cfg boot blobs remain visible differences against disk boots.
+New SeaBIOS captures boot the probe from a Syslinux FAT32 disk. The modern
+reference preserves production QEMU defaults, including its option ROMs;
+those ROMs are observations, never firmware supplied to vmlab-hv. The other
+capture configurations disable vapic and NIC ROMs. Disk boot needs no
+direct-kernel linuxboot ROM or fw_cfg boot blobs.
 OVMF captures use the same kernel and initramfs in a UKI. The unsigned probe
 requires setup-mode VARS, as in the checked-in OVMF references.
 
@@ -97,9 +103,52 @@ ICH9 USB functions at `00:1d.0`, `.1`, `.2`, and `.7` only with their captured
 Intel IDs. It permits a candidate-only `1b36:000d` xHCI function. The filter
 applies to PCI inventories, config blocks, topology, resource ranges, and USB
 host-controller listings. Changes to a function present on both sides are
-never approved automatically. Dependent changes to ACPI namespaces, IRQ
-routing, or boot logs remain visible for review. The allow-list does not
-suppress arbitrary USB-related lines.
+never approved automatically. For identity-checked omissions, the AML parser
+removes only the corresponding exact `Name (_ADR)` device nodes from a
+device-only `_SB.PCI0` scope. Additional methods prevent that normalization.
+The ASL nodes, derived DSDT header/log lengths, and table-loader offsets are
+adjusted for those removed bytes. Other AML and loader fields remain compared.
+IRQ routing and other boot-log differences remain visible for review. The
+allow-list does not suppress arbitrary USB-related lines.
+
+For identity-checked D6 omissions, the filter also removes the corresponding
+controller enumeration, root-hub topology and IRQ rows. Controller errors
+remain failures. Tablet paths name the replacement controller; tablet identity
+and descriptors remain compared. Unused GSI activation lines are omitted only
+when no remaining PCI function uses that route. Candidate-only xHCI AML nodes
+and their table-loader offsets receive the same structural checks as omitted
+ICH9 nodes.
+
+Two QEMU disk boots at 4 GiB, differing only by the D6 controller substitution,
+confirmed SeaBIOS reserves four fewer pages without the four ICH9 functions:
+low RAM ends at `0x7ffdbfff` instead of `0x7ffd7fff`, with the same
+`0x7fffffff` reservation ceiling. The filter permits only this exact 16-KiB
+adjacent boundary change and the matching four-page/16-KiB Linux totals.
+Unexpected page counts, other reservations and RAM ceilings remain failures.
+
+PCI resource maps name assigned BAR boundaries by function, BAR index and size,
+including driver subranges and I/O BAR boot logs. MSI virtual IRQ labels and
+input-device indices are run allocations; MSI vectors, GSI numbers and device
+paths remain exact. ACPI log relocation masking handles uppercase hexadecimal
+addresses too. Clock stabilization timestamps are masked. PCI function numbers
+are preserved when normalizing decimal measurements.
+
+Two further omissions are **pending owner decision**, as directed by the
+orchestrator: VMware's vmport/vmmouse interface and the virtio-net PXE ROM
+from `qemu-common`. The filter permits only the observed VMware-to-Explorer
+PS/2 enumeration substitution and the 3584-byte initialized PXE ROM copy.
+D14 also permits the 9216-byte initialized kvmvapic ROM copy. Other ROM sizes
+and mouse models remain failures.
+
+The 2a gate also records category and reason metadata for two temporary groups:
+`etc/smi/*` and `etc/tpm/*` are **deferred to 2c** and must be removed from the
+allow-list when 2c lands. `genroms/kvmvapic.bin` and
+`genroms/linuxboot_dma.bin` are **approved under D14** because QEMU-built ROMs
+are not shipped. These rules permit only reference-only files;
+changed files, candidate-only files and failed blob collection still fail.
+Their corresponding fw_cfg inventory entries and now-empty top-level
+directories are removed. Directory link counts and selector-link numbers are
+canonicalized only when such an omission applies. Other files remain compared.
 
 To check that the tool retains real differences:
 

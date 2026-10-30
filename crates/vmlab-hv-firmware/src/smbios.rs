@@ -69,6 +69,25 @@ fn finish(mut data: Vec<u8>, strings: &[&str]) -> Result<Vec<u8>, String> {
 
 /// Produce the complete table, including type 0, for installation by firmware.
 pub fn generate(platform: &Platform, config: &SmbiosConfig) -> Result<SmbiosTables, String> {
+    generate_records(platform, config, true)
+}
+
+/// fw_cfg carries platform records; SeaBIOS and OVMF supply their type 0.
+pub(crate) fn generate_fw_cfg(
+    platform: &Platform,
+    config: &SmbiosConfig,
+) -> Result<SmbiosTables, String> {
+    let mut generated = generate_records(platform, config, false)?;
+    generated.anchor[4] = 0;
+    generated.anchor[21] = 0;
+    Ok(generated)
+}
+
+fn generate_records(
+    platform: &Platform,
+    config: &SmbiosConfig,
+    include_bios: bool,
+) -> Result<SmbiosTables, String> {
     if platform.vcpus == 0 || platform.vcpus > 254 {
         return Err("SMBIOS 2.8 topology requires 1..=254 vCPUs per socket".into());
     }
@@ -93,10 +112,12 @@ pub fn generate(platform: &Platform, config: &SmbiosConfig) -> Result<SmbiosTabl
     qword(&mut bios, 10, 1 << 3);
     bios[19] = 4;
     bios[22..24].fill(0xff);
-    records.push(finish(
-        bios,
-        &[&config.bios_vendor, &config.bios_version, &config.bios_date],
-    )?);
+    if include_bios {
+        records.push(finish(
+            bios,
+            &[&config.bios_vendor, &config.bios_version, &config.bios_date],
+        )?);
+    }
     let mut system = structure(1, 27, 0x0100);
     system[4..7].copy_from_slice(&[1, 2, 3]);
     system[8..24].copy_from_slice(&config.uuid);

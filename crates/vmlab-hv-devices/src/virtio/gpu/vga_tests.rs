@@ -149,6 +149,15 @@ fn code(bytes: &[u8]) -> u32 {
 }
 
 #[test]
+fn firmware_latency_timer_write_is_ignored_as_in_the_oracle() {
+    let mut d = Driver::new();
+    d.dev.config_write(3, 1, &[0x40]);
+    assert_eq!(d.dev.config_read(3), 0);
+    d.dev.config_write(3, 0, &u32::MAX.to_le_bytes());
+    assert_eq!(d.dev.config_read(3), 0xff);
+}
+
+#[test]
 fn captured_pci_identity_capabilities_and_bar_probes() {
     let mut d = Driver::new();
     let capture =

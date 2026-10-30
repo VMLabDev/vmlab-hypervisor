@@ -35,10 +35,28 @@ const BAR_REG_END: usize = 10; // exclusive
 struct Function {
     dev: Arc<Mutex<dyn PciDevice>>,
     bars: Vec<BarState>,
+    rom: Option<OptionRom>,
+}
+
+struct OptionRom {
+    bytes: Vec<u8>,
+    value: u32,
+    sizing: bool,
+}
+
+impl OptionRom {
+    fn read_config(&self) -> u32 {
+        if self.sizing {
+            !((self.bytes.len() - 1) as u32) & 0xffff_f800
+        } else {
+            self.value
+        }
+    }
 }
 
 /// Root-side state of one BAR.
 struct BarState {
+    prefetchable: bool,
     info: BarInfo,
     /// First config dword of this BAR.
     dword: usize,
@@ -53,7 +71,13 @@ impl BarState {
     fn flags(&self) -> u32 {
         match self.info.kind {
             BarKind::Io => 0x1,
-            BarKind::Mmio32 => 0x0,
+            BarKind::Mmio32 => {
+                if self.prefetchable {
+                    8
+                } else {
+                    0
+                }
+            }
             BarKind::Mmio64 { prefetchable } => 0x4 | if prefetchable { 0x8 } else { 0 },
         }
     }
@@ -124,14 +148,32 @@ impl BarAllocator {
 pub struct PciRoot {
     slots: Vec<Option<Function>>,
     alloc: BarAllocator,
+    firmware: bool,
 }
 
 impl PciRoot {
+    pub fn addresses(&self) -> Vec<(u8, u8)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| f.as_ref().map(|_| ((i / 8) as u8, (i % 8) as u8)))
+            .collect()
+    }
     /// An empty root with the 64-bit BAR window at `mmio64_base`.
     pub fn new(mmio64_base: u64) -> Self {
         PciRoot {
-            slots: (0..PCI_SLOTS).map(|_| None).collect(),
+            slots: (0..PCI_SLOTS * 8).map(|_| None).collect(),
             alloc: BarAllocator::new(mmio64_base),
+            firmware: false,
+        }
+    }
+
+    /// Q35 leaves BAR addresses and command decoding disabled until firmware
+    /// programs them. Functions are placed with `add_device_at`.
+    pub fn q35(mmio64_base: u64) -> Self {
+        Self {
+            firmware: true,
+            ..Self::new(mmio64_base)
         }
     }
 
@@ -141,16 +183,48 @@ impl PciRoot {
             .slots
             .iter()
             .enumerate()
-            .skip(1)
-            .find(|(i, s)| *i < PCI_SLOTS && s.is_none())
+            .skip(8)
+            .find(|(i, s)| i % 8 == 0 && s.is_none())
             .map(|(i, _)| i)
             .ok_or("no free PCI slot")?;
+        self.add_device_at((slot / 8) as u8, 0, dev)?;
+        Ok((slot / 8) as u8)
+    }
+
+    /// Place a function at a specific bus-zero BDF. No implicit relocation.
+    pub fn add_device_at(
+        &mut self,
+        slot: u8,
+        function: u8,
+        dev: Arc<Mutex<dyn PciDevice>>,
+    ) -> Result<(), String> {
+        if slot >= 32 || function >= 8 {
+            return Err("PCI device/function out of range".into());
+        }
+        let index = slot as usize * 8 + function as usize;
+        if self.slots[index].is_some() {
+            return Err(format!("PCI address 00:{slot:02x}.{function} is occupied"));
+        }
         let infos = {
             let d = dev.lock();
             d.bars()
         };
         let mut bars = Vec::new();
+        let mut rom = None;
         for info in infos {
+            if info.index == 6 {
+                if !info.size.is_power_of_two() || info.size < 2048 || info.size > 16 << 20 {
+                    return Err("invalid expansion ROM size".into());
+                }
+                let mut bytes = vec![0xff; info.size as usize];
+                dev.lock().bar_read(6, 0, &mut bytes);
+                rom = Some(OptionRom {
+                    bytes,
+                    value: 0,
+                    sizing: false,
+                });
+                continue;
+            }
             // BAR `i` lives at config dword 4+i; a 64-bit BAR also owns 4+i+1.
             let dword = BAR_REG_BASE + info.index as usize;
             let span = if matches!(info.kind, BarKind::Mmio64 { .. }) {
@@ -167,26 +241,70 @@ impl PciRoot {
             }) {
                 return Err(format!("BAR {} overlaps another BAR", info.index));
             }
-            let addr = self.alloc.allocate(info.kind, info.size)?;
+            if !info.size.is_power_of_two() || info.size < 4 {
+                return Err(format!("invalid BAR size {}", info.size));
+            }
+            let addr = if self.firmware {
+                0
+            } else {
+                self.alloc.allocate(info.kind, info.size)?
+            };
             bars.push(BarState {
+                prefetchable: matches!(info.kind, BarKind::Mmio32)
+                    && dev.lock().config_read(dword) & 8 != 0,
                 info,
                 dword,
                 addr,
                 sizing: false,
             });
         }
-        self.slots[slot] = Some(Function { dev, bars });
-        Ok(slot as u8)
+        self.slots[index] = Some(Function { dev, bars, rom });
+        Ok(())
+    }
+
+    /// Attach a PCI expansion ROM. Firmware discovers, sizes and enables it
+    /// through the type-zero ROM BAR at 0x30.
+    pub fn attach_option_rom(
+        &mut self,
+        slot: u8,
+        function: u8,
+        image: &[u8],
+    ) -> Result<(), String> {
+        if image.len() < 3 || image[..2] != [0x55, 0xaa] || image.len() > 16 * 1024 * 1024 {
+            return Err("invalid PCI option ROM signature or size".into());
+        }
+        let func = self
+            .slots
+            .get_mut(slot as usize * 8 + function as usize)
+            .filter(|_| slot < 32 && function < 8)
+            .and_then(Option::as_mut)
+            .ok_or("option ROM names an absent PCI function")?;
+        if func.rom.is_some() {
+            return Err("PCI function already has an option ROM".into());
+        }
+        let mut bytes = vec![0xff; image.len().max(2048).next_power_of_two()];
+        bytes[..image.len()].copy_from_slice(image);
+        func.rom = Some(OptionRom {
+            bytes,
+            value: 0,
+            sizing: false,
+        });
+        Ok(())
     }
 
     /// Read config dword `reg` of `(bus, slot, function)`.
     pub fn config_read(&mut self, bus: u8, slot: u8, function: u8, reg: usize) -> u32 {
-        if bus != 0 || function != 0 || slot as usize >= PCI_SLOTS || reg >= 64 {
+        if bus != 0 || function >= 8 || slot as usize >= PCI_SLOTS || reg >= 1024 {
             return 0xFFFF_FFFF;
         }
-        let Some(func) = self.slots[slot as usize].as_ref() else {
+        let Some(func) = self.slots[slot as usize * 8 + function as usize].as_ref() else {
             return 0xFFFF_FFFF;
         };
+        if reg == 12
+            && let Some(rom) = &func.rom
+        {
+            return rom.read_config();
+        }
         if let Some(bar) = func.bars.iter().find(|b| b.dword == reg) {
             return bar_low_read(bar);
         }
@@ -198,15 +316,29 @@ impl PciRoot {
             return bar_high_read(bar);
         }
         let mut dev = func.dev.lock();
-        dev.config_read(reg)
+        let mut value = dev.config_read(reg);
+        if reg == 3
+            && function == 0
+            && self.slots[slot as usize * 8 + 1..slot as usize * 8 + 8]
+                .iter()
+                .any(Option::is_some)
+        {
+            value |= 0x0080_0000;
+        }
+        value
     }
 
     /// Write config bytes at `offset` (0..256) of `(bus, slot, function)`.
     pub fn config_write(&mut self, bus: u8, slot: u8, function: u8, offset: usize, data: &[u8]) {
-        if bus != 0 || function != 0 || slot as usize >= PCI_SLOTS {
+        if bus != 0
+            || function >= 8
+            || slot as usize >= PCI_SLOTS
+            || offset >= 4096
+            || data.len() > 4096 - offset
+        {
             return;
         }
-        let Some(func) = self.slots[slot as usize].as_mut() else {
+        let Some(func) = self.slots[slot as usize * 8 + function as usize].as_mut() else {
             return;
         };
         // Split at dword boundaries so the device API (one dword per call)
@@ -218,6 +350,20 @@ impl PciRoot {
             let within = offset % 4;
             let n = data.len().min(4 - within);
             let chunk = &data[..n];
+            if reg == 12
+                && let Some(rom) = &mut func.rom
+            {
+                let mut value = rom.read_config().to_le_bytes();
+                value[within..within + n].copy_from_slice(chunk);
+                let value = u32::from_le_bytes(value);
+                rom.sizing = value & 0xffff_f800 == 0xffff_f800;
+                if !rom.sizing {
+                    rom.value = value & (!((rom.bytes.len() - 1) as u32) | 1);
+                }
+                offset += n;
+                data = &data[n..];
+                continue;
+            }
             let is_low = |reg: usize| func.bars.iter().any(|b| b.dword == reg);
             let is_high = |reg: usize| func.bars.iter().any(|b| b.is_64bit() && b.dword + 1 == reg);
             if is_low(reg) {
@@ -230,7 +376,7 @@ impl PciRoot {
                     .position(|b| b.is_64bit() && b.dword + 1 == reg)
                     .unwrap();
                 Self::write_high_dword(&mut func.bars[idx], within, chunk);
-            } else if reg < 64 {
+            } else if reg < 1024 && !(self.firmware && (BAR_REG_BASE..BAR_REG_END).contains(&reg)) {
                 let mut dev = func.dev.lock();
                 dev.config_write(reg, within as u64, chunk);
             }
@@ -259,7 +405,7 @@ impl PciRoot {
             } else {
                 0
             };
-            bar.addr = high | u64::from(value & addr_bits_mask);
+            bar.addr = (high | u64::from(value & addr_bits_mask)) & !(bar.info.size - 1);
         }
     }
 
@@ -281,37 +427,74 @@ impl PciRoot {
     /// Dispatch an MMIO read inside a BAR window. Returns whether a BAR
     /// covered it.
     pub fn dispatch_mmio_read(&mut self, addr: u64, data: &mut [u8]) -> bool {
-        self.find_bar(addr)
+        if let Some((rom, offset)) = self.find_rom(addr) {
+            for (i, byte) in data.iter_mut().enumerate() {
+                *byte = rom.get(offset + i).copied().unwrap_or(0xff);
+            }
+            return true;
+        }
+        self.find_bar(addr, false)
             .map(|(mut dev, bar, offset)| dev.bar_read(bar, offset, data))
             .is_some()
     }
 
     /// Dispatch an MMIO write inside a BAR window.
     pub fn dispatch_mmio_write(&mut self, addr: u64, data: &[u8]) -> bool {
-        self.find_bar(addr)
+        if self.find_rom(addr).is_some() {
+            return true;
+        }
+        self.find_bar(addr, false)
             .map(|(mut dev, bar, offset)| dev.bar_write(bar, offset, data))
             .is_some()
     }
 
+    fn find_rom(&self, addr: u64) -> Option<(&[u8], usize)> {
+        for func in self.slots.iter().flatten() {
+            let Some(rom) = &func.rom else { continue };
+            let base = (rom.value & !0x7ff) as u64;
+            if rom.value & 1 != 0
+                && !rom.sizing
+                && func.dev.lock().config_read(1) & 2 != 0
+                && addr >= base
+                && addr - base < rom.bytes.len() as u64
+            {
+                return Some((&rom.bytes, (addr - base) as usize));
+            }
+        }
+        None
+    }
+
     /// Dispatch a port-I/O read inside a BAR window.
     pub fn dispatch_io_read(&mut self, port: u16, data: &mut [u8]) -> bool {
-        self.find_bar(u64::from(port))
+        self.find_bar(u64::from(port), true)
             .map(|(mut dev, bar, offset)| dev.bar_read(bar, offset, data))
             .is_some()
     }
 
     /// Dispatch a port-I/O write inside a BAR window.
     pub fn dispatch_io_write(&mut self, port: u16, data: &[u8]) -> bool {
-        self.find_bar(u64::from(port))
+        self.find_bar(u64::from(port), true)
             .map(|(mut dev, bar, offset)| dev.bar_write(bar, offset, data))
             .is_some()
     }
 
     /// Find the function and BAR covering `addr`, locking its device.
-    fn find_bar(&mut self, addr: u64) -> Option<(MutexGuard<'_, dyn PciDevice>, u8, u64)> {
+    fn find_bar(
+        &mut self,
+        addr: u64,
+        io: bool,
+    ) -> Option<(MutexGuard<'_, dyn PciDevice>, u8, u64)> {
         for func in self.slots.iter_mut().filter_map(|s| s.as_mut()) {
+            if self.firmware && func.dev.lock().config_read(1) & if io { 1 } else { 2 } == 0 {
+                continue;
+            }
             for bar in &func.bars {
-                if bar.addr <= addr && addr < bar.addr + bar.info.size {
+                if matches!(bar.info.kind, BarKind::Io) == io
+                    && !bar.sizing
+                    && bar.addr != 0
+                    && bar.addr <= addr
+                    && addr - bar.addr < bar.info.size
+                {
                     let offset = addr - bar.addr;
                     let dev = func.dev.lock();
                     return Some((dev, bar.info.index, offset));
@@ -332,8 +515,16 @@ impl PciRoot {
             .filter_map(|(slot, func)| {
                 func.as_ref().map(|f| {
                     (
-                        slot as u8,
-                        f.bars.iter().map(|b| (b.addr, b.sizing)).collect(),
+                        if self.firmware {
+                            slot as u8
+                        } else {
+                            (slot / 8) as u8
+                        },
+                        f.bars
+                            .iter()
+                            .map(|b| (b.addr, b.sizing))
+                            .chain(f.rom.iter().map(|rom| (rom.value as u64, rom.sizing)))
+                            .collect(),
                     )
                 })
             })
@@ -345,10 +536,15 @@ impl PciRoot {
     /// guarantees for a compatible snapshot.
     pub fn restore_bar_states(&mut self, saved: &[(u8, Vec<(u64, bool)>)]) -> Result<(), String> {
         for (slot, bars) in saved {
-            let Some(func) = self.slots.get_mut(*slot as usize).and_then(|s| s.as_mut()) else {
+            let index = if self.firmware {
+                *slot as usize
+            } else {
+                *slot as usize * 8
+            };
+            let Some(func) = self.slots.get_mut(index).and_then(|s| s.as_mut()) else {
                 return Err(format!("saved PCI state names slot {slot}, which is empty"));
             };
-            if func.bars.len() != bars.len() {
+            if func.bars.len() + usize::from(func.rom.is_some()) != bars.len() {
                 return Err(format!(
                     "saved PCI state for slot {slot} has {} bars, this machine has {}",
                     bars.len(),
@@ -358,6 +554,11 @@ impl PciRoot {
             for (bar, (addr, sizing)) in func.bars.iter_mut().zip(bars) {
                 bar.addr = *addr;
                 bar.sizing = *sizing;
+            }
+            if let Some(rom) = &mut func.rom {
+                let (value, sizing) = bars.last().unwrap();
+                rom.value = *value as u32;
+                rom.sizing = *sizing;
             }
         }
         Ok(())
@@ -414,11 +615,11 @@ impl BusDevice for PciConfigIo {
                 let bytes = self.address.to_le_bytes();
                 copy_into(data, &bytes[offset as usize..]);
             }
-            8..=11 => {
+            4..=7 if self.address & 0x8000_0000 != 0 => {
                 let (bus, slot, function, reg) = self.bdf();
                 let dword = self.root.lock().config_read(bus, slot, function, reg);
                 let bytes = dword.to_le_bytes();
-                copy_into(data, &bytes[(offset - 8) as usize..]);
+                copy_into(data, &bytes[(offset - 4) as usize..]);
             }
             _ => data.fill(0xFF),
         }
@@ -431,9 +632,9 @@ impl BusDevice for PciConfigIo {
                 overlay(&mut bytes[offset as usize..], data);
                 self.address = u32::from_le_bytes(bytes);
             }
-            8..=11 => {
+            4..=7 if self.address & 0x8000_0000 != 0 => {
                 let (bus, slot, function, reg) = self.bdf();
-                let offset = reg * 4 + (offset - 8) as usize;
+                let offset = reg * 4 + (offset - 4) as usize;
                 self.root
                     .lock()
                     .config_write(bus, slot, function, offset, data);
@@ -461,13 +662,18 @@ impl BusDevice for PciEcam {
             data.fill(0xFF);
             return;
         }
-        let (bus, slot, function, conf_off) = ecam_decode(offset);
-        let dword = self
-            .root
-            .lock()
-            .config_read(bus, slot, function, conf_off / 4);
-        let bytes = dword.to_le_bytes();
-        copy_into(data, &bytes[conf_off % 4..]);
+        let mut root = self.root.lock();
+        for (index, byte) in data.iter_mut().enumerate() {
+            let address = offset.saturating_add(index as u64);
+            if address >= MMCONFIG_SIZE {
+                *byte = 0xff;
+                continue;
+            }
+            let (bus, slot, function, conf_off) = ecam_decode(address);
+            *byte = root
+                .config_read(bus, slot, function, conf_off / 4)
+                .to_le_bytes()[conf_off % 4];
+        }
     }
 
     fn write(&mut self, offset: u64, data: &[u8]) {
@@ -644,15 +850,15 @@ mod tests {
         assert_eq!(u32::from_le_bytes(out), 0x8000_0800);
         // Vendor dword of slot 1, reg 0, through CFC.
         cfg.write(0, &0x8000_0800u32.to_le_bytes()); // bus 0, slot 1, fn 0, reg 0
-        cfg.read(8, &mut out);
+        cfg.read(4, &mut out);
         assert_eq!(u32::from_le_bytes(out), 0xABCD_1234);
         // Empty slot 2 reads all ones.
         cfg.write(0, &0x8000_1000u32.to_le_bytes());
-        cfg.read(8, &mut out);
+        cfg.read(4, &mut out);
         assert_eq!(u32::from_le_bytes(out), 0xFFFF_FFFF);
         // BAR write through CFC: address register selects dword 4 (BAR0).
         cfg.write(0, &0x8000_0810u32.to_le_bytes());
-        cfg.write(8, &0xFFFF_FFF0u32.to_le_bytes());
+        cfg.write(4, &0xFFFF_FFF0u32.to_le_bytes());
         assert_eq!(shared.lock().config_read(0, 1, 0, 4), 0xFFFF_F000);
     }
 
@@ -695,5 +901,65 @@ mod tests {
         let data = [0u8; 1];
         assert!(root.dispatch_io_write(IO_ALLOC_BASE + 3, &data));
         assert!(!root.dispatch_io_write(0x3F8, &data));
+    }
+
+    #[test]
+    fn explicit_functions_extended_config_and_firmware_bars() {
+        let mut root = PciRoot::q35(1 << 32);
+        let dev = FakePci::new(test_bars());
+        root.add_device_at(31, 3, dev.clone()).unwrap();
+        root.add_device_at(31, 0, FakePci::new(vec![])).unwrap();
+        assert_eq!(root.config_read(0, 31, 0, 3) & 0x0080_0000, 0x0080_0000);
+        assert!(root.add_device_at(31, 3, dev.clone()).is_err());
+        assert!(root.add_device_at(32, 0, dev.clone()).is_err());
+        assert!(root.add_device_at(0, 8, dev.clone()).is_err());
+        assert_eq!(root.config_read(0, 31, 3, 4), 0);
+        root.config_write(0, 31, 3, 0xffc, &[1, 2, 3, 4]);
+        assert_eq!(
+            dev.lock().config_log.lock().last().unwrap(),
+            &(1023, 0, vec![1, 2, 3, 4])
+        );
+        assert_eq!(root.config_read(0, 31, 3, 1024), u32::MAX);
+        assert_eq!(root.config_read(1, 31, 3, 0), u32::MAX);
+        root.config_write(0, 31, 3, 16, &0xc001_ffffu32.to_le_bytes());
+        assert_eq!(root.config_read(0, 31, 3, 4), 0xc001_f000);
+        let saved = root.save_bar_states();
+        root.config_write(0, 31, 3, 16, &0xc002_0000u32.to_le_bytes());
+        root.restore_bar_states(&saved).unwrap();
+        assert_eq!(root.config_read(0, 31, 3, 4), 0xc001_f000);
+    }
+
+    #[test]
+    fn cf8_disable_bit_and_cfc_location() {
+        let (root, _) = root_with_fake();
+        let mut io = PciConfigIo::new(root);
+        let mut bytes = [0; 4];
+        io.write(0, &0x800u32.to_le_bytes());
+        io.read(4, &mut bytes);
+        assert_eq!(bytes, [0xff; 4]);
+        io.write(0, &0x8000_0800u32.to_le_bytes());
+        io.read(4, &mut bytes);
+        assert_eq!(u32::from_le_bytes(bytes), 0xabcd_1234);
+        io.read(8, &mut bytes);
+        assert_eq!(bytes, [0xff; 4]);
+    }
+
+    #[test]
+    fn native_vga_rom_bar_and_prefetchable_framebuffer() {
+        let mut root = PciRoot::q35(1 << 32);
+        let vga = Arc::new(Mutex::new(
+            vmlab_hv_devices::display::StandardVga::new("vga", &[0x55, 0xaa, 1]).unwrap(),
+        ));
+        root.add_device_at(4, 0, vga).unwrap();
+        assert_eq!(root.config_read(0, 4, 0, 4), 8);
+        root.config_write(0, 4, 0, 0x30, &u32::MAX.to_le_bytes());
+        assert_eq!(root.config_read(0, 4, 0, 12), 0xfffe_0000);
+        root.config_write(0, 4, 0, 0x30, &0xfebc_0001u32.to_le_bytes());
+        let mut signature = [0; 3];
+        assert!(root.dispatch_mmio_read(0xfebc_0000, &mut signature));
+        assert_eq!(signature, [0x55, 0xaa, 1]);
+        assert!(root.dispatch_mmio_write(0xfebc_0000, &[0; 3]));
+        root.config_write(0, 4, 0, 0x30, &0xfebc_0000u32.to_le_bytes());
+        assert!(!root.dispatch_mmio_read(0xfebc_0000, &mut signature));
     }
 }

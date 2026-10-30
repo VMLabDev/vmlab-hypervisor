@@ -122,13 +122,15 @@ pub fn ancillary_files(
         if !path.starts_with('/') || !path.is_ascii() || path.contains(['\n', '\r', '\0']) {
             return Err("boot paths must be absolute NUL-free ASCII without newlines".into());
         }
+        if !bootorder.is_empty() {
+            bootorder.push(b'\n');
+        }
         bootorder.extend_from_slice(path.as_bytes());
-        bootorder.push(b'\n');
     }
     if !bootorder.is_empty() {
         bootorder.push(0);
     }
-    let smbios = smbios::generate(platform, &options.smbios)?;
+    let smbios = smbios::generate_fw_cfg(platform, &options.smbios)?;
     Ok(vec![
         ("etc/e820".into(), e820),
         ("bootorder".into(), bootorder),

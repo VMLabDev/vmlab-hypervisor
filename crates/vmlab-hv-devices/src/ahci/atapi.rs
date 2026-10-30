@@ -12,6 +12,7 @@ pub(super) struct Optical {
     pub event: u8,
     pub sense: [u8; 3],
     pub generation: u64,
+    pub transfer_mode: u8,
 }
 
 impl Optical {
@@ -24,6 +25,7 @@ impl Optical {
             event: 0,
             sense: [0; 3],
             generation: 0,
+            transfer_mode: 0x45,
         }
     }
 
@@ -79,9 +81,9 @@ impl Optical {
                 }
                 let mut data = vec![0; 36];
                 data[..8].copy_from_slice(&[5, 0x80, 5, 2, 31, 0, 0, 0]);
-                data[8..16].copy_from_slice(b"VMLAB   ");
-                data[16..32].copy_from_slice(b"SATA CD-ROM     ");
-                data[32..36].copy_from_slice(b"0.1 ");
+                data[8..16].copy_from_slice(b"QEMU    ");
+                data[16..32].copy_from_slice(b"QEMU DVD-ROM    ");
+                data[32..36].copy_from_slice(b"2.5+");
                 data.truncate(u16::from_be_bytes([cdb[3], cdb[4]]) as usize);
                 data
             }

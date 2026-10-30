@@ -612,14 +612,14 @@ impl Qcow2Image {
                 Some(e) => *e,
                 None => {
                     // Beyond L1 coverage: unallocated semantics.
-                    self.read_unallocated(cluster_off, &mut buf[done..done + take])?;
+                    self.read_unallocated(abs, &mut buf[done..done + take])?;
                     done += take;
                     continue;
                 }
             };
             let l2_host = l1e & OFFSET_MASK;
             if l2_host == 0 {
-                self.read_unallocated(cluster_off, &mut buf[done..done + take])?;
+                self.read_unallocated(abs, &mut buf[done..done + take])?;
                 done += take;
                 continue;
             }
@@ -640,7 +640,7 @@ impl Qcow2Image {
                 done += take;
             } else if host == 0 {
                 // Unallocated: read through the backing chain.
-                self.read_unallocated(cluster_off, &mut buf[done..done + take])?;
+                self.read_unallocated(abs, &mut buf[done..done + take])?;
                 done += take;
             } else {
                 self.read_file(host + in_off, &mut buf[done..done + take])?;

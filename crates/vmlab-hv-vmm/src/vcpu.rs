@@ -90,9 +90,54 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
         // (the snapshot path waits for the thread to park first).
         let mut guard = vcpu.lock();
         guard.set_kvm_immediate_exit(0);
-        match guard.run() {
-            Ok(VcpuExit::IoIn(port, data)) => shared.io_read(port, data),
-            Ok(VcpuExit::IoOut(port, data)) => shared.io_write(port, data),
+        let run_ptr = guard.get_kvm_run() as *const kvm_bindings::kvm_run;
+        let permit = shared.enter_kvm();
+        let result = guard.run();
+        drop(permit);
+        let width = if matches!(&result, Ok(VcpuExit::IoIn(..) | VcpuExit::IoOut(..))) {
+            // SAFETY: KVM_EXIT_IO selects this union member. run_ptr names
+            // the stable vCPU mmap; size is metadata disjoint from the I/O
+            // payload slice borrowed by VcpuExit.
+            unsafe { (*run_ptr).__bindgen_anon_1.io.size as usize }
+        } else {
+            1
+        };
+        if !matches!(width, 1 | 2 | 4) {
+            shared.request_exit(crate::vm::ExitReason::Error(format!(
+                "invalid KVM I/O width {width}"
+            )));
+            return;
+        }
+        match result {
+            Ok(VcpuExit::IoIn(port, data)) => {
+                for value in data.chunks_mut(width) {
+                    shared.io_read(port, value);
+                }
+            }
+            Ok(VcpuExit::IoOut(port, data)) => {
+                for value in data.chunks(width) {
+                    shared.io_write(port, value);
+                }
+                if port == 0xb2 && shared.take_smi() {
+                    // Complete the deferred OUT before SMM saves RIP. Without
+                    // this completion, RSM can return to the same APMC write.
+                    guard.set_kvm_immediate_exit(1);
+                    let permit = shared.enter_kvm();
+                    let completion = guard.run();
+                    drop(permit);
+                    if !matches!(completion, Err(ref e) if e.errno() == libc::EINTR) {
+                        shared.request_exit(crate::vm::ExitReason::Error(format!(
+                            "completing APMC output before SMI: {completion:?}"
+                        )));
+                        return;
+                    }
+                    guard.set_kvm_immediate_exit(0);
+                    if let Err(e) = guard.smi() {
+                        shared.request_exit(crate::vm::ExitReason::Error(format!("KVM_SMI: {e}")));
+                        return;
+                    }
+                }
+            }
             Ok(VcpuExit::MmioRead(addr, data)) => shared.mmio_read(addr, data),
             Ok(VcpuExit::MmioWrite(addr, data)) => shared.mmio_write(addr, data),
             Ok(VcpuExit::Hlt) => {

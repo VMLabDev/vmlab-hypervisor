@@ -1,0 +1,35 @@
+0000-0cf7 : PCI Bus 0000:00
+  0000-001f : dma1
+  0020-0021 : pic1
+  0040-0043 : timer0
+  0050-0053 : timer1
+  0060-0060 : keyboard
+  0064-0064 : keyboard
+  0070-0077 : rtc0
+  0080-008f : dma page reg
+  00a0-00a1 : pic2
+  00c0-00df : dma2
+  00f0-00ff : fpu
+  03c0-03df : vga+
+  03f8-03ff : serial
+  0510-051b : QEMU0002:00
+    0510-051b : fw_cfg_io
+  0600-067f : 0000:00:1f.0
+    0600-0603 : ACPI PM1a_EVT_BLK
+    0604-0605 : ACPI PM1a_CNT_BLK
+    0608-060b : ACPI PM_TMR
+    0620-062f : ACPI GPE0_BLK
+  0700-073f : 0000:00:1f.3
+0cf8-0cff : PCI conf1
+0d00-ffff : PCI Bus 0000:00
+  c000-c07f : 0000:00:02.0
+  c080-c0bf : 0000:00:01.0
+  c100-c11f : 0000:00:03.0
+  c120-c13f : 0000:00:1d.0
+    c120-c13f : uhci_hcd
+  c140-c15f : 0000:00:1d.1
+    c140-c15f : uhci_hcd
+  c160-c17f : 0000:00:1d.2
+    c160-c17f : uhci_hcd
+  c180-c19f : 0000:00:1f.2
+    c180-c19f : ahci

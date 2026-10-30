@@ -32,6 +32,28 @@ use crate::error::DeviceUnavailable;
 /// orchestration.
 pub type SharedImage = Arc<Mutex<Box<dyn DiskImage>>>;
 
+pub fn open_image(disk: &Disk) -> Result<SharedImage, DeviceUnavailable> {
+    let path = disk.path.as_ref().ok_or_else(|| {
+        DeviceUnavailable::new("disk", format!("disk `{}` requires an image path", disk.id))
+    })?;
+    let format = match disk.format {
+        vmlab_hv_proto::machine::DiskFormat::Raw => vmlab_disk::Format::Raw,
+        vmlab_hv_proto::machine::DiskFormat::Qcow2 => vmlab_disk::Format::Qcow2,
+    };
+    vmlab_disk::open(path, format, disk.read_only)
+        .map(|image| Arc::new(Mutex::new(image)))
+        .map_err(|e| {
+            DeviceUnavailable::new(
+                "disk",
+                format!(
+                    "cannot open disk {} (id `{}`): {e}",
+                    path.display(),
+                    disk.id
+                ),
+            )
+        })
+}
+
 /// A built serial console: the bus device plus its snapshot handle (the
 /// same object), when the model carries guest-visible state.
 pub struct BuiltSerial {
@@ -54,6 +76,14 @@ pub struct BuiltBlk {
     pub disk: SharedImage,
 }
 
+/// Per-function transport policy and interrupt wiring, selected by the machine.
+pub struct PciWiring {
+    pub msi: Arc<dyn MsiSink>,
+    pub intx: Option<Arc<dyn IrqLine>>,
+    pub transitional: bool,
+    pub msix_vectors: u16,
+}
+
 /// Produces the device models a machine description names.
 pub trait DeviceFactory: Send + Sync {
     /// The 16550A UART on COM1, appending output to the serial log.
@@ -68,7 +98,7 @@ pub trait DeviceFactory: Send + Sync {
         &self,
         disk: &Disk,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: PciWiring,
     ) -> Result<BuiltBlk, DeviceUnavailable>;
 
     /// A single multiport virtio-console PCI function with `ports` in order.
@@ -76,7 +106,7 @@ pub trait DeviceFactory: Send + Sync {
         &self,
         ports: &[SerialPort],
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable>;
 
     /// A virtio-net PCI function for one NIC.
@@ -84,7 +114,7 @@ pub trait DeviceFactory: Send + Sync {
         &self,
         nic: &Nic,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable>;
 
     /// A vhost-user-fs PCI function backed by an external virtiofsd.
@@ -92,7 +122,7 @@ pub trait DeviceFactory: Send + Sync {
         &self,
         share: &FsShare,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable>;
 }
 
@@ -118,7 +148,7 @@ impl DeviceFactory for NoDevices {
         &self,
         disk: &Disk,
         _mem: &GuestMemory,
-        _msi: Arc<dyn MsiSink>,
+        _msi: crate::factory::PciWiring,
     ) -> Result<BuiltBlk, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-blk",
@@ -133,7 +163,7 @@ impl DeviceFactory for NoDevices {
         &self,
         ports: &[SerialPort],
         _mem: &GuestMemory,
-        _msi: Arc<dyn MsiSink>,
+        _msi: crate::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-console",
@@ -152,7 +182,7 @@ impl DeviceFactory for NoDevices {
         &self,
         nic: &Nic,
         _mem: &GuestMemory,
-        _msi: Arc<dyn MsiSink>,
+        _msi: crate::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-net",
@@ -167,7 +197,7 @@ impl DeviceFactory for NoDevices {
         &self,
         share: &FsShare,
         _mem: &GuestMemory,
-        _msi: Arc<dyn MsiSink>,
+        _msi: crate::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "vhost-user-fs",

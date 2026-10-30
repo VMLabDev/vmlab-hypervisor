@@ -267,6 +267,7 @@ impl PciDevice for Lpc {
                 0x60..=0x63 | 0x68..=0x6b => 0x8f,
                 0x4e..=0x4f | 0x80..=0x93 | 0xa0..=0xab => 0xff,
                 0xf0 => 1,
+                0xf1 => 0xc0,
                 0xf2 | 0xf3 => 0xff,
                 _ => 0,
             };
@@ -358,6 +359,15 @@ mod tests {
             irq,
             actions,
         )
+    }
+
+    #[test]
+    fn firmware_can_program_the_complete_rcba_address() {
+        let (mut lpc, _, _) = fixture();
+        lpc.config_write(0xf0 / 4, 0, &0xfed1c001u32.to_le_bytes());
+        assert_eq!(lpc.config_read(0xf0 / 4), 0xfed1c001);
+        lpc.config_write(0xf0 / 4, 0, &[0xff; 4]);
+        assert_eq!(lpc.config_read(0xf0 / 4), 0xffffc001);
     }
 
     #[test]

@@ -111,6 +111,13 @@ impl VirtioVga {
     pub fn mode(&self) -> Mode {
         self.gpu.mode().unwrap_or_else(|| self.vga.mode())
     }
+    /// VGA framebuffer for direct, dirty-logged guest mappings of BAR0.
+    pub fn linear_framebuffer(&self) -> GuestMemory {
+        self.vga.linear_framebuffer()
+    }
+    pub fn mark_framebuffer_dirty(&mut self) {
+        self.vga.mark_framebuffer_dirty();
+    }
     pub fn frame(&mut self) -> Frame {
         self.gpu.frame().unwrap_or_else(|| self.vga.frame())
     }
@@ -188,13 +195,9 @@ impl PciDevice for VirtioVga {
             self.transport.config_write(16, 2, &control.to_le_bytes());
         }
         for (i, byte) in data.iter().enumerate() {
-            if let p @ (0x0c..=0x0d
-            | 0x10..=0x13
-            | 0x18..=0x23
-            | 0x30..=0x33
-            | 0x3c
-            | 0x88
-            | 0x8c..=0x93) = at + i
+            if let p
+            @ (0x0c | 0x10..=0x13 | 0x18..=0x23 | 0x30..=0x33 | 0x3c | 0x88 | 0x8c..=0x93) =
+                at + i
             {
                 self.config[p] = *byte;
             }

@@ -1,4 +1,5 @@
 use super::*;
+use vm_memory::GuestMemoryBackend;
 
 fn device() -> StandardVga {
     StandardVga::new("vga0", &[0x55, 0xaa, 1]).unwrap()
@@ -50,6 +51,30 @@ fn text_mode(dev: &mut StandardVga) {
     indexed(dev, 0x3d4, 0x12, 0x8f);
     indexed(dev, 0x3d4, 0x13, 40);
     indexed(dev, 0x3d4, 0x0a, 0x20);
+}
+
+#[test]
+fn linear_framebuffer_mapping_shares_bar_pixels_and_snapshot_storage() {
+    let mut dev = device();
+    vbe(&mut dev, 640, 480, 32);
+    dev.frame();
+    let memory = dev.linear_framebuffer();
+    let host = memory.get_host_address(GuestAddress(0)).unwrap() as usize;
+    assert_eq!(host & 4095, 0);
+    memory
+        .write_slice(&[30, 20, 10, 0], GuestAddress(0))
+        .unwrap();
+    dev.mark_framebuffer_dirty();
+    let frame = dev.frame();
+    assert!(frame.dirty);
+    assert_eq!(pixel(&frame, 0, 0), [30, 20, 10, 0]);
+    assert!(!dev.frame().dirty);
+    let saved = dev.save_state().unwrap();
+    dev.bar_write(0, 0, &[3, 2, 1, 0]);
+    dev.restore_state(&saved).unwrap();
+    let mut bytes = [0; 4];
+    memory.read_slice(&mut bytes, GuestAddress(0)).unwrap();
+    assert_eq!(bytes, [30, 20, 10, 0]);
 }
 
 #[test]

@@ -328,6 +328,10 @@ fn stream_ram_out(
     let regions = &ram.layout().regions;
     let mut region_header = Vec::new();
     format::push_u32(&mut region_header, regions.len() as u32);
+    for &(base, len) in regions {
+        format::push_u64(&mut region_header, base);
+        format::push_u64(&mut region_header, len);
+    }
     write(&region_header)?;
     let mut enc = format::RamEncoder::new();
     let mut page = vec![0u8; format::PAGE_SIZE as usize];
@@ -338,10 +342,6 @@ fn stream_ram_out(
                 "RAM region {base:#x}+{len:#x} is not page aligned"
             )));
         }
-        let mut head = Vec::new();
-        format::push_u64(&mut head, base);
-        format::push_u64(&mut head, len);
-        write(&head)?;
         let mut chunk = Vec::new();
         let mut off = 0;
         while off < len {
@@ -399,7 +399,11 @@ fn save_kernel_state(
         sections.push((p("sregs"), to_json(&fd.get_sregs().map_err(io)?)?));
         sections.push((p("fpu"), encode_fpu(&fd.get_fpu().map_err(io)?)));
         sections.push((p("xsave"), encode_xsave(&fd.get_xsave().map_err(io)?)));
-        sections.push((p("msrs"), encode_msrs(&fd, MIGRATABLE_MSRS)?));
+        let mut indices = MIGRATABLE_MSRS.to_vec();
+        if shared.chipset.lock().is_some() {
+            indices.push(0x9e);
+        } // SMBASE
+        sections.push((p("msrs"), encode_msrs(&fd, &indices)?));
         sections.push((p("lapic"), encode_lapic(&fd.get_lapic().map_err(io)?)));
         sections.push((p("events"), to_json(&fd.get_vcpu_events().map_err(io)?)?));
         sections.push((p("mp_state"), to_json(&fd.get_mp_state().map_err(io)?)?));
@@ -545,6 +549,9 @@ fn restore(
     shared
         .restore_pci_bars(pci_bars)
         .map_err(SnapshotError::Internal)?;
+    shared
+        .sync_vga_mapping()
+        .map_err(|e| SnapshotError::Internal(e.to_string()))?;
     Ok(header.run_state)
 }
 

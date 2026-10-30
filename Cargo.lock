@@ -1006,6 +1006,7 @@ dependencies = [
  "vmlab-disk",
  "vmlab-hv-devices",
  "vmlab-hv-proto",
+ "vmlab-hv-tests",
  "vmlab-hv-vmm",
 ]
 
@@ -1088,6 +1089,8 @@ dependencies = [
  "vm-memory",
  "vmlab-disk",
  "vmlab-hv-devices",
+ "vmlab-hv-display",
+ "vmlab-hv-firmware",
  "vmlab-hv-proto",
  "zerocopy 0.8.63",
 ]

@@ -109,6 +109,36 @@ fn read_table(blob: &[u8], offset: usize) -> &[u8] {
 }
 
 #[test]
+fn modern_four_gib_pci_window_matches_the_disk_boot_capture() {
+    let platform = Platform {
+        ram_regions: vec![(0, 2 << 30), (1 << 32, 2 << 30)],
+        pci64_base: Some(0xe00_0000_0000),
+        ..Platform::default()
+    };
+    let generated = generate(&platform).unwrap();
+    let dsdt = read_table(&generated.tables, 64);
+    let captured = include_bytes!("../../../docs/hwref/q35-seabios-linux-modern/guest/acpi/DSDT");
+    assert_eq!(&dsdt[0x1e62..0x1e82], &captured[0x1e62..0x1e82]);
+}
+
+#[test]
+fn loader_matches_captured_seabios_order_and_packed_offsets() {
+    let mut platform = Platform::default();
+    platform
+        .pci_devices
+        .extend([0, 1, 2, 7].map(|function| PciDevice {
+            device: 29,
+            function,
+            vga: false,
+        }));
+    let generated = generate(&platform).unwrap();
+    let captured = include_bytes!(
+        "../../../docs/hwref/q35-seabios-linux-generic/guest/fwcfg/blobs/etc/table-loader"
+    );
+    assert_eq!(generated.loader, captured);
+}
+
+#[test]
 fn firmware_installs_relocated_checksummed_tables() {
     for p in [
         Platform::default(),

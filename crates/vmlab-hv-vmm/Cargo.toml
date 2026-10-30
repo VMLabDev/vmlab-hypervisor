@@ -9,6 +9,9 @@ rust-version.workspace = true
 [dependencies]
 vmlab-hv-proto.workspace = true
 vmlab-hv-devices.workspace = true
+vmlab-hv-firmware.workspace = true
+vmlab-hv-display = { path = "../vmlab-hv-display" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 vmlab-disk.workspace = true
 vm-memory.workspace = true
 thiserror.workspace = true
@@ -22,7 +25,6 @@ serde.workspace = true
 zerocopy.workspace = true
 sha2.workspace = true
 parking_lot.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -44,6 +44,18 @@ pub struct MemLayout {
 }
 
 impl MemLayout {
+    /// Q35 reserves the legacy VGA/ROM aperture and caps low RAM at 2 GiB.
+    pub fn q35(ram_mib: u64) -> Result<Self, String> {
+        let mut layout = Self::new(ram_mib)?;
+        let low = layout.ram.min(0x8000_0000);
+        let high = layout.ram - low;
+        layout.regions = vec![(0, 0xa0000), (0x100000, low - 0x100000)];
+        if high > 0 {
+            layout.regions.push((PCI_HOLE_END, high));
+        }
+        layout.mmio64_base = (PCI_HOLE_END + high).div_ceil(2 * MIB) * 2 * MIB;
+        Ok(layout)
+    }
     /// Lay out `ram_mib` MiB of RAM around the PCI hole.
     pub fn new(ram_mib: u64) -> Result<Self, String> {
         let ram = ram_mib
@@ -79,7 +91,12 @@ impl MemLayout {
 
     /// Top of the low RAM region (below the hole), for initrd placement.
     pub fn low_ram_top(&self) -> u64 {
-        self.regions[0].0 + self.regions[0].1
+        self.regions
+            .iter()
+            .filter(|(base, _)| *base < PCI_HOLE_END)
+            .map(|(base, size)| base + size)
+            .max()
+            .unwrap_or(0)
     }
 
     /// A view of the regions as `(base, size)` for memslot registration.
@@ -127,5 +144,21 @@ mod tests {
         assert!(MemLayout::new(0).is_err());
         assert!(MemLayout::new(1).is_err());
         assert!(MemLayout::new(1 << 21).is_err());
+    }
+
+    #[test]
+    fn q35_matches_captured_low_and_high_ram() {
+        let l = MemLayout::q35(8192).unwrap();
+        assert_eq!(
+            l.regions,
+            vec![
+                (0, 0xa0000),
+                (0x100000, 0x7ff00000),
+                (0x100000000, 0x180000000)
+            ]
+        );
+        assert_eq!(l.low_ram_top(), 0x80000000);
+        assert_eq!(l.ram_top(), 0x280000000);
+        assert_eq!(MemLayout::q35(2048).unwrap().regions.len(), 2);
     }
 }

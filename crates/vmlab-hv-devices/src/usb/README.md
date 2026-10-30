@@ -22,7 +22,7 @@ doorbells.
 
 `PciDevice` supplies configuration space, BAR sizing, and BAR accesses. BAR0
 is 16 KiB, 64-bit, and non-prefetchable. `BusDevice` accesses use the same
-BAR-relative register offsets. The controller has 64 slots, one interrupter,
+BAR-relative register offsets. The controller has 64 slots, 16 interrupters,
 four USB3 root ports numbered 1..4, and four USB2 ports numbered 5..8.
 
 `poll(&mut self)` resumes NAKed transfers and bounded command/transfer ring
@@ -99,7 +99,7 @@ Transfer rings support Links, cycle toggling, scatter/gather buffers, immediate
 OUT data, Event Data, short packets, and endpoint halt/recovery. MSI-X masks,
 the pending-bit array, interrupt moderation, and optional legacy INTx are implemented.
 
-One event ring supports up to 16 segments, each 16..4096 TRBs. Full rings
+Each interrupter's event ring supports up to 16 segments, each 16..4096 TRBs. Full rings
 retain pending events rather than overwriting guest-owned entries. Transfers
 are limited to 1 MiB and 256 TRBs per TD. Invalid DMA or cyclic Link walks
 halt the controller with USBSTS.HCE, recoverable through HCRST.
@@ -131,8 +131,9 @@ The observed PCI identity was `1b36:000d`, revision 1, class `0c0330`, subsystem
 BAR mask, MSI-X capability at `0x90`, table at BAR0+`0x3000`, PBA at `0x3800`,
 and PCI Express capability at `0xa0`. MMIO probes measured operational
 registers at `0x40`, runtime registers at `0x1000`, doorbells at `0x2000`,
-USB2 ports 5..8, and USB3 ports 1..4. QEMU advertises 16 interrupters and
-streams; this package intentionally exposes one interrupter and no streams.
+USB2 ports 5..8, and USB3 ports 1..4. All 16 interrupters have independent
+event rings, MSI-X entries, masks, pending bits, moderation and snapshot state.
+QEMU also advertises streams; stream support remains a hardware-parity gap.
 
 A Linux 6.12.114 probe booted under QEMU/KVM with `-cpu host`, the same two
 USB devices, and a disposable Alpine initramfs. USBDEVFS_CONTROL descriptor
@@ -151,6 +152,6 @@ enumeration and descriptors, injected reports, snapshots, interrupt masks,
 ring wrapping/backpressure, link cycles, scatter/gather, Event Data, endpoint
 recovery, malformed input, and DMA above 4 GiB.
 
-The QEMU probe establishes the reference device identity. It is not a Linux
-guest boot against this controller. Full q35 boot and machine/control/display
-integration belong to the machine package's P1/P3 acceptance.
+The machine integration's Linux 6.12.114 hardware probe enumerates the tablet
+through this controller. P1 template acceptance also boots Debian 13 and
+Ubuntu 26.04.3 through the q35 machine. Full display/input acceptance remains P3.

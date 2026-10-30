@@ -301,6 +301,13 @@ impl VirtioPciDevice {
         let id = id.into();
         let max_sizes = device.queue_max_sizes();
         let num_queues = max_sizes.len();
+        let queue_cfg = max_sizes
+            .iter()
+            .map(|&size| QueueCfg {
+                size,
+                ..QueueCfg::default()
+            })
+            .collect();
         let device_cfg_len = device.config_len();
         let mut config = [0u8; PCI_CONFIG_SIZE];
 
@@ -386,7 +393,7 @@ impl VirtioPciDevice {
             driver_features: 0,
             negotiated: None,
             queue_select: 0,
-            queue_cfg: vec![QueueCfg::default(); num_queues],
+            queue_cfg,
             activated: false,
             command: 0,
             bar4: 0,
@@ -429,7 +436,12 @@ impl VirtioPciDevice {
         self.driver_features = 0;
         self.negotiated = None;
         self.queue_select = 0;
-        self.queue_cfg.fill(QueueCfg::default());
+        for (cfg, &size) in self.queue_cfg.iter_mut().zip(self.device.queue_max_sizes()) {
+            *cfg = QueueCfg {
+                size,
+                ..QueueCfg::default()
+            };
+        }
         self.activated = false;
         if let Some(legacy) = &mut self.transitional {
             legacy.active = false;
@@ -1648,9 +1660,9 @@ mod tests {
         let mut g = Guest::new();
         g.setup_msix();
         g.negotiate(0);
-        // Enable the queue without a size: DRIVER_OK must not stick.
+        // Enable a queue whose descriptor table crosses the end of RAM.
         g.bar16_write(COMMON_CFG_OFF + common::QUEUE_SELECT, 0);
-        g.bar32_write(COMMON_CFG_OFF + common::QUEUE_DESC, DESC as u32);
+        g.bar32_write(COMMON_CFG_OFF + common::QUEUE_DESC, 0xffff_fff0);
         g.bar32_write(COMMON_CFG_OFF + common::QUEUE_AVAIL, AVAIL as u32);
         g.bar32_write(COMMON_CFG_OFF + common::QUEUE_USED, USED as u32);
         g.bar16_write(COMMON_CFG_OFF + common::QUEUE_ENABLE, 1);

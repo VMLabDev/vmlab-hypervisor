@@ -61,6 +61,22 @@ fn smbios_matches_complete_captured_guest_table() {
 }
 
 #[test]
+fn fw_cfg_smbios_leaves_bios_record_to_firmware() {
+    let files: BTreeMap<_, _> = ancillary_files(&Platform::default(), &FirmwareOptions::default())
+        .unwrap()
+        .into_iter()
+        .collect();
+    let captured_tables = include_bytes!(
+        "../../../docs/hwref/q35-seabios-linux-generic/guest/fwcfg/blobs/etc/smbios/smbios-tables"
+    );
+    let captured_anchor = include_bytes!(
+        "../../../docs/hwref/q35-seabios-linux-generic/guest/fwcfg/blobs/etc/smbios/smbios-anchor"
+    );
+    assert_eq!(files["etc/smbios/smbios-tables"], captured_tables);
+    assert_eq!(files["etc/smbios/smbios-anchor"], captured_anchor);
+}
+
+#[test]
 fn smbios_handles_high_memory_and_custom_identity() {
     let platform = Platform {
         vcpus: 8,
@@ -147,8 +163,24 @@ fn ancillary_files_match_capture_bytes() {
         .collect();
     assert_eq!(
         files["bootorder"],
-        b"/pci@i0cf8/scsi@2/disk@0,0\n/pci@i0cf8/scsi@1f,2/disk@0,0\n\0"
+        b"/pci@i0cf8/scsi@2/disk@0,0\n/pci@i0cf8/scsi@1f,2/disk@0,0\0"
     );
+}
+
+#[test]
+fn bootorder_matches_captured_line_and_nul_terminators() {
+    let captured =
+        include_bytes!("../../../docs/hwref/q35-seabios-linux-generic/guest/fwcfg/blobs/bootorder");
+    let paths = std::str::from_utf8(captured.strip_suffix(&[0]).unwrap()).unwrap();
+    let options = FirmwareOptions {
+        bootorder: paths.lines().map(str::to_owned).collect(),
+        ..Default::default()
+    };
+    let files: BTreeMap<_, _> = ancillary_files(&Platform::default(), &options)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(files["bootorder"], captured);
 }
 
 #[test]

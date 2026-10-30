@@ -462,6 +462,7 @@ impl BusDevice for I8042 {
             }
             4 => {
                 data[0] = u8::from(!self.queue.is_empty())
+                    | 0x10
                     | (self.command_byte & 4)
                     | (u8::from(self.last_command) << 3)
                     | (u8::from(self.queue.front().is_some_and(|(_, mouse)| *mouse)) << 5)
@@ -749,6 +750,13 @@ mod tests {
             Arc::new(Irq::default()),
             Arc::new(|_| {}),
         )
+    }
+    #[test]
+    fn status_reports_keylock_released() {
+        let mut d = device();
+        assert_ne!(read(&mut d, 4) & 0x10, 0);
+        write(&mut d, 4, 0xaa);
+        assert_ne!(read(&mut d, 4) & 0x10, 0);
     }
     #[test]
     fn firmware_self_test_reset_and_qcodes() {

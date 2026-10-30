@@ -292,11 +292,13 @@ pub fn encode_ram_regions<'a>(
     let mut out = Vec::new();
     let regions: Vec<(u64, u64)> = regions.collect();
     push_u32(&mut out, regions.len() as u32);
+    for &(base, len) in &regions {
+        push_u64(&mut out, base);
+        push_u64(&mut out, len);
+    }
     let mut enc = RamEncoder::new();
     let mut page = vec![0u8; PAGE_SIZE as usize];
     for (base, len) in regions {
-        push_u64(&mut out, base);
-        push_u64(&mut out, len);
         if len % PAGE_SIZE != 0 {
             return Err(format!("RAM region {base:#x}+{len:#x} is not page aligned"));
         }
@@ -479,6 +481,28 @@ mod tests {
         for cut in 1..consumed {
             assert!(decode_header(&bytes[..cut]).is_err(), "cut at {cut}");
         }
+    }
+
+    #[test]
+    fn multiple_ram_region_headers_precede_their_records() {
+        let regions = [(0, PAGE_SIZE), (0x100000, PAGE_SIZE)];
+        let encoded = encode_ram_regions(regions.into_iter(), |base, page| {
+            page.fill(if base == 0 { 0x11 } else { 0x22 });
+            Ok(())
+        })
+        .unwrap();
+        let mut reader = Reader::new(&encoded);
+        let decoded = decode_ram_regions(&mut reader, |base, bytes| {
+            assert!(
+                bytes
+                    .iter()
+                    .all(|&b| b == if base == 0 { 0x11 } else { 0x22 })
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(decoded, regions);
+        assert!(reader.done());
     }
 
     #[test]

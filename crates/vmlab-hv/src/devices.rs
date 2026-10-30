@@ -7,17 +7,16 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::Arc;
 
-use vmlab_disk::Format;
 use vmlab_hv_devices::serial::{Serial, SerialOut};
 use vmlab_hv_devices::virtio::block::Block;
 use vmlab_hv_devices::virtio::console::{Console, PortConfig};
 use vmlab_hv_devices::virtio::fs::{Fs, FsConfig};
 use vmlab_hv_devices::virtio::net::{Net, NetConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
-use vmlab_hv_devices::{GuestMemory, IrqLine, MsiSink, VirtioDevice};
-use vmlab_hv_proto::machine::{Disk, DiskFormat, FsShare, Nic, NicAttachment, SerialPort};
+use vmlab_hv_devices::{GuestMemory, IrqLine, VirtioDevice};
+use vmlab_hv_proto::machine::{Disk, FsShare, Nic, NicAttachment, SerialPort};
 use vmlab_hv_vmm::DeviceUnavailable;
-use vmlab_hv_vmm::factory::{BuiltBlk, BuiltPci, BuiltSerial, SharedDisk, SharedImage};
+use vmlab_hv_vmm::factory::{BuiltBlk, BuiltPci, BuiltSerial, SharedDisk};
 
 /// The device set the binary ships.
 #[derive(Debug, Default)]
@@ -29,15 +28,22 @@ impl DeviceSet {
         id: String,
         device: Box<dyn VirtioDevice>,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
-        let dev = Arc::new(Mutex::new(VirtioPciDevice::new(
-            id,
-            device,
-            mem.clone(),
-            Some(msi),
-            None,
-        )));
+        let transport = if msi.transitional {
+            VirtioPciDevice::new_transitional(
+                id,
+                device,
+                mem.clone(),
+                Some(msi.msi),
+                msi.intx,
+                msi.msix_vectors,
+            )
+            .map_err(|e| DeviceUnavailable::new("virtio-pci", e.to_string()))?
+        } else {
+            VirtioPciDevice::new(id, device, mem.clone(), Some(msi.msi), msi.intx)
+        };
+        let dev = Arc::new(Mutex::new(transport));
         Ok(BuiltPci {
             function: dev.clone(),
             snapshot: Some(dev),
@@ -76,36 +82,21 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         &self,
         disk: &Disk,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltBlk, DeviceUnavailable> {
-        let format = match disk.format {
-            DiskFormat::Raw => Format::Raw,
-            DiskFormat::Qcow2 => Format::Qcow2,
-        };
         // One open image shared by the device and the VMM's snapshot
         // orchestration (D14): the block device runs on a SharedDisk
         // forwarding to the same handle the registry keeps.
-        let image: SharedImage = Arc::new(Mutex::new(
-            vmlab_disk::open(&disk.path, format, disk.read_only).map_err(|e| {
-                DeviceUnavailable::new(
-                    "virtio-blk",
-                    format!(
-                        "cannot open disk {} (id `{}`): {e}",
-                        disk.path.display(),
-                        disk.id
-                    ),
-                )
-            })?,
-        ));
-        let pci = self.wrap(
-            disk.id.clone(),
-            Box::new(Block::new(
-                disk.id.clone(),
-                Box::new(SharedDisk(image.clone())),
-            )),
-            mem,
-            msi,
-        )?;
+        let image = vmlab_hv_vmm::factory::open_image(disk)?;
+        let block = Block::new(disk.id.clone(), Box::new(SharedDisk(image.clone())));
+        let block = if msi.transitional {
+            block
+                .with_num_queues(msi.msix_vectors.saturating_sub(1))
+                .map_err(|e| DeviceUnavailable::new("virtio-blk", e.to_string()))?
+        } else {
+            block
+        };
+        let pci = self.wrap(disk.id.clone(), Box::new(block), mem, msi)?;
         Ok(BuiltBlk { pci, disk: image })
     }
 
@@ -113,7 +104,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         &self,
         ports: &[SerialPort],
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let ports = ports
             .iter()
@@ -135,7 +126,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         &self,
         nic: &Nic,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let mac = parse_mac(&nic.mac)?;
         let id = format!("nic-{}", nic.mac);
@@ -157,7 +148,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         &self,
         share: &FsShare,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let id = format!("fs-{}", share.tag);
         let fs = Fs::new(
@@ -185,4 +176,51 @@ fn parse_mac(mac: &str) -> Result<[u8; 6], DeviceUnavailable> {
         .try_into()
         .map_err(|_| DeviceUnavailable::new("virtio-net", format!("bad MAC {mac:?}")))?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vmlab_hv_vmm::DeviceFactory;
+
+    struct Msi;
+    impl vmlab_hv_devices::MsiSink for Msi {
+        fn signal(&self, _: vmlab_hv_devices::MsiMessage) {}
+    }
+
+    #[test]
+    fn block_multiqueue_policy_preserves_container_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("disk.raw");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(65536)
+            .unwrap();
+        let disk: Disk = serde_json::from_value(serde_json::json!({
+            "id":"test", "path":path, "format":"raw", "read_only":false
+        }))
+        .unwrap();
+        let mem = GuestMemory::new();
+        for (transitional, expected) in [(false, 0u16), (true, 2)] {
+            let built = DeviceSet
+                .virtio_blk(
+                    &disk,
+                    &mem,
+                    vmlab_hv_vmm::factory::PciWiring {
+                        msi: Arc::new(Msi),
+                        intx: None,
+                        transitional,
+                        msix_vectors: 3,
+                    },
+                )
+                .unwrap();
+            let mut count = [0; 2];
+            built.pci.function.lock().bar_read(
+                4,
+                if transitional { 0x2022 } else { 0x3022 },
+                &mut count,
+            );
+            assert_eq!(u16::from_le_bytes(count), expected);
+        }
+    }
 }
