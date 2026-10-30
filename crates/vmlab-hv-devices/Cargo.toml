@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 libc = "0.2"
+parking_lot = "0.12"
 thiserror.workspace = true
 virtio-queue = "0.18"
 vm-memory.workspace = true

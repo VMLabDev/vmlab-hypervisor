@@ -27,7 +27,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use parking_lot::{Mutex, MutexGuard};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use virtio_queue::{Queue, QueueState, QueueT};
@@ -254,10 +255,9 @@ fn tx_queue(port: u16) -> u16 {
     }
 }
 
-/// Lock, surviving a poisoned mutex (a device worker panic must not cascade
-/// into the vCPU path).
+/// Lock the shared state.
 fn lock(shared: &Arc<Mutex<Shared>>) -> MutexGuard<'_, Shared> {
-    shared.lock().unwrap_or_else(|e| e.into_inner())
+    shared.lock()
 }
 
 // ---- the worker thread ------------------------------------------------------
@@ -1047,5 +1047,531 @@ impl Dec<'_> {
     fn bytes(&mut self) -> Result<Vec<u8>, DeviceError> {
         let len = self.u32()? as usize;
         Ok(self.take(len)?.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+    use std::time::{Duration, Instant};
+    use vm_memory::{Bytes, GuestAddress};
+
+    /// Guest memory: 32 MiB, room for the eight queues' rings plus buffers.
+    const MEM_SIZE: u64 = 288 * 1024 * 1024;
+    /// Where the tests put data buffers, above the rings.
+    const DATA_BASE: u64 = 0x1000_0000;
+
+    const VRING_DESC_F_NEXT: u16 = 1;
+    const VRING_DESC_F_WRITE: u16 = 2;
+
+    static DIR_SEQ: AtomicU32 = AtomicU32::new(0);
+
+    /// A throwaway directory for the port sockets.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> TempDir {
+            let path = std::env::temp_dir().join(format!(
+                "vmlab-hv-console-{}-{}",
+                std::process::id(),
+                DIR_SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            TempDir(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Records queue and config interrupts; the test double the brief asks
+    /// for.
+    #[derive(Default)]
+    struct TestInterrupt {
+        queues: Mutex<Vec<u16>>,
+        config: AtomicU32,
+    }
+
+    impl TestInterrupt {
+        fn queue_notified(&self, queue: u16) -> bool {
+            self.queues.lock().contains(&queue)
+        }
+    }
+
+    impl VirtioInterrupt for TestInterrupt {
+        fn notify_queue(&self, queue: u16) {
+            self.queues.lock().push(queue);
+        }
+        fn notify_config(&self) {
+            self.config.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Poll `cond` until it holds or five seconds pass, then panic.
+    fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !cond() {
+            if Instant::now() > deadline {
+                panic!("timed out waiting for {what}");
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A driver-side split virtqueue, hand-built in guest memory: descriptor
+    /// table, available ring and used ring, plus the descriptor bookkeeping
+    /// to add chains to it.
+    struct TestVq {
+        size: u16,
+        desc: u64,
+        avail: u64,
+        used: u64,
+        next_desc: u16,
+    }
+
+    impl TestVq {
+        fn new(base: u64, size: u16) -> TestVq {
+            let desc = base;
+            let avail = (desc + 16 * u64::from(size) + 15) & !15;
+            let used = (avail + 8 + 2 * u64::from(size) + 3) & !3;
+            TestVq {
+                size,
+                desc,
+                avail,
+                used,
+                next_desc: 0,
+            }
+        }
+
+        /// A device-side `Queue` configured against this ring.
+        fn queue(&self) -> Queue {
+            let mut q = Queue::new(self.size).unwrap();
+            q.try_set_size(self.size).unwrap();
+            q.try_set_desc_table_address(GuestAddress(self.desc)).unwrap();
+            q.try_set_avail_ring_address(GuestAddress(self.avail)).unwrap();
+            q.try_set_used_ring_address(GuestAddress(self.used)).unwrap();
+            q.set_event_idx(false);
+            q.set_ready(true);
+            q
+        }
+
+        /// Add one descriptor chain of `(addr, len, device-writable)` legs.
+        fn add_chain(&mut self, mem: &GuestMemory, descs: &[(u64, u32, bool)]) -> u16 {
+            let head = self.next_desc;
+            for (j, &(addr, len, write)) in descs.iter().enumerate() {
+                let idx = head + j as u16;
+                let last = j + 1 == descs.len();
+                let mut flags = if write { VRING_DESC_F_WRITE } else { 0 };
+                if !last {
+                    flags |= VRING_DESC_F_NEXT;
+                }
+                let next = if last { 0 } else { idx + 1 };
+                let mut raw = [0u8; 16];
+                raw[0..8].copy_from_slice(&addr.to_le_bytes());
+                raw[8..12].copy_from_slice(&len.to_le_bytes());
+                raw[12..14].copy_from_slice(&flags.to_le_bytes());
+                raw[14..16].copy_from_slice(&next.to_le_bytes());
+                mem.write_slice(&raw, GuestAddress(self.desc + 16 * u64::from(idx)))
+                    .unwrap();
+            }
+            self.next_desc += descs.len() as u16;
+            let avail_idx: u16 = mem.read_obj(GuestAddress(self.avail + 2)).unwrap();
+            mem.write_obj(head, GuestAddress(self.avail + 4 + 2 * u64::from(avail_idx)))
+                .unwrap();
+            mem.write_obj(
+                avail_idx.wrapping_add(1),
+                GuestAddress(self.avail + 2),
+            )
+            .unwrap();
+            head
+        }
+
+        /// The guest address in the descriptor with this index.
+        fn desc_addr(&self, mem: &GuestMemory, idx: u16) -> u64 {
+            let mut raw = [0u8; 8];
+            mem.read_slice(&mut raw, GuestAddress(self.desc + 16 * u64::from(idx)))
+                .unwrap();
+            u64::from_le_bytes(raw)
+        }
+
+        fn used_idx(&self, mem: &GuestMemory) -> u16 {
+            mem.read_obj::<u16>(GuestAddress(self.used + 2)).unwrap()
+        }
+
+        /// `(head, written length)` of one used entry.
+        fn used_entry(&self, mem: &GuestMemory, i: u16) -> (u32, u32) {
+            let base = self.used + 4 + 8 * u64::from(i);
+            (
+                mem.read_obj(GuestAddress(base)).unwrap(),
+                mem.read_obj(GuestAddress(base + 4)).unwrap(),
+            )
+        }
+    }
+
+    /// A two-port console (vmlab's ctl and agent) wired to a guest memory
+    /// with all eight queues built and the device activated.
+    struct Fixture {
+        _dir: TempDir,
+        mem: GuestMemory,
+        dev: Console,
+        irq: Arc<TestInterrupt>,
+        vqs: Vec<TestVq>,
+        ctl_sock: PathBuf,
+        agent_sock: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Fixture {
+            let dir = TempDir::new();
+            let ctl_sock = dir.0.join("ctl.sock");
+            let agent_sock = dir.0.join("agent.sock");
+            let dev = Console::new(
+                "console",
+                vec![
+                    PortConfig {
+                        name: "vmlab.ctl.0".into(),
+                        path: ctl_sock.clone(),
+                    },
+                    PortConfig {
+                        name: "vmlab.agent.0".into(),
+                        path: agent_sock.clone(),
+                    },
+                ],
+            )
+            .unwrap();
+            let mem = GuestMemory::from_ranges(&[(GuestAddress(0), MEM_SIZE as usize)]).unwrap();
+            let irq = Arc::new(TestInterrupt::default());
+            let vqs: Vec<TestVq> = (0..8)
+                .map(|i| TestVq::new(0x1000 + 0x1_0000 * u64::from(i as u32), 128))
+                .collect();
+            let mut f = Fixture {
+                _dir: dir,
+                mem,
+                dev,
+                irq,
+                vqs,
+                ctl_sock,
+                agent_sock,
+            };
+            f.activate();
+            f
+        }
+
+        fn activate(&mut self) {
+            let queues: Vec<Queue> = self.vqs.iter().map(|v| v.queue()).collect();
+            self.dev
+                .activate(self.mem.clone(), self.irq.clone(), queues)
+                .unwrap();
+        }
+
+        /// The address of scratch data buffer `i`.
+        fn data(&self, i: u64) -> u64 {
+            DATA_BASE + 0x1_0000 * i
+        }
+
+        /// Post one control-receiveq buffer (queue 2) at scratch buffer `i`.
+        fn post_ctrl_rx(&mut self, i: u64) {
+            let addr = self.data(i);
+            self.vqs[2].add_chain(&self.mem, &[(addr, 128, true)]);
+        }
+
+        /// Send one control message on the control transmitq (queue 3).
+        fn send_ctrl(&mut self, id: u32, event: u16, value: u16) {
+            let addr = self.data(20);
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&id.to_le_bytes());
+            msg.extend_from_slice(&event.to_le_bytes());
+            msg.extend_from_slice(&value.to_le_bytes());
+            self.mem.write_slice(&msg, GuestAddress(addr)).unwrap();
+            self.vqs[3].add_chain(&self.mem, &[(addr, 8, false)]);
+            self.dev.queue_notify(3);
+        }
+
+        /// The control messages delivered so far as `(id, event, value,
+        /// trailing bytes)`.
+        fn ctrl_delivered(&self) -> Vec<(u32, u16, u16, Vec<u8>)> {
+            let n = usize::from(self.vqs[2].used_idx(&self.mem));
+            (0..n)
+                .map(|i| {
+                    let (head, len) = self.vqs[2].used_entry(&self.mem, i as u16);
+                    let addr = self.vqs[2].desc_addr(&self.mem, head as u16);
+                    let mut body = vec![0u8; len as usize];
+                    self.mem
+                        .read_slice(&mut body, GuestAddress(addr))
+                        .unwrap();
+                    (
+                        u32::from_le_bytes(body[0..4].try_into().unwrap()),
+                        u16::from_le_bytes(body[4..6].try_into().unwrap()),
+                        u16::from_le_bytes(body[6..8].try_into().unwrap()),
+                        body[8..].to_vec(),
+                    )
+                })
+                .collect()
+        }
+
+        /// Complete the driver bring-up: DEVICE_READY, then wait until
+        /// `want` control messages have been delivered.
+        fn device_ready(&mut self, buffers: u64, want: usize) {
+            for i in 0..buffers {
+                self.post_ctrl_rx(i);
+            }
+            self.send_ctrl(BAD_ID_FOR_TEST, EV_DEVICE_READY, 1);
+            wait_for("control messages", || {
+                usize::from(self.vqs[2].used_idx(&self.mem)) >= want
+            });
+        }
+    }
+
+    /// The port id the driver puts in DEVICE_READY (VIRTIO_CONSOLE_BAD_ID).
+    const BAD_ID_FOR_TEST: u32 = u32::MAX;
+
+    #[test]
+    fn config_space_names_the_port_count() {
+        let f = Fixture::new();
+        assert_eq!(f.dev.device_type(), 3);
+        assert_eq!(f.dev.queue_max_sizes().len(), 8);
+        assert!(f.dev.queue_max_sizes().iter().all(|&n| n > 0));
+        assert_ne!(f.dev.features() & (1 << 1), 0); // VIRTIO_CONSOLE_F_MULTIPORT
+        let mut config = [0u8; 12];
+        f.dev.read_config(0, &mut config);
+        assert_eq!(u32::from_le_bytes(config[4..8].try_into().unwrap()), 3);
+    }
+
+    #[test]
+    fn device_ready_announces_every_port_with_names() {
+        let mut f = Fixture::new();
+        f.device_ready(8, 6);
+        let msgs = f.ctrl_delivered();
+        assert_eq!(msgs.len(), 6);
+        // Port 0: the built-in console port.
+        assert_eq!(msgs[0], (0, EV_PORT_ADD, 0, Vec::new()));
+        assert_eq!(msgs[1], (0, EV_CONSOLE_PORT, 1, Vec::new()));
+        // The named ports, ctl first (vmlab's order).
+        assert_eq!(msgs[2], (1, EV_PORT_ADD, 0, Vec::new()));
+        assert_eq!(
+            msgs[3],
+            (1, EV_PORT_NAME, 0, b"vmlab.ctl.0".to_vec())
+        );
+        assert_eq!(msgs[4], (2, EV_PORT_ADD, 0, Vec::new()));
+        assert_eq!(
+            msgs[5],
+            (2, EV_PORT_NAME, 0, b"vmlab.agent.0".to_vec())
+        );
+        // The used length of a name message covers header plus name.
+        let (_, len) = f.vqs[2].used_entry(&f.mem, 3);
+        assert_eq!(len as usize, 8 + "vmlab.ctl.0".len());
+    }
+
+    #[test]
+    fn port_open_follows_the_host_connection() {
+        let mut f = Fixture::new();
+        f.device_ready(8, 6);
+        f.post_ctrl_rx(8);
+        let client = UnixStream::connect(&f.agent_sock).unwrap();
+        wait_for("PORT_OPEN(2,1)", || {
+            f.ctrl_delivered().last().is_some_and(|m| *m == (2, EV_PORT_OPEN, 1, Vec::new()))
+        });
+        drop(client);
+        f.post_ctrl_rx(9);
+        wait_for("PORT_OPEN(2,0)", || {
+            f.ctrl_delivered().last().is_some_and(|m| *m == (2, EV_PORT_OPEN, 0, Vec::new()))
+        });
+    }
+
+    #[test]
+    fn guest_output_reaches_the_connected_client() {
+        let mut f = Fixture::new();
+        let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        // Bring-up with the client connected: the announcement carries the
+        // port-open state, and proves the worker accepted the client.
+        f.device_ready(8, 7);
+        assert!(f
+            .ctrl_delivered()
+            .contains(&(1, EV_PORT_OPEN, 1, Vec::new())));
+
+        let addr = f.data(1);
+        f.mem.write_slice(b"hello ctl", GuestAddress(addr)).unwrap();
+        f.vqs[5].add_chain(&f.mem, &[(addr, 9, false)]);
+        f.dev.queue_notify(5);
+
+        let mut got = [0u8; 9];
+        client.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"hello ctl");
+        wait_for("tx buffer returned", || f.vqs[5].used_idx(&f.mem) == 1);
+        let (_, len) = f.vqs[5].used_entry(&f.mem, 0);
+        assert_eq!(len, 9);
+    }
+
+    #[test]
+    fn host_input_reaches_the_guest_receiveq() {
+        let mut f = Fixture::new();
+        let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        f.device_ready(8, 7);
+
+        let addr = f.data(2);
+        f.vqs[4].add_chain(&f.mem, &[(addr, 64, true)]);
+        // The driver kicks after adding receive buffers, as the spec
+        // requires; the device relies on it to refresh its poll interest.
+        f.dev.queue_notify(4);
+        client.write_all(b"ping").unwrap();
+        wait_for("rx buffer used", || f.vqs[4].used_idx(&f.mem) == 1);
+
+        let (_, len) = f.vqs[4].used_entry(&f.mem, 0);
+        assert_eq!(len, 4);
+        let mut got = [0u8; 4];
+        f.mem.read_slice(&mut got, GuestAddress(addr)).unwrap();
+        assert_eq!(&got, b"ping");
+        assert!(f.irq.queue_notified(4));
+    }
+
+    #[test]
+    fn guest_output_without_a_client_is_discarded() {
+        let mut f = Fixture::new();
+        let addr = f.data(1);
+        f.mem.write_slice(b"nobody home", GuestAddress(addr)).unwrap();
+        f.vqs[5].add_chain(&f.mem, &[(addr, 11, false)]);
+        f.dev.queue_notify(5);
+        // The buffer still returns to the driver.
+        wait_for("tx buffer returned", || f.vqs[5].used_idx(&f.mem) == 1);
+
+        // A client connecting afterwards receives nothing.
+        let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
+        client.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        let mut got = [0u8; 11];
+        assert!(client.read_exact(&mut got).is_err());
+    }
+
+    #[test]
+    fn host_input_waits_for_a_receiveq_buffer() {
+        let mut f = Fixture::new();
+        let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
+        client.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        f.device_ready(8, 7);
+
+        // Bytes with no receiveq buffer wait under backpressure, they are
+        // not dropped.
+        client.write_all(b"held back").unwrap();
+        thread::sleep(Duration::from_millis(150));
+
+        let addr = f.data(3);
+        f.vqs[4].add_chain(&f.mem, &[(addr, 32, true)]);
+        f.dev.queue_notify(4);
+        wait_for("rx buffer used", || f.vqs[4].used_idx(&f.mem) == 1);
+        let mut got = [0u8; 9];
+        f.mem.read_slice(&mut got, GuestAddress(addr)).unwrap();
+        assert_eq!(&got, b"held back");
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_queues_and_staged_bytes() {
+        let mut f = Fixture::new();
+        let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        f.device_ready(8, 7);
+
+        // Both directions move data, and one host write is left staged.
+        let tx_addr = f.data(1);
+        f.mem.write_slice(b"before", GuestAddress(tx_addr)).unwrap();
+        f.vqs[5].add_chain(&f.mem, &[(tx_addr, 6, false)]);
+        f.dev.queue_notify(5);
+        let mut got = [0u8; 6];
+        client.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"before");
+
+        let rx_addr = f.data(2);
+        f.vqs[4].add_chain(&f.mem, &[(rx_addr, 32, true)]);
+        f.dev.queue_notify(4);
+        client.write_all(b"one").unwrap();
+        wait_for("rx buffer used", || f.vqs[4].used_idx(&f.mem) == 1);
+
+        // A deliberately tiny receive buffer: the next host write lands
+        // partly in the guest and partly in the device's staging buffer.
+        let tiny_addr = f.data(4);
+        f.vqs[4].add_chain(&f.mem, &[(tiny_addr, 2, true)]);
+        f.dev.queue_notify(4);
+        client.write_all(b"staged").unwrap();
+        wait_for("tiny buffer used", || f.vqs[4].used_idx(&f.mem) == 2);
+        let mut got = [0u8; 2];
+        f.mem.read_slice(&mut got, GuestAddress(tiny_addr)).unwrap();
+        assert_eq!(&got, b"st");
+        let used_before = f.vqs[4].used_idx(&f.mem);
+        let state = f.dev.save_state().unwrap();
+
+        // A fresh device takes the state over.
+        let Fixture {
+            _dir,
+            mem,
+            dev,
+            irq,
+            mut vqs,
+            ctl_sock,
+            agent_sock,
+        } = f;
+        drop(dev);
+        let mut dev2 = Console::new(
+            "console",
+            vec![
+                PortConfig {
+                    name: "vmlab.ctl.0".into(),
+                    path: ctl_sock,
+                },
+                PortConfig {
+                    name: "vmlab.agent.0".into(),
+                    path: agent_sock,
+                },
+            ],
+        )
+        .unwrap();
+        dev2.restore_state(&state).unwrap();
+        let queues: Vec<Queue> = vqs.iter().map(|v| v.queue()).collect();
+        dev2.activate(mem.clone(), irq, queues).unwrap();
+
+        // The driver reposts a receiveq buffer and the staged remainder
+        // lands, with the used ring continuing where the snapshot left it.
+        let rx_addr = DATA_BASE + 0x1_0000 * 3;
+        vqs[4].add_chain(&mem, &[(rx_addr, 32, true)]);
+        dev2.queue_notify(4);
+        let want = used_before + 1;
+        wait_for("staged bytes delivered", || vqs[4].used_idx(&mem) == want);
+        let mut got = [0u8; 4];
+        mem.read_slice(&mut got, GuestAddress(rx_addr)).unwrap();
+        assert_eq!(&got, b"aged");
+        let (_, len) = vqs[4].used_entry(&mem, used_before);
+        assert_eq!(len, 4);
+    }
+
+
+    #[test]
+    fn reset_stops_using_the_queues() {
+        let mut f = Fixture::new();
+        f.device_ready(8, 6);
+        f.dev.reset();
+
+        let addr = f.data(1);
+        f.mem.write_slice(b"gone", GuestAddress(addr)).unwrap();
+        f.vqs[5].add_chain(&f.mem, &[(addr, 4, false)]);
+        f.dev.queue_notify(5);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(f.vqs[5].used_idx(&f.mem), 0);
+
+        // A later re-activation brings the queues back. The stale pre-reset
+        // available entry is still queued, so both buffers return.
+        f.activate();
+        f.vqs[5].add_chain(&f.mem, &[(addr, 4, false)]);
+        f.dev.queue_notify(5);
+        wait_for("tx buffers returned after re-activate", || {
+            f.vqs[5].used_idx(&f.mem) == 2
+        });
     }
 }

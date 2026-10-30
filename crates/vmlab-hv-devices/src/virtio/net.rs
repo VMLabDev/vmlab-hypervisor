@@ -26,7 +26,8 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use parking_lot::{Mutex, MutexGuard};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -195,9 +196,9 @@ impl Drop for Net {
     }
 }
 
-/// Lock, surviving a poisoned mutex.
+/// Lock the shared state.
 fn lock(shared: &Arc<Mutex<Shared>>) -> MutexGuard<'_, Shared> {
-    shared.lock().unwrap_or_else(|e| e.into_inner())
+    shared.lock()
 }
 
 // ---- the worker thread ------------------------------------------------------
