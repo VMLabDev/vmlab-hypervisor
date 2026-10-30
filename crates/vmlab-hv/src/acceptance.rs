@@ -91,10 +91,10 @@ fn boot_template(
     }
     let windows = name.starts_with("windows-");
     let tpm = name == "windows-server-2022";
-    let _swtpm = tpm.then(|| {
+    let spawn_tpm = || {
         let socket = dir.path().join("tpm.sock");
         let state = dir.path().join("tpm");
-        std::fs::create_dir(&state).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
         let mut child = Process(
             Command::new("swtpm")
                 .args(["socket", "--tpm2", "--tpmstate"])
@@ -115,7 +115,8 @@ fn boot_template(
             std::thread::sleep(Duration::from_millis(10));
         }
         child
-    });
+    };
+    let mut swtpm = tpm.then(spawn_tpm);
     let disk = dir.path().join("disk.qcow2");
     vmlab_disk::ops::create_linked_clone(&template, &disk).unwrap();
     let control = dir.path().join("control.sock");
@@ -278,7 +279,7 @@ fn boot_template(
     let timeout = std::env::var("VMLAB_HV_TEMPLATE_TIMEOUT")
         .ok()
         .map(|v| v.parse().unwrap())
-        .unwrap_or(120);
+        .unwrap_or(if windows { 600 } else { 120 });
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let mut reboots = 0;
     let mut guest = loop {
@@ -300,6 +301,14 @@ fn boot_template(
             );
             reboots += 1;
             eprintln!("{name}: restarting after guest reset {reboots}");
+            if let Some(previous) = swtpm.take() {
+                drop(previous);
+                let socket = dir.path().join("tpm.sock");
+                if socket.exists() {
+                    std::fs::remove_file(socket).unwrap();
+                }
+                swtpm = Some(spawn_tpm());
+            }
             for socket in [
                 &control,
                 &agent,
