@@ -14,8 +14,8 @@ use vmlab_hv_proto::control::{
     Capability, ClientMsg, Command, ErrorCode, Event, Outcome, RunState, ServerMsg, ShutdownReason,
 };
 use vmlab_hv_proto::machine::{
-    Accel, Arch, Boot, Disk, DiskFormat, FsShare, MachineDescription, Nic, NicAttachment,
-    SerialPort,
+    Accel, Arch, Audio, AudioDevice, Boot, Disk, DiskFormat, FsShare, MachineDescription, Nic,
+    NicAttachment, SerialPort,
 };
 
 /// Assert that `value` serializes to exactly `json` and parses back.
@@ -75,6 +75,12 @@ fn sample_machine() -> MachineDescription {
             tag: "share0".to_owned(),
             socket: PathBuf::from("/run/vmlab/web-1/virtiofs.sock"),
         }],
+        audio: Some(Audio {
+            device: AudioDevice::Hda,
+            microphone: false,
+            node_name: "vmlab.lab.web-1".to_owned(),
+            node_description: "vmlab lab/web-1".to_owned(),
+        }),
         rtc_base: Some("2026-10-30T00:00:00Z".to_owned()),
     }
 }
@@ -334,6 +340,7 @@ fn pinned_machine_description() {
             r#""serial_log":"/var/log/vmlab/web-1.serial.log","#,
             r#""ports":[{"name":"vmlab.agent.0","socket":"/run/vmlab/web-1/agent.sock"}],"#,
             r#""shares":[{"tag":"share0","socket":"/run/vmlab/web-1/virtiofs.sock"}],"#,
+            r#""audio":{"device":"hda","microphone":false,"node_name":"vmlab.lab.web-1","node_description":"vmlab lab/web-1"},"#,
             r#""rtc_base":"2026-10-30T00:00:00Z"}"#
         ),
     );
@@ -352,6 +359,41 @@ fn machine_description_defaults_apply() {
     assert!(machine.shares.is_empty());
     assert!(machine.rtc_base.is_none());
     round_trip(&machine);
+}
+
+#[test]
+fn machine_description_without_audio_omits_the_section() {
+    // The audio section is optional: absent means the machine has no audio.
+    let json = concat!(
+        r#"{"name":"min","arch":"x86_64","accel":"kvm","vcpus":1,"memory_mib":128,"#,
+        r#""boot":{"kind":"kernel","kernel":"/k","initrd":null,"cmdline":""},"#,
+        r#""disks":[],"nics":[],"serial_log":"/log","#,
+        r#""ports":[]}"#
+    );
+    let machine: MachineDescription = serde_json::from_str(json).unwrap();
+    assert_eq!(machine.audio, None);
+    assert!(!serde_json::to_string(&machine).unwrap().contains("audio"));
+}
+
+#[test]
+fn audio_microphone_defaults_to_off() {
+    let json = r#"{"device":"virtio_snd","node_name":"vmlab.lab.web-1","node_description":"vmlab lab/web-1"}"#;
+    assert_eq!(
+        serde_json::from_str::<Audio>(json).unwrap(),
+        Audio {
+            device: AudioDevice::VirtioSnd,
+            microphone: false,
+            node_name: "vmlab.lab.web-1".to_owned(),
+            node_description: "vmlab lab/web-1".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn audio_section_rejects_unknown_fields() {
+    let json =
+        r#"{"device":"hda","microphone":true,"node_name":"n","node_description":"d","sink":"x"}"#;
+    assert!(serde_json::from_str::<Audio>(json).is_err());
 }
 
 #[test]

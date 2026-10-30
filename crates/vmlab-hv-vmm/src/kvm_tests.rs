@@ -439,6 +439,7 @@ fn real_kernel_boots_and_resets() {
         serial_log: dir.join("serial.log"),
         ports: vec![],
         shares: vec![],
+        audio: None,
         rtc_base: None,
     };
 

@@ -7,9 +7,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+thiserror.workspace = true
+pipewire = { version = "=0.10.1", optional = true, features = ["v0_3_50"] }
+libpulse-binding = { version = "2.30.1", optional = true }
 libc = "0.2"
 parking_lot = "0.12"
-thiserror.workspace = true
 vhost = { version = "0.18.0", features = ["vhost-user-frontend"] }
 virtio-queue = "0.18"
 vm-memory.workspace = true
@@ -19,3 +21,9 @@ vmlab-disk.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+default = []
+pipewire = ["dep:pipewire"]
+pulse = ["dep:libpulse-binding"]
+testing = []
