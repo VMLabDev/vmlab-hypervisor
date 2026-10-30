@@ -25,6 +25,27 @@ REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_option_rom_identity_ignores_code_but_keeps_pci_identity(self):
+        image = bytearray(512)
+        image[:2] = b"\x55\xaa"
+        struct.pack_into("<H", image, 0x18, 0x20)
+        image[0x20:0x28] = b"PCIR\xf4\x1a\x00\x10"
+        struct.pack_into("<H", image, 0x30, 1)
+        image[0x35] = 0x80
+        name = "pci-roms/0000:00:03.0.rom"
+        original = diff.normalize_artifact(name, image)
+        image[100] = 42
+        self.assertEqual(original, diff.normalize_artifact(name, image))
+        image[0x26] = 1
+        self.assertNotEqual(original, diff.normalize_artifact(name, image))
+        image[0x30] = 2
+        with self.assertRaises(ValueError):
+            diff.normalize_artifact(name, image)
+        self.assertNotEqual(diff.normalize_text("lspci-nnnvvvxxxx.txt",
+            "Expansion ROM at feb00000 [disabled] [size=256K]\n"),
+            diff.normalize_text("lspci-nnnvvvxxxx.txt",
+            "Expansion ROM at feb00000 [disabled] [size=128K]\n"))
+
     def test_pci_resource_maps_move_but_sizes_and_bars_remain_exact(self):
         with tempfile.TemporaryDirectory(prefix="hwref-bars-") as tmp:
             root = Path(tmp)
@@ -91,7 +112,8 @@ class NormalizeTests(unittest.TestCase):
         right = {"dmesg.txt": generic + "other mouse changed\n", "lspci-nn.txt": nic, "iomem.txt": "000d0000-000d0fff : Adapter ROM\n"}
         diff.approved_platform(left, right, rules)
         self.assertEqual(left["dmesg.txt"], right["dmesg.txt"])
-        self.assertEqual(left["iomem.txt"], right["iomem.txt"])
+        self.assertIn("000c9000-000c9dff : Adapter ROM", left["iomem.txt"])
+        self.assertNotIn("000ca000-000cc3ff : Adapter ROM", left["iomem.txt"])
         bad = {"dmesg.txt": generic.replace("ImEx", "Other")}
         left = {"dmesg.txt": mouse * 2}
         diff.approved_platform(left, bad, rules)

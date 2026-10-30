@@ -151,6 +151,9 @@ pub enum DiskFormat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Nic {
+    /// PCI option ROM image; absent disables firmware network boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rom: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pci: Option<PciAddress>,
     /// `aa:bb:cc:dd:ee:ff`.

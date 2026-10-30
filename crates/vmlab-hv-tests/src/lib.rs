@@ -393,6 +393,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         ],
         nics: if spec.nics > 0 {
             vec![Nic {
+                rom: None,
                 pci: None,
                 mac: mac_string(TEST_MAC),
                 mtu: None,
