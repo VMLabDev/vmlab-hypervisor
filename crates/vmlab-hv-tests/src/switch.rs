@@ -13,8 +13,8 @@ use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -147,7 +147,9 @@ fn serve(listener: UnixListener, inner: Arc<Mutex<Inner>>, stopped: Arc<AtomicBo
             rx.drain(..4 + len);
             if let Some(reply) = handle_frame(&frame, &inner) {
                 let mut inner = inner.lock();
-                inner.out.extend_from_slice(&(reply.len() as u32).to_be_bytes());
+                inner
+                    .out
+                    .extend_from_slice(&(reply.len() as u32).to_be_bytes());
                 inner.out.extend_from_slice(&reply);
             }
         }

@@ -14,8 +14,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use vmlab_agent_proto::{
-    encode_ctrl, encode_frame, AgentMsg, Frame, FrameDecoder, FrameKind, HostMsg, INITIAL_WINDOW,
-    MAX_PAYLOAD, PROTO_VERSION, RecvWindow, SendWindow,
+    AgentMsg, Frame, FrameDecoder, FrameKind, HostMsg, INITIAL_WINDOW, MAX_PAYLOAD, PROTO_VERSION,
+    RecvWindow, SendWindow, encode_ctrl, encode_frame,
 };
 
 /// What the agent said about itself in the handshake.
@@ -75,7 +75,10 @@ impl AgentClient {
                 }
             }
         }
-        Err(format!("no vmlab-agent answered on {}: {last}", path.display()))
+        Err(format!(
+            "no vmlab-agent answered on {}: {last}",
+            path.display()
+        ))
     }
 
     fn attempt(path: &Path, timeout: Duration) -> Result<Self, Error> {
@@ -240,10 +243,7 @@ impl AgentClient {
                                 stderr,
                             });
                         }
-                        AgentMsg::Error {
-                            id: Some(id),
-                            msg,
-                        } if id == channel => {
+                        AgentMsg::Error { id: Some(id), msg } if id == channel => {
                             return Err(format!("exec `{}` failed: {msg}", argv.join(" ")));
                         }
                         AgentMsg::Error { msg, .. } => {

@@ -107,7 +107,10 @@ impl CtlClient {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let Some(read) = self.next_event(spec, remaining) else {
-                panic!("ctl channel never produced the wanted event: {}", diagnostic());
+                panic!(
+                    "ctl channel never produced the wanted event: {}",
+                    diagnostic()
+                );
             };
             match read {
                 CtlRead::Closed => panic!("ctl port closed early: {}", diagnostic()),

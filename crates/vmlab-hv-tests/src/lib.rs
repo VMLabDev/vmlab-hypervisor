@@ -380,13 +380,15 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
             },
         ],
         nics: (spec.nics > 0)
-            .then(|| vec![Nic {
-                mac: mac_string(TEST_MAC),
-                mtu: None,
-                attachment: NicAttachment::Stream {
-                    socket: switch_sock.clone().expect("bound above"),
-                },
-            }])
+            .then(|| {
+                vec![Nic {
+                    mac: mac_string(TEST_MAC),
+                    mtu: None,
+                    attachment: NicAttachment::Stream {
+                        socket: switch_sock.clone().expect("bound above"),
+                    },
+                }]
+            })
             .unwrap_or_default(),
         serial_log: dir.join("serial.log"),
         ports: vec![
@@ -403,8 +405,11 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         rtc_base: None,
     };
     let machine_path = dir.join("machine.json");
-    std::fs::write(&machine_path, serde_json::to_vec_pretty(&desc).expect("serialize machine"))
-        .expect("write machine.json");
+    std::fs::write(
+        &machine_path,
+        serde_json::to_vec_pretty(&desc).expect("serialize machine"),
+    )
+    .expect("write machine.json");
 
     let hv_log_path = dir.join("hv.log");
     let hv_log = std::fs::File::create(&hv_log_path).expect("create hv log");
