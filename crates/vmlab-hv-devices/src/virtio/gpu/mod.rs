@@ -1,9 +1,13 @@
-//! Synchronous 2D virtio-gpu, VIRTIO 1.2 section 5.7.
+//! Virtio-gpu, VIRTIO 1.2 section 5.7, with optional virglrenderer acceleration.
 //!
 //! `Gpu` clones share state. Keep a clone for frame and cursor publication
-//! while the PCI transport owns another clone. No host GPU is required.
+//! while the PCI transport owns another clone. The default 2D mode needs no GPU.
 
+mod renderer;
+mod scanout;
+pub use scanout::DmaFrame;
 mod snapshot;
+pub use renderer::{APERTURE_SIZE, BlobMapper, GpuMode};
 #[cfg(test)]
 mod tests;
 
@@ -91,6 +95,9 @@ impl Resource {
 }
 
 struct State {
+    renderer: Option<renderer::Renderer>,
+    fences: Vec<PendingFence>,
+    current_fence: Option<(u32, u64, u32, u8)>,
     acked: u64,
     preferred: (u32, u32),
     events: u32,
@@ -108,7 +115,7 @@ struct State {
     pending: Vec<Queue>,
 }
 
-/// One output, two queues, no virgl, blobs or capability sets.
+/// One output and two queues. `enable_3d` adds virgl, Venus and blob resources.
 #[derive(Clone)]
 pub struct Gpu {
     id: String,
@@ -120,6 +127,9 @@ impl Gpu {
         Self {
             id: id.into(),
             state: Arc::new(Mutex::new(State {
+                renderer: None,
+                fences: Vec::new(),
+                current_fence: None,
                 acked: 0,
                 preferred: (1280, 800),
                 events: 0,
@@ -141,6 +151,49 @@ impl Gpu {
 
     pub fn native(&self) -> bool {
         self.state.lock().native
+    }
+
+    pub fn enable_3d(
+        &self,
+        mode: GpuMode,
+        node: std::path::PathBuf,
+        mapper: Arc<dyn BlobMapper>,
+    ) -> Result<(), DeviceError> {
+        let renderer = renderer::Renderer::new(mode, node, mapper)?;
+        self.state.lock().renderer = Some(renderer);
+        let state = Arc::downgrade(&self.state);
+        std::thread::Builder::new()
+            .name("gpu-fence-completion".into())
+            .spawn(move || {
+                while let Some(state) = state.upgrade() {
+                    state.lock().complete_fences();
+                    drop(state);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            })?;
+        Ok(())
+    }
+
+    pub fn has_3d_contexts(&self) -> bool {
+        self.state
+            .lock()
+            .renderer
+            .as_ref()
+            .is_some_and(|r| r.has_contexts())
+    }
+
+    pub fn dma_frame(&self) -> Result<Option<DmaFrame>, DeviceError> {
+        self.state.lock().renderer.as_ref().map_or(Ok(None), |r| {
+            r.dma_frame()
+                .map_err(|e| DeviceError::Other(format!("GPU scanout capture failed: {e:#x}")))
+        })
+    }
+
+    pub fn set_aperture_base(&self, base: Option<u64>) -> Result<(), DeviceError> {
+        if let Some(renderer) = &self.state.lock().renderer {
+            renderer.set_base(base)?;
+        }
+        Ok(())
     }
 
     pub fn cursor(&self) -> Cursor {
@@ -170,6 +223,16 @@ impl Gpu {
 
     pub fn frame(&self) -> Option<Frame> {
         let mut s = self.state.lock();
+        if let Some(renderer) = &s.renderer {
+            match renderer.frame() {
+                Ok(Some(frame)) => return Some(frame),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("GPU readback failed: {error:#x}");
+                    return None;
+                }
+            }
+        }
         let mode = s.mode()?;
         if !s.dirty
             && let Some(frame) = &s.cached_frame
@@ -224,9 +287,34 @@ fn valid_format(f: u32) -> bool {
 }
 
 impl State {
+    fn complete_fences(&mut self) {
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        let Some(mem) = &self.mem else { return };
+        self.fences.retain(|fence| {
+            if !renderer.complete(fence.flags, fence.id, fence.ctx, fence.ring) {
+                return true;
+            }
+            let queue = &mut self.queues[fence.queue as usize];
+            if queue.add_used(mem, fence.head, fence.len).is_ok()
+                && queue.needs_notification(mem).unwrap_or(false)
+                && let Some(irq) = &self.interrupt
+            {
+                irq.notify_queue(fence.queue);
+            }
+            false
+        });
+    }
+
     fn mode(&self) -> Option<Mode> {
         if !self.native {
             return None;
+        }
+        if let Some(renderer) = &self.renderer
+            && let Some(mode) = renderer.mode()
+        {
+            return Some(mode);
         }
         let (width, height) = self
             .scanout
@@ -249,6 +337,17 @@ impl State {
         let mut d = Decoder::new(request);
         let kind = d.u32()?;
         d.take(20)?;
+        if q == 0
+            && !matches!(kind, 0x100 | 0x10a)
+            && let Some(renderer) = &self.renderer
+        {
+            let result = renderer.command(mem, request)?;
+            if matches!(kind, 0x103 | 0x10d) {
+                self.native = true;
+                self.scanout_generation = self.scanout_generation.wrapping_add(1);
+            }
+            return Ok(result);
+        }
         if q == 1 {
             if !matches!(kind, 0x300 | 0x301) {
                 return Err(INVALID);
@@ -458,7 +557,15 @@ impl State {
             if id == 0 {
                 self.cursor.visible = false;
             } else {
-                let r = self.resources.get(&id).ok_or(RESOURCE)?;
+                let accelerated = self
+                    .renderer
+                    .as_ref()
+                    .map(|renderer| renderer.cursor_resource(id))
+                    .transpose()?;
+                let r = accelerated
+                    .as_ref()
+                    .or_else(|| self.resources.get(&id))
+                    .ok_or(RESOURCE)?;
                 if r.width != 64 || r.height != 64 || hot_x >= 64 || hot_y >= 64 {
                     return Err(INVALID);
                 }
@@ -485,11 +592,12 @@ impl State {
     }
 
     fn chain(&mut self, mem: &GuestMemory, q: usize, chain: DescriptorChain<&GuestMemory>) -> u32 {
+        self.current_fence = None;
         let Ok(mut reader) = chain.clone().reader(mem) else {
             return 0;
         };
         let len = reader.available_bytes();
-        if !(24..=32 + MAX_ENTRIES * 16).contains(&len) {
+        if !(24..=16 * 1024 * 1024 + 32).contains(&len) {
             return 0;
         }
         let mut request = vec![0; len];
@@ -503,16 +611,25 @@ impl State {
         if q == 0 && writer.available_bytes() < 24 {
             return 0;
         }
-        let (kind, payload) = match self.command(mem, q, &request) {
+        let (mut kind, payload) = match self.command(mem, q, &request) {
             Ok(response) => response,
             Err(error) => (error, Vec::new()),
         };
         let mut response = vec![0; 24];
         response[..4].copy_from_slice(&kind.to_le_bytes());
         if request[4] & 1 != 0 {
-            response[4] = 1;
-            response[8..20].copy_from_slice(&request[8..20]);
+            response[4..24].copy_from_slice(&request[4..24]);
+            if let Some(renderer) = &self.renderer {
+                let flags = u32::from_le_bytes(request[4..8].try_into().unwrap());
+                let id = u64::from_le_bytes(request[8..16].try_into().unwrap());
+                let ctx = u32::from_le_bytes(request[16..20].try_into().unwrap());
+                match renderer.fence(flags, id, ctx, request[20]) {
+                    Err(error) => kind = error,
+                    Ok(()) => self.current_fence = Some((flags, id, ctx, request[20])),
+                }
+            }
         }
+        response[..4].copy_from_slice(&kind.to_le_bytes());
         response.extend_from_slice(&payload);
         if writer.available_bytes() < response.len() {
             return 0;
@@ -559,9 +676,15 @@ impl VirtioDevice for Gpu {
     }
     fn features(&self) -> u64 {
         FEATURES
+            | if self.state.lock().renderer.is_some() {
+                1 | (1 << 3) | (1 << 4)
+            } else {
+                0
+            }
     }
     fn ack_features(&mut self, features: u64) {
-        self.state.lock().acked = features & FEATURES;
+        let supported = self.features();
+        self.state.lock().acked = features & supported;
     }
     fn config_len(&self) -> u64 {
         16
@@ -571,6 +694,9 @@ impl VirtioDevice for Gpu {
         let mut config = [0; 16];
         config[..4].copy_from_slice(&s.events.to_le_bytes());
         config[8..12].copy_from_slice(&1u32.to_le_bytes());
+        if let Some(renderer) = &s.renderer {
+            config[12..16].copy_from_slice(&renderer.capsets.to_le_bytes());
+        }
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = offset
                 .checked_add(i as u64)
@@ -631,6 +757,18 @@ impl VirtioDevice for Gpu {
             while let Some(chain) = s.queues[index].pop_descriptor_chain(&mem) {
                 let head = chain.head_index();
                 let len = s.chain(&mem, index, chain);
+                if let Some((flags, id, ctx, ring)) = s.current_fence.take() {
+                    s.fences.push(PendingFence {
+                        queue: index as u16,
+                        head,
+                        len,
+                        flags,
+                        id,
+                        ctx,
+                        ring,
+                    });
+                    continue;
+                }
                 if s.queues[index].add_used(&mem, head, len).is_err() {
                     return;
                 }
@@ -649,6 +787,12 @@ impl VirtioDevice for Gpu {
     }
     fn reset(&mut self) {
         let mut s = self.state.lock();
+        if let Some(renderer) = &s.renderer
+            && let Err(error) = renderer.reset()
+        {
+            eprintln!("GPU reset failed: {error:#x}");
+        }
+        s.fences.clear();
         s.acked = 0;
         s.events = 0;
         s.resources.clear();
@@ -668,6 +812,16 @@ impl VirtioDevice for Gpu {
         s.queues.clear();
         s.pending.clear();
     }
+}
+
+struct PendingFence {
+    queue: u16,
+    head: u16,
+    len: u32,
+    flags: u32,
+    id: u64,
+    ctx: u32,
+    ring: u8,
 }
 
 struct Decoder<'a> {

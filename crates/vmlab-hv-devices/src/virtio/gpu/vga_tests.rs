@@ -42,7 +42,10 @@ impl Driver {
         self.write(0x08, &1u32.to_le_bytes());
         self.write(0x0c, &1u32.to_le_bytes());
         self.write(0x08, &0u32.to_le_bytes());
-        self.write(0x0c, &2u32.to_le_bytes());
+        self.write(
+            0x0c,
+            &(if self.dev.accelerated { 0x1bu32 } else { 2 }).to_le_bytes(),
+        );
         self.write(0x14, &[11]);
         for q in 0..count {
             self.write(0x16, &q.to_le_bytes());
@@ -85,6 +88,21 @@ impl Driver {
             .unwrap();
         self.dev
             .bar_write(2, 0x3000 + q as u64 * 4, &(q as u16).to_le_bytes());
+        if self.dev.accelerated {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while self
+                .mem
+                .read_obj::<u16>(GuestAddress(base + 0x2002))
+                .unwrap()
+                != self.avail[q]
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "GPU fence never completed"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
         assert_eq!(
             self.mem
                 .read_obj::<u16>(GuestAddress(base + 0x2002))
@@ -146,6 +164,147 @@ impl Driver {
 
 fn code(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes[..4].try_into().unwrap())
+}
+
+struct ProbeMapper;
+impl crate::virtio::gpu::BlobMapper for ProbeMapper {
+    fn set_base(&self, _: Option<u64>) -> Result<(), DeviceError> {
+        Ok(())
+    }
+    fn map(&self, _: u32, _: u64, _: u64, _: u64) -> Result<(), DeviceError> {
+        Ok(())
+    }
+    fn unmap(&self, _: u32) -> Result<(), DeviceError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
+    let Some(node) = std::env::var_os("VMLAB_HV_TEST_RENDER_NODE") else {
+        eprintln!("SKIP accelerated GPU protocol: VMLAB_HV_TEST_RENDER_NODE is unset");
+        return;
+    };
+    let mut d = Driver::new();
+    let venus = std::env::var("VMLAB_HV_TEST_GPU_MODE").is_ok_and(|mode| mode == "venus");
+    d.dev
+        .enable_3d(
+            if venus {
+                crate::virtio::gpu::GpuMode::Venus
+            } else {
+                crate::virtio::gpu::GpuMode::Virgl
+            },
+            node.into(),
+            Arc::new(ProbeMapper),
+        )
+        .unwrap();
+    assert_eq!(d.dev.bars()[2].size, 1 << 32);
+    assert_eq!(d.dev.config_read(0xa4 / 4), 0x08189809);
+    d.start();
+    assert_eq!(code(&d.command(0, 0x108, &[0, 0])), 0x1102);
+    assert_eq!(code(&d.command(0, 0x109, &[1, 1])), 0x1103);
+    assert!(code(&d.command(0, 0x108, &[u32::MAX, 0])) >= 0x1200);
+    if venus {
+        let cap = d.command(0, 0x108, &[2, 0]);
+        assert_eq!(code(&cap), 0x1102);
+        assert_eq!(u32::from_le_bytes(cap[24..28].try_into().unwrap()), 4);
+        assert_ne!(u32::from_le_bytes(cap[32..36].try_into().unwrap()), 0);
+        assert_eq!(code(&d.command(0, 0x109, &[4, 0])), 0x1103);
+    }
+    let mut context = vec![0; 96];
+    context[..4].copy_from_slice(&0x200u32.to_le_bytes());
+    context[16..20].copy_from_slice(&7u32.to_le_bytes());
+    context[24..28].copy_from_slice(&4u32.to_le_bytes());
+    context[28..32].copy_from_slice(&2u32.to_le_bytes());
+    context[32..36].copy_from_slice(b"test");
+    assert_eq!(code(&d.submit_raw(0, &context, 2048)), 0x1100);
+    assert!(d.dev.has_3d_contexts());
+    assert!(d.dev.save_state().is_err());
+    d.ok(0x204, &[9, 2, 2, 2, 64, 64, 1, 1, 0, 0, 0]);
+    let mut attach = vec![0; 32];
+    attach[..4].copy_from_slice(&0x202u32.to_le_bytes());
+    attach[16..20].copy_from_slice(&7u32.to_le_bytes());
+    attach[24..28].copy_from_slice(&9u32.to_le_bytes());
+    assert_eq!(code(&d.submit_raw(0, &attach, 2048)), 0x1100);
+    attach[..4].copy_from_slice(&0x203u32.to_le_bytes());
+    assert_eq!(code(&d.submit_raw(0, &attach, 2048)), 0x1100);
+    d.ok(0x102, &[9, 0]);
+    d.ok(0x10c, &[8, 1, 0, 1, 0, 0, 4096, 0, 0x180000, 0, 4096, 0]);
+    assert_eq!(code(&d.command(0, 0x208, &[8, 0, 1, 0])), 0x1205);
+    assert_eq!(code(&d.command(0, 0x209, &[8, 0])), 0x1205);
+    d.ok(0x102, &[8, 0]);
+    let mut submit = vec![0; 36];
+    submit[..4].copy_from_slice(&0x207u32.to_le_bytes());
+    submit[4..8].copy_from_slice(&1u32.to_le_bytes());
+    submit[8..16].copy_from_slice(&42u64.to_le_bytes());
+    submit[16..20].copy_from_slice(&7u32.to_le_bytes());
+    submit[24..28].copy_from_slice(&4u32.to_le_bytes());
+    let response = d.submit_raw(0, &submit, 2048);
+    assert_eq!(code(&response), 0x1100);
+    assert_eq!(&response[4..24], &submit[4..24]);
+    d.create(1, 64, 64, 2);
+    let pixels = [23, 41, 193, 0].repeat(64 * 64);
+    d.backing(1, &pixels);
+    d.transfer(1, 64, 64);
+    d.ok(0x103, &[0, 0, 64, 64, 0, 1]);
+    let first = d.dev.dma_frame().unwrap().unwrap();
+    assert_eq!(&first.pixels[..3], &pixels[..3]);
+    d.mem
+        .write_slice(&[199, 31, 17, 0].repeat(64 * 64), GuestAddress(0x100000))
+        .unwrap();
+    d.transfer(1, 64, 64);
+    let second = d.dev.dma_frame().unwrap().unwrap();
+    assert_eq!(&second.pixels[..3], &[199, 31, 17]);
+    assert_eq!(&first.pixels[..3], &pixels[..3]);
+    attach[..4].copy_from_slice(&0x202u32.to_le_bytes());
+    attach[24..28].copy_from_slice(&1u32.to_le_bytes());
+    assert_eq!(code(&d.submit_raw(0, &attach, 2048)), 0x1100);
+    let clear = [
+        (5 << 16) | (8 << 8) | 1,
+        1,
+        1,
+        2,
+        0,
+        0,
+        (3 << 16) | 5,
+        1,
+        0,
+        1,
+        (8 << 16) | 7,
+        4,
+        0.7f32.to_bits(),
+        0.2f32.to_bits(),
+        0.1f32.to_bits(),
+        1.0f32.to_bits(),
+        0,
+        0,
+        0,
+    ];
+    submit.truncate(32);
+    submit[8..16].copy_from_slice(&43u64.to_le_bytes());
+    submit[24..28].copy_from_slice(&(clear.len() as u32 * 4).to_le_bytes());
+    for word in clear {
+        submit.extend_from_slice(&word.to_le_bytes());
+    }
+    assert_eq!(code(&d.submit_raw(0, &submit, 2048)), 0x1100);
+    let rendered = d.dev.dma_frame().unwrap().unwrap();
+    for (actual, expected) in rendered.pixels[..3].iter().zip([26u8, 51, 178]) {
+        assert!(
+            actual.abs_diff(expected) <= 2,
+            "virgl clear pixel {:?}",
+            &rendered.pixels[..4]
+        );
+    }
+    let mut destroy = vec![0; 24];
+    destroy[..4].copy_from_slice(&0x201u32.to_le_bytes());
+    destroy[16..20].copy_from_slice(&7u32.to_le_bytes());
+    assert_eq!(code(&d.submit_raw(0, &destroy, 2048)), 0x1100);
+    assert!(!d.dev.has_3d_contexts());
+    for kind in [0x204u32, 0x205, 0x206, 0x207, 0x208, 0x209, 0x10c, 0x10d] {
+        let mut truncated = vec![0; 24];
+        truncated[..4].copy_from_slice(&kind.to_le_bytes());
+        assert_eq!(code(&d.submit_raw(0, &truncated, 2048)), 0x1205);
+    }
 }
 
 #[test]
