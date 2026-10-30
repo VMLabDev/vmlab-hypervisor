@@ -5,4 +5,6 @@
 //! stop advancing while paused. IRQ handles and callbacks remain attached
 //! across snapshot restore; only guest-visible state is serialized.
 
+pub mod hpet;
 pub mod lpc;
+pub mod rtc;
