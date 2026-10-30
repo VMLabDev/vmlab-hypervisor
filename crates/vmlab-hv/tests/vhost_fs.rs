@@ -307,7 +307,7 @@ fn initrd_with_init_script(dir: &Dir) -> PathBuf {
     fs::write(&init, script).unwrap();
     make_executable(&init);
     let archive = dir.path.join("overlay.cpio");
-    let output = Command::new("cpio")
+    let mut child = Command::new("cpio")
         .current_dir(&overlay)
         .args(["-o", "-H", "newc", "--owner", "0:0", "-F"])
         .arg(&archive)
@@ -316,14 +316,18 @@ fn initrd_with_init_script(dir: &Dir) -> PathBuf {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("spawn cpio");
-    // `find .` feeds the file list.
+    // Close stdin before waiting so cpio sees the end of the file list.
     {
-        let mut child = output;
         let mut stdin = child.stdin.take().expect("cpio stdin");
         stdin
             .write_all(b".\n./init\n")
             .expect("feed cpio the file list");
     }
+    let status = child.wait().expect("wait for cpio to finish the archive");
+    assert!(
+        status.success(),
+        "cpio failed to build {archive:?}: {status}"
+    );
     let combined = dir.path.join("initrd.img");
     let mut out = File::create(&combined).unwrap();
     let mut base = File::open(INITRD).unwrap();
@@ -341,6 +345,47 @@ fn make_executable(path: &Path) {
     let mut perms = fs::metadata(path).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(path, perms).unwrap();
+}
+
+#[test]
+fn initrd_overlay_is_complete_before_returning() {
+    if !Path::new(INITRD).exists() {
+        eprintln!("skipping: needs {INITRD}");
+        return;
+    }
+    std::thread::scope(|scope| {
+        let builds: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    use std::io::{Seek, SeekFrom};
+
+                    let dir = Dir::new("archive");
+                    let combined = initrd_with_init_script(&dir);
+                    let mut archive = File::open(combined).unwrap();
+                    archive
+                        .seek(SeekFrom::Start(fs::metadata(INITRD).unwrap().len()))
+                        .unwrap();
+                    let output = Command::new("cpio")
+                        .args(["-i", "--quiet", "--to-stdout"])
+                        .stdin(archive)
+                        .output()
+                        .expect("read the appended cpio archive");
+                    assert!(
+                        output.status.success(),
+                        "invalid appended archive: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert_eq!(
+                        output.stdout,
+                        fs::read(dir.path.join("overlay/init")).unwrap()
+                    );
+                })
+            })
+            .collect();
+        for build in builds {
+            build.join().unwrap();
+        }
+    });
 }
 
 /// One machine description with a single share on `socket`.
