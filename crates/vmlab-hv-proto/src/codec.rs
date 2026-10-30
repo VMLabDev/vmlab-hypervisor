@@ -11,8 +11,8 @@
 
 use std::io::{self, BufRead, Write};
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::control::{ClientMsg, ServerMsg};
 
@@ -170,8 +170,10 @@ mod tests {
     #[test]
     fn wrong_message_kind_is_malformed() {
         // A client message on the server side does not deserialize.
-        let err = read_server_msg(&mut Cursor::new(b"{\"type\":\"request\",\"id\":1,\"command\":{\"command\":\"status\"}}\n"))
-            .unwrap_err();
+        let err = read_server_msg(&mut Cursor::new(
+            b"{\"type\":\"request\",\"id\":1,\"command\":{\"command\":\"status\"}}\n",
+        ))
+        .unwrap_err();
         assert!(matches!(err, CodecError::Malformed(_)));
     }
 
@@ -211,7 +213,10 @@ mod tests {
     #[test]
     fn oversize_line_is_rejected_without_buffering_it() {
         let oversized = vec![b'a'; 8 * MAX_LINE_BYTES];
-        let counting = Counting { inner: Cursor::new(oversized), read: 0 };
+        let counting = Counting {
+            inner: Cursor::new(oversized),
+            read: 0,
+        };
         let mut reader = io::BufReader::with_capacity(8 * 1024, counting);
         let err = read_client_msg(&mut reader).unwrap_err();
         assert!(matches!(err, CodecError::LineTooLong));

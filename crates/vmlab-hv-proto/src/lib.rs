@@ -13,6 +13,7 @@
 pub mod codec;
 pub mod control;
 pub mod machine;
+pub mod server;
 
 pub use machine::MachineDescription;
 

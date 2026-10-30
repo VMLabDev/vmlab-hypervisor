@@ -28,6 +28,10 @@ pub enum ServerMsg {
         #[serde(flatten)]
         event: Event,
     },
+    /// A protocol-level failure that is not a reply to any request: a
+    /// rejected handshake. Sent without an id (there is no request id to
+    /// echo), then the connection is closed.
+    Error { code: ErrorCode, message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
