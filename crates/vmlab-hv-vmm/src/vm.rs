@@ -235,7 +235,11 @@ impl VmShared {
                     "only {parked} of {total} vCPUs quiesced within {timeout:?}"
                 ));
             }
-            self.parked_cv.wait_until(&mut parked, deadline);
+            // A signal delivered just before KVM_RUN can be consumed before
+            // the ioctl blocks. Retry while waiting for every vCPU to park.
+            self.kick_all();
+            self.parked_cv
+                .wait_for(&mut parked, std::time::Duration::from_millis(1));
         }
     }
 
@@ -447,10 +451,10 @@ impl VmShared {
             }
         }
         self.io_bus.lock().write(port, data);
-        if _memory_update.is_some() {
-            if let Err(error) = self.sync_vga_mapping() {
-                self.request_exit(ExitReason::Error(error.to_string()));
-            }
+        if _memory_update.is_some()
+            && let Err(error) = self.sync_vga_mapping()
+        {
+            self.request_exit(ExitReason::Error(error.to_string()));
         }
         if let Some(chipset) = self.chipset.lock().as_ref() {
             chipset.sync_pirqs();
@@ -952,5 +956,54 @@ impl VmHandle {
     /// Wire the event sink (used by the launcher).
     pub fn set_event_sink(&self, sink: EventSink) {
         self.0.set_event_sink(sink);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use vm_memory::{Bytes, GuestAddress};
+
+    struct NullIrq;
+    impl vmlab_hv_devices::IrqLine for NullIrq {
+        fn set_level(&self, _: bool) {}
+    }
+
+    #[test]
+    fn quiesce_recovers_a_kick_lost_before_entering_kvm() {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            return;
+        }
+        let kvm = KvmVm::new().unwrap();
+        let layout = crate::layout::MemLayout::new(16).unwrap();
+        let ram = GuestRam::anonymous(layout.clone()).unwrap();
+        crate::memory::register_memslots(&kvm.vm, &ram).unwrap();
+        ram.mem
+            .write_slice(&[0xfa, 0xf4, 0xeb, 0xfd], GuestAddress(0x8000))
+            .unwrap();
+        let signal = Arc::new(SleepSignal::default());
+        let pm = Arc::new(Mutex::new(PmDevice::new(Arc::new(NullIrq), signal.sink())));
+        let shared = VmShared::new(
+            kvm,
+            IoBus::new(),
+            MmioBus::new(),
+            Arc::new(Mutex::new(PciRoot::new(layout.mmio64_base))),
+            pm,
+            signal,
+            layout.mmio64_base,
+        );
+        let mut cpu = shared.kvm.create_vcpu(0).unwrap();
+        crate::loader::init_real_mode(&mut cpu, 0x8000).unwrap();
+        let mut vm = Vm::from_parts(shared.clone(), vec![(0, cpu)], ram).unwrap();
+        vm.start();
+        std::thread::sleep(Duration::from_millis(50));
+        // Model a kick consumed between the run-state check and KVM_RUN:
+        // the vCPU is blocked in HLT, with a paused state and no pending signal.
+        *shared.state.lock() = RunState::Paused;
+        let result = shared.wait_quiesced(Duration::from_millis(250));
+        vm.handle().quit();
+        vm.wait();
+        assert!(result.is_ok(), "{result:?}");
     }
 }
