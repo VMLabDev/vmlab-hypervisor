@@ -56,7 +56,6 @@ pub struct VmShared {
     io_trace: Option<Mutex<std::collections::VecDeque<String>>>,
     pub(crate) display: Mutex<Option<Arc<vmlab_hv_display::DisplayServer>>>,
     pub(crate) display_generation: std::sync::atomic::AtomicU64,
-    pub(crate) display_clients: Arc<std::sync::atomic::AtomicUsize>,
     vga_mapping: Mutex<Option<u64>>,
     last_frame: Mutex<std::time::Instant>,
     memory_gate: Mutex<MemoryGate>,
@@ -115,7 +114,6 @@ impl VmShared {
                 .map(|_| Mutex::new(std::collections::VecDeque::new())),
             display: Mutex::new(None),
             display_generation: std::sync::atomic::AtomicU64::new(0),
-            display_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             vga_mapping: Mutex::new(None),
             last_frame: Mutex::new(std::time::Instant::now()),
             memory_gate: Mutex::new(MemoryGate::default()),
@@ -620,32 +618,31 @@ impl VmShared {
         }
     }
 
-    fn poll_chipset(&self) {
-        let publish = {
-            let last = self.last_frame.lock();
-            last.elapsed() >= std::time::Duration::from_millis(16)
+    fn poll_display(&self) {
+        let Some(mut last) = self.last_frame.try_lock() else {
+            return;
         };
-        if publish
-            && self
-                .display_clients
-                .load(std::sync::atomic::Ordering::Relaxed)
-                != 0
-        {
-            if let Some(display) = self.display.lock().as_ref() {
-                if let Err(e) = display.publish() {
-                    eprintln!("display frame: {e}");
-                }
-                if let Some(vga) = self.vga.lock().as_ref()
-                    && let Err(e) = display.set_cursor(vga.cursor())
-                {
-                    eprintln!("display cursor: {e}");
-                }
-                if let Some(chipset) = self.chipset.lock().as_ref() {
-                    display.set_leds(chipset.ps2.lock().leds() as u32);
-                }
-            }
-            *self.last_frame.lock() = std::time::Instant::now();
+        if last.elapsed() < std::time::Duration::from_millis(16) {
+            return;
         }
+        if let Some(display) = self.display.lock().as_ref() {
+            if let Err(e) = display.publish() {
+                eprintln!("display frame: {e}");
+            }
+            if let Some(vga) = self.vga.lock().as_ref()
+                && let Err(e) = display.set_cursor(vga.cursor())
+            {
+                eprintln!("display cursor: {e}");
+            }
+            if let Some(chipset) = self.chipset.lock().as_ref() {
+                display.set_leds(chipset.ps2.lock().leds() as u32);
+            }
+        }
+        *last = std::time::Instant::now();
+    }
+
+    fn poll_chipset(&self) {
+        self.poll_display();
         if self.status() == RunState::Running
             && let Some(xhci) = self.xhci.lock().as_ref()
         {
@@ -977,6 +974,62 @@ mod tests {
     struct NullIrq;
     impl vmlab_hv_devices::IrqLine for NullIrq {
         fn set_level(&self, _: bool) {}
+    }
+
+    #[test]
+    fn display_publication_without_clients_is_rate_limited() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use vmlab_hv_display::{DisplayServer, Frame, FrameSource, InputSink, Pixels};
+
+        struct Probe(AtomicUsize);
+        impl FrameSource for Probe {
+            fn frame(&self) -> std::io::Result<Frame> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Frame {
+                    generation: 0,
+                    width: 1,
+                    height: 1,
+                    stride: 4,
+                    drm_fourcc: vmlab_hv_display::protocol::XRGB8888,
+                    modifier: 0,
+                    timestamp_ns: 0,
+                    damage: vec![],
+                    pixels: Pixels::Shm(Arc::new(vec![0; 4])),
+                })
+            }
+            fn readback(&self, _: &Frame) -> std::io::Result<Vec<u8>> {
+                Ok(vec![0; 4])
+            }
+        }
+        impl InputSink for Probe {
+            fn input(&self, _: vmlab_hv_display::Message) {}
+        }
+
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("skipping display publication test: /dev/kvm is unavailable");
+            return;
+        }
+        let signal = Arc::new(SleepSignal::default());
+        let shared = VmShared::new(
+            KvmVm::new().unwrap(),
+            IoBus::new(),
+            MmioBus::new(),
+            Arc::new(Mutex::new(PciRoot::new(1 << 32))),
+            Arc::new(Mutex::new(PmDevice::new(Arc::new(NullIrq), signal.sink()))),
+            signal,
+            1 << 32,
+        );
+        let probe = Arc::new(Probe(AtomicUsize::new(0)));
+        *shared.display.lock() = Some(Arc::new(
+            DisplayServer::new(probe.clone(), probe.clone()).unwrap(),
+        ));
+        *shared.last_frame.lock() = std::time::Instant::now() - Duration::from_millis(16);
+        shared.poll_chipset();
+        assert_eq!(probe.0.load(Ordering::SeqCst), 2);
+        // Keep the interval deterministic even if the test thread is descheduled.
+        *shared.last_frame.lock() = std::time::Instant::now() + Duration::from_secs(1);
+        shared.poll_chipset();
+        assert_eq!(probe.0.load(Ordering::SeqCst), 2);
     }
 
     #[test]
