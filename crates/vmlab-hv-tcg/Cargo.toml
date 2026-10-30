@@ -1,0 +1,24 @@
+[package]
+name = "vmlab-hv-tcg"
+description = "Sail-derived emulation IR interpreter and physical memory interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vmlab-hv-tcg-ir = { path = "../vmlab-hv-tcg-ir" }
+vmlab-hv-tcg-riscv64 = { path = "../vmlab-hv-tcg-riscv64" }
+num-bigint = "0.4.8"
+num-traits = "0.2"
+thiserror.workspace = true
+parking_lot.workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+vmlab-hv-sail-ir = { path = "../vmlab-hv-sail-ir" }
+
+[lints]
+workspace = true

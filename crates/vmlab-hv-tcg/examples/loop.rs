@@ -1,0 +1,31 @@
+use vmlab_hv_tcg::{FlatMemory, Memory, Riscv64};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let iterations = std::env::args().nth(1).map_or(Ok(1000u64), |s| s.parse())?;
+    if iterations == 0 {
+        return Err("iterations must be positive".into());
+    }
+    let mut memory = FlatMemory::new(0x8000_0000, vec![0; 4096]);
+    for (i, instruction) in [0x00108093u32, 0xfff10113, 0xfe011ce3].iter().enumerate() {
+        memory.write(0x8000_0000 + i as u64 * 4, &instruction.to_le_bytes())?;
+    }
+    let mut cpu = Riscv64::new(memory)?;
+    cpu.set_pc(0x8000_0000);
+    cpu.set_gpr(2, iterations)?;
+    cpu.interpreter.operation_limit = u64::MAX;
+    let start = std::time::Instant::now();
+    for _ in 0..iterations * 3 {
+        cpu.step()?;
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+    assert_eq!(cpu.gpr(1)?, iterations);
+    assert_eq!(cpu.gpr(2)?, 0);
+    assert_eq!(cpu.pc()?, 0x8000_000c);
+    println!(
+        "instructions={} seconds={elapsed:.6} MIPS={:.6} IR_operations={}",
+        cpu.steps,
+        cpu.steps as f64 / elapsed / 1e6,
+        cpu.interpreter.operations
+    );
+    Ok(())
+}

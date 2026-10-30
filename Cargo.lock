@@ -494,6 +494,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-derive"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -502,6 +512,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "num-integer"
+version = "0.1.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -1057,6 +1076,58 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "vmlab-hv-sail-ir"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "vmlab-hv-tcg"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "num-bigint",
+ "num-traits",
+ "parking_lot",
+ "thiserror",
+ "vmlab-hv-sail-ir",
+ "vmlab-hv-tcg-ir",
+ "vmlab-hv-tcg-riscv64",
+]
+
+[[package]]
+name = "vmlab-hv-tcg-emit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "serde_json",
+ "sha2",
+ "vmlab-hv-sail-ir",
+ "vmlab-hv-tcg-ir",
+]
+
+[[package]]
+name = "vmlab-hv-tcg-ir"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+ "vmlab-hv-sail-ir",
+]
+
+[[package]]
+name = "vmlab-hv-tcg-riscv64"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "serde_json",
+ "vmlab-hv-tcg-ir",
 ]
 
 [[package]]
