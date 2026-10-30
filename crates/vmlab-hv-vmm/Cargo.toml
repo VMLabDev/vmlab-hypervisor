@@ -10,6 +10,7 @@ rust-version.workspace = true
 vmlab-hv-proto.workspace = true
 vmlab-hv-devices.workspace = true
 vmlab-hv-firmware.workspace = true
+vmlab-hv-display = { path = "../vmlab-hv-display" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 vmlab-disk.workspace = true
 vm-memory.workspace = true
