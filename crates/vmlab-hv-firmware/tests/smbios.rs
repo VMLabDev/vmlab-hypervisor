@@ -61,6 +61,22 @@ fn smbios_matches_complete_captured_guest_table() {
 }
 
 #[test]
+fn fw_cfg_smbios_leaves_bios_record_to_firmware() {
+    let files: BTreeMap<_, _> = ancillary_files(&Platform::default(), &FirmwareOptions::default())
+        .unwrap()
+        .into_iter()
+        .collect();
+    let captured_tables = include_bytes!(
+        "../../../docs/hwref/q35-seabios-linux-generic/guest/fwcfg/blobs/etc/smbios/smbios-tables"
+    );
+    let captured_anchor = include_bytes!(
+        "../../../docs/hwref/q35-seabios-linux-generic/guest/fwcfg/blobs/etc/smbios/smbios-anchor"
+    );
+    assert_eq!(files["etc/smbios/smbios-tables"], captured_tables);
+    assert_eq!(files["etc/smbios/smbios-anchor"], captured_anchor);
+}
+
+#[test]
 fn smbios_handles_high_memory_and_custom_identity() {
     let platform = Platform {
         vcpus: 8,

@@ -128,7 +128,7 @@ pub fn ancillary_files(
     if !bootorder.is_empty() {
         bootorder.push(0);
     }
-    let smbios = smbios::generate(platform, &options.smbios)?;
+    let smbios = smbios::generate_fw_cfg(platform, &options.smbios)?;
     Ok(vec![
         ("etc/e820".into(), e820),
         ("bootorder".into(), bootorder),
