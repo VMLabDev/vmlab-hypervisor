@@ -5,7 +5,7 @@
  * 
  * Disassembling to symbolic ASL+ operators
  *
- * Disassembly of ../acpi/DSDT, Fri Oct 30 10:12:18 2026
+ * Disassembly of ../acpi/DSDT, Fri Oct 30 16:39:35 2026
  *
  * Original Table Header:
  *     Signature        "DSDT"

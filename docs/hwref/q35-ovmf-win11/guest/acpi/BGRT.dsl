@@ -3,7 +3,7 @@
  * AML/ASL+ Disassembler version 20230628 (64-bit version)
  * Copyright (c) 2000 - 2023 Intel Corporation
  * 
- * Disassembly of ../acpi/BGRT, Fri Oct 30 10:12:05 2026
+ * Disassembly of ../acpi/BGRT, Fri Oct 30 16:39:23 2026
  *
  * ACPI Data Table [BGRT]
  *
@@ -13,7 +13,7 @@
 [000h 0000 004h]                   Signature : "BGRT"    [Boot Graphics Resource Table]
 [004h 0004 004h]                Table Length : 00000038
 [008h 0008 001h]                    Revision : 01
-[009h 0009 001h]                    Checksum : 50
+[009h 0009 001h]                    Checksum : 51
 [00Ah 0010 006h]                      Oem ID : "INTEL "
 [010h 0016 008h]                Oem Table ID : "EDK2    "
 [018h 0024 004h]                Oem Revision : 00000002
@@ -25,13 +25,13 @@
                                    Displayed : 1
                           Orientation Offset : 0
 [027h 0039 001h]                  Image Type : 00
-[028h 0040 008h]               Image Address : 000000007DD49018
+[028h 0040 008h]               Image Address : 000000007DD39018
 [030h 0048 004h]               Image OffsetX : 0000021F
 [034h 0052 004h]               Image OffsetY : 00000173
 
 Raw Table Data: Length 56 (0x38)
 
-    0000: 42 47 52 54 38 00 00 00 01 50 49 4E 54 45 4C 20  // BGRT8....PINTEL 
+    0000: 42 47 52 54 38 00 00 00 01 51 49 4E 54 45 4C 20  // BGRT8....QINTEL 
     0010: 45 44 4B 32 20 20 20 20 02 00 00 00 20 20 20 20  // EDK2    ....    
-    0020: 13 00 00 01 01 00 01 00 18 90 D4 7D 00 00 00 00  // ...........}....
+    0020: 13 00 00 01 01 00 01 00 18 90 D3 7D 00 00 00 00  // ...........}....
     0030: 1F 02 00 00 73 01 00 00                          // ....s...
