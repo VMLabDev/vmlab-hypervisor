@@ -1197,7 +1197,14 @@ impl Debug for InHeader {
         write!(
             f,
             "InHeader {{ len: {}, opcode: {}, unique: {}, nodeid: 0x{:x}, uid: {}, gid: {}, pid: {}, padding: {} }}",
-            self.len, self.opcode, self.unique, self.nodeid, self.uid, self.gid, self.pid, self.padding
+            self.len,
+            self.opcode,
+            self.unique,
+            self.nodeid,
+            self.uid,
+            self.gid,
+            self.pid,
+            self.padding
         )
     }
 }

@@ -14,9 +14,11 @@ use super::{
     Context, DirEntry, Entry, FileLock, GetxattrReply, IoctlData, ListxattrReply, ZeroCopyReader,
     ZeroCopyWriter,
 };
-use crate::virtio::fs::fuse::abi::fuse_abi::{stat64, statvfs64, CreateIn, FsOptions, OpenOptions, SetattrValid};
 #[cfg(feature = "virtiofs")]
 pub use crate::abi::virtio_fs::RemovemappingOne;
+use crate::virtio::fs::fuse::abi::fuse_abi::{
+    CreateIn, FsOptions, OpenOptions, SetattrValid, stat64, statvfs64,
+};
 #[cfg(feature = "virtiofs")]
 use crate::virtio::fs::fuse::transport::FsCacheReqHandler;
 

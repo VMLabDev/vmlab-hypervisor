@@ -17,15 +17,17 @@
 use std::any::Any;
 use std::collections::VecDeque;
 use std::io::{self, IoSlice, Read, Write};
-use std::mem::{size_of, MaybeUninit};
+use std::mem::{MaybeUninit, size_of};
 use std::ops::Deref;
 use std::ptr::copy_nonoverlapping;
 use std::{cmp, fmt};
 
-use libc::{sysconf, _SC_PAGESIZE};
+use libc::{_SC_PAGESIZE, sysconf};
 use virtio_queue::DescriptorChain;
 use vm_memory::bitmap::{BitmapSlice, MS};
-use vm_memory::{Address, ByteValued, GuestMemoryBackend, GuestMemoryRegion, MemoryRegionAddress, VolatileSlice};
+use vm_memory::{
+    Address, ByteValued, GuestMemoryBackend, GuestMemoryRegion, MemoryRegionAddress, VolatileSlice,
+};
 
 use crate::virtio::fs::fuse::abi::virtio_fs::RemovemappingOne;
 use crate::virtio::fs::fuse::file_buf::FileVolatileSlice;
@@ -94,7 +96,13 @@ impl std::error::Error for Error {}
 /// which the guest never sends without a cache capability.
 pub trait FsCacheReqHandler: Send + Sync + 'static {
     /// Setup a dedicated mapping so that guest can access file data in DAX style.
-    fn map(&mut self, fov: crate::virtio::fs::fuse::file_buf::FileVolatileSlice, offset: u64, len: u64, req_id: u64) -> std::io::Result<()>;
+    fn map(
+        &mut self,
+        fov: crate::virtio::fs::fuse::file_buf::FileVolatileSlice,
+        offset: u64,
+        len: u64,
+        req_id: u64,
+    ) -> std::io::Result<()>;
     /// Remove a mapping.
     fn unmap(&mut self, requests: Vec<RemovemappingOne>) -> std::io::Result<()>;
 }
@@ -359,7 +367,7 @@ impl<S: BitmapSlice> Reader<'_, S> {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
                         "failed to fill whole buffer",
-                    ))
+                    ));
                 }
                 Ok(n) => count -= n,
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -562,7 +570,7 @@ impl<'a, S: BitmapSlice> Writer<'a, S> {
                     return Err(io::Error::new(
                         io::ErrorKind::WriteZero,
                         "failed to write whole buffer",
-                    ))
+                    ));
                 }
                 Ok(n) => count -= n,
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}

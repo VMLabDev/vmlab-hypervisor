@@ -23,8 +23,8 @@ use std::sync::atomic::Ordering;
 use std::{error, fmt, slice};
 
 use vm_memory::{
-    bitmap::BitmapSlice, volatile_memory::Error as VError, AtomicAccess, Bytes, ReadVolatile,
-    VolatileSlice, WriteVolatile,
+    AtomicAccess, Bytes, ReadVolatile, VolatileSlice, WriteVolatile, bitmap::BitmapSlice,
+    volatile_memory::Error as VError,
 };
 
 /// Error codes related to buffer management.

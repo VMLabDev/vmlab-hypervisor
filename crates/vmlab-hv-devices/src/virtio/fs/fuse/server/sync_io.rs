@@ -11,8 +11,8 @@ use std::time::Duration;
 use vm_memory::ByteValued;
 
 use super::{
-    MetricsHook, Server, ServerUtil, ServerVersion, SrvContext, ZcReader, ZcWriter,
     BUFFER_HEADER_SIZE, DIRENT_PADDING, MAX_BUFFER_SIZE, MAX_REQ_PAGES, MIN_READ_BUFFER,
+    MetricsHook, Server, ServerUtil, ServerVersion, SrvContext, ZcReader, ZcWriter,
 };
 use crate::virtio::fs::fuse::abi::fuse_abi::*;
 #[cfg(feature = "virtiofs")]
@@ -22,8 +22,8 @@ use crate::virtio::fs::fuse::filesystem::{
 };
 #[cfg(feature = "fusedev")]
 use crate::virtio::fs::fuse::transport::FuseDevWriter;
-use crate::virtio::fs::fuse::transport::{pagesize, FsCacheReqHandler, Reader, Writer};
-use crate::virtio::fs::fuse::{bytes_to_cstr, encode_io_error_kind, BitmapSlice, Error, Result};
+use crate::virtio::fs::fuse::transport::{FsCacheReqHandler, Reader, Writer, pagesize};
+use crate::virtio::fs::fuse::{BitmapSlice, Error, Result, bytes_to_cstr, encode_io_error_kind};
 
 impl<F: FileSystem + Sync> Server<F> {
     #[cfg(feature = "fusedev")]
@@ -1431,4 +1431,3 @@ fn add_dirent<S: BitmapSlice>(
         Ok(total_len)
     }
 }
-

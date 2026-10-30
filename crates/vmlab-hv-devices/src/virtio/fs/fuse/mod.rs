@@ -125,4 +125,3 @@ pub fn encode_io_error_kind(kind: io::ErrorKind) -> libc::c_int {
         _ => libc::EIO,
     }
 }
-

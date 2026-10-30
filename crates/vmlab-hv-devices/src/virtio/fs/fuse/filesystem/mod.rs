@@ -17,14 +17,13 @@ use crate::virtio::fs::fuse::file_traits::FileReadWriteVolatile;
 
 pub use fuse::FsOptions;
 pub use fuse::OpenOptions;
-pub use fuse::SetattrValid;
 pub use fuse::ROOT_ID;
+pub use fuse::SetattrValid;
 
 use crate::virtio::fs::fuse::abi::fuse_abi::{ino64_t, stat64};
 
 mod sync_io;
 pub use sync_io::FileSystem;
-
 
 /// Information about a path in the filesystem.
 #[derive(Copy, Clone, Debug)]
@@ -233,7 +232,7 @@ pub trait ZeroCopyReader: io::Read {
                     return Err(io::Error::new(
                         io::ErrorKind::WriteZero,
                         "failed to fill whole buffer",
-                    ))
+                    ));
                 }
                 Ok(n) => {
                     count -= n;
@@ -325,7 +324,7 @@ pub trait ZeroCopyWriter: io::Write {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
                         "failed to write whole buffer",
-                    ))
+                    ));
                 }
                 Ok(n) => {
                     // No need for checked math here because we verified that `off + count` will not

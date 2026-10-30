@@ -40,17 +40,17 @@ use vm_memory::{Address, GuestMemoryBackend, GuestMemoryRegion, MemoryRegionAddr
 use vmm_sys_util::eventfd::EventFd;
 
 /// Virtio device id of virtio-fs (VIRTIO 1.2 §5.11).
-pub const FS_DEVICE_TYPE: u32 = 26;
+pub(crate) const FS_DEVICE_TYPE: u32 = 26;
 
 /// `virtio_fs_config::tag` length; tags are zero-padded to it.
-const TAG_LEN: usize = 36;
+pub(crate) const TAG_LEN: usize = 36;
 /// Device-specific configuration: the tag, then `num_request_queues`.
-const CONFIG_LEN: usize = TAG_LEN + 4;
+pub(crate) const CONFIG_LEN: usize = TAG_LEN + 4;
 /// One hiprio queue plus one request queue, virtiofsd's default shape.
-const NUM_REQUEST_QUEUES: u32 = 1;
-const NUM_QUEUES: usize = 1 + NUM_REQUEST_QUEUES as usize;
+pub(crate) const NUM_REQUEST_QUEUES: u32 = 1;
+pub(crate) const NUM_QUEUES: usize = 1 + NUM_REQUEST_QUEUES as usize;
 /// virtiofsd's queue capacity.
-const QUEUE_MAX_SIZE: u16 = 1024;
+pub(crate) const QUEUE_MAX_SIZE: u16 = 1024;
 
 /// Snapshot format magic: "VUFS".
 const SNAPSHOT_MAGIC: u32 = 0x5346_5556;
@@ -1340,9 +1340,7 @@ mod tests {
         let backend = FakeBackend::new("overlay").serve();
         // SAFETY: memfd_create(2) with a NUL-terminated name; the return is
         // either a valid fd or -1 with errno set.
-        let fd = unsafe {
-            libc::syscall(libc::SYS_memfd_create, c"fs-overlay-ram".as_ptr(), 1)
-        };
+        let fd = unsafe { libc::syscall(libc::SYS_memfd_create, c"fs-overlay-ram".as_ptr(), 1) };
         assert!(fd >= 0, "memfd_create: {}", std::io::Error::last_os_error());
         // SAFETY: the fd is fresh and owned from here on.
         let memfd = unsafe { File::from_raw_fd(fd as RawFd) };

@@ -25,10 +25,10 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use crate::virtio::fs::fuse::abi::fuse_abi::*;
-use crate::virtio::fs::fuse::filesystem::{Context, FileSystem, ZeroCopyReader, ZeroCopyWriter};
 use crate::virtio::fs::fuse::file_traits::FileReadWriteVolatile;
+use crate::virtio::fs::fuse::filesystem::{Context, FileSystem, ZeroCopyReader, ZeroCopyWriter};
 use crate::virtio::fs::fuse::transport::{Reader, Writer};
-use crate::virtio::fs::fuse::{bytes_to_cstr, BitmapSlice, Error, Result};
+use crate::virtio::fs::fuse::{BitmapSlice, Error, Result, bytes_to_cstr};
 
 #[cfg(feature = "async-io")]
 mod async_io;
