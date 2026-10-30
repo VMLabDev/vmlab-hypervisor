@@ -237,8 +237,23 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
     }
     let native_listener = UnixListener::bind(native)
         .map_err(|e| VmmError::Control(format!("binding {}: {e}", native.display())))?;
-    let rfb_listener = UnixListener::bind(rfb)
-        .map_err(|e| VmmError::Control(format!("binding {}: {e}", rfb.display())))?;
+    let rfb_listener = match UnixListener::bind(rfb) {
+        Ok(listener) => listener,
+        Err(error) => {
+            drop(native_listener);
+            std::fs::remove_file(native).map_err(|cleanup| {
+                VmmError::Control(format!(
+                    "binding {}: {error}; removing newly bound {}: {cleanup}",
+                    rfb.display(),
+                    native.display()
+                ))
+            })?;
+            return Err(VmmError::Control(format!(
+                "binding {}: {error}",
+                rfb.display()
+            )));
+        }
+    };
     let server = Arc::new(
         DisplayServer::new(
             Arc::new(Source {

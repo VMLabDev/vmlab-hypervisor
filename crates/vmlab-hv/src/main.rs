@@ -113,7 +113,6 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
     let handle = vm.handle();
 
     // Bind every served socket before the vCPUs run.
-    control::serve(&args.control, &handle).map_err(|e| format!("control socket: {e}"))?;
     if let Some(display) = &desc.display {
         let directory = args.control.parent().unwrap_or(std::path::Path::new("."));
         let native = display
@@ -128,6 +127,7 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
             .serve_display(&native, &rfb)
             .map_err(|e| e.to_string())?;
     }
+    control::serve(&args.control, &handle).map_err(|e| format!("control socket: {e}"))?;
 
     spawn_signal_waiter(handle.clone());
 
