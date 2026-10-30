@@ -961,7 +961,22 @@ impl Snapshot for Console {
             port.tx_stage = restored.tx_stage;
         }
         sh.pending = pending;
-        self.pending_queues = Some(queues);
+        if sh.mem.is_some() {
+            sh.queues = queues
+                .into_iter()
+                .enumerate()
+                .map(|(i, state)| {
+                    state
+                        .map(Queue::try_from)
+                        .transpose()
+                        .map_err(|e| DeviceError::State(format!("queue {i}: {e}")))
+                })
+                .collect::<Result<_, _>>()?;
+        } else {
+            self.pending_queues = Some(queues);
+        }
+        drop(sh);
+        self.wake_worker();
         Ok(())
     }
 }
@@ -1500,6 +1515,15 @@ mod tests {
 
     #[test]
     fn snapshot_round_trip_preserves_queues_and_staged_bytes() {
+        snapshot_round_trip(false);
+    }
+
+    #[test]
+    fn snapshot_round_trip_into_active_device() {
+        snapshot_round_trip(true);
+    }
+
+    fn snapshot_round_trip(activate_first: bool) {
         let mut f = Fixture::new();
         let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
         client
@@ -1563,9 +1587,14 @@ mod tests {
             ],
         )
         .unwrap();
-        dev2.restore_state(&state).unwrap();
         let queues: Vec<Queue> = vqs.iter().map(|v| v.queue()).collect();
-        dev2.activate(mem.clone(), irq, queues).unwrap();
+        if activate_first {
+            dev2.activate(mem.clone(), irq, queues).unwrap();
+            dev2.restore_state(&state).unwrap();
+        } else {
+            dev2.restore_state(&state).unwrap();
+            dev2.activate(mem.clone(), irq, queues).unwrap();
+        }
 
         // The driver reposts a receiveq buffer and the staged remainder
         // lands, with the used ring continuing where the snapshot left it.

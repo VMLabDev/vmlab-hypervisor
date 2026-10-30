@@ -264,6 +264,24 @@ fn save_load_rolls_back_counter_and_scratch() {
 }
 
 #[test]
+fn load_clears_pages_that_were_zero_at_save() {
+    let Some(m) = machine(&counter_payload(), 16) else {
+        return;
+    };
+    m.handle.pause().expect("pause");
+    let ram = m.handle.shared().ram().unwrap();
+    let address = GuestAddress(0x20000);
+    let mut bytes = [0u8; 4096];
+    ram.mem.read_slice(&mut bytes, address).unwrap();
+    assert_eq!(bytes, [0; 4096]);
+    snapshot::save(&m.handle, "zeros").expect("save");
+    ram.mem.write_slice(&[0xa5; 4096], address).unwrap();
+    snapshot::load(&m.handle, "zeros").expect("load");
+    ram.mem.read_slice(&mut bytes, address).unwrap();
+    assert_eq!(bytes, [0; 4096]);
+}
+
+#[test]
 fn snapshot_is_visible_to_qemu_img_with_vm_state() {
     let Some(m) = machine(&counter_payload(), 16) else {
         return;
