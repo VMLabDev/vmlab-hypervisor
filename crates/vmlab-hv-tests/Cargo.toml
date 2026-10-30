@@ -16,12 +16,11 @@ vmlab-disk = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# vmlab's wire contracts (guest/cinit-proto, guest/agent-proto): path
-# dependencies into the vmlab checkout until the repos are published, then
-# git dependencies. They are wire types only — nothing depends on vmlab
+# vmlab's wire contracts (guest/cinit-proto, guest/agent-proto), pinned to a
+# vmlab commit. They are wire types only — nothing depends on vmlab
 # itself (D18).
-vmlab-cinit-proto = { path = "/home/wil/dev/vmlab/guest/cinit-proto" }
-vmlab-agent-proto = { path = "/home/wil/dev/vmlab/guest/agent-proto" }
+vmlab-cinit-proto = { git = "https://github.com/VMLabDev/vmlab", rev = "e3118e879f7c7c797596a8dff375cce03098e817" }
+vmlab-agent-proto = { git = "https://github.com/VMLabDev/vmlab", rev = "e3118e879f7c7c797596a8dff375cce03098e817" }
 
 parking_lot = { workspace = true }
 [lints]
