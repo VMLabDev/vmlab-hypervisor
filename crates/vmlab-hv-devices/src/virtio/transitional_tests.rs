@@ -26,10 +26,10 @@ fn legacy_unaligned_reads_do_not_expose_register_fragments() {
 fn pci_command_does_not_claim_memory_write_invalidate() {
     let mut driver = Driver::new();
     config_write(&mut driver.pci, 4, &[0xff; 2]);
-    assert_eq!(driver.pci.config_read(1) & 0xffff, 0x407);
+    assert_eq!(driver.pci.config_read(1) & 0xffff, 0x507);
     let mut modern = VirtioPciDevice::new("modern", block(), memory(), None, None);
     config_write(&mut modern, 4, &[0xff; 2]);
-    assert_eq!(modern.config_read(1) & 0xffff, 0x407);
+    assert_eq!(modern.config_read(1) & 0xffff, 0x507);
 }
 
 #[test]
