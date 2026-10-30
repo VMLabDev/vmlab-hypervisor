@@ -7,12 +7,13 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+libc = "0.2"
 parking_lot = "0.12"
 thiserror.workspace = true
-vmlab-disk = { path = "../../crates/vmlab-disk" }
 virtio-queue = "0.18"
 vm-memory.workspace = true
 vm-superio = "0.8"
+vmlab-disk.workspace = true
 
 [lints]
 workspace = true
