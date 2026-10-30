@@ -1,6 +1,6 @@
 //! virtio-console (VIRTIO 1.2 §5.3) with `VIRTIO_CONSOLE_F_MULTIPORT`.
 //!
-//! The device carries one built-in console port (id 0, no host side) plus one
+//! The device reserves console port id 0 and carries one
 //! named port per [`PortConfig`]. Every named port is a unix socket the device
 //! listens on from construction, matching QEMU's `server=on,wait=off` chardev
 //! as vmlab relies on it: the listener exists before the machine is ready, at
@@ -53,8 +53,6 @@ const EV_DEVICE_READY: u16 = 0;
 const EV_PORT_ADD: u16 = 1;
 /// `VIRTIO_CONSOLE_PORT_READY`.
 const EV_PORT_READY: u16 = 3;
-/// `VIRTIO_CONSOLE_CONSOLE_PORT`.
-const EV_CONSOLE_PORT: u16 = 4;
 /// `VIRTIO_CONSOLE_PORT_OPEN`.
 const EV_PORT_OPEN: u16 = 6;
 /// `VIRTIO_CONSOLE_PORT_NAME`.
@@ -648,6 +646,12 @@ fn dispatch_ctrl(sh: &mut Shared, id: u32, event: u16, value: u16, max_port: u32
             }
         }
         EV_PORT_READY if value == 1 && id >= 1 && id <= max_port => {
+            sh.pending.push_back(CtrlMsg {
+                id,
+                event: EV_PORT_NAME,
+                value: 0,
+                name: Some(sh.names[id as usize - 1].clone()),
+            });
             // Mirror the current host connection state to a freshly added
             // port, as QEMU does when the driver acks a port.
             if sh.ports[id as usize - 1].host_open {
@@ -666,39 +670,16 @@ fn dispatch_ctrl(sh: &mut Shared, id: u32, event: u16, value: u16, max_port: u32
     }
 }
 
-/// Queue the full port announcement: for each port `ADD`, then its name (or
-/// the console-port nomination for port 0), then its open state.
+/// Announce only configured ports. Send their names after PORT_READY, when
+/// the guest has created the port and can associate a name with it.
 fn announce_ports(sh: &mut Shared, max_port: u32) {
-    for id in 0..=max_port {
+    for id in 1..=max_port {
         sh.pending.push_back(CtrlMsg {
             id,
             event: EV_PORT_ADD,
-            value: 0,
+            value: 1,
             name: None,
         });
-        if id == 0 {
-            sh.pending.push_back(CtrlMsg {
-                id: 0,
-                event: EV_CONSOLE_PORT,
-                value: 1,
-                name: None,
-            });
-        } else {
-            sh.pending.push_back(CtrlMsg {
-                id,
-                event: EV_PORT_NAME,
-                value: 0,
-                name: Some(sh.names[id as usize - 1].clone()),
-            });
-            if sh.ports[id as usize - 1].host_open {
-                sh.pending.push_back(CtrlMsg {
-                    id,
-                    event: EV_PORT_OPEN,
-                    value: 1,
-                    name: None,
-                });
-            }
-        }
     }
 }
 
@@ -1356,6 +1337,15 @@ mod tests {
                 self.post_ctrl_rx(i);
             }
             self.send_ctrl(BAD_ID_FOR_TEST, EV_DEVICE_READY, 1);
+            wait_for("port announcements", || {
+                self.vqs[3].used_idx(&self.mem) == 1
+            });
+            for id in 1..=2 {
+                self.send_ctrl(id, EV_PORT_READY, 1);
+                wait_for("port ready acknowledgement", || {
+                    self.vqs[3].used_idx(&self.mem) == id as u16 + 1
+                });
+            }
             wait_for("control messages", || {
                 usize::from(self.vqs[2].used_idx(&self.mem)) >= want
             });
@@ -1378,28 +1368,47 @@ mod tests {
     }
 
     #[test]
+    fn port_names_wait_for_the_driver_to_create_the_port() {
+        let mut f = Fixture::new();
+        for i in 0..8 {
+            f.post_ctrl_rx(i);
+        }
+        f.send_ctrl(BAD_ID_FOR_TEST, EV_DEVICE_READY, 1);
+        wait_for("configured ports only", || f.vqs[3].used_idx(&f.mem) == 1);
+        assert_eq!(
+            f.ctrl_delivered(),
+            vec![
+                (1, EV_PORT_ADD, 1, Vec::new()),
+                (2, EV_PORT_ADD, 1, Vec::new()),
+            ]
+        );
+        f.send_ctrl(2, EV_PORT_READY, 1);
+        wait_for("named agent port", || f.vqs[3].used_idx(&f.mem) == 2);
+        assert_eq!(
+            f.ctrl_delivered().last().unwrap(),
+            &(2, EV_PORT_NAME, 0, b"vmlab.agent.0".to_vec())
+        );
+    }
+
+    #[test]
     fn device_ready_announces_every_port_with_names() {
         let mut f = Fixture::new();
-        f.device_ready(8, 6);
+        f.device_ready(8, 4);
         let msgs = f.ctrl_delivered();
-        assert_eq!(msgs.len(), 6);
-        // Port 0: the built-in console port.
-        assert_eq!(msgs[0], (0, EV_PORT_ADD, 0, Vec::new()));
-        assert_eq!(msgs[1], (0, EV_CONSOLE_PORT, 1, Vec::new()));
-        // The named ports, ctl first (vmlab's order).
-        assert_eq!(msgs[2], (1, EV_PORT_ADD, 0, Vec::new()));
-        assert_eq!(msgs[3], (1, EV_PORT_NAME, 0, b"vmlab.ctl.0".to_vec()));
-        assert_eq!(msgs[4], (2, EV_PORT_ADD, 0, Vec::new()));
-        assert_eq!(msgs[5], (2, EV_PORT_NAME, 0, b"vmlab.agent.0".to_vec()));
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0], (1, EV_PORT_ADD, 1, Vec::new()));
+        assert_eq!(msgs[1], (2, EV_PORT_ADD, 1, Vec::new()));
+        assert_eq!(msgs[2], (1, EV_PORT_NAME, 0, b"vmlab.ctl.0".to_vec()));
+        assert_eq!(msgs[3], (2, EV_PORT_NAME, 0, b"vmlab.agent.0".to_vec()));
         // The used length of a name message covers header plus name.
-        let (_, len) = f.vqs[2].used_entry(&f.mem, 3);
+        let (_, len) = f.vqs[2].used_entry(&f.mem, 2);
         assert_eq!(len as usize, 8 + "vmlab.ctl.0".len());
     }
 
     #[test]
     fn port_open_follows_the_host_connection() {
         let mut f = Fixture::new();
-        f.device_ready(8, 6);
+        f.device_ready(8, 4);
         f.post_ctrl_rx(8);
         let client = UnixStream::connect(&f.agent_sock).unwrap();
         wait_for("PORT_OPEN(2,1)", || {
@@ -1425,7 +1434,7 @@ mod tests {
             .unwrap();
         // Bring-up with the client connected: the announcement carries the
         // port-open state, and proves the worker accepted the client.
-        f.device_ready(8, 7);
+        f.device_ready(8, 5);
         assert!(
             f.ctrl_delivered()
                 .contains(&(1, EV_PORT_OPEN, 1, Vec::new()))
@@ -1451,7 +1460,7 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        f.device_ready(8, 7);
+        f.device_ready(8, 5);
 
         let addr = f.data(2);
         f.vqs[4].add_chain(&f.mem, &[(addr, 64, true)]);
@@ -1497,7 +1506,7 @@ mod tests {
         client
             .set_write_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        f.device_ready(8, 7);
+        f.device_ready(8, 5);
 
         // Bytes with no receiveq buffer wait under backpressure, they are
         // not dropped.
@@ -1532,7 +1541,7 @@ mod tests {
         client
             .set_write_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        f.device_ready(8, 7);
+        f.device_ready(8, 5);
 
         // Both directions move data, and one host write is left staged.
         let tx_addr = f.data(1);
@@ -1613,7 +1622,7 @@ mod tests {
     #[test]
     fn reset_stops_using_the_queues() {
         let mut f = Fixture::new();
-        f.device_ready(8, 6);
+        f.device_ready(8, 4);
         f.dev.reset();
 
         let addr = f.data(1);
