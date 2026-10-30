@@ -981,6 +981,7 @@ dependencies = [
  "flate2",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
@@ -992,6 +993,7 @@ dependencies = [
  "libc",
  "parking_lot",
  "serde_json",
+ "tempfile",
  "vmlab-disk",
  "vmlab-hv-devices",
  "vmlab-hv-proto",
@@ -1006,6 +1008,7 @@ dependencies = [
  "libpulse-binding",
  "parking_lot",
  "pipewire",
+ "tempfile",
  "thiserror",
  "vhost",
  "virtio-queue",
@@ -1020,6 +1023,7 @@ name = "vmlab-hv-display"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "tempfile",
 ]
 
 [[package]]
@@ -1038,6 +1042,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
@@ -1048,6 +1053,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "tempfile",
  "vmlab-agent-proto",
  "vmlab-cinit-proto",
  "vmlab-disk",

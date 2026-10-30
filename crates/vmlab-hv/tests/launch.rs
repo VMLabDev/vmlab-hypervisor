@@ -19,20 +19,19 @@ fn kernel_available() -> bool {
 
 struct Dir {
     path: PathBuf,
+    _dir: tempfile::TempDir,
 }
 
 impl Dir {
     fn new(tag: &str) -> Dir {
-        let path = std::env::temp_dir().join(format!(
-            "vmlab-hv-launch-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Dir { path }
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("hv-launch-{tag}-"))
+            .tempdir()
+            .unwrap();
+        Dir {
+            path: dir.path().to_path_buf(),
+            _dir: dir,
+        }
     }
 
     fn machine(&self) -> PathBuf {
@@ -64,12 +63,6 @@ impl Dir {
 
     fn control(&self) -> PathBuf {
         self.path.join("control.sock")
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 

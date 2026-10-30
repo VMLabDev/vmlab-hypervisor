@@ -23,5 +23,6 @@ vmlab-cinit-proto = { git = "https://github.com/VMLabDev/vmlab", rev = "e3118e87
 vmlab-agent-proto = { git = "https://github.com/VMLabDev/vmlab", rev = "e3118e879f7c7c797596a8dff375cce03098e817" }
 
 parking_lot = { workspace = true }
+tempfile = "3"
 [lints]
 workspace = true

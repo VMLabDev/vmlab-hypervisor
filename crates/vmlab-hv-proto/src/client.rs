@@ -208,18 +208,18 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
-    fn socket_path(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "vmlab-hv-proto-client-{name}-{}.sock",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        path
+    fn socket_path(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("hv-client-{name}-"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("control.sock");
+        (dir, path)
     }
 
     #[test]
     fn handshake_reports_the_server_hello() {
-        let path = socket_path("hello");
+        let (_dir, path) = socket_path("hello");
         let server = Server::new("0.42.0", vec![Capability::Snapshots], |_| Outcome::Ok {
             status: None,
         });
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn server_that_closes_after_our_hello_is_reported_closed() {
-        let path = socket_path("closed");
+        let (_dir, path) = socket_path("closed");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn call_returns_the_reply_and_buffers_events() {
-        let path = socket_path("call");
+        let (_dir, path) = socket_path("call");
         let (saw_request, request_seen) = mpsc::channel::<()>();
         let (event_sent, send_event) = mpsc::channel::<()>();
         let server = Server::new("test-hv", vec![], move |command| {
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn wait_event_serves_an_event_then_reports_the_close() {
-        let path = socket_path("wait");
+        let (_dir, path) = socket_path("wait");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn reply_with_the_wrong_id_is_reported() {
-        let path = socket_path("mismatch");
+        let (_dir, path) = socket_path("mismatch");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();

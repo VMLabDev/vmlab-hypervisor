@@ -120,10 +120,12 @@ impl DiskImage for RawImage {
 mod tests {
     use super::*;
 
-    fn tmp_image(tag: &str, size: u64) -> (std::path::PathBuf, RawImage) {
-        let dir = std::env::temp_dir().join(format!("vmlab-disk-raw-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("disk.raw");
+    fn tmp_image(tag: &str, size: u64) -> (tempfile::TempDir, RawImage) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("disk-raw-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("disk.raw");
         let f = File::create(&path).unwrap();
         f.set_len(size).unwrap();
         f.sync_all().unwrap();

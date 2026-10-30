@@ -302,11 +302,11 @@ mod tests {
         GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 128 * MIB as usize)]).unwrap()
     }
 
-    fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("vmlab-hv-loader-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("hv-loader-{tag}-"))
+            .tempdir()
+            .unwrap()
     }
 
     fn write_kernel(dir: &std::path::Path, image: &[u8]) -> std::path::PathBuf {
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn loads_kernel_cmdline_and_zero_page() {
         let dir = temp_dir("load");
-        let kernel = write_kernel(&dir, &tiny_bzimage());
+        let kernel = write_kernel(dir.path(), &tiny_bzimage());
         let mem = self::mem();
         let layout = MemLayout::new(128).unwrap();
         let boot = load(
@@ -372,8 +372,8 @@ mod tests {
     #[test]
     fn initrd_lands_below_low_ram_top() {
         let dir = temp_dir("initrd");
-        let kernel = write_kernel(&dir, &tiny_bzimage());
-        let initrd = dir.join("initrd");
+        let kernel = write_kernel(dir.path(), &tiny_bzimage());
+        let initrd = dir.path().join("initrd");
         std::fs::write(&initrd, vec![7u8; 0x2100]).unwrap();
         let mem = self::mem();
         let layout = MemLayout::new(128).unwrap();
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn oversized_cmdline_is_rejected() {
         let dir = temp_dir("cmdline");
-        let kernel = write_kernel(&dir, &tiny_bzimage());
+        let kernel = write_kernel(dir.path(), &tiny_bzimage());
         let mem = self::mem();
         let err = load(
             &mem,

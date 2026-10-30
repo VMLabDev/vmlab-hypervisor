@@ -59,27 +59,26 @@ fn or_skip() -> Option<()> {
 /// A scratch directory removed on drop.
 struct Dir {
     path: PathBuf,
+    dir: Option<tempfile::TempDir>,
 }
 
 impl Dir {
     fn new(tag: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "vmlab-hv-vhost-fs-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        ));
-        fs::create_dir_all(&path).unwrap();
-        Self { path }
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("hv-vhost-{tag}-"))
+            .tempdir()
+            .unwrap();
+        Self {
+            path: dir.path().to_path_buf(),
+            dir: Some(dir),
+        }
     }
 }
 
 impl Drop for Dir {
     fn drop(&mut self) {
-        if std::env::var_os("VHOST_FS_TEST_KEEP").is_none() {
-            let _ = fs::remove_dir_all(&self.path);
+        if std::env::var_os("VHOST_FS_TEST_KEEP").is_some() {
+            let _ = self.dir.take().unwrap().keep();
         }
     }
 }
