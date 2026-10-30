@@ -30,9 +30,35 @@ pub struct MachineDescription {
     /// vhost-user-fs shares served by an external virtiofsd.
     #[serde(default)]
     pub shares: Vec<FsShare>,
+    /// Guest audio device; absent means the machine has no audio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<Audio>,
     /// RTC start, RFC 3339. `None` means host time.
     #[serde(default)]
     pub rtc_base: Option<String>,
+}
+
+/// The guest audio device and the host streams it plays into.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Audio {
+    /// Guest device model presenting the audio hardware.
+    pub device: AudioDevice,
+    /// Whether the host microphone is attached to the guest. Default off.
+    #[serde(default)]
+    pub microphone: bool,
+    /// Host-side node name (vmlab sets `vmlab.<lab>.<machine>`), used by
+    /// PipeWire and PulseAudio to identify the machine's streams.
+    pub node_name: String,
+    /// Human-readable node description shown by volume mixers.
+    pub node_description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioDevice {
+    Hda,
+    VirtioSnd,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

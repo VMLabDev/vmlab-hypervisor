@@ -298,6 +298,7 @@ mod tests {
             serial_log: "/tmp/serial.log".into(),
             ports: vec![],
             shares: vec![],
+            audio: None,
             rtc_base: None,
         }
     }

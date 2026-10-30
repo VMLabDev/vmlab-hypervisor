@@ -366,6 +366,7 @@ fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
             tag: TAG.into(),
             socket: socket.to_path_buf(),
         }],
+        audio: None,
         rtc_base: None,
     }
 }
