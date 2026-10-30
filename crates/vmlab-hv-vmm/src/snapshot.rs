@@ -485,6 +485,20 @@ fn restore(
         .ram()
         .ok_or_else(|| SnapshotError::Internal("machine has no RAM".into()))?;
 
+    // Zero records are sparse in the stream. An in-place load must clear
+    // pages that the guest has dirtied since capture before applying data.
+    let zeros = [0u8; 64 * 1024];
+    for &(base, len) in ram.layout().regions.iter() {
+        let mut offset = 0;
+        while offset < len {
+            let count = (len - offset).min(zeros.len() as u64) as usize;
+            ram.mem
+                .write_slice(&zeros[..count], GuestAddress(base + offset))
+                .map_err(|e| SnapshotError::Internal(format!("clearing restored RAM: {e}")))?;
+            offset += count as u64;
+        }
+    }
+
     let regions = format::decode_ram_regions(&mut reader, |base, run| {
         ram.mem
             .write_slice(run, GuestAddress(base))
