@@ -12,7 +12,10 @@ serde.workspace = true
 serde_json.workspace = true
 pipewire = { version = "=0.10.1", optional = true, features = ["v0_3_50"] }
 libpulse-binding = { version = "2.30.1", optional = true }
+arc-swap = "1"
+bitflags = "2"
 libc = "0.2"
+log = "0.4"
 parking_lot = "0.12"
 vhost = { version = "0.18.0", features = ["vhost-user-frontend"] }
 virtio-queue = "0.18"
