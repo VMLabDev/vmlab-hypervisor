@@ -15,6 +15,20 @@ fn read(flash: &mut Pflash, offset: u64, n: usize) -> Vec<u8> {
 }
 
 #[test]
+fn ovmf_detection_reads_zero_cleared_status_then_program_completion() {
+    let (_dir, mut f) = flash(false);
+    f.write(0x10, &[0x50]);
+    assert_eq!(read(&mut f, 0x10, 1), [0xff]);
+    f.write(0x10, &[0x70]);
+    assert_eq!(read(&mut f, 0x10, 1), [0]);
+    f.write(0x10, &[0x10]);
+    f.write(0x10, &[0x42]);
+    assert_eq!(read(&mut f, 0x10, 1), [READY]);
+    f.write(0x10, &[0xff]);
+    assert_eq!(read(&mut f, 0x10, 1), [0x42]);
+}
+
+#[test]
 fn ovmf_program_erase_and_reopen() {
     let (dir, mut f) = flash(false);
     for (command, address, data) in [(0x10, 123, vec![0x42]), (0x40, 124, vec![0x12, 0x34])] {

@@ -88,6 +88,7 @@ impl Pflash {
         match self.mode {
             Mode::Program => {
                 self.mode = Mode::Status;
+                self.status |= READY;
                 if end > VARS_SIZE {
                     self.status |= PROGRAM_ERROR | PROTECTED;
                 } else if self.bytes[start..end]
@@ -102,6 +103,7 @@ impl Pflash {
             }
             Mode::Erase => {
                 self.mode = Mode::Status;
+                self.status |= READY;
                 if data[0] != 0xd0 || start / BLOCK_SIZE != self.erase_block / BLOCK_SIZE {
                     self.status |= ERASE_ERROR | PROGRAM_ERROR;
                 } else if self.erase_block >= VARS_SIZE {
@@ -114,8 +116,7 @@ impl Pflash {
                 0xff => self.mode = Mode::Array,
                 0x70 => self.mode = Mode::Status,
                 0x50 => {
-                    self.status = READY;
-                    self.mode = Mode::Status;
+                    self.status = 0;
                 }
                 0x10 | 0x40 => self.mode = Mode::Program,
                 0x20 => {
