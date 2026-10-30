@@ -401,6 +401,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
             },
         ],
         shares: Vec::new(),
+        audio: None,
         rtc_base: None,
     };
     let machine_path = dir.join("machine.json");
