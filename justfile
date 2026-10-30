@@ -19,12 +19,12 @@ workspace-test:
 
 # Emit the committed RISC-V builders from the pinned toolchain's textual Jib
 [group('tcg')]
-tcg-generate $ir='target/tcg/riscv64.ir':
+tcg-generate $ir='target/tcg/riscv64.ir': tcg-ir-generate
 	cargo run --release -p vmlab-hv-tcg-emit -- "$ir" crates/vmlab-hv-tcg-riscv64/src
 
 # Regenerate in memory and compare both committed generated artifacts
 [group('tcg')]
-tcg-generate-check $ir='target/tcg/riscv64.ir':
+tcg-generate-check $ir='target/tcg/riscv64.ir': tcg-ir-generate
 	cargo run --release -p vmlab-hv-tcg-emit -- "$ir" crates/vmlab-hv-tcg-riscv64/src --check
 
 # Build the pinned legacy and EFI virtio-net option ROMs
