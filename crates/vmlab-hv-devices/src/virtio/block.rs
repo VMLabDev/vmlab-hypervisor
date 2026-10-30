@@ -159,24 +159,40 @@ impl Block {
             return;
         }
 
+        // With VIRTIO_F_EVENT_IDX negotiated, driver kicks are suppressed
+        // once the device has consumed buffers, until the device publishes
+        // the new avail_event (`enable_notification`). Drain, re-enable,
+        // and drain again if buffers arrived while the event was being
+        // published — the loop the spec's suppression mechanism expects.
         let mut used_any = false;
-        while let Some(chain) = self
-            .queues
-            .get_mut(index)
-            .and_then(|q| q.pop_descriptor_chain(&mem))
-        {
-            let head = chain.head_index();
-            let written = self.handle_chain(&mem, chain);
-            // The used ring lives in guest memory validated at activation;
-            // failing here means the guest corrupted it, and the only
-            // recourse is to drop the request.
+        loop {
+            while let Some(chain) = self
+                .queues
+                .get_mut(index)
+                .and_then(|q| q.pop_descriptor_chain(&mem))
+            {
+                let head = chain.head_index();
+                let written = self.handle_chain(&mem, chain);
+                // The used ring lives in guest memory validated at
+                // activation; failing here means the guest corrupted it,
+                // and the only recourse is to drop the request.
+                match self
+                    .queues
+                    .get_mut(index)
+                    .and_then(|q| q.add_used(&mem, head, written as u32).ok())
+                {
+                    Some(()) => used_any = true,
+                    None => break,
+                }
+            }
             match self
                 .queues
                 .get_mut(index)
-                .and_then(|q| q.add_used(&mem, head, written as u32).ok())
+                .and_then(|q| q.enable_notification(&mem).ok())
             {
-                Some(()) => used_any = true,
-                None => break,
+                // Buffers arrived while publishing the event: drain them.
+                Some(true) => continue,
+                _ => break,
             }
         }
         let notified = self
