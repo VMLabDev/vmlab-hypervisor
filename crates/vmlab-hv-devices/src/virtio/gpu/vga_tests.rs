@@ -249,6 +249,17 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
     d.ok(0x103, &[0, 0, 64, 64, 0, 1]);
     let first = d.dev.dma_frame().unwrap().unwrap();
     assert_eq!(&first.pixels[..3], &pixels[..3]);
+    let cpu = d.dev.frame();
+    assert_eq!(&cpu.pixels[..3], &pixels[..3]);
+    assert_eq!(
+        cpu.damage,
+        vec![super::super::Damage {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+        }]
+    );
     d.mem
         .write_slice(&[199, 31, 17, 0].repeat(64 * 64), GuestAddress(0x100000))
         .unwrap();
