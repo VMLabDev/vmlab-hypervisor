@@ -1,0 +1,37 @@
+== 00:00 ==
+PNP0501
+state = active
+io 0x3f8-0x3ff
+irq 4
+== 00:01 ==
+PNP0501
+state = active
+io 0x2f8-0x2ff
+irq 3
+== 00:02 ==
+PNP0303
+state = active
+io 0x60-0x60
+io 0x64-0x64
+irq 1
+== 00:03 ==
+PNP0f13
+state = active
+irq 12
+== 00:04 ==
+PNP0700
+state = active
+io 0x3f2-0x3f5
+io 0x3f7-0x3f7
+irq 6
+dma 2
+== 00:05 ==
+PNP0400
+state = active
+io 0x378-0x37f
+irq 7
+== 00:06 ==
+PNP0b00
+state = active
+io 0x70-0x77
+irq 8

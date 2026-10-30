@@ -1,0 +1,16 @@
+[    0.000000] BIOS-e820: [mem 0x0000000000000000-0x000000000009fbff] usable
+[    0.000000] BIOS-e820: [mem 0x000000000009fc00-0x000000000009ffff] reserved
+[    0.000000] BIOS-e820: [mem 0x00000000000f0000-0x00000000000fffff] reserved
+[    0.000000] BIOS-e820: [mem 0x0000000000100000-0x000000007ffd7fff] usable
+[    0.000000] BIOS-e820: [mem 0x000000007ffd8000-0x000000007fffffff] reserved
+[    0.000000] BIOS-e820: [mem 0x00000000b0000000-0x00000000bfffffff] reserved
+[    0.000000] BIOS-e820: [mem 0x00000000fed1c000-0x00000000fed1ffff] reserved
+[    0.000000] BIOS-e820: [mem 0x00000000feffc000-0x00000000feffffff] reserved
+[    0.000000] BIOS-e820: [mem 0x00000000fffc0000-0x00000000ffffffff] reserved
+[    0.000000] BIOS-e820: [mem 0x000000fd00000000-0x000000ffffffffff] reserved
+[    0.000232] e820: update [mem 0x00000000-0x00000fff] usable ==> reserved
+[    0.000235] e820: remove [mem 0x000a0000-0x000fffff] usable
+[    0.213466] PCI: ECAM [mem 0xb0000000-0xbfffffff] reserved as E820 entry
+[    0.226465] PCI: Using E820 reservations for host bridge windows
+[    0.395291] e820: reserve RAM buffer [mem 0x0009fc00-0x0009ffff]
+[    0.395296] e820: reserve RAM buffer [mem 0x7ffd8000-0x7fffffff]

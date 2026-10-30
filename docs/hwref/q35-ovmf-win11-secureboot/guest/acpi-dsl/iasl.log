@@ -1,0 +1,121 @@
+
+File appears to be binary: found 105 non-ASCII characters, disassembling
+Binary file appears to be a valid ACPI table, disassembling
+Input file ../acpi/APIC, Length 0x90 (144) bytes
+ACPI: APIC 0x0000000000000000 000090 (v03 BOCHS  BXPC     00000001 BXPC 00000001)
+Acpi Data Table [APIC] decoded
+Formatted output:  ../acpi/APIC.dsl - 6147 bytes
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+
+File appears to be binary: found 30 non-ASCII characters, disassembling
+Binary file appears to be a valid ACPI table, disassembling
+Input file ../acpi/BGRT, Length 0x38 (56) bytes
+ACPI: BGRT 0x0000000000000000 000038 (v01 INTEL  EDK2     00000002      01000013)
+Acpi Data Table [BGRT] decoded
+Formatted output:  ../acpi/BGRT.dsl - 1619 bytes
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+
+File appears to be binary: found 4191 non-ASCII characters, disassembling
+Binary file appears to be a valid ACPI table, disassembling
+Input file ../acpi/DSDT, Length 0x2548 (9544) bytes
+ACPI: DSDT 0x0000000000000000 002548 (v01 BOCHS  BXPC     00000001 BXPC 00000001)
+Pass 1 parse of [DSDT]
+Pass 2 parse of [DSDT]
+Parsing Deferred Opcodes (Methods/Buffers/Packages/Regions)
+
+Parsing completed
+Disassembly completed
+ASL Output:    ../acpi/DSDT.dsl - 100026 bytes
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+
+File appears to be binary: found 209 non-ASCII characters, disassembling
+Binary file appears to be a valid ACPI table, disassembling
+Input file ../acpi/FACP, Length 0xF4 (244) bytes
+ACPI: FACP 0x0000000000000000 0000F4 (v03 BOCHS  BXPC     00000001 BXPC 00000001)
+Acpi Data Table [FACP] decoded
+Formatted output:  ../acpi/FACP.dsl - 9241 bytes
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+
+File appears to be binary: found 59 non-ASCII characters, disassembling
+Binary file appears to be a valid ACPI table, disassembling
+Input file ../acpi/FACS, Length 0x40 (64) bytes
+ACPI: FACS 0x0000000000000000 000040
+Acpi Data Table [FACS] decoded
+Formatted output:  ../acpi/FACS.dsl - 1381 bytes
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+
+File appears to be binary: found 33 non-ASCII characters, disassembling
+Binary file appears to be a valid ACPI table, disassembling
+Input file ../acpi/HPET, Length 0x38 (56) bytes
+ACPI: HPET 0x0000000000000000 000038 (v01 BOCHS  BXPC     00000001 BXPC 00000001)
+Acpi Data Table [HPET] decoded
+Formatted output:  ../acpi/HPET.dsl - 1878 bytes
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+
+File appears to be binary: found 36 non-ASCII characters, disassembling
+Binary file appears to be a valid ACPI table, disassembling
+Input file ../acpi/MCFG, Length 0x3C (60) bytes
+ACPI: MCFG 0x0000000000000000 00003C (v01 BOCHS  BXPC     00000001 BXPC 00000001)
+Acpi Data Table [MCFG] decoded
+Formatted output:  ../acpi/MCFG.dsl - 1539 bytes
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+
+File appears to be binary: found 52 non-ASCII characters, disassembling
+Binary file appears to be a valid ACPI table, disassembling
+Input file ../acpi/TPM2, Length 0x4C (76) bytes
+ACPI: TPM2 0x0000000000000000 00004C (v04 BOCHS  BXPC     00000001 BXPC 00000001)
+Acpi Data Table [TPM2] decoded
+Formatted output:  ../acpi/TPM2.dsl - 1738 bytes
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+
+File appears to be binary: found 16 non-ASCII characters, disassembling
+Binary file appears to be a valid ACPI table, disassembling
+Input file ../acpi/WAET, Length 0x28 (40) bytes
+ACPI: WAET 0x0000000000000000 000028 (v01 BOCHS  BXPC     00000001 BXPC 00000001)
+Acpi Data Table [WAET] decoded
+Formatted output:  ../acpi/WAET.dsl - 1275 bytes
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+
+File appears to be binary: found 17 non-ASCII characters, disassembling
+Binary file appears to be a valid ACPI table, disassembling
+Input file ../acpi/WSMT, Length 0x28 (40) bytes
+ACPI: WSMT 0x0000000000000000 000028 (v01 INTEL  EDK2     00000002      01000013)
+Acpi Data Table [WSMT] decoded
+Formatted output:  ../acpi/WSMT.dsl - 1327 bytes
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+
+Intel ACPI Component Architecture
+ASL+ Optimizing Compiler/Disassembler version 20230628
+Copyright (c) 2000 - 2023 Intel Corporation
+
+iasl refused: acpi/copy-errors.log

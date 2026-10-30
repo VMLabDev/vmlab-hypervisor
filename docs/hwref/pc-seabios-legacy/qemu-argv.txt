@@ -1,0 +1,69 @@
+# QEMU argv (argv[0] then one argument per line), a mirror of
+# vmlab's src/qemu/cmdline.rs build_args() for this profile shape.
+/usr/bin/qemu-system-x86_64
+-name
+vmlab:hwref/pc-seabios-legacy
+-machine
+pc
+-accel
+kvm
+-cpu
+host,vmx=off,svm=off
+-smp
+1
+-m
+256M
+-rtc
+base=localtime
+-display
+none
+-vnc
+unix:/tmp/hwref-vildpqxh/vnc.sock,share=ignore
+-qmp
+unix:/tmp/hwref-vildpqxh/qmp.sock,server=on,wait=off
+-monitor
+none
+-chardev
+file,id=serlog,path=/home/wil/dev/vmlab-hypervisor-wt/hwref/docs/hwref/pc-seabios-legacy/serial.log
+-device
+isa-serial,chardev=serlog,index=1
+-chardev
+socket,id=vagent0,path=/tmp/hwref-vildpqxh/agent.sock,server=on,wait=off
+-device
+isa-serial,chardev=vagent0,index=0
+-blockdev
+driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-vildpqxh/disk0.qcow2
+-device
+ide-hd,drive=disk0,bus=ide.0,unit=0,bootindex=50
+-blockdev
+driver=raw,node-name=cd0,read-only=on,file.driver=file,file.filename=/tmp/hwref-vildpqxh/cd0.iso
+-device
+ide-cd,drive=cd0,bus=ide.0,unit=1,bootindex=1,id=install-cd
+-drive
+if=floppy,format=raw,file=/tmp/hwref-vildpqxh/floppy.img
+-netdev
+stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-vildpqxh/nic0.sock
+-device
+e1000,netdev=net0,mac=52:54:00:00:00:01
+-netdev
+stream,id=net1,server=off,addr.type=unix,addr.path=/tmp/hwref-vildpqxh/nic1.sock
+-device
+pcnet,netdev=net1,mac=52:54:00:00:00:02
+-device
+cirrus-vga
+-usb
+-device
+usb-tablet
+-S
+-kernel
+/home/wil/dev/vmlab/guest/dist/x86_64/vmlinuz
+-initrd
+/home/wil/dev/vmlab-hypervisor-wt/hwref/scripts/hwref/.cache/initramfs.cpio.gz
+-append
+console=ttyS0 loglevel=7 panic=-1 reboot=t hwref.out=/dev/ttyS1
+
+# -kernel/-initrd/-append are this capture's probe boot; vmlab
+# appends qemu_args in this position and boots a real guest disk.
+
+# one line:
+/usr/bin/qemu-system-x86_64 -name vmlab:hwref/pc-seabios-legacy -machine pc -accel kvm -cpu host,vmx=off,svm=off -smp 1 -m 256M -rtc base=localtime -display none -vnc unix:/tmp/hwref-vildpqxh/vnc.sock,share=ignore -qmp unix:/tmp/hwref-vildpqxh/qmp.sock,server=on,wait=off -monitor none -chardev file,id=serlog,path=/home/wil/dev/vmlab-hypervisor-wt/hwref/docs/hwref/pc-seabios-legacy/serial.log -device isa-serial,chardev=serlog,index=1 -chardev socket,id=vagent0,path=/tmp/hwref-vildpqxh/agent.sock,server=on,wait=off -device isa-serial,chardev=vagent0,index=0 -blockdev driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-vildpqxh/disk0.qcow2 -device ide-hd,drive=disk0,bus=ide.0,unit=0,bootindex=50 -blockdev driver=raw,node-name=cd0,read-only=on,file.driver=file,file.filename=/tmp/hwref-vildpqxh/cd0.iso -device ide-cd,drive=cd0,bus=ide.0,unit=1,bootindex=1,id=install-cd -drive if=floppy,format=raw,file=/tmp/hwref-vildpqxh/floppy.img -netdev stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-vildpqxh/nic0.sock -device e1000,netdev=net0,mac=52:54:00:00:00:01 -netdev stream,id=net1,server=off,addr.type=unix,addr.path=/tmp/hwref-vildpqxh/nic1.sock -device pcnet,netdev=net1,mac=52:54:00:00:00:02 -device cirrus-vga -usb -device usb-tablet -S -kernel /home/wil/dev/vmlab/guest/dist/x86_64/vmlinuz -initrd /home/wil/dev/vmlab-hypervisor-wt/hwref/scripts/hwref/.cache/initramfs.cpio.gz -append 'console=ttyS0 loglevel=7 panic=-1 reboot=t hwref.out=/dev/ttyS1'

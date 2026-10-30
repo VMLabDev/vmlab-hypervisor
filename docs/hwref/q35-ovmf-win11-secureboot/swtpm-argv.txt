@@ -1,0 +1,1 @@
+swtpm socket --tpm2 --tpmstate=dir=/tmp/hwref-8rbr61s6/swtpm --ctrl=type=unixio,path=/tmp/hwref-8rbr61s6/swtpm.sock --terminate

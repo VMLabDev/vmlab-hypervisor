@@ -1,0 +1,36 @@
+== bios_date ==
+09/26/2026
+== bios_release ==
+0.0
+== bios_vendor ==
+Debian distribution of EDK II
+== bios_version ==
+2026.08+ds-2
+== chassis_asset_tag ==
+
+== chassis_serial ==
+
+== chassis_type ==
+1
+== chassis_vendor ==
+QEMU
+== chassis_version ==
+pc-q35-11.1
+== modalias ==
+dmi:bvnDebiandistributionofEDKII:bvr2026.08+ds-2:bd09/26/2026:br0.0:svnQEMU:pnStandardPC(Q35+ICH9,2009):pvrpc-q35-11.1:cvnQEMU:ct1:cvrpc-q35-11.1:sku:
+== power ==
+== product_family ==
+
+== product_name ==
+Standard PC (Q35 + ICH9, 2009)
+== product_serial ==
+
+== product_sku ==
+
+== product_version ==
+pc-q35-11.1
+== subsystem ==
+== sys_vendor ==
+QEMU
+== uevent ==
+MODALIAS=dmi:bvnDebiandistributionofEDKII:bvr2026.08+ds-2:bd09/26/2026:br0.0:svnQEMU:pnStandardPC(Q35+ICH9,2009):pvrpc-q35-11.1:cvnQEMU:ct1:cvrpc-q35-11.1:sku:

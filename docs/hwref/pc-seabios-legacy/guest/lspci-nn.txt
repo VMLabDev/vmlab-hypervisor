@@ -1,0 +1,8 @@
+00:00.0 Class [0600]: Device [8086:1237] (rev 02)
+00:01.0 Class [0601]: Device [8086:7000]
+00:01.1 Class [0101]: Device [8086:7010]
+00:01.2 Class [0c03]: Device [8086:7020] (rev 01)
+00:01.3 Class [0680]: Device [8086:7113] (rev 03)
+00:02.0 Class [0200]: Device [8086:100e] (rev 03)
+00:03.0 Class [0200]: Device [1022:2000] (rev 10)
+00:04.0 Class [0300]: Device [1013:00b8]

@@ -1,0 +1,13 @@
+-[0000:00]-+-00.0  Device 8086:29c0
+           +-01.0  Device 1af4:1003
+           +-02.0  Device 1af4:1001
+           +-03.0  Device 1af4:1000
+           +-04.0  Device 1234:1111
+           +-05.0  Device 1b36:000d
+           +-1d.0  Device 8086:2934
+           +-1d.1  Device 8086:2935
+           +-1d.2  Device 8086:2936
+           +-1d.7  Device 8086:293a
+           +-1f.0  Device 8086:2918
+           +-1f.2  Device 8086:2922
+           \-1f.3  Device 8086:2930

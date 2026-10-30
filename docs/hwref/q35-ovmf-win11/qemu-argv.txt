@@ -1,0 +1,63 @@
+# QEMU argv (argv[0] then one argument per line), a mirror of
+# vmlab's src/qemu/cmdline.rs build_args() for this profile shape.
+/usr/bin/qemu-system-x86_64
+-name
+vmlab:hwref/q35-ovmf-win11
+-machine
+q35
+-accel
+kvm
+-cpu
+host,vmx=off,svm=off,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-vpindex,hv-runtime,hv-time,hv-synic,hv-stimer,hv-frequencies,hv-reset,hv-tlbflush,hv-ipi,hv-avic
+-smp
+4
+-m
+8192M
+-global
+kvm-pit.lost_tick_policy=discard
+-display
+none
+-vnc
+unix:/tmp/hwref-z3n1thko/vnc.sock,share=ignore
+-qmp
+unix:/tmp/hwref-z3n1thko/qmp.sock,server=on,wait=off
+-monitor
+none
+-serial
+file:/home/wil/dev/vmlab-hypervisor-wt/hwref/docs/hwref/q35-ovmf-win11/serial.log
+-chardev
+socket,id=vagent0,path=/tmp/hwref-z3n1thko/agent.sock,server=on,wait=off
+-device
+virtio-serial-pci
+-device
+virtserialport,chardev=vagent0,name=vmlab.agent.0
+-drive
+if=pflash,format=raw,readonly=on,file=/home/wil/dev/vmlab/guest/dist/firmware/x86_64/OVMF_CODE_4M.fd
+-drive
+if=pflash,format=raw,file=/tmp/hwref-z3n1thko/OVMF_VARS.fd
+-blockdev
+driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-z3n1thko/disk0.qcow2
+-device
+virtio-blk-pci,drive=disk0
+-netdev
+stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-z3n1thko/nic0.sock
+-device
+virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01
+-chardev
+socket,id=chrtpm,path=/tmp/hwref-z3n1thko/swtpm.sock
+-tpmdev
+emulator,id=tpm0,chardev=chrtpm
+-device
+tpm-tis,tpmdev=tpm0
+-device
+virtio-vga
+-usb
+-device
+usb-tablet
+-S
+
+# boots from disk0.qcow2 (a FAT32 ESP carrying an unsigned UKI
+# at \EFI\BOOT\BOOTX64.EFI) — no probe additions to the argv.
+
+# one line:
+/usr/bin/qemu-system-x86_64 -name vmlab:hwref/q35-ovmf-win11 -machine q35 -accel kvm -cpu host,vmx=off,svm=off,hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-vpindex,hv-runtime,hv-time,hv-synic,hv-stimer,hv-frequencies,hv-reset,hv-tlbflush,hv-ipi,hv-avic -smp 4 -m 8192M -global kvm-pit.lost_tick_policy=discard -display none -vnc unix:/tmp/hwref-z3n1thko/vnc.sock,share=ignore -qmp unix:/tmp/hwref-z3n1thko/qmp.sock,server=on,wait=off -monitor none -serial file:/home/wil/dev/vmlab-hypervisor-wt/hwref/docs/hwref/q35-ovmf-win11/serial.log -chardev socket,id=vagent0,path=/tmp/hwref-z3n1thko/agent.sock,server=on,wait=off -device virtio-serial-pci -device virtserialport,chardev=vagent0,name=vmlab.agent.0 -drive if=pflash,format=raw,readonly=on,file=/home/wil/dev/vmlab/guest/dist/firmware/x86_64/OVMF_CODE_4M.fd -drive if=pflash,format=raw,file=/tmp/hwref-z3n1thko/OVMF_VARS.fd -blockdev driver=qcow2,node-name=disk0,file.driver=file,file.filename=/tmp/hwref-z3n1thko/disk0.qcow2 -device virtio-blk-pci,drive=disk0 -netdev stream,id=net0,server=off,addr.type=unix,addr.path=/tmp/hwref-z3n1thko/nic0.sock -device virtio-net-pci,netdev=net0,mac=52:54:00:00:00:01 -chardev socket,id=chrtpm,path=/tmp/hwref-z3n1thko/swtpm.sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 -device virtio-vga -usb -device usb-tablet -S

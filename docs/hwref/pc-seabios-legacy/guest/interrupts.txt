@@ -1,0 +1,26 @@
+           CPU0       
+  0:         47   IO-APIC   2-edge      timer
+  1:          9   IO-APIC   1-edge      i8042
+  4:         18   IO-APIC   4-edge      ttyS0
+  8:          1   IO-APIC   8-edge      rtc0
+  9:          0   IO-APIC   9-fasteoi   acpi
+ 11:         30   IO-APIC  11-fasteoi   uhci_hcd:usb1
+ 12:         17   IO-APIC  12-edge      i8042
+ 14:         16   IO-APIC  14-edge      ata_piix
+ 15:          0   IO-APIC  15-edge      ata_piix
+NMI:          0   Non-maskable interrupts
+LOC:        896   Local timer interrupts
+SPU:          0   Spurious interrupts
+PMI:          0   Performance monitoring interrupts
+IWI:          0   IRQ work interrupts
+RTR:          0   APIC ICR read retries
+RES:          0   Rescheduling interrupts
+CAL:          0   Function call interrupts
+TLB:          0   TLB shootdowns
+TRM:          0   Thermal event interrupts
+HYP:          1   Hypervisor callback interrupts
+ERR:          0
+MIS:          0
+PIN:          0   Posted-interrupt notification event
+NPI:          0   Nested posted-interrupt event
+PIW:          0   Posted-interrupt wakeup event

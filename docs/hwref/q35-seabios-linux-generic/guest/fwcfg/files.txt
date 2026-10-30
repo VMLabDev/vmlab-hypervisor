@@ -1,0 +1,17 @@
+/sys/firmware/qemu_fw_cfg/by_name/etc/system-states
+/sys/firmware/qemu_fw_cfg/by_name/etc/smi/supported-features
+/sys/firmware/qemu_fw_cfg/by_name/etc/smi/features-ok
+/sys/firmware/qemu_fw_cfg/by_name/etc/smi/requested-features
+/sys/firmware/qemu_fw_cfg/by_name/etc/e820
+/sys/firmware/qemu_fw_cfg/by_name/etc/boot-fail-wait
+/sys/firmware/qemu_fw_cfg/by_name/etc/smbios/smbios-tables
+/sys/firmware/qemu_fw_cfg/by_name/etc/smbios/smbios-anchor
+/sys/firmware/qemu_fw_cfg/by_name/etc/boot/kernel
+/sys/firmware/qemu_fw_cfg/by_name/etc/acpi/rsdp
+/sys/firmware/qemu_fw_cfg/by_name/etc/acpi/tables
+/sys/firmware/qemu_fw_cfg/by_name/etc/table-loader
+/sys/firmware/qemu_fw_cfg/by_name/etc/tpm/log
+/sys/firmware/qemu_fw_cfg/by_name/bootorder
+/sys/firmware/qemu_fw_cfg/by_name/bios-geometry
+/sys/firmware/qemu_fw_cfg/by_name/genroms/linuxboot_dma.bin
+/sys/firmware/qemu_fw_cfg/by_name/genroms/kvmvapic.bin

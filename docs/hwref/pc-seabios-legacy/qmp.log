@@ -1,0 +1,4 @@
+{"QMP": {"version": {"qemu": {"micro": 2, "minor": 1, "major": 11}, "package": ""}, "capabilities": ["oob"]}}
+{"return": {}}
+{"timestamp": {"seconds": 1793355145, "microseconds": 496613}, "event": "RESUME"}
+{"return": {}}
