@@ -284,13 +284,16 @@ impl Inner {
             if region.len() == 0 {
                 continue;
             }
-            let file_offset = region.file_offset().ok_or_else(|| {
-                DeviceError::Other(
-                    "guest RAM is not shared memory; a machine with vhost-user-fs \
-                     shares must back RAM with the shared memfd"
-                        .into(),
-                )
-            })?;
+            let Some(file_offset) = region.file_offset() else {
+                // Firmware-boot machines add anonymous overlays to the DMA
+                // view (the q35 PAM shadow and SMRAM aliases at
+                // 0xa0000–0x100000). They are switchable and file-less, and
+                // the file-backed RAM region underneath already covers their
+                // guest-physical range in the table, so the backend can
+                // translate every address without them — and the vhost-user
+                // table could not carry the overlap anyway.
+                continue;
+            };
             let file = file_offset
                 .file()
                 .try_clone()
@@ -309,6 +312,13 @@ impl Inner {
             });
             published.push((region.start_addr().raw_value(), region.len(), host as u64));
             keep_open.push(file);
+        }
+        if regions.is_empty() {
+            return Err(DeviceError::Other(
+                "guest RAM is not shared memory; a machine with vhost-user-fs \
+                 shares must back RAM with the shared memfd"
+                    .into(),
+            ));
         }
         self.vu
             .set_mem_table(&regions)
@@ -1316,6 +1326,64 @@ mod tests {
         assert_eq!(log.enabled, vec![(0, true), (1, true)]);
         assert_eq!(log.device_state_saves, 0);
         assert!(log.device_state_loads.is_empty());
+    }
+
+    #[test]
+    fn activation_skips_firmware_overlays_in_the_mem_table() {
+        // Regression: a q35 firmware-boot machine's DMA view carries the PAM
+        // shadow and SMRAM aliases as anonymous regions inside the
+        // 0xa0000-0x100000 hole between the RAM regions. Publishing one to
+        // virtiofsd used to fail activation (and the transport then flagged
+        // DEVICE_NEEDS_RESET, so the guest's share died with every FUSE
+        // request unanswered). Only the file-backed RAM regions belong in
+        // the table.
+        let backend = FakeBackend::new("overlay").serve();
+        // SAFETY: memfd_create(2) with a NUL-terminated name; the return is
+        // either a valid fd or -1 with errno set.
+        let fd = unsafe {
+            libc::syscall(libc::SYS_memfd_create, c"fs-overlay-ram".as_ptr(), 1)
+        };
+        assert!(fd >= 0, "memfd_create: {}", std::io::Error::last_os_error());
+        // SAFETY: the fd is fresh and owned from here on.
+        let memfd = unsafe { File::from_raw_fd(fd as RawFd) };
+        memfd.set_len(0x1_0040_0000).expect("size memfd");
+        let file = |off: u64| Some(FileOffset::new(memfd.try_clone().unwrap(), off));
+        let mem = GuestMemoryMmap::from_ranges_with_files([
+            (GuestAddress(0), 0xa0000, file(0)),
+            (GuestAddress(0x100000), 0x400000 - 0x100000, file(0x100000)),
+            (GuestAddress(0x1_0000_0000), 4 << 20, file(0x1_0000_0000)),
+        ])
+        .expect("guest memory");
+        let mem = mem
+            .insert_region(std::sync::Arc::new(
+                vm_memory::GuestRegionMmap::from_range(GuestAddress(0xc0000), 0x40000, None)
+                    .unwrap(),
+            ))
+            .unwrap();
+        std::mem::forget(memfd);
+
+        let mut fs = Fs::new("fs-scratch", backend.config()).unwrap();
+        fs.ack_features(1 << 32);
+        fs.activate(
+            mem,
+            Arc::new(RecInterrupt::default()),
+            ready_queues(&shared_guest_memory(), 128),
+        )
+        .unwrap();
+        drop(fs);
+
+        let log = backend.join();
+        let log = log.lock();
+        assert!(log.unexpected.is_empty(), "{:?}", log.unexpected);
+        assert_eq!(log.mem_fd_count, 3);
+        assert_eq!(
+            log.mem_regions,
+            vec![
+                (0, 0xa0000, 0),
+                (0x100000, 0x400000 - 0x100000, 0x100000),
+                (0x1_0000_0000, 4 << 20, 0x1_0000_0000)
+            ]
+        );
     }
 
     #[test]
