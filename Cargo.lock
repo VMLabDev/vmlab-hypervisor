@@ -3,6 +3,7 @@
 version = 4
 
 [[package]]
+<<<<<<< HEAD
 name = "acpi_tables"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10,6 +11,12 @@ checksum = "ce821f856a3eb1d033287f2dcfcdf94276d7895dd5bdd8ca45ae17e7d33d4dd9"
 dependencies = [
  "zerocopy",
 ]
+=======
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+>>>>>>> main
 
 [[package]]
 name = "anyhow"
@@ -36,6 +43,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+<<<<<<< HEAD
+=======
+name = "crc32fast"
+version = "1.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
+name = "flate2"
+version = "1.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide",
+ "zlib-rs",
+]
+
+[[package]]
+>>>>>>> main
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -69,6 +99,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
+<<<<<<< HEAD
 name = "linux-loader"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -78,6 +109,8 @@ dependencies = [
 ]
 
 [[package]]
+=======
+>>>>>>> main
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -99,6 +132,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+<<<<<<< HEAD
+=======
+name = "miniz_oxide"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
+>>>>>>> main
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -198,12 +244,22 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
+=======
+name = "simd-adler32"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
+>>>>>>> main
 name = "smallvec"
 version = "1.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
+<<<<<<< HEAD
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -215,6 +271,8 @@ dependencies = [
 ]
 
 [[package]]
+=======
+>>>>>>> main
 name = "syn"
 version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -282,9 +340,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vm-superio"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "503041e3dca68fbd5425c04e4c2ad63c57a31da5b6eb13aaafbcaaf2b9cdc74f"
+
+[[package]]
 name = "vmlab-disk"
 version = "0.1.0"
 dependencies = [
+ "flate2",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -303,9 +370,13 @@ dependencies = [
 name = "vmlab-hv-devices"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "parking_lot",
  "thiserror",
  "virtio-queue",
  "vm-memory",
+ "vm-superio",
+ "vmlab-disk",
 ]
 
 [[package]]
@@ -385,6 +456,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 
 [[package]]
+<<<<<<< HEAD
 name = "zerocopy"
 version = "0.8.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -403,6 +475,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+=======
+name = "zlib-rs"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
+>>>>>>> main
 
 [[package]]
 name = "zmij"
