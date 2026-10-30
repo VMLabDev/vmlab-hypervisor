@@ -205,6 +205,13 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
     Ok(())
 }
 
+fn tablet_serial(address: PciAddress) -> String {
+    format!(
+        "28754-0000:{:02x}:{:02x}.{}-1",
+        address.bus, address.device, address.function
+    )
+}
+
 /// Build the whole machine. With `paused`, the vCPUs stay parked until the
 /// `resume` command (`--paused`, the `-S` equivalent).
 pub fn build(
@@ -644,6 +651,18 @@ pub fn build(
             transport.msi,
             transport.intx,
         )));
+        {
+            let mut controller = xhci.lock();
+            controller
+                .detach(vmlab_hv_devices::usb::TABLET_PORT)
+                .map_err(|e| VmmError::Other(e.to_string()))?;
+            controller
+                .attach(
+                    vmlab_hv_devices::usb::TABLET_PORT,
+                    Box::new(vmlab_hv_devices::usb::Tablet::new(tablet_serial(address))),
+                )
+                .map_err(|e| VmmError::Other(e.to_string()))?;
+        }
         place(xhci.clone(), Some(address))?;
         snap_nodes.push(DeviceNode::Virtio(xhci.clone()));
         Some(xhci)
@@ -763,6 +782,25 @@ fn machine_digest(desc: &MachineDescription) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tablet_serial_uses_the_explicit_controller_address() {
+        assert_eq!(
+            super::tablet_serial(vmlab_hv_proto::machine::PciAddress {
+                bus: 0,
+                device: 5,
+                function: 0,
+            }),
+            "28754-0000:00:05.0-1"
+        );
+        assert_eq!(
+            super::tablet_serial(vmlab_hv_proto::machine::PciAddress {
+                bus: 0,
+                device: 26,
+                function: 2,
+            }),
+            "28754-0000:00:1a.2-1"
+        );
+    }
     use super::*;
     use vmlab_hv_proto::machine::{Boot, Disk, DiskFormat, MachineDescription};
 
