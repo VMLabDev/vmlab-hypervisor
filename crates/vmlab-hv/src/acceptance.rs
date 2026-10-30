@@ -326,9 +326,34 @@ fn boot_template(
         .unwrap_or(if windows { 600 } else { 120 });
     let deadline = Instant::now() + Duration::from_secs(timeout);
     let mut reboots = 0;
+    let mut windows_setup = windows;
+    let mut requested_reboot = false;
+    let mut setup_status = String::new();
     let mut guest = loop {
-        if let Ok(guest) = AgentClient::connect(&agent, Duration::from_secs(3)) {
-            break guest;
+        if !requested_reboot
+            && let Ok(mut guest) = AgentClient::connect(&agent, Duration::from_secs(3))
+        {
+            if !windows_setup {
+                break guest;
+            }
+            match guest.exec(
+                &["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                    "$s = Get-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\Setup' -ErrorAction Stop; \
+                     Write-Output ('setup=' + $s.SystemSetupInProgress + ', oobe=' + $s.OOBEInProgress); \
+                     if ($s.SystemSetupInProgress -eq 0 -and $s.OOBEInProgress -eq 0) { exit 0 }; exit 1"],
+                Duration::from_secs(20),
+            ) {
+                Ok(output) if output.exit_code == 0 => {
+                    let reboot = guest.exec(&["shutdown.exe", "/r", "/t", "5", "/f"], Duration::from_secs(20))
+                        .unwrap_or_else(|error| panic!("{name} first-boot reboot: {error}; {}", diagnostics()));
+                    assert_eq!(reboot.exit_code, 0, "{name} first-boot reboot: {reboot:?}");
+                    eprintln!("{name}: setup finished; rebooting before acceptance");
+                    requested_reboot = true;
+                }
+                Ok(output) => setup_status = format!("exit {}: {}{}", output.exit_code,
+                    String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)),
+                Err(error) => setup_status = error,
+            }
         }
         if let Some(status) = process.0.try_wait().unwrap() {
             let mut reset = false;
@@ -345,6 +370,10 @@ fn boot_template(
             );
             reboots += 1;
             eprintln!("{name}: restarting after guest reset {reboots}");
+            if requested_reboot {
+                requested_reboot = false;
+                windows_setup = false;
+            }
             drop(process);
             if let Some(previous) = swtpm.take() {
                 drop(previous);
@@ -387,7 +416,13 @@ fn boot_template(
         if Instant::now() >= deadline {
             let _ = client.call(Control::Quit);
             let _ = process.0.wait();
-            panic!("{name} agent timeout: {}", diagnostics());
+            panic!(
+                "{name} agent/setup timeout ({setup_status}): {}",
+                diagnostics()
+            );
+        }
+        if windows_setup || requested_reboot {
+            std::thread::sleep(Duration::from_millis(100));
         }
     };
     let shell = if windows { "cmd.exe" } else { "/bin/sh" };
