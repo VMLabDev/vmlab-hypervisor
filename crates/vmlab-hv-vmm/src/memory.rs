@@ -7,9 +7,7 @@ use std::sync::Arc;
 
 use kvm_bindings::kvm_userspace_memory_region;
 use kvm_ioctls::VmFd;
-use vm_memory::{
-    Address, FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion,
-};
+use vm_memory::{FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
 
 use crate::error::VmmError;
 use crate::layout::MemLayout;
@@ -109,12 +107,13 @@ fn register_address_space(
     ram: &GuestRam,
     address_space: u32,
 ) -> Result<(), VmmError> {
-    for (slot, region) in ram.mem.iter().enumerate() {
+    for (slot, &(base, size)) in ram.layout.regions.iter().enumerate() {
         let region = kvm_userspace_memory_region {
             slot: slot as u32 | address_space,
-            guest_phys_addr: region.start_addr().raw_value(),
-            memory_size: region.size() as u64,
-            userspace_addr: region.as_ptr() as u64,
+            guest_phys_addr: base,
+            memory_size: size,
+            userspace_addr: ram.mem.get_host_address(GuestAddress(base))
+                .map_err(|e| VmmError::Memory(e.to_string()))? as u64,
             flags: 0,
         };
         // SAFETY: this is the documented safe wrapper for KVM_SET_USER_MEMORY_REGION.
@@ -130,6 +129,20 @@ fn register_address_space(
 mod tests {
     use super::*;
     use vm_memory::Bytes;
+
+    #[test]
+    fn registering_ram_ignores_device_regions_in_the_dma_view() {
+        if !std::path::Path::new("/dev/kvm").exists() { return; }
+        let kvm = crate::kvm::KvmVm::new().unwrap();
+        let mut ram = GuestRam::anonymous(MemLayout::q35(8).unwrap()).unwrap();
+        register_memslots(&kvm.vm, &ram).unwrap();
+        let aperture = Arc::new(vm_memory::GuestRegionMmap::from_range(GuestAddress(0xa0000), 0x20000, None).unwrap());
+        let region = kvm_userspace_memory_region { slot: 128, guest_phys_addr: 0xa0000, memory_size: 0x20000, userspace_addr: aperture.as_ptr() as u64, flags: 0 };
+        // SAFETY: aperture owns the mapping until after the VM is dropped.
+        unsafe { kvm.vm.set_user_memory_region(region) }.unwrap();
+        ram.mem = ram.mem.insert_region(aperture).unwrap();
+        register_memslots(&kvm.vm, &ram).unwrap();
+    }
 
     #[test]
     fn anonymous_ram_round_trips() {
