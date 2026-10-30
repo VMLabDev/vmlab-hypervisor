@@ -1,0 +1,117 @@
+//! vCPU threads: the KVM run loop and the machinery to interrupt it.
+
+use std::sync::Arc;
+use std::thread::JoinHandle;
+
+use kvm_ioctls::{VcpuExit, VcpuFd};
+
+use crate::vm::VmShared;
+
+/// The signal used to kick a vCPU out of KVM_RUN. A no-op handler without
+/// `SA_RESTART` makes the ioctl return `EINTR`; the run loop then re-checks
+/// the machine state. The registry in [`VmShared`] holds each thread's id;
+/// kicking goes through it, so thread handles need no tid of their own.
+const KICK_SIGNAL: libc::c_int = libc::SIGUSR1;
+
+extern "C" fn kick_handler(_sig: libc::c_int) {}
+
+/// Install the kick signal handler once, before the first vCPU thread runs.
+pub fn install_kick_handler() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: sigaction(2) on SIGUSR1 with a handler that does nothing
+        // and an empty mask, so nothing else is blocked. Flags exclude
+        // SA_RESTART on purpose: blocked ioctls must fail with EINTR.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = kick_handler as *const () as usize;
+            action.sa_flags = 0;
+            if libc::sigaction(KICK_SIGNAL, &action, std::ptr::null_mut()) != 0 {
+                panic!(
+                    "sigaction(SIGUSR1) failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+    });
+}
+
+/// One running vCPU: its thread. The kick handle is the thread's id, held in
+/// the shared registry from thread start to thread end.
+pub struct VcpuThread {
+    handle: Option<JoinHandle<()>>,
+}
+
+impl VcpuThread {
+    /// Spawn the thread that owns `vcpu` and runs it against `shared`.
+    pub fn spawn(id: u8, vcpu: VcpuFd, shared: Arc<VmShared>) -> std::io::Result<Self> {
+        install_kick_handler();
+        let handle = std::thread::Builder::new()
+            .name(format!("vcpu-{id}"))
+            .spawn(move || {
+                // SAFETY: pthread_self(3) reads the calling thread's own id.
+                let tid = unsafe { libc::pthread_self() };
+                shared.register_vcpu(tid);
+                run_vcpu(id, vcpu, &shared);
+                shared.unregister_vcpu(tid);
+            })?;
+        Ok(VcpuThread {
+            handle: Some(handle),
+        })
+    }
+
+    pub fn join(mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// The KVM_RUN loop of one vCPU.
+fn run_vcpu(id: u8, mut vcpu: VcpuFd, shared: &Arc<VmShared>) {
+    loop {
+        if !shared.should_run() {
+            if shared.exited() {
+                return;
+            }
+            shared.park();
+            continue;
+        }
+        vcpu.set_kvm_immediate_exit(0);
+        match vcpu.run() {
+            Ok(VcpuExit::IoIn(port, data)) => shared.io_read(port, data),
+            Ok(VcpuExit::IoOut(port, data)) => shared.io_write(port, data),
+            Ok(VcpuExit::MmioRead(addr, data)) => shared.mmio_read(addr, data),
+            Ok(VcpuExit::MmioWrite(addr, data)) => shared.mmio_write(addr, data),
+            Ok(VcpuExit::Hlt) => {
+                // With the in-kernel irqchip the vCPU wakes on the next
+                // interrupt; re-enter and let the state check handle pauses.
+            }
+            Ok(VcpuExit::IrqWindowOpen) => {}
+            Ok(VcpuExit::Shutdown) => {
+                // Triple fault: the guest reset. `reboot=t` and `panic=-1`
+                // both land here.
+                shared.request_exit(crate::vm::ExitReason::Shutdown(
+                    vmlab_hv_proto::control::ShutdownReason::GuestReset,
+                ));
+                return;
+            }
+            Ok(exit) => {
+                shared.request_exit(crate::vm::ExitReason::Error(format!(
+                    "vcpu {id}: unhandled KVM exit {exit:?}"
+                )));
+                return;
+            }
+            Err(e) if e.errno() == libc::EINTR => {
+                // Kicked: fall through and re-check the machine state.
+            }
+            Err(e) => {
+                shared.request_exit(crate::vm::ExitReason::Error(format!(
+                    "vcpu {id}: KVM_RUN: {e}"
+                )));
+                return;
+            }
+        }
+    }
+}

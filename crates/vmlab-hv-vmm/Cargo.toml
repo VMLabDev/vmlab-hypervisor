@@ -12,6 +12,14 @@ vmlab-hv-devices.workspace = true
 vmlab-disk.workspace = true
 vm-memory.workspace = true
 thiserror.workspace = true
+kvm-ioctls.workspace = true
+kvm-bindings.workspace = true
+linux-loader.workspace = true
+acpi_tables.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+zerocopy.workspace = true
+parking_lot.workspace = true
 
 [lints]
 workspace = true
