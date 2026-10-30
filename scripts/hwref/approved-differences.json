@@ -1,0 +1,11 @@
+{
+  "decision": "D6",
+  "reason": "q35 uses qemu-xhci and omits ICH9 UHCI/EHCI; no other hardware differences are approved",
+  "reference_only": {
+    "00:1d.0": "8086:2934",
+    "00:1d.1": "8086:2935",
+    "00:1d.2": "8086:2936",
+    "00:1d.7": "8086:293a"
+  },
+  "candidate_only_ids": ["1b36:000d"]
+}
