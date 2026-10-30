@@ -7,7 +7,7 @@
 //! missing.
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use vmlab_disk::ops;
@@ -29,12 +29,54 @@ fn which(bin: &str) -> bool {
 }
 
 /// A scratch directory per test under the workspace target dir.
-fn tmpdir(tag: &str) -> PathBuf {
+fn tmpdir(tag: &str) -> tempfile::TempDir {
     let base = env!("CARGO_TARGET_TMPDIR");
-    let dir = Path::new(base).join(format!("s2-{tag}-{}", line!()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    std::fs::create_dir_all(base).unwrap();
+    tempfile::Builder::new()
+        .prefix(&format!("s2-{tag}-"))
+        .tempdir_in(base)
+        .unwrap()
+}
+
+#[test]
+fn scratch_directories_are_isolated_across_processes() {
+    let dir = tmpdir("isolation");
+    let marker = dir.path().join("marker");
+    if std::env::var_os("VMLAB_S2_TEMP_CHILD").is_some() {
+        std::fs::write(&marker, b"child").unwrap();
+        return;
+    }
+    std::fs::write(&marker, b"parent").unwrap();
+    let second = tmpdir("isolation");
+    assert_ne!(dir.path(), second.path());
+    let children: Vec<_> = (0..4)
+        .map(|_| {
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "scratch_directories_are_isolated_across_processes",
+                ])
+                .env("VMLAB_S2_TEMP_CHILD", "1")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for child in children {
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(std::fs::read(&marker).unwrap(), b"parent");
+    let second_path = second.path().to_path_buf();
+    drop(second);
+    assert!(!second_path.exists());
+    assert_eq!(std::fs::read(&marker).unwrap(), b"parent");
 }
 
 fn run(bin: &str, args: &[&str]) -> std::process::Output {
@@ -140,7 +182,8 @@ macro_rules! require_qemu_img {
 #[test]
 fn s2_crate_written_images_pass_check_and_compare() {
     require_qemu_img!();
-    let dir = tmpdir("check-compare");
+    let temp = tmpdir("check-compare");
+    let dir = temp.path();
     let img_path = dir.join("made.qcow2");
     ops::create_qcow2(&img_path, 32 * 1024 * 1024, None, None).unwrap();
 
@@ -177,7 +220,8 @@ fn s2_crate_written_images_pass_check_and_compare() {
 #[test]
 fn s2_backing_chains() {
     require_qemu_img!();
-    let dir = tmpdir("backing");
+    let temp = tmpdir("backing");
+    let dir = temp.path();
     let base = dir.join("base.qcow2");
     qemu_img(&["create", "-f", "qcow2", &base.to_string_lossy(), "16M"]);
     qemu_io(&["-c", "write -P 0x5a 0 1M", &base.to_string_lossy()]);
@@ -260,7 +304,8 @@ fn s2_backing_chains() {
 #[test]
 fn s2_reads_qemu_created_images() {
     require_qemu_img!();
-    let dir = tmpdir("qemu-made");
+    let temp = tmpdir("qemu-made");
+    let dir = temp.path();
     let size = 8 * 1024 * 1024;
     let expected = pattern(size as usize, 42);
 
@@ -358,7 +403,8 @@ fn s2_reads_qemu_created_images() {
 #[test]
 fn s2_snapshot_interop_disk_only() {
     require_qemu_img!();
-    let dir = tmpdir("snap-interop");
+    let temp = tmpdir("snap-interop");
+    let dir = temp.path();
     let path = dir.join("s.qcow2");
     ops::create_qcow2(&path, 16 * 1024 * 1024, None, None).unwrap();
     let v1 = pattern(4096, 1);
@@ -415,7 +461,8 @@ fn s2_snapshot_interop_disk_only() {
 #[test]
 fn s2_vmstate_round_trip() {
     require_qemu_img!();
-    let dir = tmpdir("vmstate");
+    let temp = tmpdir("vmstate");
+    let dir = temp.path();
     let path = dir.join("vm.qcow2");
     ops::create_qcow2(&path, 10 * 1024 * 1024, None, None).unwrap();
     let disk_data = pattern(4096, 5);
@@ -490,7 +537,8 @@ fn s2_vmstate_round_trip() {
 #[test]
 fn s2_ops_info_matches_qemu_img() {
     require_qemu_img!();
-    let dir = tmpdir("ops-info");
+    let temp = tmpdir("ops-info");
+    let dir = temp.path();
     let base = dir.join("base.qcow2");
     qemu_img(&["create", "-f", "qcow2", &base.to_string_lossy(), "16M"]);
     qemu_io(&["-c", "write -P 0x21 0 512k", &base.to_string_lossy()]);
@@ -532,7 +580,8 @@ fn s2_ops_info_matches_qemu_img() {
 #[test]
 fn s2_ops_rebase() {
     require_qemu_img!();
-    let dir = tmpdir("ops-rebase");
+    let temp = tmpdir("ops-rebase");
+    let dir = temp.path();
 
     // Unsafe rebase rewrites the reference as given, relative stays relative.
     let base = dir.join("base.qcow2");
@@ -578,7 +627,8 @@ fn s2_ops_rebase() {
 #[test]
 fn s2_ops_resize_and_convert() {
     require_qemu_img!();
-    let dir = tmpdir("ops-resize-convert");
+    let temp = tmpdir("ops-resize-convert");
+    let dir = temp.path();
     let img = dir.join("r.qcow2");
     ops::create_qcow2(&img, 4 * 1024 * 1024, None, None).unwrap();
     write_pattern(&img, Format::Qcow2, 0, &[1, 2, 3, 4]);
@@ -611,7 +661,8 @@ fn s2_ops_resize_and_convert() {
 #[test]
 fn s2_ops_convert_snapshot_with_backing() {
     require_qemu_img!();
-    let dir = tmpdir("ops-export");
+    let temp = tmpdir("ops-export");
+    let dir = temp.path();
     let base = dir.join("base.qcow2");
     qemu_img(&["create", "-f", "qcow2", &base.to_string_lossy(), "16M"]);
     qemu_io(&["-c", "write -P 0x50 0 1M", &base.to_string_lossy()]);
@@ -674,7 +725,8 @@ fn s2_ops_convert_snapshot_with_backing() {
 #[test]
 fn s2_ops_commit() {
     require_qemu_img!();
-    let dir = tmpdir("ops-commit");
+    let temp = tmpdir("ops-commit");
+    let dir = temp.path();
     let base = dir.join("base.qcow2");
     qemu_img(&["create", "-f", "qcow2", &base.to_string_lossy(), "16M"]);
     qemu_io(&["-c", "write -P 0x60 0 512k", &base.to_string_lossy()]);
@@ -707,7 +759,8 @@ fn s2_ops_commit() {
 #[test]
 fn s2_read_only_never_modifies() {
     require_qemu_img!();
-    let dir = tmpdir("ro");
+    let temp = tmpdir("ro");
+    let dir = temp.path();
     let path = dir.join("ro.qcow2");
     ops::create_qcow2(&path, 8 * 1024 * 1024, None, None).unwrap();
     write_pattern(&path, Format::Qcow2, 0, &[3u8; 4096]);
@@ -740,7 +793,8 @@ fn s2_read_only_never_modifies() {
 #[test]
 fn s2_discard_and_zero_semantics() {
     require_qemu_img!();
-    let dir = tmpdir("discard");
+    let temp = tmpdir("discard");
+    let dir = temp.path();
     let path = dir.join("d.qcow2");
     ops::create_qcow2(&path, 8 * 1024 * 1024, None, None).unwrap();
     write_pattern(&path, Format::Qcow2, 0, &[0x77u8; 1024 * 1024]);
@@ -762,7 +816,8 @@ fn s2_discard_and_zero_semantics() {
 #[test]
 fn s2_snapshot_churn() {
     require_qemu_img!();
-    let dir = tmpdir("churn");
+    let temp = tmpdir("churn");
+    let dir = temp.path();
     let path = dir.join("c.qcow2");
     ops::create_qcow2(&path, 64 * 1024 * 1024, None, None).unwrap();
     write_pattern(&path, Format::Qcow2, 7 * 1024 * 1024, &pattern(100_000, 4));
@@ -820,7 +875,8 @@ fn s2_snapshot_churn() {
 #[test]
 fn s2_large_unaligned_io() {
     require_qemu_img!();
-    let dir = tmpdir("large");
+    let temp = tmpdir("large");
+    let dir = temp.path();
     let path = dir.join("l.qcow2");
     ops::create_qcow2(&path, 32 * 1024 * 1024, None, None).unwrap();
     let data = pattern(16 * 1024 * 1024, 21);
@@ -856,7 +912,8 @@ fn bench_fill(buf: &mut [u8], chunk_index: u64, seed: u8) {
 #[test]
 fn s2_snapshot_apply_then_write_same_handle() {
     require_qemu_img!();
-    let dir = tmpdir("apply-write");
+    let temp = tmpdir("apply-write");
+    let dir = temp.path();
     let path = dir.join("disk.qcow2");
     let amount = 4 * 1024 * 1024;
     ops::create_qcow2(&path, amount as u64, None, None).unwrap();
@@ -905,7 +962,8 @@ fn s2_snapshot_apply_then_write_same_handle() {
 #[test]
 fn s2_freed_clusters_reused_across_processes() {
     require_qemu_img!();
-    let dir = tmpdir("reuse");
+    let temp = tmpdir("reuse");
+    let dir = temp.path();
     let path = dir.join("r.qcow2");
     ops::create_qcow2(&path, 64 * 1024 * 1024, None, None).unwrap();
     let amount = 4 * 1024 * 1024;
@@ -968,7 +1026,8 @@ fn s2_freed_clusters_reused_across_processes() {
 #[test]
 fn s2_reuse_churn_across_reopens() {
     require_qemu_img!();
-    let dir = tmpdir("churn-reuse");
+    let temp = tmpdir("churn-reuse");
+    let dir = temp.path();
     let path = dir.join("c.qcow2");
     ops::create_qcow2(&path, 64 * 1024 * 1024, None, None).unwrap();
     write_pattern(&path, Format::Qcow2, 0, &pattern(8 * 1024 * 1024, 7));
@@ -1025,7 +1084,8 @@ fn s2_reuse_churn_across_reopens() {
 #[ignore = "slow: 1 GiB throughput baseline (run with cargo test -- --ignored)"]
 fn s2_sequential_throughput_1gib() {
     require_qemu_img!();
-    let dir = tmpdir("throughput");
+    let temp = tmpdir("throughput");
+    let dir = temp.path();
     let path = dir.join("t.qcow2");
     ops::create_qcow2(&path, 2 * 1024 * 1024 * 1024, None, None).unwrap();
     let chunk = 1024 * 1024;

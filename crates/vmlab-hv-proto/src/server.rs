@@ -372,13 +372,13 @@ mod tests {
         }
     }
 
-    fn socket_path(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "vmlab-hv-proto-server-{name}-{}.sock",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        path
+    fn socket_path(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("hv-server-{name}-"))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("control.sock");
+        (dir, path)
     }
 
     fn spawn_server(
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn requests_then_handshake_then_request_over_a_socket() {
-        let path = socket_path("no-handshake");
+        let (_dir, path) = socket_path("no-handshake");
         let server = Server::new("test-hv", vec![Capability::Snapshots], |command| {
             assert_eq!(command, Command::Status);
             Outcome::Ok {
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn wrong_version_over_a_socket_gets_error_then_close() {
-        let path = socket_path("version");
+        let (_dir, path) = socket_path("version");
         let server = Server::new("test-hv", vec![], |_| Outcome::Ok { status: None });
         spawn_server(server, &path);
 
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn broadcast_lands_between_request_and_reply() {
-        let path = socket_path("mid-event");
+        let (_dir, path) = socket_path("mid-event");
         let (saw_request, request_seen) = std::sync::mpsc::channel::<()>();
         let (event_sent, send_event) = std::sync::mpsc::channel::<()>();
         let server = Server::new("test-hv", vec![], move |command| {
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn broadcast_after_disconnect_is_dropped() {
-        let path = socket_path("prune");
+        let (_dir, path) = socket_path("prune");
         let server = Server::new("test-hv", vec![], |_| Outcome::Ok { status: None });
         let broadcaster = server.clone();
         spawn_server(server, &path);

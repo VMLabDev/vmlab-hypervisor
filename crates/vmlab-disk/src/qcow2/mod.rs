@@ -1279,7 +1279,7 @@ mod tests {
     fn vmstate_base_is_first_non_guest_l1_entry() {
         // 10 MiB disk, 64 KiB clusters: L1 span is 512 MiB, so the vmstate
         // starts at 512 MiB (observed from QEMU's savevm).
-        let mut img = crate::qcow2::testsupport::blank(10 * 1024 * 1024);
+        let (_dir, mut img) = testsupport::blank(10 * 1024 * 1024);
         assert_eq!(img.vmstate_base(), 512 * 1024 * 1024);
         img.size = 512 * 1024 * 1024;
         assert_eq!(img.vmstate_base(), 512 * 1024 * 1024);
@@ -1289,7 +1289,7 @@ mod tests {
 
     #[test]
     fn freed_clusters_are_reused_lowest_first() {
-        let mut img = testsupport::blank(8 * 1024 * 1024);
+        let (_dir, mut img) = testsupport::blank(8 * 1024 * 1024);
         let a = img.alloc_cluster().unwrap();
         let b = img.alloc_cluster().unwrap();
         let c = img.alloc_cluster().unwrap();
@@ -1302,8 +1302,23 @@ mod tests {
     }
 
     #[test]
+    fn blank_images_with_same_size_have_distinct_paths() {
+        let (_first_dir, mut first) = testsupport::blank(1024 * 1024);
+        let (_second_dir, mut second) = testsupport::blank(1024 * 1024);
+        assert_ne!(first.path, second.path);
+        first.write_at(0, &[0x51; 512]).unwrap();
+        second.write_at(0, &[0xa2; 512]).unwrap();
+        first.flush().unwrap();
+        second.flush().unwrap();
+        let mut reopened = Qcow2Image::open(&first.path, true).unwrap();
+        let mut bytes = [0; 512];
+        reopened.read_at(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [0x51; 512]);
+    }
+
+    #[test]
     fn allocation_rescans_new_refcount_coverage() {
-        let mut img = testsupport::blank(8 * 1024 * 1024);
+        let (_dir, mut img) = testsupport::blank(8 * 1024 * 1024);
         let covered = img.refblock_entries();
         let first = img.alloc_clusters_contiguous(covered).unwrap();
         assert!(first > 0);
@@ -1318,10 +1333,8 @@ mod tests {
 
     #[test]
     fn holes_from_a_previous_session_are_reused_on_reopen() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp-unit");
-        std::fs::create_dir_all(&dir).expect("create target dir");
-        let path = dir.join(format!("reuse-{}.qcow2", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reuse.qcow2");
         Qcow2Image::create(&path, 8 * 1024 * 1024, 16, None)
             .expect("create")
             .flush()
@@ -1360,17 +1373,15 @@ mod tests {
     }
 }
 
-/// Test-only helpers shared with integration tests.
-pub mod testsupport {
+#[cfg(test)]
+mod testsupport {
     use super::*;
 
-    /// Create a blank image under the workspace target dir and open it.
-    /// Panics on failure; test-only.
-    pub fn blank(size: u64) -> Qcow2Image {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp-unit");
-        std::fs::create_dir_all(&dir).expect("create target dir");
-        let path = dir.join(format!("blank-{}-{size}.qcow2", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        Qcow2Image::create(&path, size, 16, None).expect("create")
+    /// Keep the directory alive for the lifetime of the image.
+    pub(super) fn blank(size: u64) -> (tempfile::TempDir, Qcow2Image) {
+        let dir = tempfile::tempdir().expect("create image directory");
+        let image =
+            Qcow2Image::create(&dir.path().join("blank.qcow2"), size, 16, None).expect("create");
+        (dir, image)
     }
 }
