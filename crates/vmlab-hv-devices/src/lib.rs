@@ -15,6 +15,7 @@ pub mod chipset;
 pub mod display;
 pub mod hda;
 pub mod serial;
+pub mod tpm;
 pub mod usb;
 pub mod virtio;
 
