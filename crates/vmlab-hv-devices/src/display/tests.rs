@@ -22,6 +22,26 @@ fn standard_vga_mmio_edid_matches_the_captured_default_monitor() {
     assert_eq!(&tail[4..], &[0; 4]);
 }
 
+#[test]
+fn fragmented_damage_fits_the_display_protocol_rectangle_limit() {
+    let mode = Mode {
+        width: 1024,
+        height: 1024,
+        stride: 4096,
+        format: PixelFormat::Xrgb8888,
+    };
+    let previous = Frame::compare(mode, vec![0; 4096 * 1024], None, (8, 1));
+    let mut pixels = previous.pixels.clone();
+    for y in 0..1024 {
+        for x in (0..1024).step_by(16) {
+            pixels[y * 4096 + x * 4] = 1;
+        }
+    }
+    let frame = Frame::compare(mode, pixels, Some(&previous), (8, 1));
+    assert!(frame.damage.len() <= u16::MAX as usize);
+    assert!(frame.dirty);
+}
+
 fn indexed(dev: &mut StandardVga, port: u16, index: u8, value: u8) {
     dev.io_write(port, &[index, value]);
 }

@@ -120,6 +120,15 @@ impl Frame {
                 height: mode.height,
             });
         }
+        // One-scanline text cells can fragment damage beyond the wire limit.
+        if damage.len() > u16::MAX as usize {
+            damage = vec![Damage {
+                x: 0,
+                y: 0,
+                width: mode.width,
+                height: mode.height,
+            }];
+        }
         Self {
             mode,
             pixels,

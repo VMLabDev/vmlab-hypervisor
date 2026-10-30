@@ -73,7 +73,7 @@ fn idle_publications_send_no_frames_but_reconfigure_and_cpu_copy_still_work() {
         })
         .unwrap();
     let (_, buffer, next_seq, damage) = ready(&client);
-    assert_eq!(next_seq, seq);
+    assert!(next_seq > seq);
     assert_eq!(damage, vec![source.0.lock().unwrap().full()]);
     client.release(surface, buffer, next_seq).unwrap();
     source.0.lock().unwrap().generation += 1;

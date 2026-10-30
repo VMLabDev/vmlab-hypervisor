@@ -165,13 +165,18 @@ impl DisplayServer {
 
     /// Capture the source once. No socket or client lock is acquired here.
     pub fn publish(&self) -> io::Result<()> {
+        self.capture(false)
+    }
+
+    fn capture(&self, force: bool) -> io::Result<()> {
         // Keep capture order and publication order identical for dirty sources.
         let _capture = self.shared.capture.lock().unwrap();
         let frame = self.shared.source.frame()?;
         frame.validate()?;
         let mut state = self.shared.state.lock().unwrap();
         let previous = &state.frame;
-        if frame.damage.is_empty()
+        if !force
+            && frame.damage.is_empty()
             && (
                 frame.generation,
                 frame.width,
@@ -326,7 +331,7 @@ impl DisplayServer {
                     if s.surface != surface_id {
                         return Err(invalid("CpuCopy names stale surface"));
                     }
-                    self.publish()?;
+                    self.capture(true)?;
                     s.cpu_copy = true;
                 }
                 Message::Key { .. }
