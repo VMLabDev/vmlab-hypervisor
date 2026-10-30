@@ -20,6 +20,7 @@ pub struct GuestRam {
     layout: MemLayout,
     /// The memfd backing RAM, when shared; kept open so the mapping lives.
     _file: Option<File>,
+    pub(crate) firmware_rom: Option<GuestMemoryMmap>,
 }
 
 impl GuestRam {
@@ -31,6 +32,7 @@ impl GuestRam {
             mem,
             layout,
             _file: None,
+            firmware_rom: None,
         })
     }
 
@@ -54,6 +56,7 @@ impl GuestRam {
             mem,
             layout,
             _file: Some(file),
+            firmware_rom: None,
         })
     }
 
@@ -94,9 +97,21 @@ fn create_memfd() -> Result<File, String> {
 
 /// Register every RAM region as a KVM memslot.
 pub fn register_memslots(vm: &Arc<VmFd>, ram: &GuestRam) -> Result<(), VmmError> {
+    register_address_space(vm, ram, 0)
+}
+
+pub fn register_smm_memslots(vm: &Arc<VmFd>, ram: &GuestRam) -> Result<(), VmmError> {
+    register_address_space(vm, ram, 1 << 16)
+}
+
+fn register_address_space(
+    vm: &Arc<VmFd>,
+    ram: &GuestRam,
+    address_space: u32,
+) -> Result<(), VmmError> {
     for (slot, region) in ram.mem.iter().enumerate() {
         let region = kvm_userspace_memory_region {
-            slot: slot as u32,
+            slot: slot as u32 | address_space,
             guest_phys_addr: region.start_addr().raw_value(),
             memory_size: region.size() as u64,
             userspace_addr: region.as_ptr() as u64,

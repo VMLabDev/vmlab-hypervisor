@@ -12,6 +12,24 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineDescription {
+    #[serde(default, skip_serializing_if = "Machine::is_microvm")]
+    pub machine: Machine,
+    #[serde(default, skip_serializing_if = "CpuPolicy::is_host")]
+    pub cpu: CpuPolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hyperv: Vec<HyperV>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<Display>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tablet: Option<PciAddress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<Tpm>,
+    /// PCI address of the shared multiport virtio-serial controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console_pci: Option<PciAddress>,
+    /// PCI address of the AHCI controller, whose ports carry AHCI disks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahci_pci: Option<PciAddress>,
     /// Human-readable label used in logs and the process title.
     pub name: String,
     pub arch: Arch,
@@ -42,6 +60,8 @@ pub struct MachineDescription {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Audio {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pci: Option<PciAddress>,
     /// Guest device model presenting the audio hardware.
     pub device: AudioDevice,
     /// Whether the host microphone is attached to the guest. Default off.
@@ -85,11 +105,29 @@ pub enum Boot {
         initrd: Option<PathBuf>,
         cmdline: String,
     },
+    Firmware {
+        firmware: FirmwareKind,
+        code: PathBuf,
+        #[serde(default)]
+        vars: Option<PathBuf>,
+        #[serde(default)]
+        secure_boot: bool,
+        #[serde(default)]
+        bootorder: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Disk {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pci: Option<PciAddress>,
+    #[serde(default, skip_serializing_if = "DiskBus::is_virtio")]
+    pub bus: DiskBus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u8>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cdrom: bool,
     /// Stable id; also the snapshot node name (e.g. `rootfs`, `scratch`, `disk0`).
     pub id: String,
     pub path: PathBuf,
@@ -111,6 +149,8 @@ pub enum DiskFormat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Nic {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pci: Option<PciAddress>,
     /// `aa:bb:cc:dd:ee:ff`.
     pub mac: String,
     /// Advertised MTU; `None` means 1500.
@@ -139,8 +179,107 @@ pub struct SerialPort {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FsShare {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pci: Option<PciAddress>,
     /// Mount tag the guest uses.
     pub tag: String,
     /// virtiofsd's vhost-user socket.
     pub socket: PathBuf,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Machine {
+    #[default]
+    Microvm,
+    Q35,
+}
+
+impl Machine {
+    pub fn is_microvm(&self) -> bool {
+        *self == Self::Microvm
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuPolicy {
+    #[default]
+    Host,
+    Nested,
+}
+
+impl CpuPolicy {
+    pub fn is_host(&self) -> bool {
+        *self == Self::Host
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareKind {
+    Seabios,
+    Ovmf,
+}
+
+/// Bus-zero BDF. Range and collision checks belong to machine validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PciAddress {
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskBus {
+    #[default]
+    Virtio,
+    Ahci,
+}
+
+impl DiskBus {
+    pub fn is_virtio(&self) -> bool {
+        *self == Self::Virtio
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Display {
+    pub device: DisplayDevice,
+    pub pci: PciAddress,
+    pub rom: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DisplayDevice {
+    StdVga,
+    VirtioVga,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tpm {
+    pub socket: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HyperV {
+    Relaxed,
+    Vapic,
+    Spinlocks,
+    Vpindex,
+    Runtime,
+    Synic,
+    Stimer,
+    Reset,
+    Frequencies,
+    Reenlightenment,
+    Tlbflush,
+    Ipi,
+    Evmbcs,
 }

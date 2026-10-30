@@ -23,7 +23,7 @@ use parking_lot::Mutex;
 use vmlab_hv_devices::serial::{Serial, SerialOut};
 use vmlab_hv_devices::virtio::fs::{Fs, FsConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
-use vmlab_hv_devices::{GuestMemory, IrqLine, MsiSink, PciSnapshot};
+use vmlab_hv_devices::{GuestMemory, IrqLine, PciSnapshot};
 use vmlab_hv_proto::machine::{Accel, Arch, Boot, FsShare, MachineDescription};
 use vmlab_hv_vmm::error::DeviceUnavailable;
 use vmlab_hv_vmm::factory::{BuiltPci, BuiltSerial};
@@ -222,7 +222,7 @@ impl DeviceFactory for TestFactory {
         &self,
         _disk: &vmlab_hv_proto::machine::Disk,
         _mem: &GuestMemory,
-        _msi: Arc<dyn MsiSink>,
+        _msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<vmlab_hv_vmm::factory::BuiltBlk, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-blk",
@@ -234,7 +234,7 @@ impl DeviceFactory for TestFactory {
         &self,
         _ports: &[vmlab_hv_proto::machine::SerialPort],
         _mem: &GuestMemory,
-        _msi: Arc<dyn MsiSink>,
+        _msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-console",
@@ -246,7 +246,7 @@ impl DeviceFactory for TestFactory {
         &self,
         _nic: &vmlab_hv_proto::machine::Nic,
         _mem: &GuestMemory,
-        _msi: Arc<dyn MsiSink>,
+        _msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-net",
@@ -258,7 +258,7 @@ impl DeviceFactory for TestFactory {
         &self,
         share: &FsShare,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let id = format!("fs-{}", share.tag);
         let fs = Fs::new(
@@ -275,7 +275,7 @@ impl DeviceFactory for TestFactory {
             id,
             Box::new(fs),
             mem.clone(),
-            Some(msi),
+            Some(msi.msi),
             None,
         )));
         *self.fs_snapshot.lock() = Some(pci.clone() as Arc<Mutex<dyn PciSnapshot>>);
@@ -347,6 +347,14 @@ fn make_executable(path: &Path) {
 /// One machine description with a single share on `socket`.
 fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
     MachineDescription {
+        machine: Default::default(),
+        cpu: Default::default(),
+        hyperv: vec![],
+        display: None,
+        tablet: None,
+        tpm: None,
+        console_pci: None,
+        ahci_pci: None,
         name: "vhost-fs-test".into(),
         arch: Arch::X86_64,
         accel: Accel::Kvm,
@@ -363,6 +371,7 @@ fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
         serial_log: dir.path.join("serial.log"),
         ports: vec![],
         shares: vec![FsShare {
+            pci: None,
             tag: TAG.into(),
             socket: socket.to_path_buf(),
         }],

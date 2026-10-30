@@ -26,8 +26,40 @@ pub enum ExitReason {
 /// Broadcasts machine events to the control connections.
 pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
 
+#[derive(Default)]
+struct MemoryGate {
+    blocked: bool,
+    in_kvm: usize,
+}
+
+pub(crate) struct KvmRunGuard<'a>(&'a VmShared);
+impl Drop for KvmRunGuard<'_> {
+    fn drop(&mut self) {
+        self.0.memory_gate.lock().in_kvm -= 1;
+        self.0.memory_cv.notify_all();
+    }
+}
+
+struct MemoryUpdateGuard<'a> {
+    shared: &'a VmShared,
+    _writer: parking_lot::MutexGuard<'a, ()>,
+}
+impl Drop for MemoryUpdateGuard<'_> {
+    fn drop(&mut self) {
+        self.shared.memory_gate.lock().blocked = false;
+        self.shared.memory_cv.notify_all();
+    }
+}
+
 /// Everything the vCPU threads and the control threads share.
 pub struct VmShared {
+    io_trace: Option<Mutex<std::collections::VecDeque<String>>>,
+    pub(crate) display: Mutex<Option<Arc<vmlab_hv_display::DisplayServer>>>,
+    pub(crate) display_generation: std::sync::atomic::AtomicU64,
+    last_frame: Mutex<std::time::Instant>,
+    memory_gate: Mutex<MemoryGate>,
+    memory_cv: Condvar,
+    memory_writer: Mutex<()>,
     pub(crate) kvm: Arc<KvmVm>,
     io_bus: Mutex<IoBus>,
     mmio_bus: Mutex<MmioBus>,
@@ -59,6 +91,10 @@ pub struct VmShared {
     /// other: save/load hold it across the whole operation, `pause` and
     /// `resume` take it briefly.
     snapshot_op: Mutex<()>,
+    pub(crate) mch: Mutex<Option<Arc<Mutex<crate::q35::Mch>>>>,
+    pub(crate) chipset: Mutex<Option<Arc<crate::chipset::Chipset>>>,
+    pub(crate) vga: Mutex<Option<Arc<Mutex<vmlab_hv_devices::display::StandardVga>>>>,
+    pub(crate) xhci: Mutex<Option<Arc<Mutex<vmlab_hv_devices::usb::XhciController>>>>,
 }
 
 impl VmShared {
@@ -73,6 +109,14 @@ impl VmShared {
         mmio64_base: u64,
     ) -> Arc<Self> {
         Arc::new(VmShared {
+            io_trace: std::env::var_os("VMLAB_HV_DIAGNOSTICS")
+                .map(|_| Mutex::new(std::collections::VecDeque::new())),
+            display: Mutex::new(None),
+            display_generation: std::sync::atomic::AtomicU64::new(0),
+            last_frame: Mutex::new(std::time::Instant::now()),
+            memory_gate: Mutex::new(MemoryGate::default()),
+            memory_cv: Condvar::new(),
+            memory_writer: Mutex::new(()),
             kvm: Arc::new(kvm),
             io_bus: Mutex::new(io_bus),
             mmio_bus: Mutex::new(mmio_bus),
@@ -95,6 +139,10 @@ impl VmShared {
             ram: Mutex::new(None),
             snapshot: Mutex::new(None),
             snapshot_op: Mutex::new(()),
+            mch: Mutex::new(None),
+            chipset: Mutex::new(None),
+            vga: Mutex::new(None),
+            xhci: Mutex::new(None),
         })
     }
 
@@ -228,6 +276,7 @@ impl VmShared {
             }
         };
         if was == RunState::Running {
+            self.clock_running(false);
             self.kick_all();
             self.state_cv.notify_all();
             self.emit(Event::Stopped);
@@ -241,12 +290,18 @@ impl VmShared {
     /// snapshots stay paused, running ones resume, suspended ones hang back
     /// in S3. The caller holds the snapshot-op lock.
     pub(crate) fn finish_snapshot(&self, run_code: u8) {
+        self.display_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(chipset) = self.chipset.lock().as_ref() {
+            chipset.sync_pirqs();
+        }
         match run_code {
             crate::snapshot::format::RUN_RUNNING => {
                 let mut state = self.state.lock();
                 if *state == RunState::Paused {
                     *state = RunState::Running;
                     drop(state);
+                    self.clock_running(true);
                     self.state_cv.notify_all();
                     self.emit(Event::Resumed);
                 }
@@ -302,6 +357,7 @@ impl VmShared {
             *exit = Some(reason.clone());
         }
         *self.state.lock() = RunState::ShuttingDown;
+        self.clock_running(false);
         self.state_cv.notify_all();
         self.exit_cv.notify_all();
         self.kick_all();
@@ -323,6 +379,7 @@ impl VmShared {
                 if *state == RunState::Running {
                     *state = RunState::Suspended;
                     drop(state);
+                    self.clock_running(false);
                     self.kick_all();
                     self.state_cv.notify_all();
                     self.emit(Event::Suspend);
@@ -335,6 +392,18 @@ impl VmShared {
     // ---- dispatch (called from vCPU threads) ---------------------------
 
     pub(crate) fn io_read(&self, port: u16, data: &mut [u8]) {
+        self.trace_io(port, data, false);
+        if matches!(port, 0x3b0..=0x3df | 0x1ce..=0x1d0)
+            && let Some(vga) = self.vga.lock().as_ref()
+        {
+            vga.lock().io_read(port, data);
+            return;
+        }
+        if let Some(chipset) = self.chipset.lock().as_ref()
+            && chipset.io_read(port, data)
+        {
+            return;
+        }
         if port >= IO_ALLOC_BASE {
             let mut root = self.pci_root.lock();
             if root.dispatch_io_read(port, data) {
@@ -345,6 +414,27 @@ impl VmShared {
     }
 
     pub(crate) fn io_write(&self, port: u16, data: &[u8]) {
+        self.trace_io(port, data, true);
+        let _memory_update = if (0xcfc..=0xcff).contains(&port) && self.mch.lock().is_some() {
+            Some(self.memory_update())
+        } else {
+            None
+        };
+        if matches!(port, 0x3b0..=0x3df | 0x1ce..=0x1d0)
+            && let Some(vga) = self.vga.lock().as_ref()
+        {
+            vga.lock().io_write(port, data);
+            return;
+        }
+        let handled = self
+            .chipset
+            .lock()
+            .as_ref()
+            .is_some_and(|chipset| chipset.io_write(port, data));
+        if handled {
+            self.poll_chipset();
+            return;
+        }
         if port >= IO_ALLOC_BASE {
             let mut root = self.pci_root.lock();
             if root.dispatch_io_write(port, data) {
@@ -353,10 +443,30 @@ impl VmShared {
             }
         }
         self.io_bus.lock().write(port, data);
+        if let Some(chipset) = self.chipset.lock().as_ref() {
+            chipset.sync_pirqs();
+        }
+        if let Some(mch) = self.mch.lock().as_ref()
+            && let Some(error) = mch.lock().error.take()
+        {
+            self.request_exit(ExitReason::Error(error));
+        }
         self.take_guest_sleep();
     }
 
     pub(crate) fn mmio_read(&self, addr: u64, data: &mut [u8]) {
+        self.advance_chipset();
+        if (0xa0000..0xc0000).contains(&addr)
+            && let Some(vga) = self.vga.lock().as_ref()
+        {
+            vga.lock().legacy_read(addr - 0xa0000, data);
+            return;
+        }
+        if let Some(offset) = self.ecam_offset(addr) {
+            use vmlab_hv_devices::BusDevice;
+            crate::pci::PciEcam::new(self.pci_root.clone()).read(offset, data);
+            return;
+        }
         if self.in_pci_window(addr) {
             let mut root = self.pci_root.lock();
             if root.dispatch_mmio_read(addr, data) {
@@ -366,6 +476,22 @@ impl VmShared {
         self.mmio_bus.lock().read(addr, data);
     }
     pub(crate) fn mmio_write(&self, addr: u64, data: &[u8]) {
+        self.advance_chipset();
+        if (0xa0000..0xc0000).contains(&addr)
+            && let Some(vga) = self.vga.lock().as_ref()
+        {
+            vga.lock().legacy_write(addr - 0xa0000, data);
+            return;
+        }
+        if let Some(offset) = self.ecam_offset(addr) {
+            let _memory_update = self.memory_update();
+            use vmlab_hv_devices::BusDevice;
+            crate::pci::PciEcam::new(self.pci_root.clone()).write(offset, data);
+            if let Some(chipset) = self.chipset.lock().as_ref() {
+                chipset.sync_pirqs();
+            }
+            return;
+        }
         if self.in_pci_window(addr) {
             let mut root = self.pci_root.lock();
             if root.dispatch_mmio_write(addr, data) {
@@ -376,8 +502,120 @@ impl VmShared {
     }
 
     fn in_pci_window(&self, addr: u64) -> bool {
+        if self.mch.lock().is_some() {
+            return true;
+        }
         let ((b32, e32), (b64, e64)) = self.pci_windows;
         (b32 <= addr && addr < e32) || (b64 <= addr && addr < e64)
+    }
+
+    fn ecam_offset(&self, addr: u64) -> Option<u64> {
+        let mch = self.mch.lock();
+        let (base, size) = mch.as_ref()?.lock().ecam_window()?;
+        addr.checked_sub(base).filter(|offset| *offset < size)
+    }
+
+    fn clock_running(&self, running: bool) {
+        if let Some(chipset) = self.chipset.lock().as_ref() {
+            chipset.set_running(running);
+        }
+    }
+
+    fn advance_chipset(&self) {
+        if let Some(chipset) = self.chipset.lock().as_ref() {
+            chipset.advance();
+        }
+    }
+
+    fn poll_chipset(&self) {
+        if self.last_frame.lock().elapsed() >= std::time::Duration::from_millis(16) {
+            if let Some(display) = self.display.lock().as_ref() {
+                if let Err(e) = display.publish() {
+                    eprintln!("display frame: {e}");
+                }
+                if let Some(chipset) = self.chipset.lock().as_ref() {
+                    display.set_leds(chipset.ps2.lock().leds() as u32);
+                }
+            }
+            *self.last_frame.lock() = std::time::Instant::now();
+        }
+        if self.status() == RunState::Running
+            && let Some(xhci) = self.xhci.lock().as_ref()
+        {
+            xhci.lock().poll();
+        }
+        let chipset = self.chipset.lock().clone();
+        let Some(chipset) = chipset else { return };
+        chipset.advance();
+        let action = chipset.power.lock().take();
+        use vmlab_hv_devices::chipset::lpc::PowerAction;
+        match action {
+            Some(PowerAction::PowerOff | PowerAction::Hibernate) => {
+                self.request_exit(ExitReason::Shutdown(ShutdownReason::GuestShutdown))
+            }
+            Some(PowerAction::Reset) => {
+                self.request_exit(ExitReason::Shutdown(ShutdownReason::GuestReset))
+            }
+            Some(PowerAction::Suspend) => {
+                *self.state.lock() = RunState::Suspended;
+                self.clock_running(false);
+                self.kick_all();
+                self.emit(Event::Suspend);
+            }
+            None => {}
+        }
+        if let Some(error) = chipset.error.lock().take() {
+            self.request_exit(ExitReason::Error(error));
+        }
+    }
+
+    pub(crate) fn take_smi(&self) -> bool {
+        self.chipset.lock().as_ref().is_some_and(|c| {
+            c.smi_pending
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        })
+    }
+
+    fn trace_io(&self, port: u16, data: &[u8], write: bool) {
+        if let Some(trace) = &self.io_trace {
+            let mut trace = trace.lock();
+            if trace.len() == 12 {
+                trace.pop_front();
+            }
+            trace.push_back(format!(
+                "{} {port:#x} {data:x?}",
+                if write { "out" } else { "in" }
+            ));
+        }
+    }
+
+    /// No CPU may execute through a temporarily removed PAM memslot. Exit
+    /// KVM_RUN on every CPU before changing readonly permissions.
+    fn memory_update(&self) -> MemoryUpdateGuard<'_> {
+        let writer = self.memory_writer.lock();
+        let mut gate = self.memory_gate.lock();
+        gate.blocked = true;
+        self.kick_all();
+        while gate.in_kvm != 0 {
+            // A signal can arrive just before KVM_RUN. Reassert the kick
+            // while a CPU remains in flight, including APs waiting for SIPI.
+            self.memory_cv
+                .wait_for(&mut gate, std::time::Duration::from_millis(1));
+            self.kick_all();
+        }
+        MemoryUpdateGuard {
+            shared: self,
+            _writer: writer,
+        }
+    }
+
+    pub(crate) fn enter_kvm(&self) -> KvmRunGuard<'_> {
+        let mut gate = self.memory_gate.lock();
+        while gate.blocked {
+            self.memory_cv.wait(&mut gate);
+        }
+        gate.in_kvm += 1;
+        KvmRunGuard(self)
     }
 }
 
@@ -387,6 +625,7 @@ pub struct Vm {
     vcpus: Vec<VcpuThread>,
     /// Guest RAM, kept for snapshot orchestration and later vhost-user.
     pub ram: Arc<GuestRam>,
+    timer: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Vm {
@@ -407,7 +646,34 @@ impl Vm {
             .map(|(id, fd)| VcpuThread::spawn(id, fd, shared.clone()))
             .collect::<std::io::Result<Vec<_>>>()
             .map_err(|e| VmmError::Other(format!("spawning vCPU threads: {e}")))?;
-        Ok(Vm { shared, vcpus, ram })
+        let timer = if shared.chipset.lock().is_some() {
+            let weak = Arc::downgrade(&shared);
+            Some(
+                std::thread::Builder::new()
+                    .name("q35-timers".into())
+                    .spawn(move || {
+                        while let Some(shared) = weak.upgrade() {
+                            if shared.exited() {
+                                break;
+                            }
+                            shared.poll_chipset();
+                            let mut state = shared.state.lock();
+                            shared
+                                .state_cv
+                                .wait_for(&mut state, std::time::Duration::from_millis(1));
+                        }
+                    })
+                    .map_err(|e| VmmError::Other(format!("spawning chipset timer: {e}")))?,
+            )
+        } else {
+            None
+        };
+        Ok(Vm {
+            shared,
+            vcpus,
+            ram,
+            timer,
+        })
     }
 
     /// A handle for the control server and tests.
@@ -426,6 +692,70 @@ impl Vm {
         for vcpu in self.vcpus.drain(..) {
             vcpu.join();
         }
+        if let Some(timer) = self.timer.take() {
+            let _ = timer.join();
+        }
+        if std::env::var_os("VMLAB_HV_DIAGNOSTICS").is_some() {
+            for (id, vcpu) in self.shared.vcpus.lock().iter() {
+                let fd = vcpu.lock();
+                if let (Ok(regs), Ok(sregs)) = (fd.get_regs(), fd.get_sregs()) {
+                    eprintln!(
+                        "vcpu {id}: cs={:#x} rip={:#x} ax={:#x} dx={:#x} cr0={:#x}",
+                        sregs.cs.base, regs.rip, regs.rax, regs.rdx, sregs.cr0
+                    );
+                }
+                eprintln!(
+                    "vcpu {id} SMI state: {:?}",
+                    fd.get_vcpu_events().map(|e| e.smi)
+                );
+            }
+            if let Some(trace) = &self.shared.io_trace {
+                eprintln!("last IO: {:?}", trace.lock());
+            }
+            let mut root = self.shared.pci_root.lock();
+            eprintln!("PCI BAR state: {:?}", root.save_bar_states());
+            for (slot, function) in root.addresses() {
+                if root.config_read(0, slot, function, 0) != 0x1001_1af4 {
+                    continue;
+                }
+                let base = (root.config_read(0, slot, function, 8) as u64 & !15)
+                    | ((root.config_read(0, slot, function, 9) as u64) << 32);
+                let mut common = [0; 64];
+                root.dispatch_mmio_read(base, &mut common);
+                eprintln!("block common config: {common:x?}");
+                let avail = u64::from_le_bytes(common[40..48].try_into().unwrap());
+                let used = u64::from_le_bytes(common[48..56].try_into().unwrap());
+                use vm_memory::Bytes;
+                let mut rings = [0; 8];
+                let _ = self
+                    .ram
+                    .mem
+                    .read_slice(&mut rings[..4], vm_memory::GuestAddress(avail));
+                let _ = self
+                    .ram
+                    .mem
+                    .read_slice(&mut rings[4..], vm_memory::GuestAddress(used));
+                eprintln!("block avail/used: {rings:x?}");
+            }
+            drop(root);
+            if let Some(vga) = self.shared.vga.lock().as_ref() {
+                let mut text = [0; 4000];
+                vga.lock().legacy_read(0x18000, &mut text);
+                let text: Vec<_> = text
+                    .iter()
+                    .step_by(2)
+                    .copied()
+                    .filter(|b| *b != 0)
+                    .collect();
+                eprintln!(
+                    "VGA text: {}",
+                    String::from_utf8_lossy(&text)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
+        }
         reason
     }
 }
@@ -435,6 +765,9 @@ impl Vm {
 pub struct VmHandle(Arc<VmShared>);
 
 impl VmHandle {
+    pub fn serve_display(&self, directory: &std::path::Path) -> Result<(), VmmError> {
+        crate::display::serve(&self.0, directory)
+    }
     /// The shared machine state, for snapshot orchestration in this crate.
     pub(crate) fn shared(&self) -> &Arc<VmShared> {
         &self.0
@@ -452,6 +785,7 @@ impl VmHandle {
             RunState::Running => {
                 *state = RunState::Paused;
                 drop(state);
+                self.0.clock_running(false);
                 self.0.kick_all();
                 self.0.state_cv.notify_all();
                 self.0.emit(Event::Stopped);
@@ -474,6 +808,12 @@ impl VmHandle {
             RunState::Paused | RunState::Suspended => {
                 *state = RunState::Running;
                 drop(state);
+                self.0.clock_running(true);
+                if was == RunState::Suspended
+                    && let Some(chipset) = self.0.chipset.lock().as_ref()
+                {
+                    chipset.lpc.lock().wakeup();
+                }
                 self.0.state_cv.notify_all();
                 self.0.emit(if was == RunState::Suspended {
                     Event::Wakeup
@@ -492,7 +832,11 @@ impl VmHandle {
         if self.0.exit.lock().is_some() {
             return Err("the machine is shutting down".to_string());
         }
-        self.0.pm.lock().press_power_button();
+        if let Some(chipset) = self.0.chipset.lock().as_ref() {
+            chipset.lpc.lock().power_button();
+        } else {
+            self.0.pm.lock().press_power_button();
+        }
         Ok(self.status())
     }
 

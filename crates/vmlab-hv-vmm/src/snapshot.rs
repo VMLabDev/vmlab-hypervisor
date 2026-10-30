@@ -394,7 +394,11 @@ fn save_kernel_state(
         sections.push((p("sregs"), to_json(&fd.get_sregs().map_err(io)?)?));
         sections.push((p("fpu"), encode_fpu(&fd.get_fpu().map_err(io)?)));
         sections.push((p("xsave"), encode_xsave(&fd.get_xsave().map_err(io)?)));
-        sections.push((p("msrs"), encode_msrs(&fd, MIGRATABLE_MSRS)?));
+        let mut indices = MIGRATABLE_MSRS.to_vec();
+        if shared.chipset.lock().is_some() {
+            indices.push(0x9e);
+        } // SMBASE
+        sections.push((p("msrs"), encode_msrs(&fd, &indices)?));
         sections.push((p("lapic"), encode_lapic(&fd.get_lapic().map_err(io)?)));
         sections.push((p("events"), to_json(&fd.get_vcpu_events().map_err(io)?)?));
         sections.push((p("mp_state"), to_json(&fd.get_mp_state().map_err(io)?)?));

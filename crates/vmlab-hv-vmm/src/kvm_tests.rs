@@ -33,6 +33,76 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Where the payload lives; the vCPU enters it in flat real mode.
 const PAYLOAD_ADDR: u64 = 0x8000;
 
+#[test]
+fn q35_seabios_banner_through_control_socket() {
+    const BIOS: &str = "/usr/share/qemu/bios-256k.bin";
+    if !Path::new(BIOS).exists() {
+        eprintln!("skipping: SeaBIOS firmware {BIOS} is not installed");
+        return;
+    }
+    let Some(kvm) = kvm_or_skip() else { return };
+    drop(kvm);
+    let dir = tempfile::tempdir().unwrap();
+    let desc: MachineDescription = serde_json::from_value(serde_json::json!({
+        "machine": "q35", "name": "seabios-test", "arch": "x86_64", "accel": "kvm",
+        "vcpus": 2, "memory_mib": 256,
+        "boot": { "kind": "firmware", "firmware": "seabios", "code": BIOS },
+        "disks": [], "nics": [], "ports": [], "serial_log": dir.path().join("serial.log"),
+        "display": { "device": "std-vga", "pci": {"bus":0,"device":4,"function":0}, "rom": null }
+    }))
+    .unwrap();
+    let (factory, serial) = TestFactory::new();
+    let vm = builder::build(&desc, &factory, true).unwrap();
+    let handle = vm.handle();
+    let socket = dir.path().join("control.sock");
+    crate::control::serve(&socket, &handle).unwrap();
+    let mut client = vmlab_hv_proto::client::Client::connect(&socket).unwrap();
+    assert!(matches!(
+        client.call(Command::Resume).unwrap(),
+        Outcome::Ok { .. }
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut log = String::new();
+    while std::time::Instant::now() < deadline {
+        log = std::fs::read_to_string(&desc.serial_log).unwrap_or_default();
+        log.push_str(&String::from_utf8_lossy(&serial.lock()));
+        if let Some(vga) = handle.shared().vga.lock().as_ref() {
+            let mut text = [0; 4000];
+            vga.lock().legacy_read(0x18000, &mut text);
+            log.push_str(&String::from_utf8_lossy(
+                &text.iter().step_by(2).copied().collect::<Vec<_>>(),
+            ));
+        }
+        if log.contains("SeaBIOS")
+            || handle.status() == vmlab_hv_proto::control::RunState::ShuttingDown
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = client.call(Command::Pause);
+    handle
+        .shared()
+        .wait_quiesced(Duration::from_secs(2))
+        .unwrap();
+    for (id, fd) in handle.shared().vcpus.lock().iter() {
+        let fd = fd.lock();
+        let regs = fd.get_regs().unwrap();
+        let sregs = fd.get_sregs().unwrap();
+        eprintln!(
+            "firmware vcpu {id}: cs={:#x} rip={:#x} ax={:#x} dx={:#x} cr0={:#x}",
+            sregs.cs.base, regs.rip, regs.rax, regs.rdx, sregs.cr0
+        );
+    }
+    let _ = client.call(Command::Quit);
+    let reason = vm.wait();
+    eprintln!("SeaBIOS observation: {log}");
+    assert!(
+        log.contains("SeaBIOS"),
+        "reset-vector boot did not print its banner; exit={reason:?}; log={log}"
+    );
+}
+
 /// A fake 16550A: records every byte written to the port range.
 struct FakeSerial {
     out: Arc<PlMutex<Vec<u8>>>,
@@ -85,7 +155,7 @@ impl DeviceFactory for TestFactory {
         &self,
         disk: &vmlab_hv_proto::machine::Disk,
         _mem: &vmlab_hv_devices::GuestMemory,
-        _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
+        _msi: crate::factory::PciWiring,
     ) -> Result<crate::factory::BuiltBlk, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-blk",
@@ -97,7 +167,7 @@ impl DeviceFactory for TestFactory {
         &self,
         _ports: &[vmlab_hv_proto::machine::SerialPort],
         _mem: &vmlab_hv_devices::GuestMemory,
-        _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
+        _msi: crate::factory::PciWiring,
     ) -> Result<crate::factory::BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-console",
@@ -109,7 +179,7 @@ impl DeviceFactory for TestFactory {
         &self,
         nic: &vmlab_hv_proto::machine::Nic,
         _mem: &vmlab_hv_devices::GuestMemory,
-        _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
+        _msi: crate::factory::PciWiring,
     ) -> Result<crate::factory::BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "virtio-net",
@@ -121,7 +191,7 @@ impl DeviceFactory for TestFactory {
         &self,
         share: &vmlab_hv_proto::machine::FsShare,
         _mem: &vmlab_hv_devices::GuestMemory,
-        _msi: Arc<dyn vmlab_hv_devices::MsiSink>,
+        _msi: crate::factory::PciWiring,
     ) -> Result<crate::factory::BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
             "vhost-user-fs",
@@ -424,6 +494,14 @@ fn real_kernel_boots_and_resets() {
         std::env::temp_dir().join(format!("vmlab-hv-kvm-tests-kernel-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let desc = MachineDescription {
+        machine: Default::default(),
+        cpu: Default::default(),
+        hyperv: vec![],
+        display: None,
+        tablet: None,
+        tpm: None,
+        console_pci: None,
+        ahci_pci: None,
         name: "kernel-test".into(),
         arch: Arch::X86_64,
         accel: Accel::Kvm,

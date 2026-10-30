@@ -90,9 +90,33 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
         // (the snapshot path waits for the thread to park first).
         let mut guard = vcpu.lock();
         guard.set_kvm_immediate_exit(0);
-        match guard.run() {
+        let permit = shared.enter_kvm();
+        let result = guard.run();
+        drop(permit);
+        match result {
             Ok(VcpuExit::IoIn(port, data)) => shared.io_read(port, data),
-            Ok(VcpuExit::IoOut(port, data)) => shared.io_write(port, data),
+            Ok(VcpuExit::IoOut(port, data)) => {
+                shared.io_write(port, data);
+                if port == 0xb2 && shared.take_smi() {
+                    // Complete the deferred OUT before SMM saves RIP. Without
+                    // this completion, RSM can return to the same APMC write.
+                    guard.set_kvm_immediate_exit(1);
+                    let permit = shared.enter_kvm();
+                    let completion = guard.run();
+                    drop(permit);
+                    if !matches!(completion, Err(ref e) if e.errno() == libc::EINTR) {
+                        shared.request_exit(crate::vm::ExitReason::Error(format!(
+                            "completing APMC output before SMI: {completion:?}"
+                        )));
+                        return;
+                    }
+                    guard.set_kvm_immediate_exit(0);
+                    if let Err(e) = guard.smi() {
+                        shared.request_exit(crate::vm::ExitReason::Error(format!("KVM_SMI: {e}")));
+                        return;
+                    }
+                }
+            }
             Ok(VcpuExit::MmioRead(addr, data)) => shared.mmio_read(addr, data),
             Ok(VcpuExit::MmioWrite(addr, data)) => shared.mmio_write(addr, data),
             Ok(VcpuExit::Hlt) => {

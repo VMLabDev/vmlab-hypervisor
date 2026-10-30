@@ -33,6 +33,14 @@ fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(val
 
 fn sample_machine() -> MachineDescription {
     MachineDescription {
+        machine: Default::default(),
+        cpu: Default::default(),
+        hyperv: vec![],
+        display: None,
+        tablet: None,
+        tpm: None,
+        console_pci: None,
+        ahci_pci: None,
         name: "web-1".to_owned(),
         arch: Arch::X86_64,
         accel: Accel::Kvm,
@@ -45,6 +53,10 @@ fn sample_machine() -> MachineDescription {
         },
         disks: vec![
             Disk {
+                pci: None,
+                bus: Default::default(),
+                port: None,
+                cdrom: false,
                 id: "rootfs".to_owned(),
                 path: PathBuf::from("/var/lib/vmlab/web-1/rootfs.squashfs"),
                 format: DiskFormat::Raw,
@@ -52,6 +64,10 @@ fn sample_machine() -> MachineDescription {
                 vmstate: false,
             },
             Disk {
+                pci: None,
+                bus: Default::default(),
+                port: None,
+                cdrom: false,
                 id: "scratch".to_owned(),
                 path: PathBuf::from("/var/lib/vmlab/web-1/scratch.qcow2"),
                 format: DiskFormat::Qcow2,
@@ -60,6 +76,7 @@ fn sample_machine() -> MachineDescription {
             },
         ],
         nics: vec![Nic {
+            pci: None,
             mac: "52:54:00:12:34:56".to_owned(),
             mtu: None,
             attachment: NicAttachment::Stream {
@@ -72,10 +89,12 @@ fn sample_machine() -> MachineDescription {
             socket: PathBuf::from("/run/vmlab/web-1/agent.sock"),
         }],
         shares: vec![FsShare {
+            pci: None,
             tag: "share0".to_owned(),
             socket: PathBuf::from("/run/vmlab/web-1/virtiofs.sock"),
         }],
         audio: Some(Audio {
+            pci: None,
             device: AudioDevice::Hda,
             microphone: false,
             node_name: "vmlab.lab.web-1".to_owned(),
@@ -83,6 +102,102 @@ fn sample_machine() -> MachineDescription {
         }),
         rtc_base: Some("2026-10-30T00:00:00Z".to_owned()),
     }
+}
+
+#[test]
+fn pinned_firmware_boot() {
+    use vmlab_hv_proto::machine::FirmwareKind;
+    wire(
+        &Boot::Firmware {
+            firmware: FirmwareKind::Seabios,
+            code: "/firmware/bios.bin".into(),
+            vars: None,
+            secure_boot: false,
+            bootorder: vec!["/pci@i0cf8/scsi@2/disk@0,0".into()],
+        },
+        r#"{"kind":"firmware","firmware":"seabios","code":"/firmware/bios.bin","vars":null,"secure_boot":false,"bootorder":["/pci@i0cf8/scsi@2/disk@0,0"]}"#,
+    );
+    wire(
+        &Boot::Firmware {
+            firmware: FirmwareKind::Ovmf,
+            code: "/firmware/OVMF_CODE.fd".into(),
+            vars: Some("/vm/OVMF_VARS.fd".into()),
+            secure_boot: true,
+            bootorder: vec![],
+        },
+        r#"{"kind":"firmware","firmware":"ovmf","code":"/firmware/OVMF_CODE.fd","vars":"/vm/OVMF_VARS.fd","secure_boot":true,"bootorder":[]}"#,
+    );
+}
+
+#[test]
+fn q35_devices_and_policy_wire_contract() {
+    use vmlab_hv_proto::machine::*;
+    wire(
+        &PciAddress {
+            bus: 0,
+            device: 31,
+            function: 2,
+        },
+        r#"{"bus":0,"device":31,"function":2}"#,
+    );
+    wire(
+        &Disk {
+            pci: None,
+            bus: DiskBus::Ahci,
+            port: Some(3),
+            cdrom: true,
+            id: "installer".into(),
+            path: "/install.iso".into(),
+            format: DiskFormat::Raw,
+            read_only: true,
+            vmstate: false,
+        },
+        r#"{"bus":"ahci","port":3,"cdrom":true,"id":"installer","path":"/install.iso","format":"raw","read_only":true,"vmstate":false}"#,
+    );
+    wire(
+        &Display {
+            device: DisplayDevice::StdVga,
+            pci: PciAddress {
+                bus: 0,
+                device: 4,
+                function: 0,
+            },
+            rom: None,
+        },
+        r#"{"device":"std-vga","pci":{"bus":0,"device":4,"function":0},"rom":null}"#,
+    );
+    wire(&CpuPolicy::Nested, r#""nested""#);
+    wire(&Machine::Q35, r#""q35""#);
+    wire(
+        &vec![
+            HyperV::Relaxed,
+            HyperV::Vapic,
+            HyperV::Spinlocks,
+            HyperV::Vpindex,
+            HyperV::Runtime,
+            HyperV::Synic,
+            HyperV::Stimer,
+            HyperV::Reset,
+            HyperV::Frequencies,
+            HyperV::Reenlightenment,
+            HyperV::Tlbflush,
+            HyperV::Ipi,
+            HyperV::Evmbcs,
+        ],
+        r#"["relaxed","vapic","spinlocks","vpindex","runtime","synic","stimer","reset","frequencies","reenlightenment","tlbflush","ipi","evmbcs"]"#,
+    );
+    let mut desc = sample_machine();
+    desc.machine = Machine::Q35;
+    desc.cpu = CpuPolicy::Nested;
+    desc.tablet = Some(PciAddress {
+        bus: 0,
+        device: 5,
+        function: 0,
+    });
+    desc.tpm = Some(Tpm {
+        socket: "/vm/swtpm.sock".into(),
+    });
+    round_trip(&desc);
 }
 
 #[test]
@@ -381,6 +496,7 @@ fn audio_microphone_defaults_to_off() {
     assert_eq!(
         serde_json::from_str::<Audio>(json).unwrap(),
         Audio {
+            pci: None,
             device: AudioDevice::VirtioSnd,
             microphone: false,
             node_name: "vmlab.lab.web-1".to_owned(),

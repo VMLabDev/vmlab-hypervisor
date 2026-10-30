@@ -4,7 +4,9 @@
 pub mod acpi;
 pub mod builder;
 pub mod bus;
+pub mod chipset;
 pub mod control;
+mod display;
 pub mod e820;
 pub mod error;
 pub mod factory;
@@ -14,6 +16,7 @@ pub mod loader;
 pub mod memory;
 pub mod pci;
 pub mod pm;
+pub mod q35;
 pub mod snapshot;
 pub mod vcpu;
 pub mod vm;

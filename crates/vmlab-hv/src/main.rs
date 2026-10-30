@@ -51,6 +51,8 @@ fn next_value(argv: &mut impl Iterator<Item = String>, flag: &str) -> Result<Pat
         .ok_or_else(|| format!("{flag} needs a value"))
 }
 
+#[cfg(test)]
+mod acceptance;
 mod devices;
 
 fn main() -> ExitCode {
@@ -104,12 +106,15 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
         ));
     }
 
-    let mut vm = builder::build(&desc, &DeviceSet, args.paused)
+    let mut vm = builder::build(&desc, &DeviceSet, true)
         .map_err(|e| format!("building machine `{}`: {e}", desc.name))?;
     let handle = vm.handle();
 
     // Bind every served socket before the vCPUs run.
     control::serve(&args.control, &handle).map_err(|e| format!("control socket: {e}"))?;
+    handle
+        .serve_display(args.control.parent().unwrap_or(std::path::Path::new(".")))
+        .map_err(|e| e.to_string())?;
 
     spawn_signal_waiter(handle.clone());
 

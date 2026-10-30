@@ -14,7 +14,7 @@ use vmlab_hv_devices::virtio::console::{Console, PortConfig};
 use vmlab_hv_devices::virtio::fs::{Fs, FsConfig};
 use vmlab_hv_devices::virtio::net::{Net, NetConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
-use vmlab_hv_devices::{GuestMemory, IrqLine, MsiSink, VirtioDevice};
+use vmlab_hv_devices::{GuestMemory, IrqLine, VirtioDevice};
 use vmlab_hv_proto::machine::{Disk, DiskFormat, FsShare, Nic, NicAttachment, SerialPort};
 use vmlab_hv_vmm::DeviceUnavailable;
 use vmlab_hv_vmm::factory::{BuiltBlk, BuiltPci, BuiltSerial, SharedDisk, SharedImage};
@@ -29,15 +29,22 @@ impl DeviceSet {
         id: String,
         device: Box<dyn VirtioDevice>,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
-        let dev = Arc::new(Mutex::new(VirtioPciDevice::new(
-            id,
-            device,
-            mem.clone(),
-            Some(msi),
-            None,
-        )));
+        let transport = if msi.transitional {
+            VirtioPciDevice::new_transitional(
+                id,
+                device,
+                mem.clone(),
+                Some(msi.msi),
+                msi.intx,
+                msi.msix_vectors,
+            )
+            .map_err(|e| DeviceUnavailable::new("virtio-pci", e.to_string()))?
+        } else {
+            VirtioPciDevice::new(id, device, mem.clone(), Some(msi.msi), msi.intx)
+        };
+        let dev = Arc::new(Mutex::new(transport));
         Ok(BuiltPci {
             function: dev.clone(),
             snapshot: Some(dev),
@@ -76,7 +83,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         &self,
         disk: &Disk,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltBlk, DeviceUnavailable> {
         let format = match disk.format {
             DiskFormat::Raw => Format::Raw,
@@ -113,7 +120,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         &self,
         ports: &[SerialPort],
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let ports = ports
             .iter()
@@ -135,7 +142,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         &self,
         nic: &Nic,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let mac = parse_mac(&nic.mac)?;
         let id = format!("nic-{}", nic.mac);
@@ -157,7 +164,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         &self,
         share: &FsShare,
         mem: &GuestMemory,
-        msi: Arc<dyn MsiSink>,
+        msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let id = format!("fs-{}", share.tag);
         let fs = Fs::new(

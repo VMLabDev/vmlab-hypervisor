@@ -349,6 +349,14 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
     };
 
     let desc = MachineDescription {
+        machine: Default::default(),
+        cpu: Default::default(),
+        hyperv: vec![],
+        display: None,
+        tablet: None,
+        tpm: None,
+        console_pci: None,
+        ahci_pci: None,
         name: spec.name.clone(),
         arch: Arch::X86_64,
         accel: Accel::Kvm,
@@ -361,6 +369,10 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         },
         disks: vec![
             Disk {
+                pci: None,
+                bus: Default::default(),
+                port: None,
+                cdrom: false,
                 id: "rootfs".to_string(),
                 path: rootfs,
                 format: DiskFormat::Raw,
@@ -368,6 +380,10 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
                 vmstate: false,
             },
             Disk {
+                pci: None,
+                bus: Default::default(),
+                port: None,
+                cdrom: false,
                 id: "scratch".to_string(),
                 path: scratch,
                 format: DiskFormat::Qcow2,
@@ -377,6 +393,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         ],
         nics: if spec.nics > 0 {
             vec![Nic {
+                pci: None,
                 mac: mac_string(TEST_MAC),
                 mtu: None,
                 attachment: NicAttachment::Stream {

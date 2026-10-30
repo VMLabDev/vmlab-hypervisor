@@ -11,7 +11,7 @@ use crate::error::{VmmError, VmmError as E};
 /// Addresses KVM manages inside the PCI hole for real-mode emulation
 /// (kernel memory mapped there, not guest RAM).
 const KVM_TSS_ADDR: usize = 0xFFFBD000;
-const KVM_IDENTITY_MAP_ADDR: u64 = 0xFFFC9000;
+const KVM_IDENTITY_MAP_ADDR: u64 = 0xFFFB_C000;
 
 /// One KVM virtual machine.
 pub struct KvmVm {
@@ -56,11 +56,22 @@ impl KvmVm {
 
     /// Create vCPU `id` with the host's supported CPUID passed through.
     pub fn create_vcpu(&self, id: u8) -> Result<VcpuFd, VmmError> {
+        self.create_vcpu_with_policy(id, 1, vmlab_hv_proto::machine::CpuPolicy::Host)
+    }
+
+    pub fn create_vcpu_with_policy(
+        &self,
+        id: u8,
+        count: u32,
+        policy: vmlab_hv_proto::machine::CpuPolicy,
+    ) -> Result<VcpuFd, VmmError> {
         let vcpu = self
             .vm
             .create_vcpu(id as u64)
             .map_err(|e| E::ioctl("KVM_CREATE_VCPU", e))?;
-        vcpu.set_cpuid2(&self.cpuid)
+        let mut cpuid = self.cpuid.clone();
+        filter_cpuid(&mut cpuid, id, count, policy);
+        vcpu.set_cpuid2(&cpuid)
             .map_err(|e| E::ioctl("KVM_SET_CPUID2", e))?;
         Ok(vcpu)
     }
@@ -83,6 +94,63 @@ impl KvmVm {
         match self.vm.signal_msi(msi) {
             Ok(delivered) => Ok(delivered > 0),
             Err(e) => Err(E::ioctl("KVM_SIGNAL_MSI", e)),
+        }
+    }
+}
+
+/// One socket, `count` cores, one thread per core. Preserve KVM's supported
+/// feature set while removing host topology and nested virtualization leaks.
+pub fn filter_cpuid(
+    cpuid: &mut CpuId,
+    id: u8,
+    count: u32,
+    policy: vmlab_hv_proto::machine::CpuPolicy,
+) {
+    let shift = count.next_power_of_two().trailing_zeros();
+    for entry in cpuid.as_mut_slice() {
+        match entry.function {
+            1 => {
+                entry.ebx =
+                    (entry.ebx & 0x0000_ffff) | (count.min(255) << 16) | ((id as u32) << 24);
+                if count > 1 {
+                    entry.edx |= 1 << 28;
+                } else {
+                    entry.edx &= !(1 << 28);
+                }
+                if policy != vmlab_hv_proto::machine::CpuPolicy::Nested {
+                    entry.ecx &= !(1 << 5);
+                }
+            }
+            4 if entry.eax & 31 != 0 => {
+                entry.eax = (entry.eax & 0x3fff) | ((count.min(64) - 1) << 26);
+            }
+            0xb | 0x1f => {
+                let (width, cpus, level) = match entry.index {
+                    0 => (0, 1, 1),
+                    1 => (shift, count, 2),
+                    _ => (0, 0, 0),
+                };
+                entry.eax = width;
+                entry.ebx = cpus;
+                entry.ecx = (level << 8) | entry.index;
+                entry.edx = id as u32;
+            }
+            0x8000_0001 if policy != vmlab_hv_proto::machine::CpuPolicy::Nested => {
+                entry.ecx &= !(1 << 2)
+            }
+            0x8000_0008 => entry.ecx = (entry.ecx & !0xf0ff) | (count - 1).min(255) | (shift << 12),
+            0x8000_001e => {
+                entry.eax = id as u32;
+                entry.ebx = id as u32;
+                entry.ecx = 0;
+            }
+            0x8000_000a if policy != vmlab_hv_proto::machine::CpuPolicy::Nested => {
+                entry.eax = 0;
+                entry.ebx = 0;
+                entry.ecx = 0;
+                entry.edx = 0;
+            }
+            _ => {}
         }
     }
 }
