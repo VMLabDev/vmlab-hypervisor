@@ -277,7 +277,6 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
         (rfb_listener, true, "display-rfb"),
     ] {
         let server = server.clone();
-        let clients = shared.display_clients.clone();
         std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
@@ -290,15 +289,12 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
                         }
                     };
                     let server = server.clone();
-                    let clients = clients.clone();
-                    clients.fetch_add(1, Ordering::Relaxed);
                     std::thread::spawn(move || {
                         let _ = if rfb {
                             server.serve_rfb(stream)
                         } else {
                             server.serve_native(stream)
                         };
-                        clients.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
             })

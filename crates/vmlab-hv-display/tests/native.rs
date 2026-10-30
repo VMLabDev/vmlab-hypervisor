@@ -44,6 +44,39 @@ fn pixels(fd: &OwnedFd, n: usize) -> Vec<u8> {
 }
 
 #[test]
+fn first_frame_captures_guest_changes_without_connected_clients() {
+    let (server, source, _) = server();
+    for value in [7, 9] {
+        // No producer publication or client is needed to refresh a screenshot.
+        *source.0.lock().unwrap() = frame(value, 2, 2);
+        let (c, h) = client(&server, C::FRAMES);
+        let (_, fds) = configure(&c);
+        let (_, buffer, _, damage) = ready(&c);
+        assert_eq!(damage, vec![frame(value, 2, 2).full()]);
+        assert_eq!(pixels(&fds[buffer as usize], 16), vec![value; 16]);
+        drop(c);
+        h.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn cpu_copy_captures_current_source_without_producer_publication() {
+    let (server, source, _) = server();
+    let (c, h) = client(&server, C::FRAMES | C::CPU_COPY);
+    let (sid, _) = configure(&c);
+    let held = ready(&c);
+    *source.0.lock().unwrap() = frame(8, 2, 2);
+    c.cpu_copy(sid).unwrap();
+    let (_, fds) = configure(&c);
+    let (_, buffer, _, damage) = ready(&c);
+    assert_eq!(damage, vec![frame(8, 2, 2).full()]);
+    assert_eq!(pixels(&fds[buffer as usize], 16), vec![8; 16]);
+    c.release(held.0, held.1, held.2).unwrap();
+    drop(c);
+    h.join().unwrap().unwrap();
+}
+
+#[test]
 fn damage_resize_reconnect_and_real_memfds() {
     let (server, source, _) = server();
     let (c, h) = client(&server, C::FRAMES);
@@ -94,12 +127,14 @@ fn held_buffers_are_immutable_and_slow_clients_skip_independently() {
     let (fast, fh) = client(&server, C::FRAMES);
     configure(&fast);
     let f = ready(&fast);
+    let mut last_seq = f.2;
     fast.release(f.0, f.1, f.2).unwrap();
     for value in 4..=30 {
         *source.0.lock().unwrap() = frame(value, 4, 3);
         server.publish().unwrap();
         let f = ready(&fast);
-        assert_eq!(f.2, value as u64);
+        assert_eq!(f.2, last_seq + 1);
+        last_seq = f.2;
         fast.release(f.0, f.1, f.2).unwrap();
     }
     for (i, (_, buffer, _, _)) in held.iter().enumerate() {
@@ -107,7 +142,7 @@ fn held_buffers_are_immutable_and_slow_clients_skip_independently() {
     }
     slow.release(first.0, first.1, first.2).unwrap();
     let latest = ready(&slow);
-    assert_eq!(latest.2, 30);
+    assert_eq!(latest.2, last_seq);
     assert_eq!(latest.3, vec![frame(30, 4, 3).full()]);
     assert_eq!(pixels(&fds[latest.1 as usize], 48), vec![30; 48]);
     drop(slow);
