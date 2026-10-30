@@ -114,7 +114,16 @@ def scanout():
         with open('/dev/null', 'r+b', buffering=0) as null:
             for stream in range(3):
                 os.dup2(null.fileno(), stream)
-        time.sleep(45)
+        deadline = time.monotonic() + 45
+        switched = False
+        while time.monotonic() < deadline:
+            if not switched and Path('/run/p3-switch').exists():
+                second, second_pitch, second_pixels = dumb(800, 600, b'\x80\x40\x20\xff')
+                second_fb = ioctl(0xae, bytearray(struct.pack('7I', 0, 800, 600, second_pitch, 32, 24, second)))
+                struct.pack_into('I', mode, 16, struct.unpack_from('I', second_fb)[0])
+                ioctl(0xa2, mode)
+                switched = True
+            time.sleep(.01)
         pixels.close()
         cursor_pixels.close()
         os._exit(0)

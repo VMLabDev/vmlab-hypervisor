@@ -32,6 +32,8 @@ this test. Build the binary first when exercising a changed executable.
   guest DRM modesetting produces an 800x600 surface with full damage.
 - The guest installs a white 64x64 hardware cursor. Native messages preserve
   its pixels, hotspot, position and visibility.
+- Replacing the guest scanout with another framebuffer at the same resolution
+  produces a fresh surface configure and different pixels.
 - Guest `/dev/input/event*` records verify native and RFB keys, absolute pointer
   positions, left and middle buttons, and downward wheel direction. Caps Lock
   updates the native LED state.

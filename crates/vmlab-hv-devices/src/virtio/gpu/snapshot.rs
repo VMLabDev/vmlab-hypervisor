@@ -239,6 +239,7 @@ impl Gpu {
         s.preferred = preferred;
         s.events = events;
         s.native = native == 1;
+        s.scanout_generation = s.scanout_generation.wrapping_add(1);
         s.scanout = scanout;
         s.resources = resources;
         s.cursor = cursor;

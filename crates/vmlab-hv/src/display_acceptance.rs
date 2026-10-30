@@ -17,6 +17,7 @@ use vmlab_hv_tests::agent::AgentClient;
 #[derive(Debug, Default)]
 struct State {
     frames: u64,
+    configures: u64,
     width: u32,
     height: u32,
     hash: u64,
@@ -120,6 +121,7 @@ impl Observer {
                     assert_eq!(kind, SurfaceKind::Shm);
                     (width, height, stride) = (w, h, pitch);
                     files = packet.fds.into_iter().map(File::from).collect();
+                    state.0.lock().unwrap().configures += 1;
                 }
                 Message::FrameReady {
                     surface_id,
@@ -303,6 +305,14 @@ impl Observer {
                 && s.resize_damage
                 && s.cursor_shape == (64, 64, 2, 3)
                 && s.cursor_position == (123, 234)
+        });
+        let (configures, hash) = {
+            let state = self.state.0.lock().unwrap();
+            (state.configures, state.hash)
+        };
+        Self::guest(agent, &["touch", "/run/p3-switch"]);
+        self.wait("same-size scanout replacement", |s| {
+            s.configures > configures && s.hash != hash && s.width == 800 && s.height == 600
         });
         let rfb_result = std::process::Command::new("python3")
             .arg("-c")

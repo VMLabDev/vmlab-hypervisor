@@ -124,6 +124,9 @@ impl VirtioVga {
     pub fn cursor(&self) -> Cursor {
         self.gpu.cursor()
     }
+    pub fn scanout_generation(&self) -> u64 {
+        self.gpu.scanout_generation()
+    }
     pub fn request_size(&self, width: u32, height: u32) -> Result<(), DeviceError> {
         self.gpu.request_size(width, height)
     }
