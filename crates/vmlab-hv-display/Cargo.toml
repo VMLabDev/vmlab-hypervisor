@@ -1,0 +1,13 @@
+[package]
+name = "vmlab-hv-display"
+description = "Native frame protocol, client, and RFB server for vmlab-hv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true
