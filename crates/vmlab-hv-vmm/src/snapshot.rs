@@ -328,6 +328,10 @@ fn stream_ram_out(
     let regions = &ram.layout().regions;
     let mut region_header = Vec::new();
     format::push_u32(&mut region_header, regions.len() as u32);
+    for &(base, len) in regions {
+        format::push_u64(&mut region_header, base);
+        format::push_u64(&mut region_header, len);
+    }
     write(&region_header)?;
     let mut enc = format::RamEncoder::new();
     let mut page = vec![0u8; format::PAGE_SIZE as usize];
@@ -338,10 +342,6 @@ fn stream_ram_out(
                 "RAM region {base:#x}+{len:#x} is not page aligned"
             )));
         }
-        let mut head = Vec::new();
-        format::push_u64(&mut head, base);
-        format::push_u64(&mut head, len);
-        write(&head)?;
         let mut chunk = Vec::new();
         let mut off = 0;
         while off < len {
