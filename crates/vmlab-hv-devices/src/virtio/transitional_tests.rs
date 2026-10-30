@@ -13,6 +13,16 @@ const HEADER: u64 = 0x21000;
 const STATUS: u64 = 0x22000;
 
 #[test]
+fn pci_command_does_not_claim_memory_write_invalidate() {
+    let mut driver = Driver::new();
+    config_write(&mut driver.pci, 4, &[0xff; 2]);
+    assert_eq!(driver.pci.config_read(1) & 0xffff, 0x407);
+    let mut modern = VirtioPciDevice::new("modern", block(), memory(), None, None);
+    config_write(&mut modern, 4, &[0xff; 2]);
+    assert_eq!(modern.config_read(1) & 0xffff, 0x407);
+}
+
+#[test]
 fn modern_default_queue_size_activates_and_resets() {
     let mut driver = Driver::new();
     for _ in 0..2 {

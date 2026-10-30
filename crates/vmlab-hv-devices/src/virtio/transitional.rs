@@ -212,7 +212,10 @@ impl VirtioPciDevice {
         for (i, byte) in data.iter().copied().enumerate() {
             let pos = addr + i;
             match pos {
-                4..=5 => set_byte16(&mut self.command, pos - 4, byte),
+                4..=5 => {
+                    set_byte16(&mut self.command, pos - 4, byte);
+                    self.command &= 0x0407;
+                }
                 0x10..=0x13 => set_byte32(&mut legacy.bar0, pos - 0x10, byte),
                 0x14..=0x17 => set_byte32(&mut legacy.bar1, pos - 0x14, byte),
                 0x20..=0x27 => {
