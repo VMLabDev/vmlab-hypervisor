@@ -30,6 +30,7 @@ struct State {
     visible: bool,
     leds: u32,
     error: Option<String>,
+    damage_areas: Vec<u64>,
     images: Images,
 }
 
@@ -135,6 +136,15 @@ pub(super) fn screenshots_after_unobserved_boot(path: &Path, agent: &mut AgentCl
         ],
     );
     let image = screenshot(path);
+    assert_eq!((image.width, image.height), (1280, 800));
+    let edid = Observer::guest(
+        agent,
+        &["sh", "-c", "cat /sys/class/drm/card*-Virtual-1/edid"],
+    );
+    assert_eq!(
+        edid,
+        include_bytes!("../../../docs/hwref/ubuntu-26.04-display/guest/drm/Virtual-1.edid")
+    );
     let text = recognize(&image);
     assert!(
         text.to_lowercase().contains("login:"),
@@ -223,6 +233,12 @@ impl Observer {
                     pixels.hash(&mut hash);
                     let mut s = state.0.lock().unwrap();
                     s.frames += 1;
+                    s.damage_areas.push(
+                        damage
+                            .iter()
+                            .map(|r| u64::from(r.width) * u64::from(r.height))
+                            .sum(),
+                    );
                     s.width = width;
                     s.height = height;
                     let next_hash = hash.finish();
@@ -341,6 +357,7 @@ impl Observer {
             assert!(Instant::now() < deadline, "Linux console OCR: {text:?}");
         }
         eprintln!("P3 recognized Linux console text in native frame pixels");
+        self.exercise_damage(agent);
         let script = include_str!("../tests/guest_display.py");
         let launch = format!(
             "python3 -c {} record >/run/p3-recorder.log 2>&1 &",
@@ -416,6 +433,80 @@ impl Observer {
         let events = Self::guest(agent, &["python3", "-c", script, "check"]);
         eprintln!("P3 input: {}", String::from_utf8_lossy(&events));
     }
+
+    fn exercise_damage(&self, agent: &mut AgentClient) {
+        let edid = Self::guest(
+            agent,
+            &["sh", "-c", "cat /sys/class/drm/card*-Virtual-1/edid"],
+        );
+        assert_eq!(
+            edid,
+            include_bytes!("../../../docs/hwref/ubuntu-26.04-display/guest/drm/Virtual-1.edid")
+        );
+        let size = Self::guest(agent, &["cat", "/sys/class/graphics/fb0/virtual_size"]);
+        assert_eq!(String::from_utf8_lossy(&size).trim(), "1280,800");
+        if let Some(root) = std::env::var_os("VMLAB_HV_DISPLAY_HWREF") {
+            let root = std::path::PathBuf::from(root).join("guest/drm");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("display.json"),
+                b"{\"kind\":\"display\",\"version\":1}\n",
+            )
+            .unwrap();
+            std::fs::write(root.join("Virtual-1.edid"), &edid).unwrap();
+            std::fs::write(root.join("framebuffer-size.txt"), &size).unwrap();
+        }
+        Self::guest(
+            agent,
+            &[
+                "sh",
+                "-c",
+                r"systemctl stop getty@tty1; printf '\033[?25l\033[2J\033[HIdle damage check' >/dev/tty1; sleep 2",
+            ],
+        );
+        let before = self.state.0.lock().unwrap().frames;
+        std::thread::sleep(Duration::from_secs(2));
+        assert_eq!(
+            self.state.0.lock().unwrap().frames,
+            before,
+            "idle console produced frames"
+        );
+        Self::guest(agent, &["sh", "-c", r"printf '\033[Hj' >/dev/tty1"]);
+        self.wait("single-character damage", |s| s.frames > before);
+        std::thread::sleep(Duration::from_millis(500));
+        {
+            let state = self.state.0.lock().unwrap();
+            let areas = &state.damage_areas[before as usize..];
+            assert!(!areas.is_empty());
+            assert!(
+                areas.iter().all(|area| *area > 0 && *area <= 4096),
+                "character damage: {areas:?}"
+            );
+        }
+        let before = self.state.0.lock().unwrap().frames;
+        Self::guest(
+            agent,
+            &["sh", "-c", r"printf '\033[?25h' >/dev/tty1; sleep 2"],
+        );
+        self.wait("cursor blink damage", |s| s.frames >= before + 2);
+        {
+            let state = self.state.0.lock().unwrap();
+            let areas = &state.damage_areas[before as usize..];
+            assert!(
+                areas.iter().all(|area| *area > 0 && *area <= 4096),
+                "cursor damage: {areas:?}"
+            );
+            eprintln!("S1 1280x800, QEMU-identical EDID, idle suppressed; cursor damage {areas:?}");
+        }
+        Self::guest(
+            agent,
+            &["sh", "-c", r"printf '\033[?25l' >/dev/tty1; sleep 1"],
+        );
+    }
 }
 
 fn shell_quote(text: &str) -> String {
@@ -429,4 +520,103 @@ impl Drop for Observer {
             let _ = reader.join();
         }
     }
+}
+
+#[test]
+fn qemu_ubuntu_display_reference() {
+    qemu_display_reference("virtio-vga");
+}
+
+#[test]
+fn qemu_ubuntu_standard_vga_display_reference() {
+    qemu_display_reference("VGA");
+}
+
+fn qemu_display_reference(device: &str) {
+    use vmlab_hv_tests::process::ManagedChild;
+    let Some(template) =
+        super::acceptance::template("ubuntu-26.04", "VMLAB_HV_TEMPLATE_UBUNTU_26_04")
+    else {
+        eprintln!("SKIP QEMU display reference: Ubuntu 26.04 template absent");
+        return;
+    };
+    if !Path::new("/dev/kvm").exists() {
+        eprintln!("SKIP QEMU display reference: /dev/kvm absent");
+        return;
+    }
+    if Command::new("qemu-system-x86_64")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("SKIP QEMU display reference: qemu-system-x86_64 absent");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let disk = dir.path().join("disk.qcow2");
+    vmlab_disk::ops::create_linked_clone(&template, &disk).unwrap();
+    let socket = dir.path().join("agent.sock");
+    let mut command = Command::new("qemu-system-x86_64");
+    command
+        .args([
+            "-machine",
+            "q35",
+            "-accel",
+            "kvm",
+            "-cpu",
+            "host,vmx=off,svm=off",
+            "-smp",
+            "2",
+            "-m",
+            "4096M",
+            "-display",
+            "none",
+            "-monitor",
+            "none",
+            "-serial",
+            "none",
+            "-device",
+            "virtio-serial-pci",
+            "-chardev",
+        ])
+        .arg(format!(
+            "socket,id=agent,path={},server=on,wait=off",
+            socket.display()
+        ))
+        .args([
+            "-device",
+            "virtserialport,chardev=agent,name=vmlab.agent.0",
+            "-drive",
+        ])
+        .arg(format!(
+            "file={},format=qcow2,if=none,id=disk",
+            disk.display()
+        ))
+        .args([
+            "-device",
+            "virtio-blk-pci,drive=disk,bootindex=50",
+            "-device",
+            device,
+        ]);
+    let _process = ManagedChild::spawn(&mut command).unwrap();
+    let mut agent = AgentClient::connect(&socket, Duration::from_secs(120)).unwrap();
+    let edid = Observer::guest(
+        &mut agent,
+        &["sh", "-c", "cat /sys/class/drm/card*-Virtual-1/edid"],
+    );
+    eprintln!("QEMU EDID ({} bytes): {edid:02x?}", edid.len());
+    if let Some(output) = std::env::var_os("VMLAB_HV_EDID_CAPTURE") {
+        std::fs::write(&output, &edid).unwrap();
+        let size = Observer::guest(&mut agent, &["cat", "/sys/class/graphics/fb0/virtual_size"]);
+        assert_eq!(String::from_utf8_lossy(&size).trim(), "1280,800");
+        std::fs::write(
+            Path::new(&output).with_file_name("framebuffer-size.txt"),
+            size,
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        edid,
+        include_bytes!("../../../docs/hwref/ubuntu-26.04-display/guest/drm/Virtual-1.edid")
+    );
 }

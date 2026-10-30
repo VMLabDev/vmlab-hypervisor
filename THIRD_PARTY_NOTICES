@@ -227,3 +227,55 @@ ad804a6ecf1d3c4337f18b56092fc54d8ca574fa, Copyright 2018 The ChromiumOS
 Authors. BSD-3-Clause; the complete licence is in LICENSE.crosvm.
 
 rutabaga_gfx 0.1.80 and magma-gpu 0.1.80 are dependencies, not copied code.
+
+toolchain/sail/ — the Sail toolchain container and its artefacts. No upstream
+source is committed, but the container fetches and the build products derive
+from the following, all BSD-2-Clause:
+
+  - Sail (compiler and C/C++ runtime, including lib/rts.c, which
+    patches/rts-weak-emulator-memory.patch modifies): rems-project/sail at
+    release 0.20.3. Copyright © 2013-2021 Alasdair Armstrong, Anthony Fox,
+    Shaked Flur, Kathyrn Gray, Robert Norton-Wright, Christopher Pulte,
+    Peter Sewell, Brian Campbell, Thomas Bauereiss, Jon French,
+    Dominic Mulligan, Gabriel Kerneis, Stephen Kell, Mark Wassell and
+    collaborators; BSD-2-Clause. https://github.com/rems-project/sail
+  - sail-riscv (the RISC-V architecture model whose Jib IR we emit and whose
+    C++ model build the oracle wraps; the oracle's init/step sequence and
+    platform callbacks mirror c_emulator/riscv_model_impl.cpp):
+    riscv/sail-riscv at commit fc074f99f578954376214c4ca9490152d35d0ec2.
+    Copyright © 2018-2025 Jessica Clarke, Peter Sewell, Alasdair Armstrong,
+    Stephan van Staden and collaborators; BSD-2-Clause.
+    https://github.com/riscv/sail-riscv
+  - isla / isla-sail (the Jib IR dump plugin): rems-project/isla at commit
+    e9b5d945394277656593a0d429466d7fa0a2b4b3. Copyright © 2018-2025 Alasdair
+    Armstrong, Brian Campbell, Kathyrn Gray, Peter Sewell and collaborators;
+    BSD-2-Clause. https://github.com/rems-project/isla
+
+The generated artefacts (target/tcg/riscv64.ir, the C++ model inside
+liboracle.a, and riscv64-config.json) are derivative works of those models
+and carry the same BSD-2-Clause notices; toolchain/sail/oracle/oracle.cpp
+includes the provenance comment.
+
+Licence: BSD-2-Clause (all three projects above)
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

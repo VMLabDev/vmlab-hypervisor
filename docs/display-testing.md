@@ -30,6 +30,10 @@ this test. Build the binary first when exercising a changed executable.
   Linux console. Tesseract recognizes both; a nonblank frame alone cannot pass.
 - The guest reports `virtio_gpudrmfb`. A preferred-size request followed by
   guest DRM modesetting produces an 800x600 surface with full damage.
+- Before resizing, the guest reports 1280x800 and the byte-identical QEMU
+  EDID in `docs/hwref/ubuntu-26.04-display`. A hidden console cursor produces
+  no frames for two seconds after settling. A character change and cursor
+  blinks each damage at most 4096 pixels, with no empty frames.
 - The guest installs a white 64x64 hardware cursor. Native messages preserve
   its pixels, hotspot, position and visibility.
 - Replacing the guest scanout with another framebuffer at the same resolution
@@ -52,6 +56,13 @@ separate vision and recorder S4 checks.
 | `VMLAB_HV_BINARY` | Executable path; otherwise use `target/debug/vmlab-hv` |
 | `VMLAB_HV_TEMPLATE_TIMEOUT` | Agent-ready timeout in seconds; default 120 |
 | `VMLAB_HV_DISPLAY_ARTIFACTS` | Existing directory for OCR input images; absent writes no persistent images |
+| `VMLAB_HV_DISPLAY_HWREF` | Absolute directory for the S1 EDID and framebuffer-size capture |
+
+`qemu_ubuntu_display_reference` boots the same Ubuntu template under QEMU
+and compares its EDID with the checked-in reference. The display hwref README
+gives the capture and diff commands. `edid-decode --check` rejects QEMU's
+CTA extension for its missing VCDB; the device tests preserve that reference
+failure and check that resized timings add no failures.
 
 The display wire format, socket-path defaults and input semantics are in
 `crates/vmlab-hv-display/PROTOCOL.md`.

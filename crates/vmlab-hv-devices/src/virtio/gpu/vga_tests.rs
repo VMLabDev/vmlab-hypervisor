@@ -249,6 +249,17 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
     d.ok(0x103, &[0, 0, 64, 64, 0, 1]);
     let first = d.dev.dma_frame().unwrap().unwrap();
     assert_eq!(&first.pixels[..3], &pixels[..3]);
+    let cpu = d.dev.frame();
+    assert_eq!(&cpu.pixels[..3], &pixels[..3]);
+    assert_eq!(
+        cpu.damage,
+        vec![super::super::Damage {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+        }]
+    );
     d.mem
         .write_slice(&[199, 31, 17, 0].repeat(64 * 64), GuestAddress(0x100000))
         .unwrap();
@@ -305,6 +316,54 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
         truncated[..4].copy_from_slice(&kind.to_le_bytes());
         assert_eq!(code(&d.submit_raw(0, &truncated, 2048)), 0x1205);
     }
+}
+
+#[test]
+fn transfer_flush_damage_is_clipped_to_scanout_and_idle_flushes_are_silent() {
+    let mut d = Driver::new();
+    d.start();
+    d.create(1, 64, 48, 2);
+    d.backing(1, &vec![0; 64 * 48 * 4]);
+    d.transfer(1, 64, 48);
+    d.ok(0x103, &[16, 16, 32, 32, 0, 1]);
+    d.dev.frame();
+    // A transfer is not a flush, and includes pixels outside the scanout.
+    d.mem
+        .write_slice(&vec![42; 64 * 48 * 4], GuestAddress(0x100000))
+        .unwrap();
+    d.transfer(1, 64, 48);
+    assert!(!d.dev.frame().dirty);
+    d.ok(0x104, &[8, 8, 16, 16, 1, 0]);
+    let frame = d.dev.frame();
+    assert_eq!(
+        frame.damage,
+        vec![super::super::Damage {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16
+        }]
+    );
+    assert_eq!(&frame.pixels[..4], &[42, 42, 42, 0]);
+    assert_eq!(&frame.pixels[8 * 4..9 * 4], &[0; 4]);
+    d.ok(0x104, &[8, 8, 16, 16, 1, 0]);
+    assert!(!d.dev.frame().dirty);
+    d.ok(0x104, &[0, 0, 8, 8, 1, 0]);
+    assert!(!d.dev.frame().dirty);
+    // Multiple flushes between captures must retain both regions.
+    d.ok(0x104, &[40, 40, 8, 8, 1, 0]);
+    d.ok(0x104, &[16, 40, 8, 8, 1, 0]);
+    let frame = d.dev.frame();
+    assert_eq!(
+        frame.damage,
+        vec![super::super::Damage {
+            x: 0,
+            y: 16,
+            width: 32,
+            height: 16
+        }]
+    );
+    assert!(d.dev.frame().damage.is_empty());
 }
 
 #[test]
@@ -425,7 +484,7 @@ fn queue_driven_scanout_fences_damage_snapshot_and_reset() {
     d.start();
     let info = d.command(0, 0x100, &[]);
     assert_eq!(code(&info), 0x1101);
-    assert_eq!(code(&info[32..]), 1024);
+    assert_eq!(code(&info[32..]), 1280);
     d.create(1, 3, 2, 2);
     let pixels: Vec<u8> = (0..24).collect();
     d.backing(1, &pixels);
@@ -451,7 +510,7 @@ fn queue_driven_scanout_fences_damage_snapshot_and_reset() {
     let response = d.submit_raw(0, &request, 24);
     assert_eq!(response[4], 1);
     assert_eq!(&response[8..16], &request[8..16]);
-    assert!(d.dev.frame().dirty);
+    assert!(!d.dev.frame().dirty); // A flush without changed pixels is idle.
     assert!(*d.irq.level.lock());
     let state = d.dev.save_state().unwrap();
     d.write(0x14, &[0]);
@@ -486,7 +545,7 @@ fn preferred_size_edid_events_and_cursor_queue() {
     assert_eq!(code(&info[32..]), 1920);
     let e = d.command(0, 0x10a, &[0, 0]);
     assert_eq!(code(&e), 0x1104);
-    assert_eq!(code(&e[24..]), 128);
+    assert_eq!(code(&e[24..]), 256);
     assert_eq!(e[32..160].iter().fold(0u8, |a, b| a.wrapping_add(*b)), 0);
     d.dev.bar_write(2, 0x2004, &1u32.to_le_bytes());
     d.dev.bar_read(2, 0x2000, &mut cfg);

@@ -44,6 +44,48 @@ fn pixels(fd: &OwnedFd, n: usize) -> Vec<u8> {
 }
 
 #[test]
+fn idle_publications_send_no_frames_but_reconfigure_and_cpu_copy_still_work() {
+    let (server, source, _) = server();
+    let (client, worker) = client(&server, C::FRAMES | C::CPU_COPY);
+    let (surface, _) = configure(&client);
+    let (_, buffer, seq, _) = ready(&client);
+    client.release(surface, buffer, seq).unwrap();
+    source.0.lock().unwrap().damage.clear();
+    for _ in 0..100 {
+        server.publish().unwrap();
+    }
+    client
+        .stream()
+        .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+        .unwrap();
+    let error = client.receive().unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    client
+        .stream()
+        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .unwrap();
+    client
+        .send(&M::CpuCopy {
+            surface_id: surface,
+        })
+        .unwrap();
+    let (_, buffer, next_seq, damage) = ready(&client);
+    assert!(next_seq > seq);
+    assert_eq!(damage, vec![source.0.lock().unwrap().full()]);
+    client.release(surface, buffer, next_seq).unwrap();
+    source.0.lock().unwrap().generation += 1;
+    server.publish().unwrap();
+    let (next_surface, _) = configure(&client);
+    assert_ne!(surface, next_surface);
+    ready(&client);
+    drop(client);
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
 fn first_frame_captures_guest_changes_without_connected_clients() {
     let (server, source, _) = server();
     for value in [7, 9] {

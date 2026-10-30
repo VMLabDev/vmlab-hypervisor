@@ -165,11 +165,37 @@ impl DisplayServer {
 
     /// Capture the source once. No socket or client lock is acquired here.
     pub fn publish(&self) -> io::Result<()> {
+        self.capture(false)
+    }
+
+    fn capture(&self, force: bool) -> io::Result<()> {
         // Keep capture order and publication order identical for dirty sources.
         let _capture = self.shared.capture.lock().unwrap();
         let frame = self.shared.source.frame()?;
         frame.validate()?;
         let mut state = self.shared.state.lock().unwrap();
+        let previous = &state.frame;
+        if !force
+            && frame.damage.is_empty()
+            && (
+                frame.generation,
+                frame.width,
+                frame.height,
+                frame.stride,
+                frame.drm_fourcc,
+                frame.modifier,
+            ) == (
+                previous.generation,
+                previous.width,
+                previous.height,
+                previous.stride,
+                previous.drm_fourcc,
+                previous.modifier,
+            )
+            && std::mem::discriminant(&frame.pixels) == std::mem::discriminant(&previous.pixels)
+        {
+            return Ok(());
+        }
         state.frame = Arc::new(frame);
         state.seq += 1;
         self.shared.changed.notify_all();
@@ -187,6 +213,9 @@ impl DisplayServer {
             .encode()?,
         )?;
         let mut state = self.shared.state.lock().unwrap();
+        if state.cursor == cursor {
+            return Ok(());
+        }
         state.cursor = cursor;
         state.cursor_seq += 1;
         self.shared.changed.notify_all();
@@ -194,6 +223,9 @@ impl DisplayServer {
     }
     pub fn set_leds(&self, mask: u32) {
         let mut state = self.shared.state.lock().unwrap();
+        if state.leds == mask & 7 {
+            return;
+        }
         state.leds = mask & 7;
         state.led_seq += 1;
         self.shared.changed.notify_all();
@@ -299,7 +331,7 @@ impl DisplayServer {
                     if s.surface != surface_id {
                         return Err(invalid("CpuCopy names stale surface"));
                     }
-                    self.publish()?;
+                    self.capture(true)?;
                     s.cpu_copy = true;
                 }
                 Message::Key { .. }
