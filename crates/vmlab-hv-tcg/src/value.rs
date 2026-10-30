@@ -3,7 +3,7 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive;
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Value {
     Unit,
     Bool(bool),

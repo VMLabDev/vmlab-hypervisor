@@ -127,10 +127,17 @@ host threads. No host-FPU shortcut is used.
 ## Caches and the JIT consumer
 
 The decoded cache contains single-instruction blocks keyed by physical fetch
-address, memory write generation, and instruction bits. It is bounded to
-4096 entries. A write makes old entries unreachable; the cache is cleared
-when full. Constructor-specialised instruction bodies are cached separately
-because their semantics do not depend on guest memory.
+address, memory write generation, instruction width and bits, and decoder
+context. A call-graph walk derives that context from every global read or
+written by the generated decoders and their callees. This includes privilege,
+misa, FP/vector enable state, vector type, and exception bookkeeping.
+Architectural state can change a decode without changing instruction memory.
+
+Decoders with memory or external effects are not memoized. A decode that
+changes its context or the memory generation is not cached either. The cache
+is bounded to 4096 entries and is cleared when full. Constructor-specialised
+instruction bodies are cached separately because their semantics do not
+depend on guest memory.
 
 A trace compiler can consume the same `Function`, `Op`, `NativeOperation`,
 and typed register slots. It must convert the explicit control-flow graph

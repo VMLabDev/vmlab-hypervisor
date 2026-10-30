@@ -32,6 +32,28 @@ fn generated_fetch_decode_execute_and_self_modification() {
 }
 
 #[test]
+fn decoder_cache_observes_floating_point_enable_changes() {
+    let mut cpu = cpu(&[0x022081d3]); // fadd.d f3,f1,f2
+    cpu.write_csr(0x305, 0x8000_0100).unwrap();
+    cpu.step().unwrap();
+    assert_eq!(cpu.read_csr(0x342).unwrap(), 2);
+    let status = cpu.read_csr(0x300).unwrap();
+    cpu.write_csr(0x300, status | 0x6000).unwrap();
+    cpu.interpreter
+        .globals
+        .insert("zf1".into(), Value::bits(64, 1.5f64.to_bits()));
+    cpu.interpreter
+        .globals
+        .insert("zf2".into(), Value::bits(64, 2.25f64.to_bits()));
+    cpu.set_pc(0x8000_0000);
+    cpu.step().unwrap();
+    assert_eq!(
+        cpu.interpreter.globals["zf3"].u64().unwrap(),
+        3.75f64.to_bits()
+    );
+}
+
+#[test]
 fn generated_csr_lookup_and_constructor_mismatch() {
     let mut cpu = cpu(&[]);
     let result = cpu

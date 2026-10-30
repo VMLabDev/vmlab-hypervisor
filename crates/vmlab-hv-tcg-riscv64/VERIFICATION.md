@@ -173,3 +173,10 @@ its enabled configuration with FP and vector state enabled. That list is not
 an advertisement that every extension has been validated. In particular,
 the host entropy operation needed by Zkr is not supplied by `FlatMemory`.
 An attempted call fails explicitly rather than supplying fabricated entropy.
+
+A decoder-cache regression test first executes FADD.D with FS disabled, then
+enables FS and retries the same physical instruction without modifying RAM.
+It reproduced an incorrect cached illegal decode, leaving f3 zero instead
+of 3.75. The cache now keys on context derived from the generated decoder's
+global dependencies. The same reproduction passes, and a dependency test
+ensures that the pinned model uses the cache while tracking its CSR inputs.

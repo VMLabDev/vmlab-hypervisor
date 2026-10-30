@@ -1,5 +1,6 @@
 //! Reference execution of the same specialised IR consumed by the trace compiler.
 mod cpu;
+mod decode;
 mod intrinsics;
 #[cfg(feature = "lockstep")]
 pub mod lockstep;
@@ -50,7 +51,8 @@ pub struct Interpreter<'a, M> {
     depth: u32,
     reservation: Option<(u64, u64)>,
     fetch_address: Option<u64>,
-    decode_cache: BTreeMap<(u64, u64, u32), Value>,
+    decode_cache: BTreeMap<decode::CacheKey, Value>,
+    decode_dependencies: decode::Dependencies,
     instruction_cache: BTreeMap<String, std::sync::Arc<Function>>,
     csr_cache: BTreeMap<u16, std::sync::Arc<Function>>,
 }
@@ -69,6 +71,7 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             reservation: None,
             fetch_address: None,
             decode_cache: BTreeMap::new(),
+            decode_dependencies: decode::Dependencies::new(program),
             instruction_cache: BTreeMap::new(),
             csr_cache: BTreeMap::new(),
         }
@@ -305,8 +308,15 @@ impl<'a, M: Memory> Interpreter<'a, M> {
         }
         if matches!(name, "zext_decode" | "zext_decode_compressed")
             && let Some(address) = self.fetch_address
+            && self.decode_dependencies.cacheable
         {
-            let key = (address, self.memory.generation(), args[0].u64()? as u32);
+            let key = decode::CacheKey {
+                address,
+                generation: self.memory.generation(),
+                compressed: name == "zext_decode_compressed",
+                instruction: args[0].u64()? as u32,
+                context: self.decode_dependencies.snapshot(&self.globals),
+            };
             if let Some(value) = self.decode_cache.get(&key) {
                 return Ok(value.clone());
             }
@@ -314,7 +324,13 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             if self.decode_cache.len() >= 4096 {
                 self.decode_cache.clear();
             }
-            self.decode_cache.insert(key, value.clone());
+            // An exception or an observable decoder write must run again on
+            // the next access; memoization must not suppress its effects.
+            if key.context == self.decode_dependencies.snapshot(&self.globals)
+                && key.generation == self.memory.generation()
+            {
+                self.decode_cache.insert(key, value.clone());
+            }
             return Ok(value);
         }
         self.run_function(function, args)
