@@ -51,11 +51,7 @@ impl VcpuThread {
     /// The fd sits in a mutex shared with the snapshot path: this thread
     /// holds it across KVM_RUN only, so a snapshot can take it once the
     /// thread parks.
-    pub fn spawn(
-        id: u8,
-        vcpu: Arc<Mutex<VcpuFd>>,
-        shared: Arc<VmShared>,
-    ) -> std::io::Result<Self> {
+    pub fn spawn(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: Arc<VmShared>) -> std::io::Result<Self> {
         install_kick_handler();
         let handle = std::thread::Builder::new()
             .name(format!("vcpu-{id}"))

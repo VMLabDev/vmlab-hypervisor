@@ -45,13 +45,20 @@ pub struct VmShared {
     /// vCPU file descriptors, shared with the snapshot path: the owning
     /// thread holds each mutex across KVM_RUN, snapshots take it while the
     /// thread is parked.
-    vcpus: Mutex<Vec<(u8, Arc<Mutex<VcpuFd>>)>>,
+    pub(crate) vcpus: Mutex<Vec<(u8, Arc<Mutex<VcpuFd>>)>>,
     /// How many vCPU threads are parked (out of KVM_RUN and waiting on
     /// `state_cv`); a snapshot waits for this to reach the vCPU count.
     parked: Mutex<usize>,
     parked_cv: Condvar,
     /// Guest RAM, shared with the snapshot path and later vhost-user.
     ram: Mutex<Option<Arc<GuestRam>>>,
+    /// What snapshot orchestration needs: machine digest, writable disks,
+    /// and every device with guest-visible state.
+    snapshot: Mutex<Option<Arc<crate::snapshot::SnapshotRegistry>>>,
+    /// Serialises snapshot operations against run-state changes and each
+    /// other: save/load hold it across the whole operation, `pause` and
+    /// `resume` take it briefly.
+    snapshot_op: Mutex<()>,
 }
 
 impl VmShared {
@@ -86,6 +93,8 @@ impl VmShared {
             parked: Mutex::new(0),
             parked_cv: Condvar::new(),
             ram: Mutex::new(None),
+            snapshot: Mutex::new(None),
+            snapshot_op: Mutex::new(()),
         })
     }
 
@@ -178,9 +187,93 @@ impl VmShared {
         }
     }
 
+    /// Register what snapshots need; the builder calls this once.
+    pub(crate) fn set_snapshot_registry(&self, registry: Arc<crate::snapshot::SnapshotRegistry>) {
+        *self.snapshot.lock() = Some(registry);
+    }
+
+    /// The machine's snapshot registry, when the machine is built.
+    pub(crate) fn snapshot_registry(&self) -> Option<Arc<crate::snapshot::SnapshotRegistry>> {
+        self.snapshot.lock().clone()
+    }
+
     /// Guest RAM, when the machine is assembled.
     pub(crate) fn ram(&self) -> Option<Arc<GuestRam>> {
         self.ram.lock().clone()
+    }
+
+    /// Take the snapshot-operation lock; save and load hold it across the
+    /// whole operation so run-state changes cannot interleave.
+    pub(crate) fn begin_snapshot(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.snapshot_op.lock()
+    }
+
+    /// Pause the vCPUs and wait until every one has left KVM_RUN. Returns
+    /// the run state the machine had, for the header and for
+    /// [`VmShared::finish_snapshot`]. The caller holds the snapshot-op
+    /// lock.
+    pub(crate) fn stop_for_snapshot(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<RunState, String> {
+        let was = {
+            let mut state = self.state.lock();
+            match *state {
+                RunState::ShuttingDown => return Err("the machine is shutting down".into()),
+                RunState::Running => {
+                    *state = RunState::Paused;
+                    RunState::Running
+                }
+                was => was,
+            }
+        };
+        if was == RunState::Running {
+            self.kick_all();
+            self.state_cv.notify_all();
+            self.emit(Event::Stopped);
+        }
+        self.wait_quiesced(timeout)
+            .map_err(|e| format!("pausing for a snapshot: {e}"))?;
+        Ok(was)
+    }
+
+    /// Leave the machine in the run state a snapshot recorded: paused
+    /// snapshots stay paused, running ones resume, suspended ones hang back
+    /// in S3. The caller holds the snapshot-op lock.
+    pub(crate) fn finish_snapshot(&self, run_code: u8) {
+        match run_code {
+            crate::snapshot::format::RUN_RUNNING => {
+                let mut state = self.state.lock();
+                if *state == RunState::Paused {
+                    *state = RunState::Running;
+                    drop(state);
+                    self.state_cv.notify_all();
+                    self.emit(Event::Resumed);
+                }
+            }
+            crate::snapshot::format::RUN_SUSPENDED => {
+                let mut state = self.state.lock();
+                if *state == RunState::Paused {
+                    *state = RunState::Suspended;
+                    drop(state);
+                    self.state_cv.notify_all();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The PCI root's BAR state: programmed addresses and mid-sizing
+    /// flags, per slot, in registration order.
+    pub(crate) fn save_pci_bars(&self) -> Vec<(u8, Vec<(u64, bool)>)> {
+        self.pci_root.lock().save_bar_states()
+    }
+
+    /// Restore the PCI root's BAR state from its snapshot section.
+    pub(crate) fn restore_pci_bars(&self, bytes: &[u8]) -> Result<(), String> {
+        let states: Vec<(u8, Vec<(u64, bool)>)> =
+            serde_json::from_slice(bytes).map_err(|e| format!("pci-root state: {e}"))?;
+        self.pci_root.lock().restore_bar_states(&states)
     }
 
     /// Whether the machine has an exit reason.
@@ -342,12 +435,18 @@ impl Vm {
 pub struct VmHandle(Arc<VmShared>);
 
 impl VmHandle {
+    /// The shared machine state, for snapshot orchestration in this crate.
+    pub(crate) fn shared(&self) -> &Arc<VmShared> {
+        &self.0
+    }
+
     pub fn status(&self) -> RunState {
         self.0.status()
     }
 
     /// `pause`: stop issuing guest execution; emits `stopped`.
     pub fn pause(&self) -> Result<RunState, String> {
+        let _op = self.0.snapshot_op.lock();
         let mut state = self.0.state.lock();
         match *state {
             RunState::Running => {
@@ -365,6 +464,7 @@ impl VmHandle {
 
     /// `resume`: start execution; emits `resumed` (or `wakeup` from S3).
     pub fn resume(&self) -> Result<RunState, String> {
+        let _op = self.0.snapshot_op.lock();
         let mut state = self.0.state.lock();
         if self.0.exit.lock().is_some() {
             return Err("the machine is shutting down".to_string());
