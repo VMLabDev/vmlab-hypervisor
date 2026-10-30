@@ -393,6 +393,7 @@ impl XhciController {
                     data: self.get(MSIX + 8),
                 });
                 self.set(PBA, 0);
+                self.set(IMAN, self.get(IMAN) & !1);
                 self.state.interrupt_sent = true;
                 self.state.ehb = true;
                 self.start_moderation();
