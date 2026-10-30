@@ -4,6 +4,7 @@
 pub mod acpi;
 pub mod builder;
 pub mod bus;
+mod clock;
 pub mod control;
 pub mod e820;
 pub mod error;

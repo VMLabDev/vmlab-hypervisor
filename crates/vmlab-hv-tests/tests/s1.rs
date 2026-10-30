@@ -142,6 +142,145 @@ fn snapshot_disk_integrity() {
     snapshot_roundtrip(false, true);
 }
 
+fn guest_seconds(agent: &mut AgentClient) -> i64 {
+    let out = agent
+        .exec(&[BUSYBOX, "date", "+%s"], Duration::from_secs(15))
+        .unwrap();
+    assert_eq!(out.exit_code, 0, "{out:?}");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+fn rtc_seconds(agent: &mut AgentClient) -> i64 {
+    let out = agent
+        .exec(
+            &[BUSYBOX, "cat", "/sys/class/rtc/rtc0/since_epoch"],
+            Duration::from_secs(15),
+        )
+        .unwrap();
+    assert_eq!(out.exit_code, 0, "{out:?}");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn clock_fixed_base() {
+    let Some(assets) = check() else { return };
+    let mut spec = MachineSpec::idle("s1-clock-fixed");
+    spec.rtc_base = Some("2020-01-01T00:00:00Z".into());
+    let mut guest = vmlab_hv_tests::launch(&spec, &assets);
+    let (_ctl, _) = boot_to_idle(&guest, &spec.container_spec(), BOOT);
+    let mut agent = agent_ready(&guest);
+    let seconds = guest_seconds(&mut agent);
+    eprintln!("fixed-base guest epoch seconds: {seconds}");
+    assert!(
+        (1_577_836_800..1_577_836_920).contains(&seconds),
+        "{seconds}"
+    );
+    guest.quit_and_exit_zero();
+}
+
+#[test]
+fn clock_snapshot_keeps_captured_time() {
+    clock_snapshot_roundtrip(None, 1);
+}
+
+#[test]
+fn clock_fixed_base_and_cmos_survive_smp_snapshot() {
+    clock_snapshot_roundtrip(Some("2020-01-01T00:00:00Z"), 2);
+}
+
+fn clock_snapshot_roundtrip(base: Option<&str>, vcpus: u32) {
+    let Some(assets) = check() else { return };
+    let mut spec = MachineSpec::idle("s1-clock-snapshot");
+    spec.rtc_base = base.map(str::to_owned);
+    spec.vcpus = vcpus;
+    let mut guest = vmlab_hv_tests::launch(&spec, &assets);
+    let (_ctl, _) = boot_to_idle(&guest, &spec.container_spec(), BOOT);
+    let mut agent = agent_ready(&guest);
+    let captured = guest_seconds(&mut agent);
+    let captured_rtc = rtc_seconds(&mut agent);
+    assert!(
+        (captured_rtc - captured).abs() <= 2,
+        "CMOS and system clock disagree"
+    );
+    assert!(matches!(
+        guest
+            .control
+            .call(Ctrl::SnapshotSave {
+                name: "clock".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    let wait = std::time::Instant::now();
+    std::thread::sleep(Duration::from_secs(10));
+    let before_load = guest_seconds(&mut agent);
+    assert!(
+        rtc_seconds(&mut agent) - captured_rtc >= 9,
+        "CMOS must tick before restore"
+    );
+    assert!(
+        before_load - captured >= 9,
+        "guest clock must advance before restore"
+    );
+    assert!(matches!(
+        guest
+            .control
+            .call(Ctrl::SnapshotLoad {
+                name: "clock".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    drop(agent);
+    let restored_at = std::time::Instant::now();
+    let mut agent = agent_ready(&guest);
+    let restored = guest_seconds(&mut agent);
+    let restored_rtc = rtc_seconds(&mut agent);
+    let elapsed = restored_at.elapsed().as_secs() as i64;
+    let host = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    eprintln!(
+        "clock captured={captured}, before_load={before_load}, restored={restored}, host={host}, wait={:?}",
+        wait.elapsed()
+    );
+    assert!(
+        (0..=elapsed + 3).contains(&(restored - captured)),
+        "restored clock did not rewind"
+    );
+    assert!(
+        (0..=elapsed + 3).contains(&(restored_rtc - captured_rtc)),
+        "CMOS did not rewind: {captured_rtc} -> {restored_rtc}"
+    );
+    if base.is_none() {
+        assert!(host - restored >= 8, "restored clock caught up to host");
+    } else {
+        assert!(
+            (1_577_836_800..1_577_836_920).contains(&restored),
+            "fixed base lost on restore"
+        );
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        guest_seconds(&mut agent) - restored >= 1,
+        "system clock stopped after restore"
+    );
+    assert!(
+        rtc_seconds(&mut agent) - restored_rtc >= 1,
+        "CMOS stopped after restore"
+    );
+    guest.quit_and_exit_zero();
+}
+
 /// Resolve assets; print the skip reason and return `None` when the S1
 /// acceptance cannot run on this machine.
 fn check() -> Option<Assets> {
