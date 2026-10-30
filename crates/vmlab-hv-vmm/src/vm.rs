@@ -1123,6 +1123,15 @@ mod tests {
 
     #[test]
     fn quiesce_recovers_a_kick_lost_before_entering_kvm() {
+        lost_kick(false);
+    }
+
+    #[test]
+    fn shutdown_recovers_a_kick_lost_before_entering_kvm() {
+        lost_kick(true);
+    }
+
+    fn lost_kick(shutdown: bool) {
         if !std::path::Path::new("/dev/kvm").exists() {
             return;
         }
@@ -1149,6 +1158,16 @@ mod tests {
         let mut vm = Vm::from_parts(shared.clone(), vec![(0, cpu)], ram).unwrap();
         vm.start();
         std::thread::sleep(Duration::from_millis(50));
+        if shutdown {
+            // Record quit without a pending signal, modeling an exit kick
+            // consumed just before the blocked KVM_RUN.
+            *shared.state.lock() = RunState::ShuttingDown;
+            *shared.exit.lock() = Some(ExitReason::Shutdown(ShutdownReason::HostRequest));
+            let start = std::time::Instant::now();
+            vm.wait();
+            assert!(start.elapsed() < Duration::from_millis(250));
+            return;
+        }
         // Model a kick consumed between the run-state check and KVM_RUN:
         // the vCPU is blocked in HLT, with a paused state and no pending signal.
         *shared.state.lock() = RunState::Paused;
