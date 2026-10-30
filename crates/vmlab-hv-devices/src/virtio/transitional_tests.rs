@@ -12,6 +12,29 @@ const DATA: u64 = 0x20000;
 const HEADER: u64 = 0x21000;
 const STATUS: u64 = 0x22000;
 
+#[test]
+fn modern_default_queue_size_activates_and_resets() {
+    let mut driver = Driver::new();
+    for _ in 0..2 {
+        driver.pci.bar_write(4, 0x14, &[0]);
+        driver.pci.bar_write(4, 0x14, &[3]);
+        driver.pci.bar_write(4, 8, &1u32.to_le_bytes());
+        driver.pci.bar_write(4, 12, &1u32.to_le_bytes());
+        driver.pci.bar_write(4, 0x14, &[11]);
+        assert_eq!(read::<2>(&mut driver.pci, 4, 0x18), 128u16.to_le_bytes());
+        driver.avail = 0x11000;
+        driver.used = 0x12000;
+        for (off, addr) in [(0x20, DESC), (0x28, driver.avail), (0x30, driver.used)] {
+            driver.pci.bar_write(4, off, &addr.to_le_bytes());
+        }
+        // SeaBIOS accepts the offered size without writing queue_size.
+        driver.pci.bar_write(4, 0x1c, &1u16.to_le_bytes());
+        driver.pci.bar_write(4, 0x14, &[15]);
+        assert_eq!(read::<1>(&mut driver.pci, 4, 0x14), [15]);
+        driver.request(false, 1);
+    }
+}
+
 fn memory() -> GuestMemory {
     GuestMemory::from_ranges(&[(GuestAddress(0), 1 << 20)]).unwrap()
 }
