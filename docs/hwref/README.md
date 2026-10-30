@@ -86,6 +86,8 @@ MAC addresses, system UUIDs, kernel relocation addresses, and the clocksource
 watchdog's scheduling-delay notice. Boot-log lines are sorted to remove
 asynchronous log ordering. Native host CPUID leaves and host CPU descriptions
 are masked. Hypervisor CPUID leaves and guest CPU counts remain comparable.
+The delay-loop calibration count is masked with BogoMIPS as a run-dependent
+timing measurement. The calibration method remains comparable.
 PCI BAR allocation bases and MSI destinations are masked in text and raw
 config dumps. BAR type bits, sizes, IDs, capabilities, and routing remain.
 ACPI FADT table pointers, FACS wake vectors, root-table pointers, BGRT image

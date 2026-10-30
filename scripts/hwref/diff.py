@@ -168,6 +168,8 @@ def normalize_text(name: str, text: str) -> str:
         text = re.sub(r"0x[0-9a-fA-F]{6,16}\b", "<address>", text)
         text = re.sub(r"\b[0-9a-f]{8,16}\b", "<address>", text)
         text = re.sub(r"(?<![:0-9a-fA-F])\b\d+\.\d+\b(?![.:0-9a-fA-F])", "<measurement>", text)
+        text = re.sub(r"(?m)^(Calibrating delay loop .* BogoMIPS \(lpj=)\d+(\))$",
+                      r"\1<measurement>\2", text)
         text = re.sub(r"(?m)^sched_clock: Marking stable .*", "sched_clock: Marking stable <time>", text)
         text = re.sub(r"(/input/input)\d+\b", r"\1<index>", text)
         text = re.sub(r"(Memory: )\d+K/", r"\1<available>K/", text)

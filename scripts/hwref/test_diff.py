@@ -25,6 +25,16 @@ REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_delay_loop_calibration_is_run_dependent(self):
+        line = "Calibrating delay loop (skipped) preset value.. 8583.91 BogoMIPS (lpj=4291956)\n"
+        original = diff.normalize_text("dmesg.txt", line)
+        self.assertEqual(original, diff.normalize_text("dmesg.txt", line.replace("4291956", "4291932")))
+        changed = line.replace("(skipped) preset value", "using timer specific routine")
+        self.assertNotEqual(original, diff.normalize_text("dmesg.txt", changed))
+        unrelated = "device calibration lpj=4291956\n"
+        self.assertNotEqual(diff.normalize_text("dmesg.txt", unrelated),
+                            diff.normalize_text("dmesg.txt", unrelated.replace("4291956", "4291932")))
+
     def test_setup_data_splits_do_not_change_usable_ram_coverage(self):
         with tempfile.TemporaryDirectory(prefix="hwref-setup-ram-") as tmp:
             root = Path(tmp)
