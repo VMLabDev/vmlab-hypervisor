@@ -260,9 +260,12 @@ impl Qcow2Image {
             None => self.refcount_table.len() as u64 * rbe,
         };
         let host = host_idx * self.cluster_size;
+        self.l2_cache.remove(host);
         // Install the table entry first so refblock_set can resolve it.
         self.refcount_table[table_index as usize] = host;
         self.refcount_table_dirty = true;
+        // A previous scan may have skipped this previously uncovered range.
+        self.free.scan_next = self.free.scan_next.min(table_index * rbe);
         // Zero the block on disk before anything can read it.
         let zeros = vec![0u8; self.cluster_size as usize];
         self.write_file(host, &zeros)?;
@@ -275,6 +278,9 @@ impl Qcow2Image {
     /// Allocate one free cluster (rc 0 -> 1) and return its host offset.
     pub(crate) fn alloc_cluster(&mut self) -> Result<u64> {
         let idx = self.find_free(1)?;
+        // A freed cluster may retain a cached L2 from its previous owner.
+        // Discard it before the storage is used for a new allocation.
+        self.l2_cache.remove(idx * self.cluster_size);
         self.set_cluster_refcount(idx, 1)?;
         Ok(idx * self.cluster_size)
     }
@@ -283,6 +289,7 @@ impl Qcow2Image {
     pub(crate) fn alloc_clusters_contiguous(&mut self, count: u64) -> Result<u64> {
         let first = self.find_free(count)?;
         for idx in first..first + count {
+            self.l2_cache.remove(idx * self.cluster_size);
             self.set_cluster_refcount(idx, 1)?;
         }
         Ok(first * self.cluster_size)
@@ -342,10 +349,7 @@ impl Qcow2Image {
                 self.free.scan_next = (ti + 1) * rbe;
                 continue;
             }
-            if self.load_refblock(ti).is_err() {
-                self.free.scan_next = (ti + 1) * rbe;
-                continue;
-            }
+            self.load_refblock(ti)?;
             let buf = {
                 let (b, _) = self.refblock_cache.get(ti).expect("loaded");
                 b.clone()
@@ -353,6 +357,10 @@ impl Qcow2Image {
             for i in self.free.scan_next % rbe..rbe {
                 if bits_get(&buf, i, self.refcount_bits) == 0 {
                     self.free.set.insert(ti * rbe + i);
+                }
+                self.free.scan_next = ti * rbe + i + 1;
+                if !to_end && self.free.set.len() >= FREE_SCAN_TARGET {
+                    return Ok(());
                 }
             }
             self.free.scan_next = (ti + 1) * rbe;
@@ -477,5 +485,4 @@ impl Qcow2Image {
             self.dec_refcount(cluster_idx)
         }
     }
-
 }

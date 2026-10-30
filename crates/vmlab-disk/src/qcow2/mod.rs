@@ -68,7 +68,9 @@ impl TableCache {
         let mut evicted = Vec::new();
         if !self.map.contains_key(&key) {
             while self.map.len() >= self.cap {
-                let Some(k) = self.order.pop_front() else { break };
+                let Some(k) = self.order.pop_front() else {
+                    break;
+                };
                 if let Some((buf, dirty)) = self.map.remove(&k)
                     && dirty
                 {
@@ -85,6 +87,11 @@ impl TableCache {
         if let Some(entry) = self.map.get_mut(&key) {
             entry.1 = true;
         }
+    }
+
+    fn remove(&mut self, key: u64) {
+        self.map.remove(&key);
+        self.order.retain(|k| *k != key);
     }
 
     fn take_dirty(&mut self) -> Vec<(u64, Vec<u8>)> {
@@ -1292,6 +1299,21 @@ mod tests {
         // The lowest hole goes first, then the next.
         assert_eq!(img.alloc_cluster().unwrap(), a);
         assert_eq!(img.alloc_cluster().unwrap(), c);
+    }
+
+    #[test]
+    fn allocation_rescans_new_refcount_coverage() {
+        let mut img = testsupport::blank(8 * 1024 * 1024);
+        let covered = img.refblock_entries();
+        let first = img.alloc_clusters_contiguous(covered).unwrap();
+        assert!(first > 0);
+        img.flush().unwrap();
+        assert_eq!(img.get_refcount(first / img.cluster_size).unwrap(), 1);
+        assert_eq!(
+            img.get_refcount(first / img.cluster_size + covered - 1)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
