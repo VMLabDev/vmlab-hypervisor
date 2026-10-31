@@ -378,7 +378,8 @@ fn boot(linux: bool, paused_snapshot: bool) {
         if text.contains("OpenSBI") && text.contains("RISC-V EDK2 firmware") {
             break;
         }
-        assert!(process.try_wait().unwrap().is_none(), "{}", diagnostics());
+        let exit = process.try_wait().unwrap();
+        assert!(exit.is_none(), "guest exited: {exit:?}\n{}", diagnostics());
         assert!(
             start.elapsed() < timeout,
             "firmware boot timeout: {}",
