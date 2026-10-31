@@ -57,6 +57,9 @@ pub(super) fn configure_memory<M: Memory>(cpu: &mut Riscv64<M>, size: u64) -> Re
         "zsys_writable_hpm_counters".into(),
         Value::bits(32, 0x0007fff8u32),
     );
+    cpu.interpreter
+        .globals
+        .insert("znum_triggers".into(), Value::int(2));
     Ok(())
 }
 
@@ -82,6 +85,10 @@ mod tests {
         assert_eq!(cpu.read_csr(0xb12).unwrap(), 17);
         cpu.write_csr(0xb13, 17).unwrap();
         assert_eq!(cpu.read_csr(0xb13).unwrap(), 0);
+        cpu.write_csr(0x7a0, 1).unwrap();
+        assert_eq!(cpu.read_csr(0x7a0).unwrap(), 1);
+        cpu.write_csr(0x7a0, u64::MAX).unwrap();
+        assert_eq!(cpu.read_csr(0x7a0).unwrap(), 1);
         cpu.set_pc(0x20000000);
         let state = cpu.save_state();
         cpu.run(1).unwrap();
