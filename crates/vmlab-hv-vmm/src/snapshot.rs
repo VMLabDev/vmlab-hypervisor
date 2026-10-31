@@ -17,6 +17,7 @@
 //! restores RAM, then kernel state, then devices, and leaves the machine in
 //! the run state the snapshot recorded.
 
+mod audit;
 pub mod format;
 
 use std::sync::Arc;
@@ -31,7 +32,7 @@ use kvm_ioctls::VcpuFd;
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use vm_memory::{Bytes, GuestAddress};
+use vm_memory::{Bytes, GuestAddress, GuestMemoryBackend, GuestMemoryRegion};
 use vmlab_disk::Error as DiskError;
 use vmlab_hv_devices::{PciSnapshot, Snapshot};
 
@@ -40,26 +41,6 @@ use crate::vm::VmHandle;
 
 /// How long a snapshot waits for every vCPU to leave KVM_RUN.
 const QUIESCE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Architectural and KVM clock MSRs migrated through KVM_GET_MSRS.
-/// EFER, the APIC base and the PAT ride in `sregs`. Restoring IA32_TSC and
-/// the pvclock registrations keeps guest TSC interpolation on the saved
-/// timeline after RAM and KVM_SET_CLOCK have been restored.
-const MIGRATABLE_MSRS: &[u32] = &[
-    0x0000_0010, // IA32_TSC
-    0x0000_0175, // IA32_SYSENTER_ESP
-    0x0000_0176, // IA32_SYSENTER_EIP
-    0xC000_0081, // IA32_STAR
-    0xC000_0082, // IA32_LSTAR
-    0xC000_0083, // IA32_CSTAR
-    0xC000_0084, // IA32_FMASK
-    0xC000_0100, // IA32_FS_BASE
-    0xC000_0101, // IA32_GS_BASE
-    0xC000_0102, // IA32_KERNEL_GS_BASE
-    0xC000_0103, // IA32_TSC_AUX
-    0x4b56_4d00, // MSR_KVM_WALL_CLOCK_NEW
-    0x4b56_4d01, // MSR_KVM_SYSTEM_TIME_NEW
-];
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct TscState {
@@ -381,6 +362,7 @@ fn capture_and_write(
         sections.extend(node.save().map_err(SnapshotError::Internal)?);
     }
     save_kernel_state(shared, &mut sections)?;
+    audit::write(shared, "save");
     let head = format::encode_header_sections(
         run_code(was),
         env!("CARGO_PKG_VERSION"),
@@ -419,22 +401,31 @@ fn capture_and_write(
     Ok(())
 }
 
+fn ram_regions(ram: &crate::memory::GuestRam) -> Vec<(u64, u64)> {
+    ram.mem
+        .iter()
+        .map(|region| (region.start_addr().0, region.len()))
+        .collect()
+}
+
 /// Walk guest RAM page by page, emitting run-length records.
 fn stream_ram_out(
     ram: &crate::memory::GuestRam,
     write: &mut dyn FnMut(&[u8]) -> Result<(), SnapshotError>,
 ) -> Result<(), SnapshotError> {
-    let regions = &ram.layout().regions;
+    // Firmware adds writable PAM and SMRAM mappings after the boot layout
+    // is built. Capture the complete memory view, not just initial RAM slots.
+    let regions = ram_regions(ram);
     let mut region_header = Vec::new();
     format::push_u32(&mut region_header, regions.len() as u32);
-    for &(base, len) in regions {
+    for &(base, len) in &regions {
         format::push_u64(&mut region_header, base);
         format::push_u64(&mut region_header, len);
     }
     write(&region_header)?;
     let mut enc = format::RamEncoder::new();
     let mut page = vec![0u8; format::PAGE_SIZE as usize];
-    for (base, len) in regions {
+    for (base, len) in &regions {
         let (base, len) = (*base, *len);
         if len % format::PAGE_SIZE != 0 {
             return Err(SnapshotError::Internal(format!(
@@ -491,13 +482,7 @@ pub(crate) fn save_kernel_state(
     sections.push(("pci-root".into(), to_json(&shared.save_pci_bars())?));
     sections.push(("pending-smis".into(), to_json(&shared.save_pending_smis())?));
 
-    let deadline_supported = shared
-        .kvm
-        .kvm
-        .get_msr_index_list()
-        .map_err(io)?
-        .as_slice()
-        .contains(&0x6e0);
+    let msr_indices = shared.kvm.kvm.get_msr_index_list().map_err(io)?;
     let vcpus = shared.vcpus.lock().clone();
     let mut tsc = (clock.flags & kvm_bindings::KVM_CLOCK_HOST_TSC != 0).then_some(TscState {
         host_tsc: clock.host_tsc,
@@ -523,18 +508,20 @@ pub(crate) fn save_kernel_state(
         sections.push((p("sregs"), to_json(&fd.get_sregs().map_err(io)?)?));
         sections.push((p("fpu"), encode_fpu(&fd.get_fpu().map_err(io)?)));
         sections.push((p("xsave"), encode_xsave(&fd.get_xsave().map_err(io)?)));
-        let mut indices = MIGRATABLE_MSRS.to_vec();
-        if deadline_supported {
-            indices.push(0x6e0); // IA32_TSC_DEADLINE
-        }
-        indices.extend(
-            crate::hyperv::snapshot_msr_indices(&shared.kvm.kvm, &fd)
-                .map_err(|e| SnapshotError::Internal(e.to_string()))?,
-        );
-        if shared.chipset.lock().is_some() {
-            indices.push(0x9e);
-        } // SMBASE
-        sections.push((p("msrs"), encode_msrs(&fd, &indices)?));
+        sections.push((p("xcrs"), to_json(&fd.get_xcrs().map_err(io)?)?));
+        sections.push((p("debugregs"), to_json(&fd.get_debug_regs().map_err(io)?)?));
+        let hyperv = crate::hyperv::snapshot_msr_indices(&shared.kvm.kvm, &fd)
+            .map_err(|e| SnapshotError::Internal(e.to_string()))?;
+        let mut indices: Vec<_> = msr_indices
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|index| !(0x4000_0000..0x4000_0200).contains(index) || !hyperv.is_empty())
+            .collect();
+        indices.extend(hyperv.iter().copied());
+        indices.sort_unstable();
+        indices.dedup();
+        sections.push((p("msrs"), encode_msrs(&fd, &indices, &hyperv)?));
         sections.push((p("lapic"), encode_lapic(&fd.get_lapic().map_err(io)?)));
         sections.push((p("events"), to_json(&fd.get_vcpu_events().map_err(io)?)?));
         sections.push((p("mp_state"), to_json(&fd.get_mp_state().map_err(io)?)?));
@@ -654,10 +641,27 @@ fn restore(
         .ram()
         .ok_or_else(|| SnapshotError::Internal("machine has no RAM".into()))?;
 
+    // Validate the region list and complete stream before replacing memory.
+    // Legacy snapshots contain only the original boot layout.
+    let mut validation = reader.clone();
+    let regions = format::decode_ram_regions(&mut validation, |_, _| Ok(()))
+        .map_err(SnapshotError::from_format)?;
+    if !validation.done() {
+        return Err(SnapshotError::from_format(FormatError::Corrupt(
+            "trailing bytes after RAM".into(),
+        )));
+    }
+    let expected = ram_regions(&ram);
+    if regions != expected && regions != ram.layout().regions {
+        return Err(SnapshotError::Incompatible(format!(
+            "snapshot RAM layout {regions:#x?} does not match this machine's {expected:#x?}"
+        )));
+    }
+
     // Zero records are sparse in the stream. An in-place load must clear
     // pages that the guest has dirtied since capture before applying data.
     let zeros = [0u8; 64 * 1024];
-    for &(base, len) in ram.layout().regions.iter() {
+    for &(base, len) in &regions {
         let mut offset = 0;
         while offset < len {
             let count = (len - offset).min(zeros.len() as u64) as usize;
@@ -668,23 +672,12 @@ fn restore(
         }
     }
 
-    let regions = format::decode_ram_regions(&mut reader, |base, run| {
+    format::decode_ram_regions(&mut reader, |base, run| {
         ram.mem
             .write_slice(run, GuestAddress(base))
             .map_err(|e| format!("writing guest page {base:#x}: {e}"))
     })
     .map_err(SnapshotError::from_format)?;
-    if !reader.done() {
-        return Err(SnapshotError::from_format(FormatError::Corrupt(
-            "trailing bytes after RAM".into(),
-        )));
-    }
-    if regions != *ram.layout().regions {
-        return Err(SnapshotError::Incompatible(format!(
-            "snapshot RAM layout {regions:#x?} does not match this machine's {:?}",
-            ram.layout().regions
-        )));
-    }
 
     // Replacing RAM also replaces page tables. Removing the slots forces
     // KVM to invalidate translations even when the restored CR3 is unchanged.
@@ -699,6 +692,7 @@ fn restore(
     }
     crate::memory::register_memslots(&shared.kvm.vm, &ram)
         .map_err(|e| SnapshotError::Internal(format!("registering restored RAM: {e}")))?;
+    audit::write(shared, "ram-restored");
     restore_kernel_state(shared, &sections)?;
     for node in &reg.nodes {
         node.restore(&sections).map_err(SnapshotError::Internal)?;
@@ -712,6 +706,7 @@ fn restore(
     shared
         .sync_vga_mapping()
         .map_err(|e| SnapshotError::Internal(e.to_string()))?;
+    audit::write(shared, "load");
     Ok(header.run_state)
 }
 
@@ -825,33 +820,31 @@ fn decode_xsave(bytes: &[u8]) -> Result<kvm_xsave, SnapshotError> {
     Ok(xsave)
 }
 
-fn encode_msrs(fd: &VcpuFd, indices: &[u32]) -> Result<Vec<u8>, SnapshotError> {
-    let entries: Vec<kvm_msr_entry> = indices
-        .iter()
-        .map(|&index| kvm_msr_entry {
+fn encode_msrs(fd: &VcpuFd, indices: &[u32], required: &[u32]) -> Result<Vec<u8>, SnapshotError> {
+    let mut entries = Vec::new();
+    for &index in indices {
+        let mut msr = Msrs::from_entries(&[kvm_msr_entry {
             index,
-            reserved: 0,
-            data: 0,
-        })
-        .collect();
-    let mut msrs = Msrs::from_entries(&entries)
-        .map_err(|e| SnapshotError::Internal(format!("building the MSR list: {e}")))?;
-    let filled = fd
-        .get_msrs(&mut msrs)
-        .map_err(|e| SnapshotError::Internal(format!("KVM_GET_MSRS: {e}")))?;
-    if filled != indices.len()
-        && indices
-            .iter()
-            .any(|n| (0x4000_0000..0x4000_0200).contains(n))
-    {
-        return Err(SnapshotError::Internal(format!(
-            "KVM_GET_MSRS: saved {filled} of {} MSRs, including Hyper-V state",
-            indices.len()
-        )));
+            ..Default::default()
+        }])
+        .map_err(|e| SnapshotError::Internal(format!("building MSR {index:#x}: {e}")))?;
+        // The system-wide list includes MSRs unavailable under this vCPU's
+        // CPUID policy. Probe separately so one short read cannot drop the tail.
+        if fd
+            .get_msrs(&mut msr)
+            .map_err(|e| SnapshotError::Internal(format!("KVM_GET_MSRS {index:#x}: {e}")))?
+            == 1
+        {
+            entries.push(msr.as_slice()[0]);
+        } else if required.contains(&index) {
+            return Err(SnapshotError::Internal(format!(
+                "KVM_GET_MSRS: required Hyper-V MSR {index:#x} is unavailable"
+            )));
+        }
     }
-    let mut out = Vec::with_capacity(4 + filled * 12);
-    format::push_u32(&mut out, filled as u32);
-    for entry in &msrs.as_slice()[..filled] {
+    let mut out = Vec::with_capacity(4 + entries.len() * 12);
+    format::push_u32(&mut out, entries.len() as u32);
+    for entry in &entries {
         format::push_u32(&mut out, entry.index);
         format::push_u64(&mut out, entry.data);
     }
@@ -962,6 +955,13 @@ pub(crate) fn restore_kernel_state(
         fd.set_sregs(&sregs).map_err(io)?;
         let regs: kvm_regs = from_json(get("regs")?, "regs")?;
         fd.set_regs(&regs).map_err(io)?;
+        if let Some(bytes) = sections.get(&p("xcrs")) {
+            fd.set_xcrs(&from_json(bytes, "xcrs")?).map_err(io)?;
+        }
+        if let Some(bytes) = sections.get(&p("debugregs")) {
+            fd.set_debug_regs(&from_json(bytes, "debugregs")?)
+                .map_err(io)?;
+        }
         let fpu = decode_fpu(get("fpu")?)?;
         fd.set_fpu(&fpu).map_err(io)?;
         let xsave = decode_xsave(get("xsave")?)?;

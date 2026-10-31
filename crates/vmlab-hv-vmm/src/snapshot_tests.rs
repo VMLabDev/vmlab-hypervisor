@@ -133,6 +133,15 @@ fn machine_with_setup(
     disk_mib: u64,
     setup: impl FnOnce(&KvmVm, &mut kvm_ioctls::VcpuFd),
 ) -> Option<Machine> {
+    machine_with_ram_setup(payload, disk_mib, setup, |_, _| {})
+}
+
+fn machine_with_ram_setup(
+    payload: &[u8],
+    disk_mib: u64,
+    setup: impl FnOnce(&KvmVm, &mut kvm_ioctls::VcpuFd),
+    setup_ram: impl FnOnce(&KvmVm, &mut GuestRam),
+) -> Option<Machine> {
     let kvm = kvm_or_skip()?;
     let dir = tempfile::tempdir().ok()?;
     let disk_path = dir.path().join("scratch.qcow2");
@@ -142,8 +151,9 @@ fn machine_with_setup(
     ));
 
     let layout = MemLayout::new(16).ok()?;
-    let ram = GuestRam::anonymous(layout.clone()).ok()?;
+    let mut ram = GuestRam::anonymous(layout.clone()).ok()?;
     register_memslots(&kvm.vm, &ram).ok()?;
+    setup_ram(&kvm, &mut ram);
     ram.mem.write_slice(payload, GuestAddress(0x8000)).ok()?;
 
     let log = Log::default();
@@ -473,6 +483,277 @@ fn paused_snapshots_stay_paused() {
     let before = m.observed().len();
     settle(&m);
     assert!(m.observed().len() > before, "machine runs after resume");
+}
+
+#[test]
+fn control_snapshot_restores_extended_cpu_state() {
+    use kvm_bindings::{Msrs, kvm_msr_entry};
+    use vmlab_hv_proto::{client::Client, control::Command};
+
+    let Some(m) = machine(&[0xeb, 0xfe], 8) else {
+        return;
+    };
+    m.handle.pause().unwrap();
+    m.handle
+        .shared()
+        .wait_quiesced(Duration::from_secs(5))
+        .unwrap();
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = Client::connect(socket).unwrap();
+    let call = |client: &mut Client, command| {
+        assert!(matches!(
+            client.call(command).unwrap(),
+            vmlab_hv_proto::control::Outcome::Ok { .. }
+        ));
+    };
+    let cpus = m.handle.shared().vcpus.lock().clone();
+    let cpu = &cpus[0].1;
+    let set = |saved: bool| {
+        let fd = cpu.lock();
+        let mut debug = fd.get_debug_regs().unwrap();
+        debug.db[0] = if saved { 0x1234 } else { 0x5678 };
+        fd.set_debug_regs(&debug).unwrap();
+        let mut xcrs = fd.get_xcrs().unwrap();
+        assert_eq!(xcrs.nr_xcrs, 1);
+        xcrs.xcrs[0].value = if saved { 3 } else { 1 };
+        fd.set_xcrs(&xcrs).unwrap();
+        let msrs = Msrs::from_entries(&[
+            kvm_msr_entry {
+                index: 0x277,
+                data: if saved {
+                    0x0007_0406_0007_0406
+                } else {
+                    0x0606_0606_0606_0606
+                },
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: 0x174,
+                data: if saved { 0x10 } else { 0x20 },
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        assert_eq!(fd.set_msrs(&msrs).unwrap(), 2);
+    };
+    let read = || {
+        let fd = cpu.lock();
+        let mut msrs = Msrs::from_entries(&[
+            kvm_msr_entry {
+                index: 0x277,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: 0x174,
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        assert_eq!(fd.get_msrs(&mut msrs).unwrap(), 2);
+        (
+            fd.get_debug_regs().unwrap().db[0],
+            fd.get_xcrs().unwrap().xcrs[0].value,
+            msrs.as_slice()[0].data,
+            msrs.as_slice()[1].data,
+        )
+    };
+    set(true);
+    let expected = read();
+    call(&mut client, Command::SnapshotSave { name: "cpu".into() });
+    set(false);
+    call(&mut client, Command::SnapshotLoad { name: "cpu".into() });
+    assert_eq!(
+        read(),
+        expected,
+        "DR0, XCR0, IA32_PAT, IA32_SYSENTER_CS must roll back"
+    );
+}
+
+#[test]
+fn control_snapshot_restores_cet_user_shadow_stack() {
+    use kvm_bindings::{Msrs, kvm_msr_entry};
+    use vmlab_hv_proto::{
+        client::Client,
+        control::{Command, Outcome},
+    };
+
+    let payload = [
+        0xe4, 0x80, // pause before reading the saved context's CET state
+        0x66, 0xb9, 0xa0, 0x06, 0, 0, 0x0f, 0x32, // rdmsr IA32_U_CET
+        0x66, 0xa3, 0, 0x90, // mov [0x9000], eax
+        0x66, 0xb9, 0xa7, 0x06, 0, 0, 0x0f, 0x32, // rdmsr IA32_PL3_SSP
+        0x66, 0xa3, 4, 0x90, // mov [0x9004], eax
+        0xeb, 0xe4, // repeat and pause
+    ];
+    let Some(m) = machine(&payload, 8) else {
+        return;
+    };
+    let indices = m.handle.shared().kvm.kvm.get_msr_index_list().unwrap();
+    if ![0x6a0, 0x6a7]
+        .iter()
+        .all(|index| indices.as_slice().contains(index))
+    {
+        eprintln!("skipping CET snapshot regression: KVM does not expose user CET MSRs");
+        return;
+    }
+    let wait = || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while m.handle.status() != vmlab_hv_proto::control::RunState::Paused {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "CET payload did not pause"
+            );
+            std::thread::yield_now();
+        }
+        m.handle
+            .shared()
+            .wait_quiesced(Duration::from_secs(5))
+            .unwrap();
+    };
+    wait();
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = Client::connect(socket).unwrap();
+    let cpus = m.handle.shared().vcpus.lock().clone();
+    let set = |control, pointer| {
+        let state = Msrs::from_entries(&[
+            kvm_msr_entry {
+                index: 0x6a0,
+                data: control,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: 0x6a7,
+                data: pointer,
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        assert_eq!(cpus[0].1.lock().set_msrs(&state).unwrap(), 2);
+    };
+    // Restoring a user context with its later, zero SSP makes the next
+    // shadow-stack push access -8. Both CET control and PL3_SSP are MSR
+    // migration state; KVM_GET_XSAVE does not capture them.
+    for (control, pointer) in [(1, 0xa000), (0, 0)] {
+        set(control, pointer);
+        assert!(matches!(
+            client
+                .call(Command::SnapshotSave { name: "cet".into() })
+                .unwrap(),
+            Outcome::Ok { .. }
+        ));
+        set(control ^ 1, pointer ^ 0xa000);
+        assert!(matches!(
+            client
+                .call(Command::SnapshotLoad { name: "cet".into() })
+                .unwrap(),
+            Outcome::Ok { .. }
+        ));
+        let mut actual = Msrs::from_entries(&[
+            kvm_msr_entry {
+                index: 0x6a0,
+                ..Default::default()
+            },
+            kvm_msr_entry {
+                index: 0x6a7,
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        assert_eq!(cpus[0].1.lock().get_msrs(&mut actual).unwrap(), 2);
+        assert_eq!(
+            (actual.as_slice()[0].data, actual.as_slice()[1].data),
+            (control, pointer),
+            "snapshot lost user CET control or the ring-3 shadow-stack pointer"
+        );
+        assert!(matches!(
+            client.call(Command::Resume).unwrap(),
+            Outcome::Ok { .. }
+        ));
+        wait();
+        let mut observed = [0; 8];
+        m.vm.ram
+            .mem
+            .read_slice(&mut observed, GuestAddress(0x9000))
+            .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(observed[..4].try_into().unwrap()),
+            control as u32
+        );
+        assert_eq!(
+            u32::from_le_bytes(observed[4..].try_into().unwrap()),
+            pointer as u32
+        );
+        assert!(matches!(
+            client
+                .call(Command::SnapshotDelete { name: "cet".into() })
+                .unwrap(),
+            Outcome::Ok { .. }
+        ));
+    }
+}
+
+#[test]
+fn control_snapshot_restores_ram_outside_the_boot_layout() {
+    use vmlab_hv_proto::{
+        client::Client,
+        control::{Command, Outcome},
+    };
+    let base = GuestAddress(0x2000_0000);
+    let Some(m) = machine_with_ram_setup(
+        &[0xeb, 0xfe],
+        8,
+        |_, _| {},
+        |kvm, ram| {
+            let region =
+                Arc::new(vm_memory::GuestRegionMmap::from_range(base, 4096, None).unwrap());
+            let slot = kvm_bindings::kvm_userspace_memory_region {
+                slot: 128,
+                guest_phys_addr: base.0,
+                memory_size: 4096,
+                userspace_addr: region.as_ptr() as u64,
+                flags: 0,
+            };
+            // SAFETY: the device region remains owned by GuestRam until VM drop.
+            unsafe { kvm.vm.set_user_memory_region(slot) }.unwrap();
+            ram.mem = ram.mem.insert_region(region).unwrap();
+        },
+    ) else {
+        return;
+    };
+    m.handle.pause().unwrap();
+    m.handle
+        .shared()
+        .wait_quiesced(Duration::from_secs(5))
+        .unwrap();
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = Client::connect(socket).unwrap();
+    m.vm.ram.mem.write_slice(b"before", base).unwrap();
+    assert!(matches!(
+        client
+            .call(Command::SnapshotSave {
+                name: "device-ram".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    m.vm.ram.mem.write_slice(b"after!", base).unwrap();
+    assert!(matches!(
+        client
+            .call(Command::SnapshotLoad {
+                name: "device-ram".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    let mut value = [0; 6];
+    m.vm.ram.mem.read_slice(&mut value, base).unwrap();
+    assert_eq!(
+        &value, b"before",
+        "snapshot omitted a firmware/device RAM memslot"
+    );
 }
 
 #[test]

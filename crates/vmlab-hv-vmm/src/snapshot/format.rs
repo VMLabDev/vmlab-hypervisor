@@ -100,7 +100,7 @@ pub(crate) fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 /// A checked little-endian reader over a byte slice.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
