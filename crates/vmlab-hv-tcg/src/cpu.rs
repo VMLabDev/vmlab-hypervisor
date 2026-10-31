@@ -146,6 +146,7 @@ impl<M: Memory> Riscv64<M> {
         restored.specialize = self.specialize;
         restored.interpreter.memoize = self.interpreter.memoize;
         restored.interpreter.indexed = self.interpreter.indexed;
+        restored.interpreter.operation_limit = self.interpreter.operation_limit;
         *self = restored;
         Ok(())
     }

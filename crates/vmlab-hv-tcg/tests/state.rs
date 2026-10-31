@@ -11,6 +11,7 @@ fn snapshot_restores_architecture_and_rebuilds_translation_cache() {
         .unwrap();
     let mut cpu = Riscv64::new(memory).unwrap();
     cpu.specialize = true;
+    cpu.interpreter.operation_limit = u64::MAX;
     cpu.set_pc(0x80000000);
     cpu.run(64).unwrap();
     assert!(cpu.specialization_stats.hits > 0);
@@ -25,6 +26,7 @@ fn snapshot_restores_architecture_and_rebuilds_translation_cache() {
     assert_eq!(cpu.gpr(1).unwrap(), x1);
     assert_eq!(cpu.steps, steps);
     assert!(cpu.specialize);
+    assert_eq!(cpu.interpreter.operation_limit, u64::MAX);
     assert!(cpu.trace_profile().is_empty());
     cpu.run(64).unwrap();
     assert_eq!(cpu.gpr(1).unwrap(), x1 + 32);
