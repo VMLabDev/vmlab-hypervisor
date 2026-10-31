@@ -185,6 +185,113 @@ fn sail_sv39_sv48_page_walks_and_tlb() {
 }
 
 #[test]
+fn unrelated_tlb_entries_do_not_retrain_a_paged_instruction_loop() {
+    let make = || {
+        let mut cpu = paged(8, true);
+        for (index, instruction) in [0x00108093u32, 0xffdff06f].into_iter().enumerate() {
+            cpu.interpreter
+                .memory
+                .write(0x8000_0000 + index as u64 * 4, &instruction.to_le_bytes())
+                .unwrap();
+        }
+        for index in 0..8 {
+            let vpn = 63 + index * 64;
+            let pte = (0x80000u64 << 10) | 0xdf;
+            cpu.interpreter
+                .memory
+                .write(0x8000_3000 + vpn * 8, &pte.to_le_bytes())
+                .unwrap();
+        }
+        cpu.set_gpr(1, 0).unwrap();
+        cpu.interpreter.operation_limit = u64::MAX;
+        cpu
+    };
+    let mut reference = make();
+    let mut specialized = make();
+    specialized.specialize = true;
+    for _ in 0..4 {
+        reference.run(64).unwrap();
+        specialized.run(64).unwrap();
+    }
+    let trained = specialized.specialization_stats.recordings;
+    let mut filled = None;
+    for index in 0..8 {
+        for cpu in [&mut reference, &mut specialized] {
+            let Value::Vector(entries) = &cpu.interpreter.globals["ztlb"] else {
+                panic!("TLB vector expected");
+            };
+            let Value::Union(_, entry) = entries[4].clone() else {
+                panic!("cached code translation expected");
+            };
+            let Value::Struct(mut fields) = *entry else {
+                panic!("TLB entry expected");
+            };
+            let vpn = 63 + index * 64;
+            fields.insert("zvpn".into(), Value::bits(47, vpn));
+            fields.insert("zpteAddr".into(), Value::bits(64, 0x8000_3000u64 + vpn * 8));
+            cpu.interpreter
+                .call("zwrite_TLB", vec![Value::int(63), Value::Struct(fields)])
+                .unwrap();
+        }
+        reference.run(64).unwrap();
+        specialized.run(64).unwrap();
+        assert_eq!(
+            *specialized.interpreter.globals,
+            *reference.interpreter.globals
+        );
+        assert_eq!(specialized.pc().unwrap(), 0x4000);
+        if let Some(recordings) = filled {
+            assert_eq!(specialized.specialization_stats.recordings, recordings);
+        } else {
+            filled = Some(specialized.specialization_stats.recordings);
+        }
+    }
+    let retrained = specialized.specialization_stats.recordings - trained;
+    eprintln!("unused TLB entry replacement: {retrained} retrainings over 8 batches");
+    // The initial None-to-Some shape change can require one specialization;
+    // changing the cached translation's fields must not retrain every batch.
+    assert!(
+        retrained <= 1,
+        "unrelated translations retrained {retrained} times"
+    );
+    let before = reference.gpr(1).unwrap();
+    for cpu in [&mut reference, &mut specialized] {
+        for (index, instruction) in [0x00208093u32, 0xffdff06f].into_iter().enumerate() {
+            cpu.interpreter
+                .memory
+                .write(0x8000_4000 + index as u64 * 4, &instruction.to_le_bytes())
+                .unwrap();
+        }
+        let pte = (0x80004u64 << 10) | 0xdf;
+        cpu.interpreter
+            .memory
+            .write(0x8000_3020, &pte.to_le_bytes())
+            .unwrap();
+        let Value::Vector(entries) = &cpu.interpreter.globals["ztlb"] else {
+            panic!("TLB vector expected");
+        };
+        let Value::Union(_, entry) = entries[4].clone() else {
+            panic!("cached code translation expected");
+        };
+        let Value::Struct(mut fields) = *entry else {
+            panic!("TLB entry expected");
+        };
+        fields.insert("zppn".into(), Value::bits(44, 0x80004u64));
+        fields.insert("zpte".into(), Value::bits(64, pte));
+        cpu.interpreter
+            .call("zwrite_TLB", vec![Value::int(4), Value::Struct(fields)])
+            .unwrap();
+    }
+    reference.run(64).unwrap();
+    specialized.run(64).unwrap();
+    assert_eq!(specialized.gpr(1).unwrap(), before + 64);
+    assert_eq!(
+        *specialized.interpreter.globals,
+        *reference.interpreter.globals
+    );
+}
+
+#[test]
 fn sail_user_fetch_permission_fault() {
     let mut cpu = paged(8, false);
     cpu.step().unwrap();

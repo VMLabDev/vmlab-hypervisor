@@ -31,6 +31,7 @@ fn dynamic_names() -> &'static std::collections::BTreeSet<String> {
             "zminstret",
             "zmtime",
             "zminstret_increment",
+            "ztlb",
         ]
         .into_iter()
         .map(str::to_owned)
