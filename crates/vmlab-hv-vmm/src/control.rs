@@ -536,9 +536,23 @@ mod usb_tests {
         // The host device disappears.
         *f.lost.lock().unwrap() = true;
         f.shared.detach_lost_usb();
+        // The event worker can win the detach and still be publishing its
+        // notification when this poll returns.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let events = loop {
+            let events = f.events.lock().unwrap().clone();
+            if !events.is_empty() {
+                break events;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no device_deleted event"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
         assert!(f.shared.usb_attachments.lock().is_empty());
         assert_eq!(
-            *f.events.lock().unwrap(),
+            events,
             vec![Event::DeviceDeleted {
                 id: "usbhost-1-5".into()
             }]
