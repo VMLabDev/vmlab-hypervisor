@@ -231,6 +231,15 @@ impl DiskImage for SharedDisk {
         self.0.lock().read_at(offset, buf)
     }
 
+    fn read_into(
+        &mut self,
+        offset: u64,
+        len: usize,
+        target: &mut dyn vmlab_disk::ReadTarget,
+    ) -> vmlab_disk::Result<()> {
+        self.0.lock().read_into(offset, len, target)
+    }
+
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> vmlab_disk::Result<()> {
         self.0.lock().write_at(offset, buf)
     }

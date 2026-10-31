@@ -683,6 +683,43 @@ impl Qcow2Image {
         Ok(())
     }
 
+    fn read_target(
+        &mut self,
+        offset: u64,
+        len: usize,
+        target: &mut dyn crate::ReadTarget,
+    ) -> Result<()> {
+        let mut done = 0;
+        while done < len {
+            let abs = offset + done as u64;
+            let (source, count) = self.read_extent(abs, len - done)?;
+            match source {
+                ReadSource::File(host) => target.read_file(&self.file, host, count)?,
+                ReadSource::Zero => target.zero(count)?,
+                ReadSource::Backing => {
+                    let backed = self.backing_image.as_ref().map_or(0, |image| {
+                        image.size().saturating_sub(abs).min(count as u64) as usize
+                    });
+                    if backed != 0 {
+                        self.backing_image
+                            .as_mut()
+                            .unwrap()
+                            .read_into(abs, backed, target)?;
+                    }
+                    target.zero(count - backed)?;
+                }
+                ReadSource::Compressed(entry) => {
+                    let mut cluster = vec![0; self.cluster_size as usize];
+                    self.read_compressed_cluster(entry, &mut cluster)?;
+                    let start = (abs % self.cluster_size) as usize;
+                    target.write_all(&cluster[start..start + count])?;
+                }
+            }
+            done += count;
+        }
+        Ok(())
+    }
+
     fn write_bytes(&mut self, offset: u64, buf: &[u8]) -> Result<()> {
         let mut done = 0usize;
         while done < buf.len() {
@@ -1132,6 +1169,16 @@ impl DiskImage for Qcow2Image {
             )));
         }
         self.read_bytes(offset, buf)
+    }
+
+    fn read_into(
+        &mut self,
+        offset: u64,
+        len: usize,
+        target: &mut dyn crate::ReadTarget,
+    ) -> Result<()> {
+        crate::check_read(offset, len, self.size)?;
+        self.read_target(offset, len, target)
     }
 
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<()> {

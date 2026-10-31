@@ -16,6 +16,16 @@ use vmlab_disk::{Format, SnapshotInfo};
 const QEMU_IMG: &str = "/usr/bin/qemu-img";
 const QEMU_IO: &str = "qemu-io";
 
+#[derive(Default)]
+struct ReadTarget(Vec<u8>);
+
+impl vmlab_disk::ReadTarget for ReadTarget {
+    fn write_all(&mut self, bytes: &[u8]) -> vmlab_disk::Result<()> {
+        self.0.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
 fn qemu_img_available() -> bool {
     Path::new(QEMU_IMG).exists() || which(QEMU_IMG.split('/').next_back().unwrap())
 }
@@ -163,6 +173,9 @@ fn read_all(path: &Path, format: Format) -> Vec<u8> {
     let mut img = vmlab_disk::open(path, format, true).unwrap();
     let mut buf = vec![0u8; img.size() as usize];
     img.read_at(0, &mut buf).unwrap();
+    let mut target = ReadTarget::default();
+    img.read_into(0, buf.len(), &mut target).unwrap();
+    assert_eq!(target.0, buf, "read target differs from buffered read");
     buf
 }
 
@@ -447,7 +460,17 @@ fn s2_bulk_reads_match_qemu_across_mapping_and_backing_boundaries() {
                     expected[offset..offset + len],
                     "{format}, cluster {cluster}, offset {offset}, length {len}"
                 );
+                let mut target = ReadTarget::default();
+                image.read_into(offset as u64, len, &mut target).unwrap();
+                assert_eq!(
+                    target.0, received,
+                    "target read, {format}, cluster {cluster}, offset {offset}"
+                );
             }
+            let mut target = ReadTarget::default();
+            assert!(image.read_into(image.size() - 1, 2, &mut target).is_err());
+            assert!(image.read_into(u64::MAX, 2, &mut target).is_err());
+            assert!(target.0.is_empty());
             qemu_check(&overlay);
         }
     }
