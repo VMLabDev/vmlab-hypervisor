@@ -95,6 +95,15 @@ between empty and filled in Sv39, Sv48, and Sv57, and remap the executing
 page to prove that cached code observes a changed translation. Continuation
 tests cover unused entry shapes, changed indexes, and bounds failures.
 
+Paged data-load testing then exposed repeated Sail fallback on a warmed
+second-page access. Index guards derived entirely from trace-entry inputs
+now reject an incompatible trace before execution, allowing a separate
+cached trace for the new index. Guards that depend on memory reads remain
+ordered continuations. The eight-page regression checks every Sail global
+against the reference interpreter and requires zero source operations on
+each warmed path. Counted-memory tests verify that rejecting a trace does
+not duplicate a store and that a memory-derived index reads MMIO once.
+
 edk2 boot, Linux hardware capture, booted-guest snapshot restoration, and
 boot-to-agent-ready timing are pending. This reference does not establish
 a phase-3b parity pass.
