@@ -32,15 +32,21 @@ class VmSession:
         self.log = log
         self.stderr_path = os.path.join(run_dir, "stderr.log")
         self.stderr_file = open(self.stderr_path, "wb")
+        self.vm_slot = lib.VmSlot.acquire()
         argv = lib.systemd_run_prefix() + vm_argv
         self.log(f"launching: {' '.join(argv)}")
         self.t0 = time.monotonic()
-        self.proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.DEVNULL,
-            stderr=self.stderr_file,
-            start_new_session=True,
-        )
+        try:
+            self.proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=self.stderr_file,
+                start_new_session=True,
+            )
+        except BaseException:
+            self.vm_slot.close()
+            self.stderr_file.close()
+            raise
 
     def exited(self):
         return self.proc.poll() is not None
@@ -82,6 +88,7 @@ class VmSession:
             ["pkill", "-f", self.run_dir], check=False, stdout=subprocess.DEVNULL
         )
         self.stderr_file.close()
+        self.vm_slot.close()
 
     def elapsed(self):
         return time.monotonic() - self.t0
@@ -231,20 +238,19 @@ def hv_machine_description(run_dir, arch, smp, overlay, code_fd, vars_fd):
 
     The guest matches the QEMU backend: `virt` hardware, 2 GiB, one qcow2
     overlay on virtio-blk, edk2 firmware pair, the agent port named
-    `vmlab.agent.0`. `accel` is `tcg` — the point of the comparison. The
-    `machine` field stays at its default until phase 3b/3d adds the `virt`
-    machine kind; until then vmlab-hv itself rejects the description, which
-    the backend reports as a skip.
+    `vmlab.agent.0`. RISC-V uses the virt machine and its edk2 firmware kind.
+    The aarch64 description remains rejected until phase 3d implements it.
     """
     return {
         "name": f"vmlab:bench/{arch}",
         "arch": arch,
+        "machine": "virt" if arch == "riscv64" else "microvm",
         "accel": "tcg",
         "vcpus": smp,
         "memory_mib": 2048,
         "boot": {
             "kind": "firmware",
-            "firmware": "ovmf",
+            "firmware": "edk2_riscv" if arch == "riscv64" else "ovmf",
             "code": code_fd,
             "vars": vars_fd,
             "secure_boot": False,

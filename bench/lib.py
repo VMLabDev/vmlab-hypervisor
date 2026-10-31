@@ -12,6 +12,7 @@ The QEMU argv below is vmlab's own argv for a linux-modern profile VM on the
 """
 
 import json
+import fcntl
 import os
 import shutil
 import socket
@@ -19,6 +20,8 @@ import statistics
 import struct
 import subprocess
 import time
+import tempfile
+from pathlib import Path
 
 BENCH_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(BENCH_DIR)
@@ -41,6 +44,62 @@ MACHINE_ARG = {"aarch64": "virt", "riscv64": "virt,acpi=off"}
 
 # The safety cap every VM-booting command runs under (wave-4 common brief).
 MEMORY_MAX = "24G"
+
+
+def project_vm_count(processes="/proc"):
+    count = 0
+    for process in Path(processes).iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            args = (process / "cmdline").read_bytes().split(b"\0")
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        executable = os.path.basename(args[0])
+        if b"-avd" not in args and (
+            executable.startswith(b"qemu-system-")
+            or executable.startswith(b"vmlab-hv")
+        ):
+            count += 1
+    return count
+
+
+class VmSlot:
+    """Share the Rust test launcher's two file permits and count live guests."""
+
+    def __init__(self, file):
+        self.file = file
+
+    @classmethod
+    def acquire(cls, timeout=600, processes="/proc", directory=None):
+        directory = Path(directory or os.path.join(
+            tempfile.gettempdir(), f"vmlab-hv-vm-slots-{os.geteuid()}"
+        ))
+        directory.mkdir(exist_ok=True)
+        deadline = time.monotonic() + timeout
+        while True:
+            for slot in range(2):
+                file = open(directory / f"{slot}.lock", "a+b")
+                try:
+                    fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    file.close()
+                    continue
+                try:
+                    while project_vm_count(processes) >= 2:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("waiting for fewer than two project VMs")
+                        time.sleep(0.1)
+                    return cls(file)
+                except BaseException:
+                    file.close()
+                    raise
+            if time.monotonic() >= deadline:
+                raise TimeoutError("waiting for a project VM file permit")
+            time.sleep(0.1)
+
+    def close(self):
+        self.file.close()
 
 # ---------------------------------------------------------------------------
 # x86_64 KVM (phase 2, HV-D28): templates, firmware, workloads
@@ -133,6 +192,8 @@ UNIT = {
 
 def workloads(arch, guest="debian-13", suite="full"):
     """The workload list for one run, in report order."""
+    if suite == "boot":
+        return ("boot_to_agent_ready",)
     if arch != "x86_64":
         return TCG_WORKLOADS
     if suite == "g2g":

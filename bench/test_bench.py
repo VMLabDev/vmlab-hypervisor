@@ -280,13 +280,46 @@ class HvMachineTests(unittest.TestCase):
         self.assertEqual(self.desc["accel"], "tcg")
         self.assertEqual(self.desc["vcpus"], 4)
         self.assertEqual(self.desc["memory_mib"], 2048)
-        self.assertEqual(self.desc["boot"]["firmware"], "ovmf")
+        self.assertEqual(self.desc["machine"], "virt")
+        self.assertEqual(self.desc["boot"]["firmware"], "edk2_riscv")
         self.assertEqual(self.desc["ports"][0]["name"], "vmlab.agent.0")
         self.assertEqual(self.desc["disks"][0]["format"], "qcow2")
         self.assertFalse(self.desc["disks"][0]["read_only"])
 
 
 class NoiseControlTests(unittest.TestCase):
+    def test_host_vm_count_excludes_android_and_counts_test_binaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for pid, args in enumerate([
+                b"/usr/bin/qemu-system-riscv64\0-name\0vmlab:test\0",
+                b"/run/vmlab-hv-test-plain\0--machine\0machine.json\0",
+                b"/opt/qemu-system-x86_64\0-avd\0owner\0",
+                b"/usr/bin/python3\0vmlab-hv\0",
+            ], 1):
+                os.mkdir(os.path.join(tmp, str(pid)))
+                with open(os.path.join(tmp, str(pid), "cmdline"), "wb") as file:
+                    file.write(args)
+            self.assertEqual(lib.project_vm_count(tmp), 2)
+            with self.assertRaises(TimeoutError):
+                lib.VmSlot.acquire(timeout=0, processes=tmp, directory=os.path.join(tmp, "slots"))
+
+    def test_vm_slots_release_and_limit_concurrent_launches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            processes = os.path.join(tmp, "processes")
+            os.mkdir(processes)
+            slots = os.path.join(tmp, "slots")
+            first = lib.VmSlot.acquire(timeout=0, processes=processes, directory=slots)
+            second = lib.VmSlot.acquire(timeout=0, processes=processes, directory=slots)
+            try:
+                with self.assertRaises(TimeoutError):
+                    lib.VmSlot.acquire(timeout=0, processes=processes, directory=slots)
+                first.close()
+                third = lib.VmSlot.acquire(timeout=0, processes=processes, directory=slots)
+                third.close()
+            finally:
+                first.close()
+                second.close()
+
     def test_pin_windows(self):
         with mock.patch.object(os, "cpu_count", return_value=32):
             self.assertEqual(lib.pin_cpus(1), "16-19")
@@ -347,6 +380,7 @@ DISPLAY_FIELDS = {"device", "gpu", "render_node", "pci", "rom", "socket", "vnc_s
 class X86WorkloadTests(unittest.TestCase):
     def test_workload_dispatch(self):
         self.assertEqual(lib.workloads("riscv64"), lib.TCG_WORKLOADS)
+        self.assertEqual(lib.workloads("riscv64", suite="boot"), ("boot_to_agent_ready",))
         self.assertEqual(
             lib.workloads("x86_64", "ubuntu-26.04"), lib.X86_UBUNTU_WORKLOADS
         )

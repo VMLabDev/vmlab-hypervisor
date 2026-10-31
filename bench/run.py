@@ -59,8 +59,8 @@ def parse_args(argv):
                         "the template's own for x86_64)")
     p.add_argument("--repeats", type=int, default=3, help="repeats per configuration")
     p.add_argument("--guest", default="debian-13", help="template name")
-    p.add_argument("--suite", choices=("full", "g2g"), default="full",
-                   help="x86_64: full single-VM set, or the guest-to-guest net pair")
+    p.add_argument("--suite", choices=("full", "g2g", "boot"), default="full",
+                   help="full workload set; g2g: x86_64 net pair; boot: TCG boot time only")
     p.add_argument("--cpus", default=None, help="taskset window override (e.g. 16-19)")
     p.add_argument("--hv-bin", default=os.path.join(lib.REPO_DIR, "target/release/vmlab-hv"))
     p.add_argument("--timeout-scale", type=float, default=1.0)
@@ -132,6 +132,10 @@ def one_repeat(args, arch, smp, pin, version, index):
             k: hello.get(k) for k in ("agent_version", "os", "features")
         }
         log(f"agent ready after {result['boot_to_agent_ready']}s")
+
+        if args.suite == "boot":
+            result["samples"] = {"boot_to_agent_ready": result["boot_to_agent_ready"]}
+            return result, backend, session, agent, None
 
         def timed(name, argv, timeout):
             t = time.monotonic()
@@ -1036,6 +1040,8 @@ def main(argv=None):
     arches = resolve_arches(args.arch)
     if args.suite == "g2g" and arches != ["x86_64"]:
         raise lib.BenchError("--suite g2g is an x86_64 suite")
+    if args.suite == "boot" and "x86_64" in arches:
+        raise lib.BenchError("--suite boot is a TCG guest suite")
     commit, dirty = git_commit()
     host = os.uname().nodename
     if "x86_64" in arches:

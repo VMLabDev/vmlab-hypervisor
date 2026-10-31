@@ -26,6 +26,16 @@ regression check (D2). TCG baseline method and first numbers:
 ceiling for a slow backend, `--keep` preserves per-run scratch, `--dry-run`
 prints the plan without booting anything.
 
+For an interpreter boot-time measurement without the SHA256 and xz workloads:
+
+```sh
+python3 bench/run.py --backend vmlab-hv --arch riscv64 --vcpus 1 --repeats 1 --suite boot --timeout-scale 20 --keep
+```
+
+This uses the same spawn-to-agent-Hello clock and history format as the full
+suite. It appends only `boot_to_agent_ready`; it does not establish the full
+TCG performance gate. `--suite boot` is restricted to TCG guests.
+
 ## Workloads
 
 Per guest arch (aarch64, riscv64), per vCPU count (1 and 4), N repeats,
