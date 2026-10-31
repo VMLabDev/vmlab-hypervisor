@@ -22,8 +22,9 @@ pub struct ControlHandler {
 }
 
 /// What an attach opens: (hostbus, hostaddr) to a USB backend.
-pub type UsbOpener =
-    Arc<dyn Fn(u16, u16) -> Result<Box<dyn vmlab_hv_devices::usb::UsbDevice>, String> + Send + Sync>;
+pub type UsbOpener = Arc<
+    dyn Fn(u16, u16) -> Result<Box<dyn vmlab_hv_devices::usb::UsbDevice>, String> + Send + Sync,
+>;
 
 /// The production opener: open `/dev/bus/usb/<bus>/<dev>` and take over its
 /// interfaces (detaching the host driver; a claim failure returns it).
@@ -109,8 +110,7 @@ impl ControlHandler {
                         message: format!("device_add supports the usbx.0 bus, not {bus:?}"),
                     };
                 }
-                let (hostbus, hostaddr) = match (u16::try_from(hostbus), u16::try_from(hostaddr))
-                {
+                let (hostbus, hostaddr) = match (u16::try_from(hostbus), u16::try_from(hostaddr)) {
                     (Ok(bus), Ok(addr)) => (bus, addr),
                     _ => {
                         return Outcome::Error {
@@ -224,8 +224,8 @@ mod usb_tests {
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
-    use vmlab_hv_devices::usb::{SetupPacket, UsbDevice, UsbSpeed, UsbTransfer, XhciController};
     use vmlab_hv_devices::MsiMessage;
+    use vmlab_hv_devices::usb::{SetupPacket, UsbDevice, UsbSpeed, UsbTransfer, XhciController};
     use vmlab_hv_proto::control::{Command, Event, Outcome};
 
     use super::*;
@@ -385,7 +385,10 @@ mod usb_tests {
     fn attach_and_detach_round_trip_with_events() {
         let Some(f) = fixture() else { return };
         // The device lands on a USB2 root port past the tablet.
-        match f.handler.handle(device_add("usbhost-1-5", "usb-host", Some("usbx.0"))) {
+        match f
+            .handler
+            .handle(device_add("usbhost-1-5", "usb-host", Some("usbx.0")))
+        {
             Outcome::Ok { .. } => {}
             other => panic!("attach failed: {other:?}"),
         }
@@ -394,27 +397,39 @@ mod usb_tests {
         assert_eq!(attachments[0].id, "usbhost-1-5");
         assert_eq!(attachments[0].port, 6);
         assert_eq!(attachments[0].hostport, "2");
-        assert!(f
-            .shared
-            .xhci
-            .lock()
-            .as_ref()
-            .unwrap()
-            .lock()
-            .has_host_devices());
+        assert!(
+            f.shared
+                .xhci
+                .lock()
+                .as_ref()
+                .unwrap()
+                .lock()
+                .has_host_devices()
+        );
 
         // Duplicate ids and unknown drivers/buses are refused.
         assert!(matches!(
-            f.handler.handle(device_add("usbhost-1-5", "usb-host", Some("usbx.0"))),
-            Outcome::Error { code: ErrorCode::Unsupported, .. }
+            f.handler
+                .handle(device_add("usbhost-1-5", "usb-host", Some("usbx.0"))),
+            Outcome::Error {
+                code: ErrorCode::Unsupported,
+                ..
+            }
         ));
         assert!(matches!(
             f.handler.handle(device_add("x", "vfio-pci", None)),
-            Outcome::Error { code: ErrorCode::Unsupported, .. }
+            Outcome::Error {
+                code: ErrorCode::Unsupported,
+                ..
+            }
         ));
         assert!(matches!(
-            f.handler.handle(device_add("x", "usb-host", Some("other.0"))),
-            Outcome::Error { code: ErrorCode::Unsupported, .. }
+            f.handler
+                .handle(device_add("x", "usb-host", Some("other.0"))),
+            Outcome::Error {
+                code: ErrorCode::Unsupported,
+                ..
+            }
         ));
 
         // An online snapshot is refused while the device is attached (D9):
@@ -428,26 +443,34 @@ mod usb_tests {
 
         // Detach: the reply is ok and a device_deleted event follows.
         assert!(matches!(
-            f.handler.handle(Command::DeviceDel { id: "usbhost-1-5".into() }),
+            f.handler.handle(Command::DeviceDel {
+                id: "usbhost-1-5".into()
+            }),
             Outcome::Ok { .. }
         ));
         assert!(f.shared.usb_attachments.lock().is_empty());
-        assert!(!f
-            .shared
-            .xhci
-            .lock()
-            .as_ref()
-            .unwrap()
-            .lock()
-            .has_host_devices());
+        assert!(
+            !f.shared
+                .xhci
+                .lock()
+                .as_ref()
+                .unwrap()
+                .lock()
+                .has_host_devices()
+        );
         assert_eq!(
             *f.events.lock().unwrap(),
-            vec![Event::DeviceDeleted { id: "usbhost-1-5".into() }]
+            vec![Event::DeviceDeleted {
+                id: "usbhost-1-5".into()
+            }]
         );
         // Unknown ids say so.
         assert!(matches!(
             f.handler.handle(Command::DeviceDel { id: "ghost".into() }),
-            Outcome::Error { code: ErrorCode::DeviceNotFound, .. }
+            Outcome::Error {
+                code: ErrorCode::DeviceNotFound,
+                ..
+            }
         ));
     }
 
@@ -467,7 +490,8 @@ mod usb_tests {
     fn a_lost_host_device_detaches_with_an_event() {
         let Some(f) = fixture() else { return };
         assert!(matches!(
-            f.handler.handle(device_add("usbhost-1-5", "usb-host", Some("usbx.0"))),
+            f.handler
+                .handle(device_add("usbhost-1-5", "usb-host", Some("usbx.0"))),
             Outcome::Ok { .. }
         ));
         // The host device disappears.
@@ -476,7 +500,9 @@ mod usb_tests {
         assert!(f.shared.usb_attachments.lock().is_empty());
         assert_eq!(
             *f.events.lock().unwrap(),
-            vec![Event::DeviceDeleted { id: "usbhost-1-5".into() }]
+            vec![Event::DeviceDeleted {
+                id: "usbhost-1-5".into()
+            }]
         );
     }
 }

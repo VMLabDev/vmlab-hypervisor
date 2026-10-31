@@ -11,11 +11,11 @@ use std::ops::Deref;
 
 use zerocopy::FromBytes;
 
+use super::Error;
 use super::types::{
     ConfigDescriptor, Descriptor, DescriptorHeader, DeviceDescriptor, EndpointDescriptor,
     InterfaceDescriptor,
 };
-use super::Error;
 
 #[derive(Clone)]
 pub struct DeviceDescriptorTree {
@@ -243,7 +243,6 @@ pub fn parse_usbfs_descriptors(data: &[u8]) -> Result<DeviceDescriptorTree> {
     Ok(device_descriptor)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,11 +293,11 @@ mod tests {
             .get_endpoint_descriptor(0)
             .expect("could not get endpoint descriptor 0");
         assert_eq!(e.bEndpointAddress, 0x81);
-        assert_eq!(e.get_endpoint_type(), Some(super::super::types::EndpointType::Bulk));
         assert_eq!(
-            i.get_endpoint_descriptor(1).unwrap().bEndpointAddress,
-            0x02
+            e.get_endpoint_type(),
+            Some(super::super::types::EndpointType::Bulk)
         );
+        assert_eq!(i.get_endpoint_descriptor(1).unwrap().bEndpointAddress, 0x02);
     }
 
     #[test]

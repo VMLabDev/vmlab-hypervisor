@@ -59,7 +59,9 @@ pub enum Command {
     },
     /// Unplug the device with id `id`; the server confirms with a
     /// `device_deleted` event once the device is back on the host.
-    DeviceDel { id: String },
+    DeviceDel {
+        id: String,
+    },
     SnapshotSave {
         name: String,
     },
@@ -125,7 +127,9 @@ pub enum Capability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    Shutdown { reason: ShutdownReason },
+    Shutdown {
+        reason: ShutdownReason,
+    },
     Reset,
     Stopped,
     Resumed,
@@ -133,7 +137,9 @@ pub enum Event {
     Wakeup,
     /// A hot-plugged device left the machine: after `device_del`, or when
     /// the host device itself was unplugged. QEMU's DEVICE_DELETED.
-    DeviceDeleted { id: String },
+    DeviceDeleted {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

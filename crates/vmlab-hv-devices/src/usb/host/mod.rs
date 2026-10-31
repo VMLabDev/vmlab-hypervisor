@@ -26,15 +26,15 @@ pub mod fake;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use descriptor::ConfigDescriptorTree;
 pub use device::{Device, Transfer, TransferStatus};
 pub use error::{Error, Result};
 pub use fs::{UsbFs, Usbdevfs};
-use zerocopy::IntoBytes;
-use descriptor::ConfigDescriptorTree;
 use types::{
     ControlRequestDataPhaseTransferDirection, ControlRequestRecipient, DeviceSpeed, EndpointType,
     StandardControlRequest,
 };
+use zerocopy::IntoBytes;
 
 use crate::usb::{SetupPacket, UsbDevice, UsbSpeed, UsbTransfer};
 use crate::{DeviceError, Snapshot};
@@ -292,9 +292,9 @@ impl HostUsbDevice {
                 endpoints.insert(
                     ep_dp.address(),
                     EndpointInfo {
-                        ty: ep_dp.get_endpoint_type().ok_or_else(|| {
-                            Error::Other("invalid endpoint type".into())
-                        })?,
+                        ty: ep_dp
+                            .get_endpoint_type()
+                            .ok_or_else(|| Error::Other("invalid endpoint type".into()))?,
                         max_packet: ep_dp.max_packet_size(),
                     },
                 );
@@ -309,13 +309,17 @@ impl HostUsbDevice {
     /// guest drivers leave them alone. Lifted from crosvm's
     /// `get_config_descriptor_filtered`.
     fn config_descriptor_filtered(&self, descriptor_index: u8) -> Result<Vec<u8>> {
-        let config_descriptor = self.device.get_config_descriptor_by_index(descriptor_index)?;
+        let config_descriptor = self
+            .device
+            .get_config_descriptor_by_index(descriptor_index)?;
         let device_descriptor = self.device.get_device_descriptor_tree();
         let config_start = config_descriptor.offset();
         let config_end = config_start + config_descriptor.total_length() as usize;
         let mut descriptor_data = device_descriptor.raw()[config_start..config_end].to_vec();
 
-        if self.device.get_active_configuration().ok() == Some(config_descriptor.bConfigurationValue) {
+        if self.device.get_active_configuration().ok()
+            == Some(config_descriptor.bConfigurationValue)
+        {
             for i in 0..config_descriptor.bNumInterfaces {
                 if !self.claimed_interfaces.contains(&i) {
                     // Rewrite descriptors for unclaimed interfaces to vendor-specific class.
@@ -332,7 +336,8 @@ impl HostUsbDevice {
                     let interface_start = interface.offset()
                         + std::mem::size_of::<types::DescriptorHeader>()
                         - config_start;
-                    let interface_end = interface_start + std::mem::size_of::<types::InterfaceDescriptor>();
+                    let interface_end =
+                        interface_start + std::mem::size_of::<types::InterfaceDescriptor>();
                     descriptor_data[interface_start..interface_end]
                         .copy_from_slice(interface_data.as_bytes());
                 }
@@ -414,11 +419,7 @@ impl HostUsbDevice {
                     None
                 }
             }
-            (
-                StandardControlRequest::GetDescriptor,
-                Recipient::Device,
-                Dir::DeviceToHost,
-            ) => {
+            (StandardControlRequest::GetDescriptor, Recipient::Device, Dir::DeviceToHost) => {
                 let descriptor_type = (setup.value >> 8) as u8;
                 if descriptor_type != types::DescriptorType::Configuration as u8 {
                     return None;
@@ -606,7 +607,9 @@ impl Snapshot for HostUsbDevice {
 
 /// The usbdevfs node for a device number on a bus.
 pub fn device_node(bus: u16, dev: u16) -> PathBuf {
-    Path::new(USB_DEV_ROOT).join(format!("{bus:03}")).join(format!("{dev:03}"))
+    Path::new(USB_DEV_ROOT)
+        .join(format!("{bus:03}"))
+        .join(format!("{dev:03}"))
 }
 
 #[cfg(test)]
@@ -715,21 +718,30 @@ mod tests {
         let (mut host, fake) = device();
         // The first SET_CONFIGURATION(1) matches the active configuration,
         // so no SETCONFIGURATION ioctl is issued, but the claims are retaken.
-        assert_eq!(host.control(set_config(1), &[]), UsbTransfer::Ack(Vec::new()));
+        assert_eq!(
+            host.control(set_config(1), &[]),
+            UsbTransfer::Ack(Vec::new())
+        );
         assert_eq!(fake.calls().set_configurations, Vec::<u8>::new());
         let after = fake.calls();
         assert_eq!(after.claims, vec![0, 1, 0, 1]);
         assert_eq!(after.releases, vec![0, 1]);
 
         // Unconfigure: the claims go back and configuration 0 is set.
-        assert_eq!(host.control(set_config(0), &[]), UsbTransfer::Ack(Vec::new()));
+        assert_eq!(
+            host.control(set_config(0), &[]),
+            UsbTransfer::Ack(Vec::new())
+        );
         let after = fake.calls();
         assert_eq!(after.set_configurations, vec![0]);
         assert_eq!(after.releases, vec![0, 1, 0, 1]);
         assert_eq!(after.claims, vec![0, 1, 0, 1]);
 
         // Reconfigure: set again and claimed again.
-        assert_eq!(host.control(set_config(1), &[]), UsbTransfer::Ack(Vec::new()));
+        assert_eq!(
+            host.control(set_config(1), &[]),
+            UsbTransfer::Ack(Vec::new())
+        );
         let after = fake.calls();
         assert_eq!(after.set_configurations, vec![0, 1]);
         assert_eq!(after.claims.len(), 6);
@@ -762,12 +774,12 @@ mod tests {
         let (mut host, fake) = device();
         // Submission, then the device's IRQ, then the retry.
         assert_eq!(host.transfer(0x02, b"payload", 64), UsbTransfer::Nak);
-        assert_eq!(
-            fake.submitted_payloads(),
-            vec![(0x02, b"payload".to_vec())]
-        );
+        assert_eq!(fake.submitted_payloads(), vec![(0x02, b"payload".to_vec())]);
         fake.run_irq();
-        assert_eq!(host.transfer(0x02, b"payload", 64), UsbTransfer::Ack(Vec::new()));
+        assert_eq!(
+            host.transfer(0x02, b"payload", 64),
+            UsbTransfer::Ack(Vec::new())
+        );
     }
 
     #[test]
@@ -789,7 +801,10 @@ mod tests {
         fake.complete_with(Completion::Data(payload.clone()));
         assert_eq!(host.transfer_iso(0x83, &[], 1024, 512), UsbTransfer::Nak);
         fake.run_irq();
-        assert_eq!(host.transfer_iso(0x83, &[], 1024, 512), UsbTransfer::Ack(payload));
+        assert_eq!(
+            host.transfer_iso(0x83, &[], 1024, 512),
+            UsbTransfer::Ack(payload)
+        );
     }
 
     #[test]

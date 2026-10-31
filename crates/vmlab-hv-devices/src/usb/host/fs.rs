@@ -115,7 +115,8 @@ impl UsbFs for Usbdevfs {
     }
 
     fn submit_urb(&self, urb: *mut sys::usbdevfs_urb) -> io::Result<()> {
-        self.ioctl_with_ptr(sys::USBDEVFS_SUBMITURB, urb.cast()).map(|_| ())
+        self.ioctl_with_ptr(sys::USBDEVFS_SUBMITURB, urb.cast())
+            .map(|_| ())
     }
 
     fn reap_urb(&self) -> io::Result<*mut sys::usbdevfs_urb> {
@@ -125,7 +126,8 @@ impl UsbFs for Usbdevfs {
     }
 
     fn discard_urb(&self, urb: *mut sys::usbdevfs_urb) -> io::Result<()> {
-        self.ioctl_with_ptr(sys::USBDEVFS_DISCARDURB, urb.cast()).map(|_| ())
+        self.ioctl_with_ptr(sys::USBDEVFS_DISCARDURB, urb.cast())
+            .map(|_| ())
     }
 
     fn control(&self, transfer: &usbdevfs_ctrltransfer) -> io::Result<c_int> {

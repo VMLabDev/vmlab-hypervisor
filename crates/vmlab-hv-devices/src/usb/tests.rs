@@ -813,7 +813,10 @@ impl super::UsbDevice for IsoSink {
         max_length: usize,
         packet_size: u32,
     ) -> super::UsbTransfer {
-        self.iso_calls.lock().unwrap().push((endpoint, max_length, packet_size));
+        self.iso_calls
+            .lock()
+            .unwrap()
+            .push((endpoint, max_length, packet_size));
         super::UsbTransfer::Ack(vec![0x5a; 1024])
     }
     fn is_host_backed(&self) -> bool {
@@ -882,7 +885,9 @@ fn p4_isochronous_transfer_reaches_a_host_backend() {
     assert_eq!(event.status >> 24, 1, "isoch transfer completes");
     assert_eq!((event.control >> 16) & 31, 7);
     let mut payload = [0; 1024];
-    d.mem.read_slice(&mut payload, GuestAddress(0xa000)).unwrap();
+    d.mem
+        .read_slice(&mut payload, GuestAddress(0xa000))
+        .unwrap();
     assert!(payload.iter().all(|&b| b == 0x5a));
     // The backend saw the endpoint address, the TD length and the endpoint
     // context's packet size.

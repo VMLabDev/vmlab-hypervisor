@@ -75,7 +75,9 @@ fn virtual_gadget() -> Option<(u32, u32)> {
 /// one data transfer, and hand it back to the host.
 #[test]
 fn usb_loopback_over_virtual_hardware() {
-    let Some((bus, devnum)) = virtual_gadget() else { return };
+    let Some((bus, devnum)) = virtual_gadget() else {
+        return;
+    };
     let mut host = match HostUsbDevice::open("usbhost-loopback", bus as u16, devnum as u16) {
         Ok(host) => host,
         Err(e) => {

@@ -390,9 +390,15 @@ mod tests {
     #[test]
     fn test_standard_request() {
         let setup = UsbRequestSetup::new(0x80, 6, 1, 0, 255);
-        assert_eq!(setup.get_standard_request(), Some(StandardControlRequest::GetDescriptor));
+        assert_eq!(
+            setup.get_standard_request(),
+            Some(StandardControlRequest::GetDescriptor)
+        );
         let setup = UsbRequestSetup::new(0x01, 11, 1, 0, 0);
-        assert_eq!(setup.get_standard_request(), Some(StandardControlRequest::SetInterface));
+        assert_eq!(
+            setup.get_standard_request(),
+            Some(StandardControlRequest::SetInterface)
+        );
         let setup = UsbRequestSetup::new(0x01, 99, 0, 0, 0);
         assert_eq!(setup.get_standard_request(), None);
     }

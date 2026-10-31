@@ -876,12 +876,13 @@ fn usb_host_passthrough_real_device() {
         client.call(Control::Resume).unwrap(),
         Outcome::Ok { .. }
     ));
-    let deadline = Instant::now() + Duration::from_secs(
-        std::env::var("VMLAB_HV_TEMPLATE_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(180),
-    );
+    let deadline = Instant::now()
+        + Duration::from_secs(
+            std::env::var("VMLAB_HV_TEMPLATE_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(180),
+        );
     let mut guest = loop {
         if let Ok(guest) = AgentClient::connect(&agent, Duration::from_secs(3)) {
             break guest;
@@ -946,9 +947,7 @@ fn usb_host_passthrough_real_device() {
     let event_deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < event_deadline {
         match client.wait_event().unwrap() {
-            Some(vmlab_hv_proto::control::Event::DeviceDeleted { id: gone })
-                if gone == id =>
-            {
+            Some(vmlab_hv_proto::control::Event::DeviceDeleted { id: gone }) if gone == id => {
                 deleted = true;
                 break;
             }
@@ -960,8 +959,8 @@ fn usb_host_passthrough_real_device() {
     // The host kernel driver rebound: the interface drivers are back to
     // what they were before the attach.
     let rebound = {
-        let root = Path::new("/sys/bus/usb/devices")
-            .join(format!("{}-{}", facts.bus, facts.port_path));
+        let root =
+            Path::new("/sys/bus/usb/devices").join(format!("{}-{}", facts.bus, facts.port_path));
         let mut drivers = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&root) {
             for entry in entries.flatten() {

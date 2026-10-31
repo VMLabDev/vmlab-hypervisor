@@ -19,9 +19,8 @@ use super::error::{Error, Result};
 use super::fs::UsbFs;
 use super::sys;
 use super::types::{
-    DeviceSpeed, StandardControlRequest, control_request_type,
     ControlRequestDataPhaseTransferDirection, ControlRequestRecipient, ControlRequestType,
-    UsbRequestSetup,
+    DeviceSpeed, StandardControlRequest, UsbRequestSetup, control_request_type,
 };
 
 /// A transfer carries one URB. `urb` is a single `Vec` slot holding the URB
@@ -36,8 +35,7 @@ pub struct Transfer {
 /// One `usbdevfs_urb` with room for `iso_packets` trailing packet descriptors.
 fn vec_with_iso_packets(iso_packets: usize) -> Vec<sys::usbdevfs_urb> {
     let iso = std::mem::size_of::<sys::usbdevfs_iso_packet_desc>();
-    let bytes =
-        std::mem::size_of::<sys::usbdevfs_urb>() + iso_packets * iso;
+    let bytes = std::mem::size_of::<sys::usbdevfs_urb>() + iso_packets * iso;
     let slots = bytes.div_ceil(std::mem::size_of::<sys::usbdevfs_urb>());
     let mut v: Vec<sys::usbdevfs_urb> = Vec::with_capacity(slots);
     // SAFETY: the allocation covers `slots` element-sized slots and the
@@ -87,9 +85,7 @@ impl Transfer {
         transfer.urb_mut().endpoint = endpoint;
         let data = transfer.buffer.as_mut_ptr().cast();
         transfer.urb_mut().buffer = data;
-        transfer
-            .urb_mut()
-            .buffer_length = transfer
+        transfer.urb_mut().buffer_length = transfer
             .buffer
             .len()
             .try_into()
@@ -97,8 +93,12 @@ impl Transfer {
 
         // SAFETY: `transfer.urb` was created with room for exactly this
         // many trailing iso packet descriptors.
-        let iso_frame_desc =
-            unsafe { transfer.urb_mut().iso_frame_desc.as_mut_slice(iso_packets.len()) };
+        let iso_frame_desc = unsafe {
+            transfer
+                .urb_mut()
+                .iso_frame_desc
+                .as_mut_slice(iso_packets.len())
+        };
         iso_frame_desc.copy_from_slice(iso_packets);
 
         Ok(transfer)
@@ -122,11 +122,7 @@ impl Transfer {
 
     /// Create an isochronous transfer, dividing `buffer` into packets of
     /// `packet_size` bytes (the last packet takes the remainder).
-    pub fn new_isochronous(
-        endpoint: u8,
-        buffer: Vec<u8>,
-        packet_size: u32,
-    ) -> Result<Transfer> {
+    pub fn new_isochronous(endpoint: u8, buffer: Vec<u8>, packet_size: u32) -> Result<Transfer> {
         let buffer_size: u32 = buffer
             .len()
             .try_into()
@@ -150,12 +146,7 @@ impl Transfer {
             .expect("there should be at least one entry for ISOC packet");
         last_entry.length = buffer_size - packet_size * (count - 1);
 
-        let mut transfer = Self::new(
-            sys::USBDEVFS_URB_TYPE_ISO,
-            endpoint,
-            buffer,
-            &iso_packets,
-        )?;
+        let mut transfer = Self::new(sys::USBDEVFS_URB_TYPE_ISO, endpoint, buffer, &iso_packets)?;
         transfer.urb_mut().number_of_packets_or_stream_id = count;
         transfer.urb_mut().flags = sys::USBDEVFS_URB_ISO_ASAP;
         Ok(transfer)
@@ -197,8 +188,8 @@ impl Transfer {
 
     /// Control-transfer data phase payload (the setup prefix removed).
     pub fn control_data(&self) -> &[u8] {
-        let end = (std::mem::size_of::<UsbRequestSetup>() + self.actual_length())
-            .min(self.buffer.len());
+        let end =
+            (std::mem::size_of::<UsbRequestSetup>() + self.actual_length()).min(self.buffer.len());
         &self.buffer[std::mem::size_of::<UsbRequestSetup>()..end]
     }
 
@@ -215,9 +206,7 @@ impl Transfer {
         let mut offset = 0usize;
         for packet in packets {
             let length = packet.actual_length as usize;
-            if packet.status == 0
-                && offset + length <= self.buffer.len()
-            {
+            if packet.status == 0 && offset + length <= self.buffer.len() {
                 data.extend_from_slice(&self.buffer[offset..offset + length]);
             }
             offset += packet.length as usize;
@@ -238,9 +227,7 @@ pub struct Device {
 impl Device {
     /// Open a device through `fs`, reading and parsing its descriptors.
     pub fn new(fs: Box<dyn UsbFs>) -> Result<Self> {
-        let descriptor_data = fs
-            .read_descriptors()
-            .map_err(Error::DescriptorRead)?;
+        let descriptor_data = fs.read_descriptors().map_err(Error::DescriptorRead)?;
         let device_descriptor_tree = parse_usbfs_descriptors(&descriptor_data)?;
         Ok(Device {
             fs,

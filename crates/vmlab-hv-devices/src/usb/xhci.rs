@@ -302,7 +302,9 @@ impl XhciController {
     }
     /// Whether root port `port` carries no device.
     pub fn port_free(&self, port: u8) -> bool {
-        Self::port_index(port).map(|p| self.devices[p].is_none()).unwrap_or(false)
+        Self::port_index(port)
+            .map(|p| self.devices[p].is_none())
+            .unwrap_or(false)
     }
 
     /// Root ports whose backend reports the physical device gone. The
@@ -628,9 +630,7 @@ impl XhciController {
                 self.store_endpoint(slot, ep)?;
                 // The endpoint's transfer state is gone; a backend with
                 // in-flight work must not attribute it to the next TD.
-                if let Some(device) = self
-                    .state
-                    .slots[slot]
+                if let Some(device) = self.state.slots[slot]
                     .port
                     .checked_sub(1)
                     .and_then(|p| self.devices[p].as_mut())
@@ -654,9 +654,7 @@ impl XhciController {
                 if let Some(device) = port.checked_sub(1).and_then(|p| self.devices[p].as_mut()) {
                     device.reset();
                     for ep in 2..32u8 {
-                        device.endpoint_dropped(
-                            (ep / 2) | if ep & 1 == 1 { 0x80 } else { 0 },
-                        );
+                        device.endpoint_dropped((ep / 2) | if ep & 1 == 1 { 0x80 } else { 0 });
                     }
                 }
                 for e in &mut self.state.slots[slot].endpoints[2..] {
