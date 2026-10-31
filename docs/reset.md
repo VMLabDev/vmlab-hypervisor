@@ -55,6 +55,31 @@ Virtio interrupt handles carry a host-only activation epoch. Callbacks from
 before reset or snapshot load cannot change the new transport's ISR or
 configuration generation. Layered snapshot restore also delays worker activation
 until both transport state and wrapped-device queue indices have been restored.
+The always-running event worker exposed a concurrent USB detach race. Detach now
+serializes controller access and attachment removal; a 16-caller regression
+requires one successful detach and one deletion event.
+
+### Windows validation limit
+
+Earlier debug runs intermittently stopped in Windows `HaliHaltSystem`, identified
+using the guest's kernel image and Microsoft's matching public symbols. This
+occurred before the agent became ready after a reset, and after snapshot load.
+An isolated read-only KVM observer captured bugcheck `0x5c`, subtype `0x110`,
+timer problem `0x19`, status `0xc0000001`. The matching kernel's public symbols
+and unwind metadata locate the failure in `HalpTimerInitializeClock`: its clock
+interrupt self-test did not observe an interrupt. The selected interrupt source
+and underlying cause are still under investigation. An untouched baseline using
+process relaunch passed, so a reset-related cause remains possible.
+
+After the interrupt-epoch and restore-order fixes, the full gate's Windows reboot
+and snapshot cases passed. Four additional isolated snapshot runs passed in
+120.72, 114.20, 115.11 and 118.07 seconds. Earlier failures also occurred after
+those fixes; the successful runs do not establish that the intermittent halt is
+resolved. Investigating it remains follow-up work.
+
+Retained guest disks and logs are under `.scratch/reset-artifacts.3uNABW/` rather
+than the host's RAM-backed `/tmp`. Their machine descriptions retain the original
+temporary paths and need path updates before another launch.
 
 ## First-paint measurements
 
