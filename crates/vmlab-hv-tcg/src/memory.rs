@@ -32,8 +32,10 @@ pub trait Memory {
     fn code_stamp(&self, _address: u64, _len: usize) -> Option<CodeStamp> {
         None
     }
-    /// Inclusive numeric bounds of the RAM region containing this address.
-    /// Specialization must guard the resulting range and retain memory effects.
+    /// Inclusive numeric bounds of the RAM or firmware-ROM region containing
+    /// this address. Specialization must guard the range and retain memory
+    /// effects, including flash command modes. This does not authorize folding
+    /// reads; only `code_stamp` provides that guarantee for instruction fetch.
     fn ram_bounds(&self, _address: u64) -> Option<(u64, u64)> {
         None
     }

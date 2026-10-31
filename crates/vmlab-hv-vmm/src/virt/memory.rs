@@ -112,6 +112,13 @@ impl Memory for PhysicalMemory {
     fn ram_bounds(&self, address: u64) -> Option<(u64, u64)> {
         self.is_ram(address, 1)
             .then_some((RAM_BASE, RAM_BASE + self.size - 1))
+            .or_else(|| {
+                self.flash.iter().find_map(|(base, _)| {
+                    (*base..base + (32 << 20))
+                        .contains(&address)
+                        .then_some((*base, base + (32 << 20) - 1))
+                })
+            })
     }
     fn code_stamp(&self, address: u64, len: usize) -> Option<CodeStamp> {
         let _guard = self.transaction.lock();
@@ -201,9 +208,17 @@ mod tests {
             .unwrap();
         memory.map_flash(0x20000000, flash.clone());
         let initial = memory.code_stamp(0x20000000, 4).unwrap();
+        assert_eq!(
+            memory.ram_bounds(0x20000000),
+            Some((0x20000000, 0x21ffffff))
+        );
         let state = flash.lock().save_state().unwrap();
         memory.write(0x20000000, &[0x98]).unwrap();
         assert!(memory.code_stamp(0x20000000, 4).is_none());
+        assert_eq!(
+            memory.ram_bounds(0x20000000),
+            Some((0x20000000, 0x21ffffff))
+        );
         flash.lock().write(0, &[0xff]);
         assert_ne!(memory.code_stamp(0x20000000, 4), Some(initial));
         let array = memory.code_stamp(0x20000000, 4).unwrap();
