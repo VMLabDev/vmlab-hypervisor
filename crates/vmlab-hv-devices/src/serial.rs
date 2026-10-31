@@ -1,34 +1,31 @@
-//! 16550A UART (COM1), output appended to the machine's serial log.
+//! 16550A UART with QEMU-compatible transmit and bounded receive/transmit FIFOs.
 //!
-//! The register model is [`vm_superio`]'s 16550A (loopback, FIFO, divisor
-//! latches); this module adapts it to the device traits: an 8-byte port-I/O
-//! window through [`BusDevice`], host input through [`Serial::input`], and a
-//! level-triggered IRQ4 through [`IrqLine`]. The interrupt line is recomputed
-//! from the model's interrupt-identification state after every register
-//! access, so the level follows the model exactly: asserted while a pending
-//! interrupt source is enabled, released when the guest services it.
-//!
-//! The output writer is shared by handle ([`SerialOut`]) so a snapshot restore
-//! can rebuild the register model without losing the log.
+//! Register behavior follows the TI TL16C550C data sheet, sections 7.7.2-7.7.12.
+//! The machine advances running guest time through [`Serial::advance`]. Host
+//! connections and output handles remain attached across reset and restore.
+//! A writable backend transmits immediately, as the socket qtest capture shows.
+//! The divisor controls the receive timeout, not an artificial transmit delay.
 
-use std::convert::Infallible;
-use std::io::Write;
+mod socket;
+#[cfg(test)]
+mod tests;
+
+use std::collections::VecDeque;
+use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use vm_superio::serial::{Error as SuperioError, NoEvents};
-use vm_superio::{Serial as Uart, Trigger};
+use serde::{Deserialize, Serialize};
 
-use crate::{BusDevice, DeviceError, IrqLine, Snapshot};
+use crate::{BusDevice, DeviceError, IrqLine, Resettable, Snapshot};
+use socket::SocketBackend;
 
-/// Snapshot format magic: "SER1".
-const SNAPSHOT_MAGIC: u32 = 0x3152_4553;
-/// Bytes per UART register window (COM1 hosts eight register locations).
-const REGISTER_WINDOW: u64 = 8;
-/// 16550A FIFO depth.
 const FIFO_SIZE: usize = 16;
+const SNAPSHOT_MAGIC: &[u8; 5] = b"SER2\x01";
+const MAX_CHARACTER_NS: u64 = 12 * 65_535 * 1_000_000_000u64 / 115_200 + 1;
 
-/// A cloneable handle to the serial output sink (the VMM's serial log).
+/// A cloneable handle to the serial output sink.
 #[derive(Clone)]
 pub struct SerialOut(Arc<Mutex<Box<dyn Write + Send>>>);
 
@@ -39,374 +36,399 @@ impl SerialOut {
 }
 
 impl Write for SerialOut {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0.lock().write(buf)
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         self.0.lock().flush()
     }
 }
 
-/// Asserts the UART's level-triggered interrupt line when the model raises an
-/// interrupt. The release edge is driven by [`Serial::update_irq`] after each
-/// register access.
-struct IrqTrigger(Arc<dyn IrqLine>);
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct State {
+    divisor: u16,
+    ier: u8,
+    fcr: u8,
+    lcr: u8,
+    mcr: u8,
+    msr: u8,
+    scratch: u8,
+    last_rx: u8,
+    rx: VecDeque<u8>,
+    tx: VecDeque<u8>,
+    shift: Option<u8>,
+    rx_idle_ns: u64,
+    timeout: bool,
+    overrun: bool,
+    thre_pending: bool,
+}
 
-impl Trigger for IrqTrigger {
-    type E = Infallible;
-
-    fn trigger(&self) -> Result<(), Self::E> {
-        self.0.set_level(true);
-        Ok(())
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            divisor: 12,
+            ier: 0,
+            fcr: 0,
+            lcr: 0,
+            mcr: 0,
+            msr: 0xb0,
+            scratch: 0,
+            last_rx: 0,
+            rx: VecDeque::new(),
+            tx: VecDeque::new(),
+            shift: None,
+            rx_idle_ns: 0,
+            timeout: false,
+            overrun: false,
+            thre_pending: false,
+        }
     }
 }
 
-/// A 16550A UART on one COM port (an 8-byte register window).
+impl State {
+    fn capacity(&self) -> usize {
+        if self.fcr & 1 != 0 { FIFO_SIZE } else { 1 }
+    }
+
+    fn trigger(&self) -> usize {
+        if self.fcr & 1 == 0 {
+            1
+        } else {
+            [1, 4, 8, 14][(self.fcr >> 6) as usize]
+        }
+    }
+
+    fn character_ns(&self) -> u64 {
+        let data_bits = 5 + u64::from(self.lcr & 3);
+        let stop_half_bits = if self.lcr & 4 == 0 {
+            2
+        } else if data_bits == 5 {
+            3
+        } else {
+            4
+        };
+        let half_bits = 2 + data_bits * 2 + u64::from(self.lcr & 8 != 0) * 2 + stop_half_bits;
+        // A zero divisor is treated as one, matching the maximum baud rate.
+        (half_bits * u64::from(self.divisor.max(1)) * 1_000_000_000).div_ceil(230_400)
+    }
+
+    fn lsr(&self) -> u8 {
+        u8::from(!self.rx.is_empty())
+            | (u8::from(self.overrun) << 1)
+            | (u8::from(self.tx.is_empty()) << 5)
+            | (u8::from(self.tx.is_empty() && self.shift.is_none()) << 6)
+    }
+
+    fn iir(&self) -> u8 {
+        let source = if self.ier & 4 != 0 && self.overrun {
+            6
+        } else if self.ier & 1 != 0 && self.rx.len() >= self.trigger() {
+            4
+        } else if self.ier & 1 != 0 && self.timeout {
+            12
+        } else if self.ier & 2 != 0 && self.thre_pending {
+            2
+        } else if self.ier & 8 != 0 && self.msr & 15 != 0 {
+            0
+        } else {
+            1
+        };
+        source | if self.fcr & 1 != 0 { 0xc0 } else { 0 }
+    }
+
+    fn valid(&self) -> bool {
+        self.ier & !15 == 0
+            && self.fcr & !0xc9 == 0
+            && self.mcr & !31 == 0
+            && self.rx.len() <= self.capacity()
+            && self.tx.len() <= self.capacity()
+            && (self.shift.is_some() || self.tx.is_empty())
+            && self.rx_idle_ns <= MAX_CHARACTER_NS * 4
+            && (!self.timeout || (self.fcr & 1 != 0 && !self.rx.is_empty()))
+    }
+}
+
+/// One 16550A UART on an eight-byte port-I/O window.
 pub struct Serial {
     id: String,
     out: SerialOut,
     irq: Arc<dyn IrqLine>,
-    uart: Uart<IrqTrigger, NoEvents, SerialOut>,
+    state: State,
+    socket: Option<Arc<Mutex<SocketBackend>>>,
 }
 
 impl Serial {
-    /// New UART whose guest output is appended to `out`.
+    /// Create a UART whose transmitted bytes go to `out`.
     pub fn new(id: impl Into<String>, out: SerialOut, irq: Arc<dyn IrqLine>) -> Self {
-        let uart = Uart::new(IrqTrigger(irq.clone()), out.clone());
         let serial = Self {
             id: id.into(),
             out,
-            uart,
             irq,
+            state: State::default(),
+            socket: None,
         };
-        // vm-superio's default state has no pending interrupt, so the line
-        // starts deasserted; be explicit in case the line was left high.
-        serial.irq.set_level(false);
+        serial.update_irq();
         serial
     }
 
-    /// Offer host input to the guest's receive FIFO. Returns the number of
-    /// bytes accepted; 0 when the FIFO is full (a real UART would raise an
-    /// overrun instead).
-    pub fn input(&mut self, bytes: &[u8]) -> usize {
-        let n = match self.uart.enqueue_raw_bytes(bytes) {
-            Ok(n) => n,
-            Err(SuperioError::FullFifo) => 0,
-            // The trigger is infallible, so no other error exists.
-            Err(_) => 0,
-        };
-        self.update_irq();
-        n
+    /// Bind a nonblocking socket before the machine reports ready.
+    /// An existing socket path is an error and is never replaced.
+    pub fn socket(id: impl Into<String>, path: &Path, irq: Arc<dyn IrqLine>) -> io::Result<Self> {
+        let backend = Arc::new(Mutex::new(SocketBackend::bind(path)?));
+        let mut serial = Self::new(
+            id,
+            SerialOut::new(Box::new(socket::SocketOut(backend.clone()))),
+            irq,
+        );
+        serial.socket = Some(backend);
+        Ok(serial)
     }
 
-    /// Offer the guest one input byte. True when accepted.
+    /// Offer host bytes without overrunning the receive FIFO.
+    /// The caller retains bytes beyond the returned count.
+    pub fn input(&mut self, bytes: &[u8]) -> usize {
+        let count = bytes.len().min(self.state.capacity() - self.state.rx.len());
+        self.state.rx.extend(&bytes[..count]);
+        if count != 0 {
+            self.state.rx_idle_ns = 0;
+            self.state.timeout = false;
+        }
+        self.update_irq();
+        count
+    }
+
     pub fn input_byte(&mut self, byte: u8) -> bool {
         self.input(&[byte]) == 1
     }
 
-    /// A fresh handle to the output sink.
     pub fn output(&self) -> SerialOut {
         self.out.clone()
     }
 
-    /// True while an enabled interrupt source is pending (IIR bit 0 clear).
-    fn interrupt_pending(&self) -> bool {
-        self.uart.state().interrupt_identification & 0x1 == 0
+    /// Advance running guest time and service host socket I/O.
+    /// Calling this with zero services sockets without advancing the UART.
+    pub fn advance(&mut self, ns: u64) {
+        if !self.state.rx.is_empty() && self.state.fcr & 1 != 0 {
+            let limit = self.state.character_ns().saturating_mul(4);
+            self.state.rx_idle_ns = self.state.rx_idle_ns.saturating_add(ns).min(limit);
+            self.state.timeout = self.state.rx_idle_ns >= limit;
+        }
+        self.transmit();
+        self.service_socket();
+        self.update_irq();
+    }
+
+    fn transmit(&mut self) {
+        while let Some(byte) = self.state.shift {
+            if self.state.mcr & 0x10 != 0 {
+                if self.input(&[byte]) == 0 {
+                    self.state.overrun = true;
+                }
+            } else {
+                match self.out.write(&[byte]) {
+                    Ok(0) => break,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        break;
+                    }
+                    // A failed output sink must not fault the guest UART.
+                    Ok(_) | Err(_) => {}
+                }
+            }
+            self.state.shift = None;
+            self.start_shift();
+        }
+    }
+
+    fn service_socket(&mut self) {
+        let Some(socket) = self.socket.as_ref() else {
+            return;
+        };
+        let capacity = if self.state.mcr & 0x10 == 0 {
+            self.state.capacity() - self.state.rx.len()
+        } else {
+            0
+        };
+        let mut bytes = [0; FIFO_SIZE];
+        let count = socket.lock().read_input(&mut bytes[..capacity]);
+        self.input(&bytes[..count]);
     }
 
     fn update_irq(&self) {
-        self.irq.set_level(self.interrupt_pending());
+        self.irq.set_level(self.state.iir() & 1 == 0);
+    }
+
+    fn start_shift(&mut self) {
+        if self.state.shift.is_none()
+            && let Some(byte) = self.state.tx.pop_front()
+        {
+            self.state.shift = Some(byte);
+            if self.state.tx.is_empty() {
+                self.state.thre_pending = true;
+            }
+        }
+    }
+
+    fn modem_control(&mut self, value: u8) {
+        self.state.mcr = value & 31;
+        let pins = if value & 0x10 != 0 {
+            ((value & 2) << 3) | ((value & 1) << 5) | ((value & 4) << 4) | ((value & 8) << 4)
+        } else {
+            0xb0
+        };
+        let changed = self.state.msr ^ pins;
+        let deltas = ((changed >> 4) & 0x0b)
+            | (u8::from(self.state.msr & 0x40 != 0 && pins & 0x40 == 0) << 2);
+        self.state.msr = pins | (self.state.msr & 15) | deltas;
+    }
+
+    fn read_register(&mut self, register: u64) -> u8 {
+        let value = match register {
+            0 if self.state.lcr & 0x80 != 0 => self.state.divisor as u8,
+            1 if self.state.lcr & 0x80 != 0 => (self.state.divisor >> 8) as u8,
+            0 => {
+                if let Some(byte) = self.state.rx.pop_front() {
+                    self.state.last_rx = byte;
+                }
+                self.state.timeout = false;
+                self.state.rx_idle_ns = 0;
+                self.state.last_rx
+            }
+            1 => self.state.ier,
+            2 => {
+                let iir = self.state.iir();
+                if iir & 15 == 2 {
+                    self.state.thre_pending = false;
+                }
+                iir
+            }
+            3 => self.state.lcr,
+            4 => self.state.mcr,
+            5 => {
+                let lsr = self.state.lsr();
+                self.state.overrun = false;
+                lsr
+            }
+            6 => {
+                let msr = self.state.msr;
+                self.state.msr &= 0xf0;
+                msr
+            }
+            7 => self.state.scratch,
+            _ => 0,
+        };
+        self.update_irq();
+        value
+    }
+
+    fn write_register(&mut self, register: u64, value: u8) {
+        match register {
+            0 if self.state.lcr & 0x80 != 0 => {
+                self.state.divisor = (self.state.divisor & 0xff00) | u16::from(value);
+            }
+            1 if self.state.lcr & 0x80 != 0 => {
+                self.state.divisor = (self.state.divisor & 0xff) | (u16::from(value) << 8);
+            }
+            0 => {
+                self.state.thre_pending = false;
+                if self.state.tx.len() == self.state.capacity() {
+                    // QEMU discards the oldest queued byte on FIFO overflow.
+                    self.state.tx.pop_front();
+                }
+                self.state.tx.push_back(value);
+                self.start_shift();
+                self.transmit();
+            }
+            1 => {
+                if value & 2 != 0 && self.state.ier & 2 == 0 && self.state.tx.is_empty() {
+                    self.state.thre_pending = true;
+                }
+                self.state.ier = value & 15;
+            }
+            2 => {
+                let changed = (value ^ self.state.fcr) & 1 != 0;
+                self.state.fcr = value & 0xc9;
+                if changed || value & 2 != 0 {
+                    self.state.rx.clear();
+                    self.state.rx_idle_ns = 0;
+                    self.state.timeout = false;
+                    self.state.overrun = false;
+                }
+                if changed || value & 4 != 0 {
+                    self.state.tx.clear();
+                    self.state.thre_pending = true;
+                }
+            }
+            3 => self.state.lcr = value,
+            4 => self.modem_control(value),
+            7 => self.state.scratch = value,
+            _ => {}
+        }
+        self.update_irq();
     }
 }
 
 impl BusDevice for Serial {
     fn read(&mut self, offset: u64, data: &mut [u8]) {
-        for (i, b) in data.iter_mut().enumerate() {
-            let off = offset + i as u64;
-            *b = if off < REGISTER_WINDOW {
-                let v = self.uart.read(off as u8);
-                self.update_irq();
-                v
-            } else {
-                0
-            };
+        self.service_socket();
+        for (index, byte) in data.iter_mut().enumerate() {
+            *byte = self.read_register(offset.saturating_add(index as u64));
         }
     }
 
     fn write(&mut self, offset: u64, data: &[u8]) {
-        for (i, b) in data.iter().enumerate() {
-            let off = offset + i as u64;
-            if off < REGISTER_WINDOW {
-                // The trigger is infallible and a failed log write drops the
-                // byte rather than the guest: a serial console never faults.
-                let _ = self.uart.write(off as u8, *b);
-                self.update_irq();
-            }
+        self.service_socket();
+        for (index, byte) in data.iter().enumerate() {
+            self.write_register(offset.saturating_add(index as u64), *byte);
         }
     }
 }
 
-/// Serial snapshot layout: magic, version, nine model registers, FIFO length,
-/// FIFO bytes.
+impl Resettable for Serial {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        self.state = State::default();
+        self.update_irq();
+        Ok(())
+    }
+}
+
 impl Snapshot for Serial {
     fn state_id(&self) -> String {
         self.id.clone()
     }
 
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
-        let s = self.uart.state();
-        let mut out = Vec::with_capacity(16 + 2 + s.in_buffer.len());
-        out.extend_from_slice(&SNAPSHOT_MAGIC.to_le_bytes());
-        out.push(1); // format version
-        out.extend_from_slice(&[
-            s.baud_divisor_low,
-            s.baud_divisor_high,
-            s.interrupt_enable,
-            s.interrupt_identification,
-            s.line_control,
-            s.line_status,
-            s.modem_control,
-            s.modem_status,
-            s.scratch,
-        ]);
-        out.extend_from_slice(&(s.in_buffer.len() as u16).to_le_bytes());
-        out.extend_from_slice(&s.in_buffer);
-        Ok(out)
+        let mut bytes = SNAPSHOT_MAGIC.to_vec();
+        bytes.extend(
+            serde_json::to_vec(&self.state)
+                .map_err(|error| DeviceError::State(error.to_string()))?,
+        );
+        Ok(bytes)
     }
 
-    fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
-        let bad = || DeviceError::State(format!("{}: bad serial state", self.id));
-        if state.len() < 16 || u32::from_le_bytes(state[0..4].try_into().unwrap()) != SNAPSHOT_MAGIC
-        {
-            return Err(bad());
-        }
-        if state[4] != 1 {
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceError> {
+        if bytes.len() > 4096 || !bytes.starts_with(SNAPSHOT_MAGIC) {
             return Err(DeviceError::State(format!(
-                "{}: serial state version {} is not 1",
-                self.id, state[4]
+                "{}: invalid UART state/version",
+                self.id
             )));
         }
-        let fifo_len = u16::from_le_bytes(state[14..16].try_into().unwrap()) as usize;
-        if state.len() != 16 + fifo_len || fifo_len > FIFO_SIZE {
-            return Err(bad());
+        let state: State = serde_json::from_slice(&bytes[SNAPSHOT_MAGIC.len()..])
+            .map_err(|error| DeviceError::State(format!("{}: {error}", self.id)))?;
+        if !state.valid() {
+            return Err(DeviceError::State(format!(
+                "{}: invalid UART state",
+                self.id
+            )));
         }
-        let s = vm_superio::SerialState {
-            baud_divisor_low: state[5],
-            baud_divisor_high: state[6],
-            interrupt_enable: state[7],
-            interrupt_identification: state[8],
-            line_control: state[9],
-            line_status: state[10],
-            modem_control: state[11],
-            modem_status: state[12],
-            scratch: state[13],
-            in_buffer: state[16..].to_vec(),
-        };
-        self.uart = Uart::from_state(&s, IrqTrigger(self.irq.clone()), NoEvents, self.out.clone())
-            .map_err(|e| DeviceError::State(format!("{}: {}", self.id, e)))?;
+        self.state = state;
         self.update_irq();
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use parking_lot::Mutex;
-    use std::sync::Arc;
-
-    use super::*;
-    use crate::BusDevice;
-
-    /// Records IRQ line level and written output for inspection.
-    #[derive(Clone, Default)]
-    struct Recording {
-        level: Arc<Mutex<bool>>,
-        bytes: Arc<Mutex<Vec<u8>>>,
-    }
-
-    struct RecWriter(Recording);
-
-    impl Write for RecWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.bytes.lock().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct RecIrq(Recording);
-
-    impl IrqLine for RecIrq {
-        fn set_level(&self, high: bool) {
-            *self.0.level.lock() = high;
-        }
-    }
-
-    fn make() -> (Serial, Recording) {
-        let rec = Recording::default();
-        let serial = Serial::new(
-            "serial-com1",
-            SerialOut::new(Box::new(RecWriter(rec.clone()))),
-            Arc::new(RecIrq(rec.clone())),
-        );
-        (serial, rec)
-    }
-
-    fn reg_read(serial: &mut Serial, off: u64) -> u8 {
-        let mut b = [0u8; 1];
-        serial.read(off, &mut b);
-        b[0]
-    }
-
-    fn reg_write(serial: &mut Serial, off: u64, val: u8) {
-        serial.write(off, &[val]);
-    }
-
-    fn level(rec: &Recording) -> bool {
-        *rec.level.lock()
-    }
-
-    #[test]
-    fn output_reaches_the_log() {
-        let (mut s, rec) = make();
-        reg_write(&mut s, 0, b'h');
-        reg_write(&mut s, 0, b'i');
-        assert_eq!(*rec.bytes.lock(), b"hi");
-    }
-
-    #[test]
-    fn input_is_readable_through_rbr() {
-        let (mut s, _) = make();
-        assert_eq!(reg_read(&mut s, 5) & 0x01, 0); // LSR: no data
-        assert!(s.input_byte(b'x'));
-        assert_eq!(reg_read(&mut s, 5) & 0x01, 1); // LSR: data ready
-        assert_eq!(reg_read(&mut s, 0), b'x');
-        assert_eq!(reg_read(&mut s, 5) & 0x01, 0);
-    }
-
-    #[test]
-    fn receive_interrupt_is_level_triggered() {
-        let (mut s, rec) = make();
-        reg_write(&mut s, 1, 0x01); // IER: received-data interrupt
-        assert!(!level(&rec));
-        assert!(s.input_byte(b'a'));
-        assert!(level(&rec));
-        // Reading RBR services the interrupt and releases the line.
-        assert_eq!(reg_read(&mut s, 0), b'a');
-        assert!(!level(&rec));
-    }
-
-    #[test]
-    fn receive_interrupt_respects_ier() {
-        let (mut s, rec) = make();
-        // RDA interrupt masked (IER bit 0 clear): input raises no line.
-        assert!(s.input_byte(b'a'));
-        assert!(!level(&rec));
-        // Enabling IER with data pending asserts immediately.
-        reg_write(&mut s, 1, 0x01);
-        assert!(level(&rec));
-    }
-
-    #[test]
-    fn thr_empty_interrupt_and_iir_read() {
-        let (mut s, rec) = make();
-        reg_write(&mut s, 1, 0x02); // IER: THR-empty interrupt
-        reg_write(&mut s, 0, b'z');
-        assert!(level(&rec));
-        // IIR reports THRE (id 1) with FIFO bits set, pending bit clear.
-        let iir = reg_read(&mut s, 2);
-        assert_eq!(iir, 0xC2);
-        // Reading IIR acknowledges the THRE interrupt.
-        assert!(!level(&rec));
-        // With no pending source the IIR reads "no interrupt pending".
-        assert_eq!(reg_read(&mut s, 2), 0xC1);
-    }
-
-    #[test]
-    fn loopback_connects_thr_to_rbr() {
-        let (mut s, rec) = make();
-        reg_write(&mut s, 4, 0x10); // MCR: loopback
-        reg_write(&mut s, 0, b'L');
-        assert_eq!(*rec.bytes.lock(), b""); // nothing leaves the chip
-        assert_eq!(reg_read(&mut s, 0), b'L');
-    }
-
-    #[test]
-    fn divisor_latches_behind_dlab() {
-        let (mut s, _) = make();
-        reg_write(&mut s, 3, 0x80); // LCR: DLAB=1
-        reg_write(&mut s, 0, 0x0C); // DLL
-        reg_write(&mut s, 1, 0x00); // DLM
-        assert_eq!(reg_read(&mut s, 0), 0x0C);
-        reg_write(&mut s, 3, 0x03); // DLAB=0, 8N1
-        assert_eq!(reg_read(&mut s, 3), 0x03);
-    }
-
-    #[test]
-    fn scratch_register_round_trips() {
-        let (mut s, _) = make();
-        reg_write(&mut s, 7, 0x5A);
-        assert_eq!(reg_read(&mut s, 7), 0x5A);
-    }
-
-    #[test]
-    fn modem_status_reports_connected_lines() {
-        let (mut s, _) = make();
-        // DSR, CTS and DCD asserted (a null-modem cable), RI clear, no deltas.
-        assert_eq!(reg_read(&mut s, 6), 0xB0);
-    }
-
-    #[test]
-    fn accesses_outside_the_register_window_are_ignored() {
-        let (mut s, rec) = make();
-        reg_write(&mut s, 8, b'X');
-        let mut b = [0u8; 4];
-        s.read(8, &mut b);
-        assert_eq!(*rec.bytes.lock(), b"");
-    }
-
-    #[test]
-    fn snapshot_round_trips_registers_and_fifo() {
-        let (mut s, rec) = make();
-        reg_write(&mut s, 3, 0x83); // DLAB, 8N2
-        reg_write(&mut s, 0, 0x01); // DLL
-        reg_write(&mut s, 1, 0x00); // DLM
-        reg_write(&mut s, 3, 0x03);
-        reg_write(&mut s, 4, 0x0B); // DTR|RTS|OUT2
-        reg_write(&mut s, 7, 0x42); // SCR
-        reg_write(&mut s, 1, 0x01); // IER: RDA
-        s.input(b"fifo");
-        let state = s.save_state().unwrap();
-
-        // Diverge: drain the FIFO and change the registers.
-        s.read(0, &mut [0]);
-        reg_write(&mut s, 7, 0x00);
-        reg_write(&mut s, 1, 0x00);
-        assert!(!level(&rec));
-
-        s.restore_state(&state).unwrap();
-        assert_eq!(reg_read(&mut s, 7), 0x42);
-        assert_eq!(reg_read(&mut s, 4), 0x0B);
-        assert_eq!(reg_read(&mut s, 3), 0x03);
-        assert_eq!(reg_read(&mut s, 5) & 0x01, 1); // FIFO data restored
-        // The pending RDA interrupt is restored with the line asserted.
-        assert!(level(&rec));
-        assert_eq!(reg_read(&mut s, 0), b'f');
-        assert_eq!(reg_read(&mut s, 0), b'i');
-        // Servicing RBR releases the line.
-        assert!(!level(&rec));
-    }
-
-    #[test]
-    fn snapshot_restore_rejects_bad_state() {
-        let (mut s, _) = make();
-        let garbage: Vec<u8> = (0..24u8).collect();
-        assert!(s.restore_state(&garbage).is_err());
-        let mut short = s.save_state().unwrap();
-        short.pop();
-        assert!(s.restore_state(&short).is_err());
     }
 }
