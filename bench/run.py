@@ -35,7 +35,7 @@ SHUTDOWN_TIMEOUT = 300
 
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--backend", choices=("qemu", "vmlab-hv"), default="qemu")
+    p.add_argument("--backend", choices=("qemu", "vmlab-hv", "interpreter", "interpreter-reference", "interpreter-specialized"), default="qemu")
     p.add_argument("--arch", default="all", help="all, or aarch64,riscv64")
     p.add_argument("--vcpus", default="1,4", help="comma-separated vCPU counts")
     p.add_argument("--repeats", type=int, default=3, help="repeats per configuration")
@@ -251,6 +251,10 @@ def run_config(args, arch, smp, pin, version, commit, dirty, host):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.backend in ("interpreter", "interpreter-reference", "interpreter-specialized"):
+        import micro
+        commit, dirty = git_commit()
+        return micro.run(args, commit, dirty, os.uname().nodename, log)
     if args.repeats < 2:
         log("note: --repeats < 2 leaves no spread; bench-check treats that as zero noise")
     arches = resolve_arches(args.arch)

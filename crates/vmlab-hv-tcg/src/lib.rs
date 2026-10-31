@@ -1,14 +1,22 @@
 //! Reference execution of the same specialised IR consumed by the trace compiler.
+mod continuation;
 mod cpu;
 mod decode;
+mod globals;
+mod indexed;
 mod intrinsics;
+mod memo;
+mod publication;
+mod record;
+mod trace;
+pub use globals::Globals;
 #[cfg(feature = "lockstep")]
 pub mod lockstep;
 mod memory;
 mod softfloat;
 mod value;
-pub use cpu::{Privilege, Riscv64};
-pub use memory::{FlatMemory, Memory, SharedMemory};
+pub use cpu::{Privilege, Riscv64, SpecializationStats, TraceProfile};
+pub use memory::{CodeStamp, FlatMemory, Memory, SharedMemory};
 use num_bigint::BigUint;
 use std::collections::BTreeMap;
 pub use value::Value;
@@ -40,14 +48,26 @@ pub enum Error {
 
 type Frame = BTreeMap<String, Value>;
 
+#[derive(Default)]
+pub struct Profile {
+    /// Function name -> (calls, exclusive operations, inclusive operations).
+    pub functions: BTreeMap<String, (u64, u64, u64)>,
+    children: Vec<u64>,
+}
+
 pub struct Interpreter<'a, M> {
     pub program: &'a Program,
-    pub globals: BTreeMap<String, Value>,
+    pub globals: Globals,
     pub memory: M,
     pub operations: u64,
     pub operation_limit: u64,
     pub diagnostics: std::collections::VecDeque<String>,
     pub terminal: Vec<u8>,
+    pub profile: Option<Profile>,
+    pub memoize: bool,
+    pub indexed: bool,
+    indexed_cache: BTreeMap<String, std::sync::Arc<indexed::Compiled>>,
+    memo: BTreeMap<String, memo::Memo>,
     depth: u32,
     reservation: Option<(u64, u64)>,
     fetch_address: Option<u64>,
@@ -55,18 +75,29 @@ pub struct Interpreter<'a, M> {
     decode_dependencies: decode::Dependencies,
     instruction_cache: BTreeMap<String, std::sync::Arc<Function>>,
     csr_cache: BTreeMap<u16, std::sync::Arc<Function>>,
+    recorder: Option<record::Recorder>,
+    watch_store: Option<u64>,
+    watch_hit: bool,
+    source_cache: BTreeMap<String, std::sync::Arc<record::Source>>,
+    trace_completed: u32,
+    address_arguments: BTreeMap<String, std::collections::BTreeSet<usize>>,
 }
 
 impl<'a, M: Memory> Interpreter<'a, M> {
     pub fn new(program: &'a Program, memory: M) -> Self {
         Self {
             program,
-            globals: BTreeMap::new(),
+            globals: Globals::default(),
             memory,
             operations: 0,
             operation_limit: 100_000_000,
             diagnostics: std::collections::VecDeque::new(),
             terminal: Vec::new(),
+            profile: None,
+            memoize: true,
+            indexed: true,
+            indexed_cache: BTreeMap::new(),
+            memo: memo::Memo::analyze(program),
             depth: 0,
             reservation: None,
             fetch_address: None,
@@ -74,6 +105,12 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             decode_dependencies: decode::Dependencies::new(program),
             instruction_cache: BTreeMap::new(),
             csr_cache: BTreeMap::new(),
+            recorder: None,
+            watch_store: None,
+            watch_hit: false,
+            source_cache: BTreeMap::new(),
+            trace_completed: 0,
+            address_arguments: vmlab_hv_tcg_ir::address_arguments(program),
         }
     }
 
@@ -196,6 +233,13 @@ impl<'a, M: Memory> Interpreter<'a, M> {
     }
 
     fn assign(&mut self, frame: &mut Frame, location: &Location, value: Value) -> Result<()> {
+        if let Location::Id(name) = location
+            && !frame.contains_key(name)
+            && self.globals.contains_key(name)
+        {
+            self.globals.insert(name.clone(), value);
+            return Ok(());
+        }
         fn path(location: &Location, fields: &mut Vec<String>) -> Option<String> {
             match location {
                 Location::Id(name) => Some(name.clone()),
@@ -255,6 +299,26 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             .functions
             .get(name)
             .ok_or_else(|| Error::Undefined(format!("function {name}")))?;
+        if self.recorder.is_none() && self.memoize && self.memo.contains_key(name) {
+            if let Some(value) = self
+                .memo
+                .get_mut(name)
+                .unwrap()
+                .lookup(&mut self.globals, &args)
+            {
+                self.operations += 1;
+                if self.operations > self.operation_limit {
+                    return Err(Error::Limit);
+                }
+                return Ok(value);
+            }
+            let result = self.run_cached(function, args.clone())?;
+            self.memo
+                .get_mut(name)
+                .unwrap()
+                .insert(&self.globals, args, result.clone());
+            return Ok(result);
+        }
         if name == "zread_CSR" {
             let csr = u16::try_from(
                 args.first()
@@ -273,10 +337,11 @@ impl<'a, M: Memory> Interpreter<'a, M> {
                         &argument,
                         Expr::Bits(format!("0x{csr:03x}")),
                     );
+                    builder.name = format!("zread_CSR:{csr}");
                     std::sync::Arc::new(builder)
                 })
                 .clone();
-            return self.run_function(&builder, args);
+            return self.run_cached(&builder, args);
         }
         if name == "zexecute"
             && let Some(Value::Union(tag, _)) = args.first()
@@ -295,18 +360,20 @@ impl<'a, M: Memory> Interpreter<'a, M> {
                 .or_insert_with(|| {
                     let mut builder = function.clone();
                     vmlab_hv_tcg_ir::specialize_constructor(&mut builder, tag);
+                    builder.name = format!("zexecute:{tag}");
                     std::sync::Arc::new(builder)
                 })
                 .clone();
-            return self.run_function(&builder, args);
+            return self.run_cached(&builder, args);
         }
         if name == "zpt_walk" {
             // Serialize the complete PTE read/check/A-D update with RAM stores.
             let transaction = self.memory.transaction_lock();
             let _pte = transaction.as_ref().map(|lock| lock.lock());
-            return self.run_function(function, args);
+            return self.run_cached(function, args);
         }
         if matches!(name, "zext_decode" | "zext_decode_compressed")
+            && self.recorder.is_none()
             && let Some(address) = self.fetch_address
             && self.decode_dependencies.cacheable
         {
@@ -320,7 +387,7 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             if let Some(value) = self.decode_cache.get(&key) {
                 return Ok(value.clone());
             }
-            let value = self.run_function(function, args)?;
+            let value = self.run_cached(function, args)?;
             if self.decode_cache.len() >= 4096 {
                 self.decode_cache.clear();
             }
@@ -333,7 +400,7 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             }
             return Ok(value);
         }
-        self.run_function(function, args)
+        self.run_cached(function, args)
     }
 
     pub fn run_function(&mut self, function: &Function, args: Vec<Value>) -> Result<Value> {
@@ -358,17 +425,72 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             },
         );
         self.depth += 1;
+        if let Some(mut recorder) = self.recorder.take() {
+            let key = if self.depth == 1 {
+                format!("root:{}", function.name)
+            } else {
+                function.name.clone()
+            };
+            if self.depth == 1
+                && self
+                    .source_cache
+                    .get(&key)
+                    .is_some_and(|source| !source.matches(function))
+            {
+                self.source_cache.remove(&key);
+            }
+            let source = self
+                .source_cache
+                .entry(key)
+                .or_insert_with(|| std::sync::Arc::new(record::Source::new(function)))
+                .clone();
+            recorder.enter(self, source, &frame);
+            self.recorder = Some(recorder);
+        }
+        let start = self.operations;
+        if let Some(profile) = &mut self.profile {
+            profile.children.push(0);
+        }
         let result = self.run_frame(function, &mut frame);
+        if let Some(mut recorder) = self.recorder.take() {
+            recorder.leave(self, result.is_ok());
+            self.recorder = Some(recorder);
+        }
+        if let Some(profile) = &mut self.profile {
+            let inclusive = self.operations - start;
+            let children = profile.children.pop().expect("profile frame");
+            let counts = profile.functions.entry(function.name.clone()).or_default();
+            counts.0 += 1;
+            counts.1 += inclusive - children;
+            counts.2 += inclusive;
+            if let Some(parent) = profile.children.last_mut() {
+                *parent += inclusive;
+            }
+        }
         self.depth -= 1;
         result
     }
 
     fn run_frame(&mut self, function: &Function, frame: &mut Frame) -> Result<Value> {
-        let mut pc = 0;
+        self.run_frame_from(function, frame, 0)
+    }
+
+    fn run_frame_from(
+        &mut self,
+        function: &Function,
+        frame: &mut Frame,
+        mut pc: usize,
+    ) -> Result<Value> {
         while let Some(op) = function.code.get(pc) {
             self.operations += 1;
             if self.operations > self.operation_limit {
                 return Err(Error::Limit);
+            }
+            let mut folded_result = None;
+            if let Some(mut recorder) = self.recorder.take() {
+                recorder.before(self, frame, op, pc);
+                folded_result = recorder.take_folded_result();
+                self.recorder = Some(recorder);
             }
             let step = (|| -> Result<Option<usize>> {
                 match op {
@@ -393,7 +515,13 @@ impl<'a, M: Memory> Interpreter<'a, M> {
                             .map(|e| self.eval(frame, e))
                             .collect::<Result<Vec<_>>>()?;
                         let value = match target {
-                            Target::Function(name) => self.call(name, args)?,
+                            Target::Function(name) => {
+                                if let Some(result) = folded_result.take() {
+                                    result?
+                                } else {
+                                    self.call(name, args)?
+                                }
+                            }
                             Target::Intrinsic(name) => self.intrinsic(name, None, &args)?,
                             Target::Native { operation, width } => {
                                 self.native(operation, *width, &args)?
@@ -433,6 +561,12 @@ impl<'a, M: Memory> Interpreter<'a, M> {
                 }
                 Ok(Some(pc + 1))
             })();
+            if step.is_ok()
+                && let Some(mut recorder) = self.recorder.take()
+            {
+                recorder.after(self, frame, op, pc);
+                self.recorder = Some(recorder);
+            }
             match step {
                 Ok(Some(next)) => pc = next,
                 Ok(None) => return Ok(frame.remove("return").unwrap_or(Value::Unit)),
@@ -473,6 +607,15 @@ impl<'a, M: Memory> Interpreter<'a, M> {
                 true
             };
             self.reservation = None;
+            if result
+                && self.watch_store.is_some_and(|watch| {
+                    watch
+                        .checked_sub(address)
+                        .is_some_and(|delta| delta < len as u64)
+                })
+            {
+                self.watch_hit = true;
+            }
             Ok(Value::Bool(result))
         } else {
             let mut bytes = vec![0; len];

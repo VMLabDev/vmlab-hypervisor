@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cpu = Riscv64::new(FlatMemory::new(0x8000_0000, image))?;
     cpu.set_pc(0x8000_0000);
     cpu.interpreter.operation_limit = 5_000_000_000;
+    cpu.specialize = std::env::var_os("VMLAB_TCG_SPECIALIZE").is_some();
     let start = std::time::Instant::now();
     for _ in 0..limit {
         cpu.step()
@@ -36,6 +37,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 start.elapsed().as_secs_f64(),
                 cpu.steps as f64 / start.elapsed().as_secs_f64() / 1e6
             );
+            if cpu.specialize {
+                let stats = &cpu.specialization_stats;
+                eprintln!(
+                    "trace: recordings={} native={} exits={}",
+                    stats.recordings, stats.hits, stats.exits
+                );
+            }
             if value != 1 {
                 return Err(format!("guest test failed: {}", value >> 1).into());
             }

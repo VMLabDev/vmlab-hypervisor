@@ -61,6 +61,24 @@ really sees the configured CPU count (`nproc`).
 
 ## Noise control
 
+The interpreter micro-benchmarks use flat RV64 images rather than booting a VM:
+
+- **interpreter** selects indexed generated IR with guarded memoization.
+- **interpreter-reference** selects named frames without memoization.
+- **interpreter-specialized** selects warm shared scalar blocks. It excludes
+  training time and records that time separately.
+
+Run `just bench-run interpreter-specialized riscv64 1 3` for three pinned
+samples of the 30-million-instruction scalar loop and 1,000 iterations of the
+CRC-checked CoreMark algorithm mix. The longer mix reduces the timing noise and
+fixed startup contribution of the earlier one-iteration workload; it has a
+distinct history key. Reference and indexed backends retain one iteration.
+These workloads do not establish Linux boot performance or an
+official CoreMark score. Measurements include guest instruction counts,
+execution and initialization time, native and training instructions, slow
+continuations, and cache evictions. Backend selection clears inherited debug
+and execution flags. Guest failures and CRC mismatches fail the run.
+
 - **Pinning**: the VM process tree runs under `taskset -c` on full physical
   cores in the top half of the topology (smp1 → e.g. `16-19`, smp4 →
   `16-23` on the 32-thread host this was written on; `--cpus` overrides).
