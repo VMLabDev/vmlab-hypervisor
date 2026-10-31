@@ -1,0 +1,393 @@
+{
+  "cpu": "Skylake-Client-v4,-hle,-rtm,kvm=on,vendor=GenuineIntel,vmware-cpuid-freq=on,+invtsc,tsc-frequency=4291934000",
+  "vcpus": 4,
+  "tsc_khz": 4291934,
+  "qemu": "QEMU emulator version 11.1.2",
+  "kernel_sha256": "26f146f664ad057be3b39b211422b03b1f94cb2c3d66522fd4841811a224bfd5",
+  "leaves": [
+    {
+      "function": 0,
+      "index": 0,
+      "eax": 13,
+      "ebx": 1970169159,
+      "ecx": 1818588270,
+      "edx": 1231384169
+    },
+    {
+      "function": 1,
+      "index": 0,
+      "eax": 329443,
+      "ebx": 264192,
+      "ecx": 4294455811,
+      "edx": 395049983
+    },
+    {
+      "function": 2,
+      "index": 0,
+      "eax": 1,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 255
+    },
+    {
+      "function": 3,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 4,
+      "index": 0,
+      "eax": 201326881,
+      "ebx": 29360191,
+      "ecx": 63,
+      "edx": 1
+    },
+    {
+      "function": 4,
+      "index": 1,
+      "eax": 201326882,
+      "ebx": 29360191,
+      "ecx": 63,
+      "edx": 1
+    },
+    {
+      "function": 4,
+      "index": 2,
+      "eax": 201326915,
+      "ebx": 62914623,
+      "ecx": 4095,
+      "edx": 1
+    },
+    {
+      "function": 4,
+      "index": 3,
+      "eax": 201376099,
+      "ebx": 62914623,
+      "ecx": 16383,
+      "edx": 6
+    },
+    {
+      "function": 4,
+      "index": 4,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 5,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 3,
+      "edx": 0
+    },
+    {
+      "function": 6,
+      "index": 0,
+      "eax": 4,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 7,
+      "index": 0,
+      "eax": 0,
+      "ebx": 1836969,
+      "ecx": 0,
+      "edx": 67108864
+    },
+    {
+      "function": 8,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 9,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 10,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 11,
+      "index": 0,
+      "eax": 0,
+      "ebx": 1,
+      "ecx": 256,
+      "edx": 0
+    },
+    {
+      "function": 11,
+      "index": 1,
+      "eax": 2,
+      "ebx": 4,
+      "ecx": 513,
+      "edx": 0
+    },
+    {
+      "function": 11,
+      "index": 2,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 2,
+      "edx": 0
+    },
+    {
+      "function": 12,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 13,
+      "index": 0,
+      "eax": 7,
+      "ebx": 832,
+      "ecx": 832,
+      "edx": 0
+    },
+    {
+      "function": 13,
+      "index": 1,
+      "eax": 15,
+      "ebx": 832,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 13,
+      "index": 2,
+      "eax": 256,
+      "ebx": 576,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741824,
+      "index": 0,
+      "eax": 1073741840,
+      "ebx": 1263359563,
+      "ecx": 1447775574,
+      "edx": 77
+    },
+    {
+      "function": 1073741825,
+      "index": 0,
+      "eax": 16777339,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741826,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741827,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741828,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741829,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741830,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741831,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741832,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741833,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741834,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741835,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741836,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741837,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741838,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741839,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 1073741840,
+      "index": 0,
+      "eax": 4291934,
+      "ebx": 1000000,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 2147483648,
+      "index": 0,
+      "eax": 2147483656,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 2147483649,
+      "index": 0,
+      "eax": 329443,
+      "ebx": 0,
+      "ecx": 289,
+      "edx": 672139264
+    },
+    {
+      "function": 2147483650,
+      "index": 0,
+      "eax": 1702129225,
+      "ebx": 1866670188,
+      "ecx": 1344300402,
+      "edx": 1701015410
+    },
+    {
+      "function": 2147483651,
+      "index": 0,
+      "eax": 1919906675,
+      "ebx": 1800611872,
+      "ecx": 1801546873,
+      "edx": 1226845285
+    },
+    {
+      "function": 2147483652,
+      "index": 0,
+      "eax": 743658050,
+      "ebx": 544173600,
+      "ecx": 693654356,
+      "edx": 0
+    },
+    {
+      "function": 2147483653,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    },
+    {
+      "function": 2147483654,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 268468288,
+      "edx": 0
+    },
+    {
+      "function": 2147483655,
+      "index": 0,
+      "eax": 0,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 256
+    },
+    {
+      "function": 2147483656,
+      "index": 0,
+      "eax": 12328,
+      "ebx": 0,
+      "ecx": 0,
+      "edx": 0
+    }
+  ]
+}
