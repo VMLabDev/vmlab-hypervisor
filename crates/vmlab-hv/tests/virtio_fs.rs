@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use vmlab_hv_devices::PciSnapshot;
 use vmlab_hv_devices::virtio::fs::{InProcessFs, InProcessFsConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
 use vmlab_hv_proto::client::Client;
@@ -77,23 +76,9 @@ impl Drop for Dir {
     }
 }
 
-/// A factory whose serial is the real 16550A into a log file and whose only
-/// PCI device is the real in-process virtio-fs device.
-struct TestFactory {
-    serial: PathBuf,
-}
-
-impl TestFactory {
-    fn new(dir: &Path) -> Self {
-        Self {
-            serial: dir.join("serial.log"),
-        }
-    }
-
-    fn serial_log(&self) -> &Path {
-        &self.serial
-    }
-}
+/// A factory whose serial is the real 16550A into the machine's log file
+/// and whose PCI devices are the real virtio block and in-process fs.
+struct TestFactory;
 
 impl DeviceFactory for TestFactory {
     fn serial(
@@ -340,7 +325,7 @@ fn teardown(vm: Vm) {
 fn boot(dir: &Dir, share: &Path, read_only: bool) -> (Vm, PathBuf) {
     vmlab_disk::ops::create_qcow2(&dir.path.join("vmstate.qcow2"), 64 << 20, None, None).unwrap();
     let initrd = initrd_with_init_script(dir);
-    let factory = TestFactory::new(&dir.path);
+    let factory = TestFactory;
     let description = machine(dir, share, &initrd, read_only);
     let vm = match builder::build(&description, &factory, false) {
         Ok(vm) => vm,

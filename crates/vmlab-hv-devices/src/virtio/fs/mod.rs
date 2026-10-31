@@ -7,5 +7,5 @@ pub mod fuse;
 pub mod passthrough;
 pub mod vhost_user;
 
-pub use device::InProcessFs;
+pub use device::{InProcessFs, InProcessFsConfig};
 pub use vhost_user::{Fs, FsConfig};

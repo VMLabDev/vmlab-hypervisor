@@ -163,9 +163,8 @@ fn launch(share: Share) -> Option<Vm> {
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !socket.exists() {
-            match fsd.try_wait() {
-                Ok(Some(status)) => panic!("virtiofsd exited at startup with {status}"),
-                _ => {}
+            if let Ok(Some(status)) = fsd.try_wait() {
+                panic!("virtiofsd exited at startup with {status}");
             }
             assert!(Instant::now() < deadline, "virtiofsd never bound");
             std::thread::sleep(Duration::from_millis(50));
