@@ -353,20 +353,18 @@ impl VmShared {
     /// Detach the device with qdev id `id`, returning it to the host: the
     /// backend's drop releases the interfaces and rebinds the host driver.
     pub(crate) fn detach_usb(&self, id: &str) -> Result<u8, vmlab_hv_proto::control::ErrorCode> {
-        let port = self
-            .usb_attachments
-            .lock()
-            .iter()
-            .find(|a| a.id == id)
-            .map(|a| a.port);
-        let Some(port) = port else {
-            return Err(vmlab_hv_proto::control::ErrorCode::DeviceNotFound);
-        };
         let Some(controller) = self.xhci.lock().clone() else {
             return Err(vmlab_hv_proto::control::ErrorCode::Internal);
         };
-        let detached = controller.lock().detach(port);
-        self.usb_attachments.lock().retain(|a| a.id != id);
+        let mut controller = controller.lock();
+        let mut attachments = self.usb_attachments.lock();
+        let Some(index) = attachments.iter().position(|a| a.id == id) else {
+            return Err(vmlab_hv_proto::control::ErrorCode::DeviceNotFound);
+        };
+        let port = attachments.remove(index).port;
+        let detached = controller.detach(port);
+        drop(attachments);
+        drop(controller);
         // Either the detach handed back the backend, whose drop rebinds the
         // host driver, or the port was already empty (host unplug drained
         // it); either way the device is back on the host.

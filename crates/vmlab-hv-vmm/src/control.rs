@@ -487,6 +487,45 @@ mod usb_tests {
     }
 
     #[test]
+    fn concurrent_detaches_emit_one_event() {
+        let Some(f) = fixture() else { return };
+        assert!(matches!(
+            f.handler
+                .handle(device_add("usbhost-1-5", "usb-host", Some("usbx.0"))),
+            Outcome::Ok { .. }
+        ));
+        let controller = f.shared.xhci.lock().clone().unwrap();
+        let held = controller.lock();
+        let start = Arc::new(std::sync::Barrier::new(17));
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                let shared = f.shared.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    shared.detach_usb("usbhost-1-5")
+                })
+            })
+            .collect();
+        start.wait();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        drop(held);
+        let detached = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .filter(Result::is_ok)
+            .count();
+        let events = f.events.lock().unwrap().clone();
+        assert_eq!(detached, 1);
+        assert_eq!(
+            events,
+            vec![Event::DeviceDeleted {
+                id: "usbhost-1-5".into()
+            }]
+        );
+    }
+
+    #[test]
     fn a_lost_host_device_detaches_with_an_event() {
         let Some(f) = fixture() else { return };
         assert!(matches!(
