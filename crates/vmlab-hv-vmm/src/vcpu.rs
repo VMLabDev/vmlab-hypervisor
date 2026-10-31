@@ -14,6 +14,16 @@ use crate::vm::VmShared;
 /// kicking goes through it, so thread handles need no tid of their own.
 const KICK_SIGNAL: libc::c_int = libc::SIGUSR1;
 
+fn io_dispatch_width(port: u16, width: usize, length: usize) -> usize {
+    // IDE data ports are byte FIFOs, including across sector boundaries.
+    // Keep the complete REP payload so each dword does not poll every UART.
+    if matches!(port, 0x1f0 | 0x170) {
+        length.max(width)
+    } else {
+        width
+    }
+}
+
 extern "C" fn kick_handler(_sig: libc::c_int) {}
 
 /// Install the kick signal handler once, before the first vCPU thread runs.
@@ -136,12 +146,12 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
         }
         match result {
             Ok(VcpuExit::IoIn(port, data)) => {
-                for value in data.chunks_mut(width) {
+                for value in data.chunks_mut(io_dispatch_width(port, width, data.len())) {
                     shared.io_read(port, value);
                 }
             }
             Ok(VcpuExit::IoOut(port, data)) => {
-                for value in data.chunks(width) {
+                for value in data.chunks(io_dispatch_width(port, width, data.len())) {
                     shared.io_write(port, value);
                 }
                 if port == 0xb2 && shared.take_smi() {
@@ -259,6 +269,26 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                     "vcpu {id}: KVM_RUN: {e}"
                 )));
                 return;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::io_dispatch_width;
+
+    #[test]
+    fn repeated_ide_fifo_io_keeps_batches_and_other_registers_keep_width() {
+        for width in [1, 2, 4] {
+            assert_eq!(io_dispatch_width(0x1f0, width, 0), width);
+            for length in [width, 512, 4096] {
+                for port in [0x1f0, 0x170] {
+                    assert_eq!(io_dispatch_width(port, width, length), length);
+                }
+                for port in [0x1f1, 0x177, 0x3f6, 0x3f8, 0x2f8, 0xc000] {
+                    assert_eq!(io_dispatch_width(port, width, length), width);
+                }
             }
         }
     }

@@ -155,6 +155,7 @@ pub struct Serial {
     id: String,
     out: SerialOut,
     irq: Arc<dyn IrqLine>,
+    last_irq_level: Option<bool>,
     state: State,
     socket: Option<Arc<Mutex<SocketBackend>>>,
 }
@@ -162,10 +163,11 @@ pub struct Serial {
 impl Serial {
     /// Create a UART whose transmitted bytes go to `out`.
     pub fn new(id: impl Into<String>, out: SerialOut, irq: Arc<dyn IrqLine>) -> Self {
-        let serial = Self {
+        let mut serial = Self {
             id: id.into(),
             out,
             irq,
+            last_irq_level: None,
             state: State::default(),
             socket: None,
         };
@@ -260,8 +262,12 @@ impl Serial {
         self.input(&bytes[..count]);
     }
 
-    fn update_irq(&self) {
-        self.irq.set_level(self.state.iir() & 1 == 0);
+    fn update_irq(&mut self) {
+        let level = self.state.iir() & 1 == 0;
+        if self.last_irq_level != Some(level) {
+            self.irq.set_level(level);
+            self.last_irq_level = Some(level);
+        }
     }
 
     fn start_shift(&mut self) {
@@ -393,6 +399,7 @@ impl BusDevice for Serial {
 impl Resettable for Serial {
     fn reset(&mut self) -> Result<(), DeviceError> {
         self.state = State::default();
+        self.last_irq_level = None;
         self.update_irq();
         Ok(())
     }
@@ -428,6 +435,7 @@ impl Snapshot for Serial {
             )));
         }
         self.state = state;
+        self.last_irq_level = None;
         self.update_irq();
         Ok(())
     }

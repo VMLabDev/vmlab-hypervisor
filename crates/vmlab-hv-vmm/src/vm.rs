@@ -646,8 +646,18 @@ impl VmShared {
     // ---- dispatch (called from vCPU threads) ---------------------------
 
     pub(crate) fn io_read(&self, port: u16, data: &mut [u8]) {
-        self.advance_serials(None);
+        if matches!(port, 0x2f8..=0x2ff | 0x3f8..=0x3ff) {
+            self.advance_serials(None);
+        }
+        self.dispatch_io_read(port, data);
         self.trace_io(port, data, false);
+    }
+
+    fn dispatch_io_read(&self, port: u16, data: &mut [u8]) {
+        if matches!(port, 0x1f0 | 0x170) {
+            self.io_bus.lock().read(port, data);
+            return;
+        }
         if self.chipset.lock().is_none() && data.len() == 1 && matches!(port, 0xcf9 | 0x64) {
             data[0] = if port == 0xcf9 {
                 *self.legacy_reset_control.lock()
@@ -677,8 +687,14 @@ impl VmShared {
     }
 
     pub(crate) fn io_write(&self, port: u16, data: &[u8]) {
-        self.advance_serials(None);
+        if matches!(port, 0x2f8..=0x2ff | 0x3f8..=0x3ff) {
+            self.advance_serials(None);
+        }
         self.trace_io(port, data, true);
+        if matches!(port, 0x1f0 | 0x170) {
+            self.io_bus.lock().write(port, data);
+            return;
+        }
         if self.chipset.lock().is_none() && data.len() == 1 {
             if port == 0xcf9 {
                 let mut control = self.legacy_reset_control.lock();
@@ -1138,8 +1154,10 @@ impl VmShared {
                 trace.pop_front();
             }
             trace.push_back(format!(
-                "{} {port:#x} {data:x?}",
-                if write { "out" } else { "in" }
+                "{} {port:#x} {} bytes {:x?}",
+                if write { "out" } else { "in" },
+                data.len(),
+                &data[..data.len().min(16)]
             ));
         }
     }
@@ -1299,8 +1317,15 @@ impl Vm {
                 let fd = vcpu.lock();
                 if let (Ok(regs), Ok(sregs)) = (fd.get_regs(), fd.get_sregs()) {
                     eprintln!(
-                        "vcpu {id}: cs={:#x} rip={:#x} ax={:#x} dx={:#x} cr0={:#x}",
-                        sregs.cs.base, regs.rip, regs.rax, regs.rdx, sregs.cr0
+                        "vcpu {id}: cs={:#x} rip={:#x} ax={:#x} cx={:#x} dx={:#x} si={:#x} di={:#x} cr0={:#x}",
+                        sregs.cs.base,
+                        regs.rip,
+                        regs.rax,
+                        regs.rcx,
+                        regs.rdx,
+                        regs.rsi,
+                        regs.rdi,
+                        sregs.cr0
                     );
                     eprintln!("vcpu {id} MP state: {:?}", fd.get_mp_state());
                 }

@@ -37,6 +37,68 @@ impl IrqLine for RecIrq {
     }
 }
 
+struct CountingIrq(Arc<Mutex<Vec<bool>>>);
+
+impl IrqLine for CountingIrq {
+    fn set_level(&self, high: bool) {
+        self.0.lock().push(high);
+    }
+}
+
+fn counting_serial() -> (Serial, Arc<Mutex<Vec<bool>>>) {
+    let levels = Arc::new(Mutex::new(Vec::new()));
+    let serial = Serial::new(
+        "serial-counted",
+        SerialOut::new(Box::new(io::sink())),
+        Arc::new(CountingIrq(levels.clone())),
+    );
+    (serial, levels)
+}
+
+#[test]
+fn unchanged_running_time_and_register_accesses_do_not_redrive_irq() {
+    let (mut serial, levels) = counting_serial();
+    assert_eq!(*levels.lock(), [false]);
+    for _ in 0..128 {
+        serial.advance(1_000);
+        read(&mut serial, 5);
+    }
+    assert_eq!(*levels.lock(), [false]);
+    write(&mut serial, 1, 1);
+    serial.input_byte(b'x');
+    for _ in 0..128 {
+        serial.advance(1_000);
+        read(&mut serial, 5);
+    }
+    assert_eq!(*levels.lock(), [false, true]);
+    assert_eq!(read(&mut serial, 0), b'x');
+    assert_eq!(*levels.lock(), [false, true, false]);
+}
+
+#[test]
+fn reset_and_restore_force_irq_output_even_when_the_cached_level_matches() {
+    let (mut serial, levels) = counting_serial();
+    let low = serial.save_state().unwrap();
+    serial.reset().unwrap();
+    serial.restore_state(&low).unwrap();
+    assert_eq!(*levels.lock(), [false, false, false]);
+    write(&mut serial, 1, 1);
+    serial.input_byte(b'x');
+    let high = serial.save_state().unwrap();
+    serial.restore_state(&high).unwrap();
+    serial.reset().unwrap();
+    serial.restore_state(&high).unwrap();
+    assert_eq!(
+        *levels.lock(),
+        [false, false, false, true, true, false, true]
+    );
+    assert!(serial.restore_state(b"invalid").is_err());
+    assert_eq!(
+        *levels.lock(),
+        [false, false, false, true, true, false, true]
+    );
+}
+
 fn make() -> (Serial, Recording) {
     let rec = Recording::default();
     let serial = Serial::new(
