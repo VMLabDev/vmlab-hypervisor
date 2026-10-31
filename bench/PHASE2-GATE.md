@@ -1,9 +1,138 @@
 # Phase-2 performance gate (HV-D28)
 
-**Verdict: NOT passed. Eight of ten bars meet D28; G1 and G3 fail.**
+**Verdict: NOT passed. Six of ten bars meet D28; G1, G2, G7, and G10 fail.**
 The VM default must remain unchanged.
 
-## Round 2 diagnostics
+## Round 2 final run
+
+The final window opened with the owner's confirmation that no other
+project VM was running and every other session was holding new boots.
+Local main `a0b61f4` (including phase 4a) was merged in `a99edda` before
+building and measuring. The measured commit is `872fab1d147233a46851cdc817ee32510c64f6ab`.
+The later dirty markers reflect appended benchmark history; runtime
+sources did not change during this cohort.
+
+Both backends completed three repeats of the full Ubuntu suite, Windows
+boot suite, and guest-to-guest suite on 2026-11-01 (Australia/Brisbane).
+The 22 aggregate records in `bench/history/x86_64.jsonl` retain every
+sample and load average. `just bench-report x86_64` gives the same
+verdicts. No bar, workload, or repeat was dropped or relaxed.
+
+| Bar | Workload | QEMU | vmlab-hv | hv/qemu | Required | Verdict |
+|---|---|---|---|---|---|---|
+| G1 | Ubuntu boot to agent ready (s) | 6.70 | 8.29 | 1.237 | <= 1.000 | FAILS |
+| G2 | Windows boot to agent ready (s) | 108.11 | 109.68 | 1.015 | <= 1.000 | FAILS |
+| G3 | sequential read (MiB/s) | 17579.97 | 15061.59 | 0.857 | >= 0.800 | meets |
+| G4 | sequential write (MiB/s) | 815.32 | 1921.45 | 2.357 | >= 0.800 | meets |
+| G5 | random read 4 KiB (IOPS) | 50640.50 | 67013.70 | 1.323 | >= 0.800 | meets |
+| G6 | random write 4 KiB (IOPS) | 20150.00 | 19088.00 | 0.947 | >= 0.800 | meets |
+| G7 | UDP TX (Mbit/s) | 41107.46 | 23870.07 | 0.581 | >= 0.800 | FAILS |
+| G8 | UDP RX (Mbit/s) | 86108.37 | 75773.06 | 0.880 | >= 0.800 | meets |
+| G9 | guest TCP A to B (Mbit/s) | 26011.68 | 20866.66 | 0.802 | >= 0.800 | meets |
+| G10 | guest TCP B to A (Mbit/s) | 26610.76 | 20640.87 | 0.776 | >= 0.800 | FAILS |
+
+All throughput workloads use Ubuntu 26.04.3; Windows is 19045.2006.9.
+Idle CPU has no D28 bar: QEMU 1.13%, vmlab-hv 2.85% of one core.
+
+G3 now meets the read bar. G1 improves from round 1's 12.23 seconds to
+8.29 seconds, but still misses QEMU by 1.59 seconds. G2 fails its strict
+median bar despite overlapping samples: QEMU 179.54, 108.11, 106.33;
+vmlab-hv 195.25, 104.69, 109.68 seconds. This is not a statistically
+established Windows regression relative to round 1's different baseline.
+
+UDP TX samples are QEMU 37211.44, 41107.46, 43560.06 and vmlab-hv
+29595.84, 23870.07, 23343.36 Mbit/s. G10's vmlab-hv samples are
+11028.92, 20640.87, 21526.57 Mbit/s. The slow first sample is retained;
+no cause is assigned without a profile. G9's 0.802x median leaves little
+margin, and its first sample is below 80% of QEMU's median. These are
+median verdicts, not claims that every repeat passes.
+
+### Final-window environment
+
+The host is helios, with 32 logical CPUs, the performance governor,
+QEMU 11.1.2, and vmlab-hv 0.1.0. Single VMs use CPUs 16-23; pairs use
+16-19 and 20-23. Ubuntu uses 2 vCPUs and 4 GiB; Windows uses 4 vCPUs
+and 8 GiB. The Ubuntu NIC MTU is 65520. Templates and disk cache/flush
+policy are unchanged from round 1.
+
+Both host-wide slot locks were reserved for the benchmark cohort. No
+project VM was present before any configuration, and the per-launch
+count check remained enabled. Each VM ran in a scope with MemoryMax=24G
+and MemorySwapMax=0. A live QEMU scope readback confirmed memory.max
+25769803776 and memory.swap.max 0. The owner's Android emulator was
+excluded and untouched. No physical PCI/USB device was claimed.
+
+The one-minute load averages below include the measured VMs. Five- and
+fifteen-minute averages, including decaying build load, remain in history.
+No competing project VM was observed. A process CPU sample before the
+fresh cohort found no heavy external CPU consumer.
+
+| Run | Configuration | Repeat 1 | Repeat 2 | Repeat 3 |
+|---|---|---|---|---|
+| E1 | qemu Ubuntu | 1.55 to 0.97 | 0.97 to 0.72 | 0.72 to 4.29 |
+| E2 | vmlab-hv Ubuntu | 4.29 to 1.85 | 1.85 to 0.73 | 0.73 to 0.90 |
+| E3 | qemu Windows | 0.90 to 1.21 | 1.21 to 3.03 | 3.03 to 2.48 |
+| E4 | vmlab-hv Windows | 2.48 to 1.22 | 1.22 to 2.07 | 2.07 to 2.39 |
+| E5 | qemu guest pair | 2.39 to 2.82 | 2.82 to 2.94 | 2.94 to 3.14 |
+| E6 | vmlab-hv guest pair | 3.14 to 6.42 | 6.42 to 5.36 | 5.36 to 5.09 |
+
+An earlier attempt was rejected before appending results: QEMU remained
+in QMP prelaunch despite the client reporting resume. The client had
+treated socket chunks as complete replies and had not correlated command
+IDs or checked errors. Commit `872fab1` reads buffered JSON lines,
+matches IDs, rejects command errors, and verifies running state. Three
+socketpair regressions fail before the fix and pass afterward. The
+complete cohort above was restarted after that fix and a cooldown.
+
+### Final-window verification
+
+The timed suites and report completed with exit 0. `just ci::check`
+also exited 0 with RUST_TEST_THREADS=1 inside the 24 GiB, zero-swap
+scope: formatting, workspace clippy with -D warnings, and 890 reported
+passing tests. This includes all 36 binary acceptance tests, all 379
+active device tests, all 23 active S2 tests, all 14 core S1 tests, and
+both filesystem restore tests. Ubuntu and Windows snapshot/reset,
+Windows Server TPM, legacy-PC acceptance, and snapshot during fsync
+writes passed. Guest-write, flush, and snapshot ordering were not
+weakened for throughput.
+
+CI normally ignores three tests. The 1 GiB S2 integrity/throughput test
+and the zero-fill byte-verification diagnostic were run explicitly and
+passed. The live PipeWire loopback test remains ignored. Physical USB
+and VFIO testing was not enabled; their opt-in variables were unset.
+Optional Sail-oracle feature tests were not enabled.
+
+All 83 benchmark unit tests pass, including the QMP regressions and
+main's additional coverage. Existing mock socket/file ResourceWarnings
+remain. PIE and non-PIE sampler symbol-resolution self-tests pass with
+compiler warnings treated as errors. No scoped todo!() or
+unimplemented!() remains.
+
+Herdr lost the outer completion marker for the main job and its wait
+helper raised a TypeError. The runner independently saved each child
+exit status and complete logs: CI exited 0 after 1597.48 seconds, and no
+project VM remained. An auxiliary job had the same tracking issue;
+those two explicit tests were rerun with normal job arguments and a
+confirmed job exit 0. No test failure was hidden by the wrapper issue.
+
+`bench/profiles/phase2-round2-final-20261101.json` records the command
+statuses, timestamps, scope readback, firmware hashes, and auxiliary
+checks. Full logs remain under `.scratch/perf2/final-quiet/`. QEMU C
+source was not read. Only the authorized local-main merge was made;
+there was no push or default change. G1, G2, G7, and G10 remain
+unfinished, and work stops with evidence under the brief's failed-bar
+condition instead of changing the bars.
+
+## Round 2 development diagnostics (historical)
+
+| Change | Commit | Diagnostic evidence |
+|---|---|---|
+| C5: iPXE POST timeout | `06b3f3c` | Agent readiness 12.31 to 8.19 s with the original VMM |
+| C6: direct guest-buffer reads | `6e1a493` | Read-path series 9583.51 to 13998.15 MiB/s before the final table cache |
+| C7: unchanged IRQ-level cache | `27a43c8` | Sampled Source share 6.08% to 1.26%; no isolated wall-rate claim |
+| C8: test-hypervisor VM counting | `5cbbd87` | Reproduced omission; regression passes with the count fix |
+| C9: direct sparse-zero fills | `422b67a` | Development zero probe 18052.31 to 47731.18 MiB/s; every byte verified |
+| C10: correlated QMP resume | `872fab1` | Three regressions fail before and pass after; complete fresh cohort retained |
 
 The initial round-2 CI run failed waiting 600 seconds for a shared VM slot
 in Windows Server TPM acceptance. The VMM never launched for that test.
@@ -12,9 +141,10 @@ and in-process reset acceptance, and Windows 10 snapshot and reset
 acceptance, passed earlier in that run. Full CI must be rerun on the final
 code; the failed run stopped before the remaining test crates.
 
-The round-2 changes have not had a final quiet-host gate run. The full-run
-table below remains the round-1 result. No diagnostic appends benchmark
-history or changes a D28 bar. Raw timings, samples, and load averages are in
+At this development checkpoint, the quiet-host gate was still pending.
+The round-1 table below is historical; the final result is above. No
+diagnostic appends benchmark history or changes a D28 bar. Raw timings,
+samples, and load averages are in
 `bench/profiles/phase2-round2-20261031.json`.
 
 The Ubuntu 26.04.3 template explicitly selects SeaBIOS. File observations
@@ -62,17 +192,17 @@ fails before the change and passes afterward. The source's sampled share
 falls from 6.08% to 1.26%; differing host loads prevent an isolated
 throughput claim.
 
-The last diagnostic boot takes 12.23 seconds at a starting one-minute
-host load of 5.16. All samples are retained. Neither G1 nor G3 has a new
-gate verdict. The final comparison must rerun both backends on the quiet
-host, rather than compare these development samples with round 1.
+The last development diagnostic boot takes 12.23 seconds at a starting
+one-minute host load of 5.16. All samples are retained. This was not a
+gate verdict. The final comparison above reruns both backends instead
+of comparing development samples with round 1.
 
 The disk seam adds `ReadTarget` and the default `DiskImage::read_into` method.
 Raw images, qcow2, and `SharedDisk` implement or forward the direct path.
 Buffered callers remain unchanged. S2 checks compare both read paths
 across backing, compressed, zero, unaligned, and snapshot reads. The
 normally ignored 1 GiB S2 test also passes. Guest writes and flush handling
-are unchanged. Full CI and the quiet-host gate are still pending.
+are unchanged. Final-window verification is recorded above.
 
 Final-code formatting, workspace clippy with `-D warnings`, all 24 active
 block tests, and all 67 benchmark tests pass. The zero-fill diagnostic
@@ -159,7 +289,7 @@ Black-box QMP `query-block` on this argv reports
 is enabled and guest flush requests are honored. The disk crate retains
 the same buffered-I/O and flush semantics. No unsafe cache mode was used.
 
-## What moved the bars
+## Round 1 changes
 
 The following before/after figures are single-repeat diagnostics on a
 shared host, not the final gate evidence above.
@@ -195,7 +325,7 @@ partially started pairs. Guest-to-guest labels now identify the actual
 sender and receiver; historical records retain their old, swapped keys.
 New records for both backends use the corrected labels.
 
-## Remaining failures and profiles
+## Round 1 failures and profiles (historical)
 
 The sampler is committed as `bench/ipsample.c`. It resolves ELF load
 segments and symbol sizes, supports dynamic DSO symbols, requests 1 kHz
@@ -251,7 +381,7 @@ These are leaf-IP histograms, not call counts or wall-time breakdowns.
 Unresolved code limits the attribution. No claim assigns those samples
 to allocation, copying, or storage I/O without evidence.
 
-## Correctness and verification
+## Round 1 correctness and verification (historical)
 
 `just ci::check` passed with `RUST_TEST_THREADS=1`, inside the 24 GiB
 scope. This includes firmware acceptance, S1 snapshot/reset and network
@@ -267,5 +397,6 @@ No shared Rust trait or control protocol type changed. No scoped
 operation was performed. Measurement VMs, peers, and profiler processes
 were reaped. No merge, rebase, default flip, or push was performed.
 
-Work stops with G1 and G3 measured and profiled, as the task's failed-bar
-condition requires. D28 remains the gate for any future default change.
+Round 1 stopped with G1 and G3 measured and profiled. The round-2 result
+above supersedes that verdict. D28 remains the gate for any future
+default change.

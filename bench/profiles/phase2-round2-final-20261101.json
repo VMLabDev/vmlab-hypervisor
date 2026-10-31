@@ -1,0 +1,541 @@
+{
+  "session": {
+    "started": "2026-10-31T20:41:18.743915+00:00",
+    "commit": "872fab1d147233a46851cdc817ee32510c64f6ab",
+    "main": "a0b61f4ae6ec7a79533f96ffee103f5a32d71afc",
+    "governor": "performance",
+    "steps": [
+      {
+        "name": "qemu-ubuntu",
+        "argv": [
+          "just",
+          "bench-run-kvm",
+          "qemu",
+          "ubuntu-26.04",
+          "3"
+        ],
+        "started": "2026-10-31T20:42:48.755805+00:00",
+        "loadavg_start": [
+          1.6,
+          8.36,
+          8.49
+        ],
+        "vm_pids_start": [],
+        "exit_code": 0,
+        "elapsed": 313.50830611800484,
+        "loadavg_end": [
+          4.29,
+          5.13,
+          6.92
+        ],
+        "vm_pids_end": []
+      },
+      {
+        "name": "hv-ubuntu",
+        "argv": [
+          "just",
+          "bench-run-kvm",
+          "vmlab-hv",
+          "ubuntu-26.04",
+          "3"
+        ],
+        "started": "2026-10-31T20:48:02.278352+00:00",
+        "loadavg_start": [
+          4.29,
+          5.13,
+          6.92
+        ],
+        "vm_pids_start": [],
+        "exit_code": 0,
+        "elapsed": 315.4444845470134,
+        "loadavg_end": [
+          0.9,
+          2.54,
+          5.28
+        ],
+        "vm_pids_end": []
+      },
+      {
+        "name": "qemu-windows",
+        "argv": [
+          "just",
+          "bench-run-kvm",
+          "qemu",
+          "windows-10",
+          "3"
+        ],
+        "started": "2026-10-31T20:53:17.736885+00:00",
+        "loadavg_start": [
+          0.9,
+          2.54,
+          5.28
+        ],
+        "vm_pids_start": [],
+        "exit_code": 0,
+        "elapsed": 406.935360812,
+        "loadavg_end": [
+          2.48,
+          2.39,
+          4.21
+        ],
+        "vm_pids_end": []
+      },
+      {
+        "name": "hv-windows",
+        "argv": [
+          "just",
+          "bench-run-kvm",
+          "vmlab-hv",
+          "windows-10",
+          "3"
+        ],
+        "started": "2026-10-31T21:00:04.685211+00:00",
+        "loadavg_start": [
+          2.48,
+          2.39,
+          4.21
+        ],
+        "vm_pids_start": [],
+        "exit_code": 0,
+        "elapsed": 428.50269543999457,
+        "loadavg_end": [
+          2.39,
+          2.14,
+          3.38
+        ],
+        "vm_pids_end": []
+      },
+      {
+        "name": "qemu-g2g",
+        "argv": [
+          "just",
+          "bench-run-g2g",
+          "qemu",
+          "ubuntu-26.04",
+          "3"
+        ],
+        "started": "2026-10-31T21:07:13.199473+00:00",
+        "loadavg_start": [
+          2.39,
+          2.14,
+          3.38
+        ],
+        "vm_pids_start": [],
+        "exit_code": 0,
+        "elapsed": 120.07316510399687,
+        "loadavg_end": [
+          3.14,
+          2.53,
+          3.37
+        ],
+        "vm_pids_end": []
+      },
+      {
+        "name": "hv-g2g",
+        "argv": [
+          "just",
+          "bench-run-g2g",
+          "vmlab-hv",
+          "ubuntu-26.04",
+          "3"
+        ],
+        "started": "2026-10-31T21:09:13.282878+00:00",
+        "loadavg_start": [
+          3.14,
+          2.53,
+          3.37
+        ],
+        "vm_pids_start": [],
+        "exit_code": 0,
+        "elapsed": 121.97765382900252,
+        "loadavg_end": [
+          5.09,
+          3.78,
+          3.75
+        ],
+        "vm_pids_end": []
+      },
+      {
+        "name": "report",
+        "argv": [
+          "just",
+          "bench-report",
+          "x86_64"
+        ],
+        "started": "2026-10-31T21:11:15.267713+00:00",
+        "loadavg_start": [
+          5.09,
+          3.78,
+          3.75
+        ],
+        "vm_pids_start": [],
+        "exit_code": 0,
+        "elapsed": 0.03015710499312263,
+        "loadavg_end": [
+          5.09,
+          3.78,
+          3.75
+        ],
+        "vm_pids_end": []
+      },
+      {
+        "name": "ci",
+        "argv": [
+          "systemd-run",
+          "--user",
+          "--scope",
+          "-q",
+          "-p",
+          "MemoryMax=24G",
+          "-p",
+          "MemorySwapMax=0",
+          "--",
+          "env",
+          "-u",
+          "VMLAB_HV_TEST_USB_DEVICE",
+          "-u",
+          "VMLAB_HV_TEST_VFIO_DEVICE",
+          "RUST_TEST_THREADS=1",
+          "just",
+          "ci::check"
+        ],
+        "started": "2026-10-31T21:11:15.305300+00:00",
+        "loadavg_start": [
+          5.09,
+          3.78,
+          3.75
+        ],
+        "vm_pids_start": [],
+        "exit_code": 0,
+        "elapsed": 1597.4786044920038,
+        "loadavg_end": [
+          7.93,
+          8.28,
+          7.14
+        ],
+        "vm_pids_end": []
+      }
+    ],
+    "finished": "2026-10-31T21:37:52.792761+00:00"
+  },
+  "ci_test_summaries": [
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_disk-af3a780f86b1dc3e)",
+      "result": "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s"
+    },
+    {
+      "suite": "Running unittests src/bin/vmlab-disk.rs (target/debug/deps/vmlab_disk-9c1c02814f03ffe0)",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/s2_qemuimg.rs (target/debug/deps/s2_qemuimg-088f7caa3b12ca4c)",
+      "result": "test result: ok. 23 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.42s"
+    },
+    {
+      "suite": "Running unittests src/main.rs (target/debug/deps/vmlab_hv-e9c84e7a84c85054)",
+      "result": "test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1050.87s"
+    },
+    {
+      "suite": "Running tests/gpu.rs (target/debug/deps/gpu-ac903aa287e8c4ec)",
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.11s"
+    },
+    {
+      "suite": "Running tests/ipxe.rs (target/debug/deps/ipxe-1ff14b6d11b47eb1)",
+      "result": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.99s"
+    },
+    {
+      "suite": "Running tests/launch.rs (target/debug/deps/launch-0ca5991a8dfbeb51)",
+      "result": "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.23s"
+    },
+    {
+      "suite": "Running tests/vhost_fs.rs (target/debug/deps/vhost_fs-ebb00f67f3070986)",
+      "result": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.41s"
+    },
+    {
+      "suite": "Running tests/virtio_fs.rs (target/debug/deps/virtio_fs-a37c927783f05b74)",
+      "result": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.85s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_devices-04d27aa75b1077ed)",
+      "result": "test result: ok. 379 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.05s"
+    },
+    {
+      "suite": "Running tests/gpu_renderer.rs (target/debug/deps/gpu_renderer-2a83beb6cc1d1c72)",
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_display-bac6fb26b3e34e0d)",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/native.rs (target/debug/deps/native-f05e8d292c6c77e5)",
+      "result": "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s"
+    },
+    {
+      "suite": "Running tests/rfb.rs (target/debug/deps/rfb-d0c1541f26c5ffe4)",
+      "result": "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s"
+    },
+    {
+      "suite": "Running tests/wire.rs (target/debug/deps/wire-0f250192ca117088)",
+      "result": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_firmware-40402029881c2a7e)",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/acpi.rs (target/debug/deps/acpi-a017acc3929911fb)",
+      "result": "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    },
+    {
+      "suite": "Running tests/fw_cfg.rs (target/debug/deps/fw_cfg-0ff49293429a77e2)",
+      "result": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    },
+    {
+      "suite": "Running tests/pc.rs (target/debug/deps/pc-4c874e71a332a976)",
+      "result": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    },
+    {
+      "suite": "Running tests/smbios.rs (target/debug/deps/smbios-ea7a163a1c0d0de3)",
+      "result": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_lockstep-ccf43319a7d354c5)",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/runner.rs (target/debug/deps/runner-0f92a5681c957df2)",
+      "result": "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/sail.rs (target/debug/deps/sail-e4f17a9688dd6f27)",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_proto-660709b8a6c52ee2)",
+      "result": "test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s"
+    },
+    {
+      "suite": "Running tests/pc_wire.rs (target/debug/deps/pc_wire-f5fafd70a89f1819)",
+      "result": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/wire.rs (target/debug/deps/wire-4c02d5cee7d78969)",
+      "result": "test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_sail_ir-fb966eb98c9c15bc)",
+      "result": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_tcg-3b05919e0225448f)",
+      "result": "test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s"
+    },
+    {
+      "suite": "Running tests/exceptions.rs (target/debug/deps/exceptions-fb4b1b045ab6172a)",
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/generated.rs (target/debug/deps/generated-193d55f61165a290)",
+      "result": "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.93s"
+    },
+    {
+      "suite": "Running tests/indexed.rs (target/debug/deps/indexed-bef3fb75d93e3435)",
+      "result": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s"
+    },
+    {
+      "suite": "Running tests/lockstep.rs (target/debug/deps/lockstep-8a1b9ba91cf26bb0)",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/memo.rs (target/debug/deps/memo-5815494035887ac9)",
+      "result": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/specialized.rs (target/debug/deps/specialized-958d5c2d9950f976)",
+      "result": "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 62.39s"
+    },
+    {
+      "suite": "Running unittests src/main.rs (target/debug/deps/vmlab_hv_tcg_emit-1140904b44f5d60e)",
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_tcg_ir-11232b35707ae92e)",
+      "result": "test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_tcg_riscv64-6b48b30abea0973c)",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_tests-48c2569db2dd1a84)",
+      "result": "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s"
+    },
+    {
+      "suite": "Running tests/audio_guest.rs (target/debug/deps/audio_guest-18241f64ba1b37c8)",
+      "result": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 53.04s"
+    },
+    {
+      "suite": "Running tests/audio_latency.rs (target/debug/deps/audio_latency-dd1e2e4dca18e2e7)",
+      "result": "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/audio_virtio_guest.rs (target/debug/deps/audio_virtio_guest-f2ee2e1ad793e073)",
+      "result": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 46.19s"
+    },
+    {
+      "suite": "Running tests/binary.rs (target/debug/deps/binary-5ffd8bcc9aeb87d0)",
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/bios_timer.rs (target/debug/deps/bios_timer-0c3cc1447e0c6d12)",
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.02s"
+    },
+    {
+      "suite": "Running tests/clock_qemu.rs (target/debug/deps/clock_qemu-78f1032349c96ebb)",
+      "result": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s"
+    },
+    {
+      "suite": "Running tests/s1.rs (target/debug/deps/s1-ae2e774ec1e5c944)",
+      "result": "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 83.14s"
+    },
+    {
+      "suite": "Running tests/usb_loopback.rs (target/debug/deps/usb_loopback-e341b985ffc80771)",
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    },
+    {
+      "suite": "Running tests/vfio.rs (target/debug/deps/vfio-b22f72ed6902264f)",
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/vm_restore.rs (target/debug/deps/vm_restore-a48bbd764ad60edb)",
+      "result": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 139.85s"
+    },
+    {
+      "suite": "Running tests/vm_share.rs (target/debug/deps/vm_share-043926acb021ecc2)",
+      "result": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.92s"
+    },
+    {
+      "suite": "Running unittests src/lib.rs (target/debug/deps/vmlab_hv_vmm-b7deabb18b0f19c7)",
+      "result": "test result: ok. 158 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.93s"
+    },
+    {
+      "suite": "Running tests/pc_chipset.rs (target/debug/deps/pc_chipset-4a430e5f48278c98)",
+      "result": "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Running tests/pc_validation.rs (target/debug/deps/pc_validation-022bd9fecef9dfa9)",
+      "result": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_disk",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_devices",
+      "result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_display",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_firmware",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_lockstep",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_proto",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_sail_ir",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_tcg",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_tcg_ir",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_tcg_riscv64",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_tests",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "suite": "Doc-tests vmlab_hv_vmm",
+      "result": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    }
+  ],
+  "auxiliary_checks": {
+    "benchmark_unit_tests": {
+      "exit_code": 0,
+      "passed": 83,
+      "seconds": 8.105,
+      "resource_warnings": "Existing mock sockets and file handles"
+    },
+    "sampler_self_tests": {
+      "pie": 0,
+      "non_pie": 0,
+      "compiler_flags": [
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror"
+      ]
+    },
+    "s2_1gib_explicit": {
+      "exit_code": 0,
+      "passed": 1,
+      "write_mb_s": 478,
+      "read_mb_s": 511,
+      "seconds": 4.38
+    },
+    "zero_fill_explicit": {
+      "exit_code": 0,
+      "passed": 1,
+      "buffered_mib_s": 17788.97,
+      "direct_mib_s": 49947.73,
+      "seconds": 0.35
+    },
+    "herdr_auxiliary_tracking": {
+      "initial_attempt": "Both tests passed, but completion marker was lost and wait raised TypeError.",
+      "rerun": "Normal job arguments; job exit_code 0, pane closed."
+    }
+  },
+  "scope_readback": [
+    {
+      "pid": 2033209,
+      "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/run-p2033209-i6117953.scope",
+      "memory_max": "25769803776",
+      "memory_swap_max": "0"
+    }
+  ],
+  "firmware_sha256": {
+    "legacy": "12387e52d9ad853c02a994c14659a8ae4164aea78d77ce37f306e10c39244557",
+    "efi": "ecc6ffe6160c646b40075ef36c036800d2f603eb20258384e1de6acea5edc7a7",
+    "combined": "34f5ea191f0bbb23a4e371dd005990263d9704b423f8d52748750fff4a02f3fc",
+    "source_tar": "93d84710315771b542a08c44b879046b47f2ff53fd9a4745d06ec67e61b21943"
+  },
+  "history": {
+    "path": "bench/history/x86_64.jsonl",
+    "commit": "872fab1d147233a46851cdc817ee32510c64f6ab",
+    "aggregate_records": 22,
+    "repeats": 3
+  },
+  "herdr_main_tracking": "Outer marker lost; wait helper raised TypeError. Independently saved child exit statuses and complete CI log confirm exit 0.",
+  "verification_limits": [
+    "Live PipeWire loopback ignored",
+    "Physical USB and VFIO opt-ins unset",
+    "Optional Sail-oracle feature tests not enabled"
+  ]
+}
