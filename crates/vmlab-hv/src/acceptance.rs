@@ -165,6 +165,7 @@ fn boot_template(
         "ahci_pci":{"bus":0,"device":31,"function":2},
         "display":{"device":"virtio-vga","pci":{"bus":0,"device":4,"function":0},"rom":null},
         "tablet":{"bus":0,"device":5,"function":0},
+        "usb":{"bus":0,"device":5,"function":0},
         "ports":[{"name":"vmlab.agent.0", "socket":agent}], "nics":[],"serial_log":serial
     });
     if windows || secure {
