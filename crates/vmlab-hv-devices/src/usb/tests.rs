@@ -769,3 +769,130 @@ fn interrupt_moderation_delays_delivery_until_counter_expires() {
     assert_eq!(d.read(0x1024) & 0xffff, 40000);
     assert_eq!(d.read(0x1024) >> 16, 0);
 }
+
+/// A host-passthrough-style isochronous IN sink: one control endpoint plus
+/// isochronous IN endpoint 3, recording what `transfer_iso` received. The
+/// recorder is shared with the test because the controller owns the device.
+struct IsoSink {
+    iso_calls: Arc<Mutex<Vec<(u8, usize, u32)>>>,
+    address: Option<u16>,
+}
+
+impl IsoSink {
+    fn new() -> Self {
+        IsoSink {
+            iso_calls: Arc::new(Mutex::new(Vec::new())),
+            address: None,
+        }
+    }
+}
+
+impl super::UsbDevice for IsoSink {
+    fn speed(&self) -> super::UsbSpeed {
+        super::UsbSpeed::High
+    }
+    fn reset(&mut self) {}
+    fn control(&mut self, setup: crate::usb::SetupPacket, _data: &[u8]) -> super::UsbTransfer {
+        match (setup.request_type & 0x60, setup.request) {
+            (0x00, 5) => {
+                // SET_ADDRESS
+                self.address = Some(setup.value);
+                super::UsbTransfer::Ack(Vec::new())
+            }
+            (0x00, 9) => super::UsbTransfer::Ack(Vec::new()), // SET_CONFIGURATION
+            _ => super::UsbTransfer::Stall,
+        }
+    }
+    fn transfer(&mut self, _endpoint: u8, _data: &[u8], _max_length: usize) -> super::UsbTransfer {
+        super::UsbTransfer::Stall
+    }
+    fn transfer_iso(
+        &mut self,
+        endpoint: u8,
+        _data: &[u8],
+        max_length: usize,
+        packet_size: u32,
+    ) -> super::UsbTransfer {
+        self.iso_calls
+            .lock()
+            .unwrap()
+            .push((endpoint, max_length, packet_size));
+        super::UsbTransfer::Ack(vec![0x5a; 1024])
+    }
+    fn is_host_backed(&self) -> bool {
+        true
+    }
+}
+
+impl crate::Snapshot for IsoSink {
+    fn state_id(&self) -> String {
+        "iso-sink".into()
+    }
+    fn save_state(&self) -> Result<Vec<u8>, crate::DeviceError> {
+        Ok(Vec::new())
+    }
+    fn restore_state(&mut self, _bytes: &[u8]) -> Result<(), crate::DeviceError> {
+        Ok(())
+    }
+}
+
+/// A hot-plugged isochronous device is enumerated, configured and polled
+/// through the guest interface: the isoch TRB's payload reaches the guest
+/// and the backend sees the endpoint's negotiated packet size.
+#[test]
+fn p4_isochronous_transfer_reaches_a_host_backend() {
+    let mut d = Driver::new();
+    let sink = IsoSink::new();
+    let iso_calls = sink.iso_calls.clone();
+    d.hc.attach(6, Box::new(sink)).unwrap();
+    assert!(d.hc.has_host_devices());
+
+    d.start();
+    // Port reset on root port 6, then the port-status-change event.
+    d.write(0x490, 0x210);
+    assert_eq!(d.event(34).parameter, 6 << 24);
+
+    // Enable a slot and address the device through port 6.
+    let t = d.command(9, 0, 0);
+    assert_eq!(t.status >> 24, 1);
+    d.slot = t.control >> 24;
+    d.mem64(0x4000 + u64::from(d.slot) * 8, 0x5000);
+    d.mem32(0x6000, 0);
+    d.mem32(0x6004, 3); // add: slot + default control endpoint
+    d.mem32(0x6020, (3 << 20) | (1 << 27));
+    d.mem32(0x6024, 6 << 16); // route: root port 6
+    d.mem32(0x6044, (4 << 3) | (64 << 16));
+    d.mem64(0x6048, 0x7001);
+    assert_eq!(d.command(11, 0x6000, d.slot << 24).status >> 24, 1);
+
+    // Configure the slot with isochronous IN endpoint 3 (DCI 7, EP type 5,
+    // max packet 1024).
+    d.mem32(0x6000, 0);
+    d.mem32(0x6004, 0x81); // slot context + DCI 7
+    d.mem32(0x6100, 0);
+    d.mem32(0x6104, (5 << 3) | (1024 << 16));
+    d.mem64(0x6108, 0x8001);
+    assert_eq!(
+        d.command(12, 0x6000, d.slot << 24).status >> 24,
+        1,
+        "isochronous endpoint context must be accepted"
+    );
+
+    // One isochronous TRB carrying 1024 bytes.
+    d.trb(0x8000, 0xa000, 1024, (5 << 10) | 32);
+    d.write(0x2000 + u64::from(d.slot) * 4, 7);
+    let event = d.event(32);
+    assert_eq!(event.status >> 24, 1, "isoch transfer completes");
+    assert_eq!((event.control >> 16) & 31, 7);
+    let mut payload = [0; 1024];
+    d.mem
+        .read_slice(&mut payload, GuestAddress(0xa000))
+        .unwrap();
+    assert!(payload.iter().all(|&b| b == 0x5a));
+    // The backend saw the endpoint address, the TD length and the endpoint
+    // context's packet size.
+    assert_eq!(*iso_calls.lock().unwrap(), [(0x83, 1024, 1024)]);
+
+    // A lost host device is reported so the machine can detach it.
+    assert_eq!(d.hc.lost_ports(), Vec::<u8>::new());
+}

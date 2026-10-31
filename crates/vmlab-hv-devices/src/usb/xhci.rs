@@ -300,6 +300,35 @@ impl XhciController {
         }
         Ok(port as usize - 1)
     }
+    /// Whether root port `port` carries no device.
+    pub fn port_free(&self, port: u8) -> bool {
+        Self::port_index(port)
+            .map(|p| self.devices[p].is_none())
+            .unwrap_or(false)
+    }
+
+    /// Root ports whose backend reports the physical device gone. The
+    /// machine detaches these, which drops the backend and returns the
+    /// host device to the host.
+    pub fn lost_ports(&self) -> Vec<u8> {
+        self.devices
+            .iter()
+            .enumerate()
+            .filter_map(|(p, device)| {
+                device.as_ref().filter(|d| d.is_lost())?;
+                Some(p as u8 + 1)
+            })
+            .collect()
+    }
+
+    /// Whether any root port carries a host passthrough device (D9).
+    pub fn has_host_devices(&self) -> bool {
+        self.devices
+            .iter()
+            .flatten()
+            .any(|device| device.is_host_backed())
+    }
+
     pub fn inject_pointer(&mut self, event: PointerEvent) -> Result<(), DeviceError> {
         self.devices[TABLET_PORT as usize - 1]
             .as_mut()
@@ -599,6 +628,15 @@ impl XhciController {
                     _ => unreachable!(),
                 }
                 self.store_endpoint(slot, ep)?;
+                // The endpoint's transfer state is gone; a backend with
+                // in-flight work must not attribute it to the next TD.
+                if let Some(device) = self.state.slots[slot]
+                    .port
+                    .checked_sub(1)
+                    .and_then(|p| self.devices[p].as_mut())
+                {
+                    device.endpoint_dropped((ep / 2) as u8 | if ep & 1 == 1 { 0x80 } else { 0 });
+                }
                 if let Some((addr, trb)) = stopped {
                     self.transfer_event(
                         (slot, ep),
@@ -615,6 +653,9 @@ impl XhciController {
                 let port = self.state.slots[slot].port;
                 if let Some(device) = port.checked_sub(1).and_then(|p| self.devices[p].as_mut()) {
                     device.reset();
+                    for ep in 2..32u8 {
+                        device.endpoint_dropped((ep / 2) | if ep & 1 == 1 { 0x80 } else { 0 });
+                    }
                 }
                 for e in &mut self.state.slots[slot].endpoints[2..] {
                     *e = Endpoint::default();
@@ -660,7 +701,7 @@ impl XhciController {
                 if (ctx[1] >> 10) & 31 != 0
                     || ctx[1] >> 16 == 0
                     || (ep == 1 && endpoint_type != 4)
-                    || (ep != 1 && !matches!(endpoint_type, 2 | 3 | 6 | 7))
+                    || (ep != 1 && !matches!(endpoint_type, 1 | 2 | 3 | 5 | 6 | 7))
                 {
                     return Ok(TRB_ERROR);
                 }
@@ -816,7 +857,8 @@ impl XhciController {
                 let data = if control {
                     t.kind() == 3 || t.kind() == 1
                 } else {
-                    t.kind() == 1
+                    // Normal and Isoch TRBs carry the data of a TD.
+                    t.kind() == 1 || t.kind() == 5
                 };
                 if data {
                     length = length.saturating_add(t.length());
@@ -870,11 +912,15 @@ impl XhciController {
                 } else if td.iter().all(|(_, t)| t.kind() == 8) {
                     UsbTransfer::Ack(vec![])
                 } else {
-                    d.transfer(
-                        ((ep / 2) as u8) | if input { 0x80 } else { 0 },
-                        &data,
-                        length,
-                    )
+                    let address = ((ep / 2) as u8) | if input { 0x80 } else { 0 };
+                    if td.iter().any(|(_, t)| t.kind() == 5) {
+                        // Isochronous TDs need the endpoint's packet size
+                        // to lay out the packets.
+                        let max_packet = endpoint.context[1] >> 16;
+                        d.transfer_iso(address, &data, length, max_packet)
+                    } else {
+                        d.transfer(address, &data, length)
+                    }
                 }
             } else {
                 UsbTransfer::Stall

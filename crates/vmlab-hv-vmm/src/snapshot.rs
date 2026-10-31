@@ -259,6 +259,14 @@ pub fn save(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
         ));
     }
     let _op = shared.begin_snapshot();
+    if let Some(xhci) = shared.xhci.lock().as_ref()
+        && xhci.lock().has_host_devices()
+    {
+        return Err(SnapshotError::Unsupported(
+            "online snapshots are refused while host USB devices are attached (D9): detach them              first"
+                .into(),
+        ));
+    }
     if shared
         .vga
         .lock()
@@ -455,6 +463,14 @@ pub fn load(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
         ));
     }
     let _op = shared.begin_snapshot();
+    if let Some(xhci) = shared.xhci.lock().as_ref()
+        && xhci.lock().has_host_devices()
+    {
+        return Err(SnapshotError::Unsupported(
+            "online snapshots are refused while host USB devices are attached (D9): detach them              first"
+                .into(),
+        ));
+    }
     if shared
         .vga
         .lock()

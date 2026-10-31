@@ -255,6 +255,7 @@ fn machine(dir: &Dir, share: &Path, initrd: &Path, read_only: bool) -> MachineDe
         hyperv: vec![],
         display: None,
         tablet: None,
+        usb: None,
         tpm: None,
         console_pci: None,
         ahci_pci: None,
