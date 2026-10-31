@@ -26,6 +26,10 @@ zerocopy.workspace = true
 sha2.workspace = true
 parking_lot.workspace = true
 
+[features]
+# The file-backed recording host for seam A3: test binaries only.
+testing = ["vmlab-hv-devices/testing"]
+
 [dev-dependencies]
 tempfile = "3"
 

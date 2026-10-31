@@ -2,6 +2,7 @@
 //! machine model, the control server and snapshot orchestration.
 
 pub mod acpi;
+pub mod audio;
 pub mod builder;
 pub mod bus;
 pub mod chipset;

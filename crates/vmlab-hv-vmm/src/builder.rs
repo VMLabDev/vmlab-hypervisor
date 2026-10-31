@@ -85,7 +85,7 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
             })
             || desc.nics.iter().any(|nic| nic.pci.is_some())
             || desc.shares.iter().any(|share| share.pci.is_some())
-            || desc.audio.as_ref().is_some_and(|audio| audio.pci.is_some()))
+            || desc.audio.is_some())
     {
         return Err(VmmError::InvalidMachine(
             "q35 devices and explicit PCI addresses require machine=q35".into(),
@@ -206,7 +206,24 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
         add(Some(tablet), "tablet")?;
     }
     if let Some(audio) = &desc.audio {
-        add(audio.pci, "audio")?;
+        // D11: q35's HDA sits at 00:1b.0, where real ICH9 places it.
+        // virtio-snd is the audio plan's second device and lands later.
+        match audio.device {
+            vmlab_hv_proto::machine::AudioDevice::Hda => {
+                if audio
+                    .pci
+                    .is_none_or(|a| (a.bus, a.device, a.function) != (0, 0x1b, 0))
+                {
+                    return Err(VmmError::InvalidMachine("q35 HDA sits at 00:1b.0".into()));
+                }
+                add(audio.pci, "audio")?;
+            }
+            vmlab_hv_proto::machine::AudioDevice::VirtioSnd => {
+                return Err(VmmError::InvalidMachine(
+                    "virtio-snd has not landed yet; use device = \"hda\"".into(),
+                ));
+            }
+        }
     }
     for reserved in [(31, 0), (31, 3)] {
         if used.contains(&reserved) {
@@ -786,11 +803,25 @@ pub fn build(
     } else {
         None
     };
-    if q35 && desc.audio.is_some() {
-        return Err(VmmError::DeviceUnavailable {
-            device: "q35 platform",
-            reason: "q35 audio is assigned to phase 2e".into(),
-        });
+    if let Some(section) = &desc.audio {
+        // The host backend is picked per machine from the description's
+        // node identity; capture opens only when the microphone is on.
+        let host = crate::audio::host(section);
+        let hda = Arc::new(Mutex::new(vmlab_hv_devices::hda::Hda::new(
+            "hda",
+            ram.mem.clone(),
+            host,
+            msi.clone(),
+            section.microphone,
+        )));
+        place(hda.clone(), section.pci)?;
+        snap_nodes.push(DeviceNode::Plain(hda.clone()));
+        chipset
+            .as_ref()
+            .expect("audio requires the q35 chipset")
+            .audio
+            .lock()
+            .replace(hda.clone());
     }
     let tpm = if let Some(tpm) = &desc.tpm {
         let device = Arc::new(Mutex::new(
@@ -1124,6 +1155,81 @@ mod tests {
     fn rejects_missing_kernel_naming_the_path() {
         let err = validate(&desc()).unwrap_err().to_string();
         assert!(err.contains("/kernel"), "{err}");
+    }
+
+    #[test]
+    fn audio_is_a_q35_hda_at_00_1b_0() {
+        use vmlab_hv_proto::machine::{Audio, AudioDevice};
+
+        fn section(device: AudioDevice, pci: Option<PciAddress>) -> Audio {
+            Audio {
+                pci,
+                device,
+                microphone: true,
+                node_name: "vmlab.lab.machine".into(),
+                node_description: "a machine".into(),
+            }
+        }
+        const HDA_SLOT: PciAddress = PciAddress {
+            bus: 0,
+            device: 0x1b,
+            function: 0,
+        };
+
+        // The microvm keeps phase 1's shape: no audio at all.
+        let mut machine = desc();
+        machine.audio = Some(section(AudioDevice::Hda, None));
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("machine=q35")
+        );
+
+        // q35 wants an explicit address, HDA exactly at ICH9's 00:1b.0 (D11).
+        let dir = tempfile::tempdir().unwrap();
+        let mut machine = desc();
+        machine.machine = Machine::Q35;
+        machine.boot = Boot::Firmware {
+            firmware: FirmwareKind::Seabios,
+            code: tiny_bzimage(dir.path()),
+            vars: None,
+            secure_boot: false,
+            bootorder: vec![],
+        };
+        machine.audio = Some(section(AudioDevice::Hda, None));
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("00:1b.0"),
+            "an address-less audio section must name the fixed slot"
+        );
+        machine.audio = Some(section(
+            AudioDevice::Hda,
+            Some(PciAddress {
+                bus: 0,
+                device: 5,
+                function: 0,
+            }),
+        ));
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("00:1b.0")
+        );
+        machine.audio = Some(section(AudioDevice::Hda, Some(HDA_SLOT)));
+        validate(&machine).unwrap();
+
+        // virtio-snd is the audio plan's second device; it has not landed.
+        machine.audio = Some(section(AudioDevice::VirtioSnd, Some(HDA_SLOT)));
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("virtio-snd")
+        );
     }
 
     /// The smallest bzImage `linux-loader` accepts.

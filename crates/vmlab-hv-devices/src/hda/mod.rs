@@ -34,7 +34,7 @@ struct Stream {
     completions: VecDeque<u64>,
 }
 
-/// An ICH9 HDA PCI function, conventionally q35 slot 00:1f.3.
+/// An ICH9 HDA PCI function; on q35 it sits at 00:1b.0 (phase-2 D11).
 pub struct Hda {
     id: String,
     memory: GuestMemory,
