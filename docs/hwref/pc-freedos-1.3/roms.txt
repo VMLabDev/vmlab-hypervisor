@@ -1,0 +1,5 @@
+fw=genroms/kvmvapic.bin size=0x002400 name="kvmvapic.bin"
+addr=00000000fffc0000 size=0x040000 mem=rom name="bios-256k.bin"
+/rom@etc/acpi/tables size=0x200000 name="etc/acpi/tables"
+/rom@etc/table-loader size=0x010000 name="etc/table-loader"
+/rom@etc/acpi/rsdp size=0x001000 name="etc/acpi/rsdp"

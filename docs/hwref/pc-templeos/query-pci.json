@@ -1,0 +1,156 @@
+[
+  {
+    "bus": 0,
+    "devices": [
+      {
+        "irq_pin": 0,
+        "bus": 0,
+        "qdev_id": "",
+        "slot": 0,
+        "class_info": {
+          "class": 1536,
+          "desc": "Host bridge"
+        },
+        "id": {
+          "device": 4663,
+          "subsystem-vendor": 6900,
+          "vendor": 32902,
+          "subsystem": 4352
+        },
+        "function": 0,
+        "regions": []
+      },
+      {
+        "irq_pin": 0,
+        "bus": 0,
+        "qdev_id": "",
+        "slot": 1,
+        "class_info": {
+          "class": 1537,
+          "desc": "ISA bridge"
+        },
+        "id": {
+          "device": 28672,
+          "subsystem-vendor": 6900,
+          "vendor": 32902,
+          "subsystem": 4352
+        },
+        "function": 0,
+        "regions": []
+      },
+      {
+        "irq_pin": 0,
+        "bus": 0,
+        "qdev_id": "",
+        "slot": 1,
+        "class_info": {
+          "class": 257,
+          "desc": "IDE controller"
+        },
+        "id": {
+          "device": 28688,
+          "subsystem-vendor": 6900,
+          "vendor": 32902,
+          "subsystem": 4352
+        },
+        "function": 1,
+        "regions": [
+          {
+            "bar": 4,
+            "size": 16,
+            "address": 49184,
+            "type": "io"
+          }
+        ]
+      },
+      {
+        "irq_pin": 4,
+        "bus": 0,
+        "qdev_id": "",
+        "irq": 11,
+        "slot": 1,
+        "class_info": {
+          "class": 3075,
+          "desc": "USB controller"
+        },
+        "id": {
+          "device": 28704,
+          "subsystem-vendor": 6900,
+          "vendor": 32902,
+          "subsystem": 4352
+        },
+        "function": 2,
+        "regions": [
+          {
+            "bar": 4,
+            "size": 32,
+            "address": 49152,
+            "type": "io"
+          }
+        ]
+      },
+      {
+        "irq_pin": 1,
+        "bus": 0,
+        "qdev_id": "",
+        "irq": 9,
+        "slot": 1,
+        "class_info": {
+          "class": 1664,
+          "desc": "Bridge"
+        },
+        "id": {
+          "device": 28947,
+          "subsystem-vendor": 6900,
+          "vendor": 32902,
+          "subsystem": 4352
+        },
+        "function": 3,
+        "regions": []
+      },
+      {
+        "irq_pin": 0,
+        "bus": 0,
+        "qdev_id": "",
+        "slot": 2,
+        "class_info": {
+          "class": 768,
+          "desc": "VGA controller"
+        },
+        "id": {
+          "device": 4369,
+          "subsystem-vendor": 6900,
+          "vendor": 4660,
+          "subsystem": 4352
+        },
+        "function": 0,
+        "regions": [
+          {
+            "prefetch": true,
+            "mem_type_64": false,
+            "bar": 0,
+            "size": 16777216,
+            "address": 4244635648,
+            "type": "memory"
+          },
+          {
+            "prefetch": false,
+            "mem_type_64": false,
+            "bar": 2,
+            "size": 4096,
+            "address": 4273930240,
+            "type": "memory"
+          },
+          {
+            "prefetch": false,
+            "mem_type_64": false,
+            "bar": 6,
+            "size": 65536,
+            "address": -1,
+            "type": "memory"
+          }
+        ]
+      }
+    ]
+  }
+]

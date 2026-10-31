@@ -1,0 +1,5 @@
+{
+  "exit_code": 0,
+  "stdout": "{\n    \"image-end-offset\": 212336640,\n    \"total-clusters\": 655360,\n    \"check-errors\": 0,\n    \"allocated-clusters\": 3221,\n    \"filename\": \"/home/wil/dev/vmlab/.scratch/hwref-captures.MTzhVI/.vmlab/vms/win7/disk0.qcow2\",\n    \"format\": \"qcow2\",\n    \"fragmented-clusters\": 734\n}\n",
+  "stderr": ""
+}

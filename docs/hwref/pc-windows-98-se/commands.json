@@ -1,0 +1,74 @@
+{
+  "ide_bus_exec_cmd|0xa1": {
+    "count": 3,
+    "first_line": 41590
+  },
+  "ide_bus_exec_cmd|0xec": {
+    "count": 4,
+    "first_line": 41619
+  },
+  "ide_bus_exec_cmd|0xa0": {
+    "count": 162,
+    "first_line": 42724
+  },
+  "ide_atapi_cmd|0x00": {
+    "count": 126,
+    "first_line": 42739
+  },
+  "ide_atapi_cmd|0x28": {
+    "count": 2,
+    "first_line": 42782
+  },
+  "ide_bus_exec_cmd|0x20": {
+    "count": 5304,
+    "first_line": 62787
+  },
+  "ide_bus_exec_cmd|0x30": {
+    "count": 997,
+    "first_line": 534980
+  },
+  "ide_bus_exec_cmd|0x08": {
+    "count": 1,
+    "first_line": 25926848
+  },
+  "ide_atapi_cmd|0x12": {
+    "count": 1,
+    "first_line": 25927406
+  },
+  "ide_atapi_cmd|0x5a": {
+    "count": 4,
+    "first_line": 25927488
+  },
+  "ide_atapi_cmd|0x46": {
+    "count": 1,
+    "first_line": 25927700
+  },
+  "ide_atapi_cmd|0x03": {
+    "count": 3,
+    "first_line": 25927734
+  },
+  "ide_bus_exec_cmd|0x91": {
+    "count": 1,
+    "first_line": 25927779
+  },
+  "ide_bus_exec_cmd|0x40": {
+    "count": 1,
+    "first_line": 25929420
+  },
+  "ide_atapi_cmd|0xad": {
+    "count": 1,
+    "first_line": 47289799
+  },
+  "ide_atapi_cmd|0x43": {
+    "count": 2,
+    "first_line": 47289991
+  },
+  "ide_atapi_cmd|0xa8": {
+    "count": 18,
+    "first_line": 47290119
+  },
+  "ide_atapi_cmd|0x2b": {
+    "count": 4,
+    "first_line": 47329314
+  }
+}

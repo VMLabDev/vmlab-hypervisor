@@ -1,0 +1,14 @@
+import <vmlab-meta.wcl>
+
+template_meta "windows-7" {
+  arch = "x86_64"
+  version = "7600.0.1"
+  profile = "windows-legacy"
+  cpus = 2
+  memory = 4GiB
+  disk = 40GiB
+  created = "2026-09-03T05:01:42.667941442+00:00"
+  sha256 = "653bec2f0f640f3d03ec9edbd69558df9e616be56acf110cff0f32d808471fe6"
+  agent_version = "agent=57fa802"
+  wscript_surface = 1
+}

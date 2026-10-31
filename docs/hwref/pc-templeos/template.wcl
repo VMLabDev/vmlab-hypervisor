@@ -1,0 +1,16 @@
+import <vmlab-meta.wcl>
+
+template_meta "templeos" {
+  arch = "x86_64"
+  version = "5.03.2"
+  profile = "templeos"
+  cpus = 2
+  memory = 512MiB
+  disk = 2GiB
+  created = "2026-10-06T08:04:38.862215559+00:00"
+  origin = "https://templeos.org/Downloads/TempleOS.ISO"
+  registry = "ghcr.io/vmlabdev/vmlab-templates/templeos"
+  sha256 = "6d30b5c0661b1e201157f5dc832c5030c20bbcba407b35d551808e10bce9c3d4"
+  agent_version = "agent-templeos=f1e4515"
+  wscript_surface = 1
+}
