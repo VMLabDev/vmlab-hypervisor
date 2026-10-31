@@ -547,7 +547,7 @@ impl<M: Memory> Riscv64<M> {
         }
         while cache_units <= self.cache_limit
             && !self.traces.is_empty()
-            && (self.traces.len() >= 4096 || self.cache_units + cache_units > self.cache_limit)
+            && self.cache_units + cache_units > self.cache_limit
         {
             let oldest = *self
                 .traces
@@ -596,5 +596,110 @@ impl<M: Memory> Riscv64<M> {
                 Ok(None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FlatMemory;
+    use std::collections::BTreeMap;
+    use vmlab_hv_tcg_ir::{Location, Program, Type};
+
+    fn cache_cpu(limit: usize) -> Riscv64<FlatMemory> {
+        static PROGRAM: std::sync::OnceLock<Program> = std::sync::OnceLock::new();
+        let program = PROGRAM.get_or_init(|| {
+            let step = Function {
+                name: "ztry_step".into(),
+                args: vec![
+                    ("step".into(), Type::Integer(None)),
+                    ("trace".into(), Type::Bool),
+                ],
+                result: Type::Bool,
+                locals: BTreeMap::new(),
+                code: vec![
+                    Op::Call(
+                        Location::Id("zPC".into()),
+                        Target::Intrinsic("add_bits_int".into()),
+                        vec![Expr::Id("zPC".into()), Expr::Integer("4".into(), None)],
+                    ),
+                    Op::Assign(Location::Id("return".into()), Expr::Bool(false)),
+                    Op::Return,
+                ],
+            };
+            let tick = Function {
+                name: "ztick_clock".into(),
+                args: vec![("unit".into(), Type::Unit)],
+                result: Type::Unit,
+                locals: BTreeMap::new(),
+                code: vec![
+                    Op::Assign(Location::Id("return".into()), Expr::Unit),
+                    Op::Return,
+                ],
+            };
+            let mut program = Program::default();
+            program.globals.insert("zPC".into(), Type::Bits(Some(64)));
+            program.functions.insert(step.name.clone(), step);
+            program.functions.insert(tick.name.clone(), tick);
+            program
+        });
+        let mut interpreter = Interpreter::new(program, FlatMemory::new(0, vec![]));
+        interpreter.initialize().unwrap();
+        Riscv64 {
+            interpreter,
+            steps: 0,
+            specialize: true,
+            specialization_stats: SpecializationStats::default(),
+            traces: BTreeMap::new(),
+            cache_units: 0,
+            cache_limit: limit,
+            cache_clock: 0,
+            external_clock: false,
+        }
+    }
+
+    #[test]
+    fn pc_working_set_that_fits_the_budget_stays_native() {
+        let mut cpu = cache_cpu(TRACE_CACHE_LIMIT);
+        for pc in (0..4097).map(|index| index * 4) {
+            cpu.set_pc(pc);
+            cpu.step().unwrap();
+            assert_eq!(cpu.pc().unwrap(), pc + 4);
+        }
+        assert!(cpu.cache_units < cpu.cache_limit);
+        eprintln!(
+            "working set: {} PCs, {}/{} cache units, {} evictions",
+            cpu.traces.len(),
+            cpu.cache_units,
+            cpu.cache_limit,
+            cpu.specialization_stats.evictions
+        );
+        assert_eq!(cpu.specialization_stats.evictions, 0);
+        let recordings = cpu.specialization_stats.recordings;
+        let operations = cpu.interpreter.operations;
+        for pc in (0..4097).map(|index| index * 4) {
+            cpu.set_pc(pc);
+            cpu.step().unwrap();
+            assert_eq!(cpu.pc().unwrap(), pc + 4);
+            assert_eq!(cpu.interpreter.operations, operations);
+            assert_eq!(cpu.specialization_stats.recordings, recordings);
+        }
+    }
+
+    #[test]
+    fn pc_working_set_exceeding_the_budget_evicts_and_stays_bounded() {
+        let mut cpu = cache_cpu(512);
+        for pc in (0..64).map(|index| index * 4) {
+            cpu.set_pc(pc);
+            cpu.step().unwrap();
+            assert!(cpu.cache_units <= cpu.cache_limit);
+        }
+        assert!(cpu.specialization_stats.evictions > 0);
+        assert!(cpu.traces.len() < 64);
+        let operations = cpu.interpreter.operations;
+        cpu.set_pc(63 * 4);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc().unwrap(), 64 * 4);
+        assert_eq!(cpu.interpreter.operations, operations);
     }
 }
