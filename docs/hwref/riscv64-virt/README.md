@@ -65,6 +65,22 @@ regression test reproduces the fault with the defaults and executes the
 pflash instruction with the virt PMAs, including after CPU-state restore.
 The paused S1 snapshot save/load/delete round trip passes.
 
+The complete Sail-oracle corpus passes: 133 programs, including the two FP
+regressions. `just tcg-generate-check` reproduces both committed generated
+artifacts byte-for-byte. Three fresh warm interpreter measurements pass
+`just bench-check riscv64 interpreter-specialized`; the CoreMark median is
+50.899 MIPS (5.978 seconds for 304,258,499 instructions).
+
+Live firmware execution exposed excessive block-cache invalidation in the
+VMM memory adapter. Page-wide guards treated stores to data beside code as
+instruction changes. RAM guards now track exact instruction windows; CPU
+page epochs avoid rereading unchanged windows until DMA becomes possible.
+The regression executes stores beside a warm instruction loop, both before
+and after enabling DMA: neither case retrains the unchanged instructions.
+Separate tests check instruction replacement, overlapping windows, stores
+between fetch and recording, and bounded guard storage. These changes are
+in the VMM adapter, not the interpreter's execution engine.
+
 edk2 boot, Linux hardware capture, booted-guest snapshot restoration, and
 boot-to-agent-ready timing are pending. This reference does not establish
 a phase-3b parity pass.
