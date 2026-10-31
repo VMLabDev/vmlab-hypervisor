@@ -493,6 +493,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
         let mut hdr = vec![0u8; hdr_len];
         let num_buffers_at = hdr.len().saturating_sub(2);
         hdr[num_buffers_at..].copy_from_slice(&1u16.to_le_bytes());
+        let mut used_any = false;
         while let Some(frame) = sh.rx_pending.front() {
             let Some(chain) = q.pop_descriptor_chain(mem) else {
                 break;
@@ -510,6 +511,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
             if q.add_used(mem, head, written).is_err() {
                 break;
             }
+            used_any = true;
             if written == 0 {
                 // Buffer too small for the frame: the frame is dropped and
                 // the buffer returns empty for the driver to reuse.
@@ -517,7 +519,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
             }
             sh.rx_pending.pop_front();
         }
-        if q.needs_notification(mem).unwrap_or(false) {
+        if used_any && q.needs_notification(mem).unwrap_or(false) {
             irq = sh.interrupt.clone().map(|irq| (irq, RXQ));
         }
     }
@@ -547,6 +549,7 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             let Some(q) = sh.queues.get_mut(usize::from(TXQ)).and_then(|q| q.as_mut()) else {
                 return;
             };
+            let mut used_any = false;
             while let Some(chain) = q.pop_descriptor_chain(mem) {
                 if stream.is_some() && pending + out.len() >= MAX_TX_STAGE {
                     q.go_to_previous_position();
@@ -577,8 +580,9 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
                 if q.add_used(mem, head, consumed).is_err() {
                     break;
                 }
+                used_any = true;
             }
-            if q.needs_notification(mem).unwrap_or(false) {
+            if used_any && q.needs_notification(mem).unwrap_or(false) {
                 irq = sh.interrupt.clone().map(|irq| (irq, TXQ));
             }
             if stream.is_some() {
@@ -1234,6 +1238,29 @@ mod tests {
                 ],
             );
         }
+    }
+
+    #[test]
+    fn empty_transmit_drain_does_not_interrupt_the_guest() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.irq.queues.lock().clear();
+        process_tx(&f.dev.shared, &mut None, 12);
+        assert_eq!(f.vqs[1].used_idx(&f.mem), 0);
+        assert!(f.irq.queues.lock().is_empty());
+    }
+
+    #[test]
+    fn receive_without_available_buffers_does_not_interrupt_the_guest() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.irq.queues.lock().clear();
+        lock(&f.dev.shared)
+            .rx_pending
+            .push_back(b"waiting for a receive buffer".to_vec());
+        place_rx_frames(&f.dev.shared, 12);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
+        assert!(f.irq.queues.lock().is_empty());
     }
 
     #[test]
