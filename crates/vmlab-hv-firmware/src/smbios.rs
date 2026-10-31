@@ -69,7 +69,15 @@ fn finish(mut data: Vec<u8>, strings: &[&str]) -> Result<Vec<u8>, String> {
 
 /// Produce the complete table, including type 0, for installation by firmware.
 pub fn generate(platform: &Platform, config: &SmbiosConfig) -> Result<SmbiosTables, String> {
-    generate_records(platform, config, true)
+    generate_records(platform.vcpus, &platform.ram_regions, config, true, false)
+}
+
+/// Complete SMBIOS table for the i440FX/PIIX machine identity.
+pub fn generate_pc(
+    platform: &crate::pc::Platform,
+    config: &SmbiosConfig,
+) -> Result<SmbiosTables, String> {
+    generate_records(platform.vcpus, &platform.ram_regions, config, true, true)
 }
 
 /// fw_cfg carries platform records; SeaBIOS and OVMF supply their type 0.
@@ -77,33 +85,49 @@ pub(crate) fn generate_fw_cfg(
     platform: &Platform,
     config: &SmbiosConfig,
 ) -> Result<SmbiosTables, String> {
-    let mut generated = generate_records(platform, config, false)?;
+    let mut generated =
+        generate_records(platform.vcpus, &platform.ram_regions, config, false, false)?;
+    generated.anchor[4] = 0;
+    generated.anchor[21] = 0;
+    Ok(generated)
+}
+
+pub(crate) fn generate_pc_fw_cfg(
+    platform: &crate::pc::Platform,
+    config: &SmbiosConfig,
+) -> Result<SmbiosTables, String> {
+    let mut generated =
+        generate_records(platform.vcpus, &platform.ram_regions, config, false, true)?;
     generated.anchor[4] = 0;
     generated.anchor[21] = 0;
     Ok(generated)
 }
 
 fn generate_records(
-    platform: &Platform,
+    vcpus: u16,
+    ram_regions: &[(u64, u64)],
     config: &SmbiosConfig,
     include_bios: bool,
+    pc: bool,
 ) -> Result<SmbiosTables, String> {
-    if platform.vcpus == 0 || platform.vcpus > 254 {
+    if vcpus == 0 || vcpus > 254 {
         return Err("SMBIOS 2.8 topology requires 1..=254 vCPUs per socket".into());
     }
-    let ram = platform
-        .ram_regions
-        .iter()
-        .try_fold(0u64, |sum, &(base, length)| {
-            if length == 0 || base.checked_add(length).is_none() {
-                return Err("invalid RAM range".to_string());
-            }
-            sum.checked_add(length)
-                .ok_or_else(|| "RAM size overflow".to_string())
-        })?;
+    let ram = ram_regions.iter().try_fold(0u64, |sum, &(base, length)| {
+        if length == 0 || base.checked_add(length).is_none() {
+            return Err("invalid RAM range".to_string());
+        }
+        sum.checked_add(length)
+            .ok_or_else(|| "RAM size overflow".to_string())
+    })?;
     if ram == 0 || ram % (1024 * 1024) != 0 || ram / (1024 * 1024) > 0x7fff_ffff {
         return Err("SMBIOS RAM must be a positive whole MiB fitting the extended size".into());
     }
+    let (product, version) = if pc {
+        ("Standard PC (i440FX + PIIX, 1996)", "pc-i440fx-11.1")
+    } else {
+        ("Standard PC (Q35 + ICH9, 2009)", "pc-q35-11.1")
+    };
     let mut records = Vec::new();
     let mut bios = structure(0, 24, 0);
     bios[4..6].copy_from_slice(&[1, 2]);
@@ -122,14 +146,11 @@ fn generate_records(
     system[4..7].copy_from_slice(&[1, 2, 3]);
     system[8..24].copy_from_slice(&config.uuid);
     system[24] = 6;
-    records.push(finish(
-        system,
-        &["QEMU", "Standard PC (Q35 + ICH9, 2009)", "pc-q35-11.1"],
-    )?);
+    records.push(finish(system, &["QEMU", product, version])?);
     let mut chassis = structure(3, 22, 0x0300);
     chassis[4..7].copy_from_slice(&[1, 1, 2]);
     chassis[9..13].copy_from_slice(&[3, 3, 3, 2]);
-    records.push(finish(chassis, &["QEMU", "pc-q35-11.1"])?);
+    records.push(finish(chassis, &["QEMU", version])?);
     let mut cpu = structure(4, 42, 0x0400);
     cpu[4..8].copy_from_slice(&[1, 3, 0xfe, 2]);
     cpu[8..16].copy_from_slice(&config.processor_id);
@@ -138,10 +159,10 @@ fn generate_records(
     word(&mut cpu, 22, 2000);
     cpu[24..26].copy_from_slice(&[0x41, 1]);
     cpu[26..32].fill(0xff);
-    cpu[35..38].fill(platform.vcpus as u8);
+    cpu[35..38].fill(vcpus as u8);
     word(&mut cpu, 38, 2);
     word(&mut cpu, 40, 1);
-    records.push(finish(cpu, &["CPU 0", "QEMU", "pc-q35-11.1"])?);
+    records.push(finish(cpu, &["CPU 0", "QEMU", version])?);
     let mut array = structure(16, 23, 0x1000);
     array[4..7].copy_from_slice(&[1, 3, 6]);
     if ram / 1024 < 0x8000_0000 {
@@ -171,7 +192,7 @@ fn generate_records(
     word(&mut dimm, 19, 2);
     dimm[23] = 2;
     records.push(finish(dimm, &["DIMM 0", "QEMU"])?);
-    for (index, &(base, length)) in platform.ram_regions.iter().enumerate() {
+    for (index, &(base, length)) in ram_regions.iter().enumerate() {
         let handle = 0x1300u16
             .checked_add(u16::try_from(index).map_err(|_| "too many RAM ranges")?)
             .filter(|handle| *handle < 0x2000)
