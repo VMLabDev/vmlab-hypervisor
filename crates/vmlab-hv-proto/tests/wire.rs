@@ -186,6 +186,30 @@ fn sample_machine() -> MachineDescription {
 }
 
 #[test]
+fn riscv_virt_description_is_additive() {
+    let mut machine = sample_machine();
+    machine.arch = Arch::Riscv64;
+    machine.accel = Accel::Tcg;
+    machine.machine = vmlab_hv_proto::machine::Machine::Virt;
+    machine.boot = Boot::Firmware {
+        firmware: vmlab_hv_proto::machine::FirmwareKind::Edk2Riscv,
+        code: "/firmware/RISCV_VIRT_CODE.fd".into(),
+        vars: Some("/run/vars.fd".into()),
+        secure_boot: false,
+        bootorder: Vec::new(),
+    };
+    let json = serde_json::to_value(&machine).unwrap();
+    assert_eq!(json["arch"], "riscv64");
+    assert_eq!(json["machine"], "virt");
+    assert_eq!(json["accel"], "tcg");
+    assert_eq!(json["boot"]["firmware"], "edk2_riscv");
+    assert_eq!(
+        serde_json::from_value::<MachineDescription>(json).unwrap(),
+        machine
+    );
+}
+
+#[test]
 fn reset_defaults_to_in_place_and_exit_on_reset_is_explicit() {
     let description = sample_machine();
     let mut value = serde_json::to_value(&description).unwrap();

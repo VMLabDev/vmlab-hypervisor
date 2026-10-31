@@ -252,6 +252,7 @@ pub enum Machine {
     #[default]
     Microvm,
     Q35,
+    Virt,
 }
 
 impl Machine {
@@ -279,6 +280,7 @@ impl CpuPolicy {
 pub enum FirmwareKind {
     Seabios,
     Ovmf,
+    Edk2Riscv,
 }
 
 /// Bus-zero BDF. Range and collision checks belong to machine validation.
@@ -327,6 +329,7 @@ pub struct Display {
 pub enum DisplayDevice {
     StdVga,
     VirtioVga,
+    VirtioGpu,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
