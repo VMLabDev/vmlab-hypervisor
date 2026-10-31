@@ -6,6 +6,7 @@ pub mod dce;
 pub mod linear;
 pub mod liveness;
 mod modular;
+pub mod packed;
 pub mod schedule;
 use std::collections::HashMap;
 

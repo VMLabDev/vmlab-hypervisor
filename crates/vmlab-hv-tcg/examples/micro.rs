@@ -139,6 +139,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("loop result mismatch".into());
     }
+    if cpu.interpreter.profile.is_some() {
+        for profile in cpu.trace_profile().into_iter().take(30) {
+            eprintln!("block_profile={profile:?}");
+        }
+    }
     let profile = cpu.interpreter.profile.map(|profile| {
         let mut functions: Vec<_> = profile.functions.into_iter().collect();
         functions.sort_by_key(|(_, (_, own, _))| std::cmp::Reverse(*own));

@@ -50,6 +50,7 @@ pub fn guard(graph: &Graph, mut condition: ScalarId, mut expected: bool) -> Opti
 }
 
 impl Guard {
+    #[inline(always)]
     pub fn matches(self, left: u128, right: u128) -> bool {
         let value = if self.host64 {
             let (left, right) = (left as u64, right as u64);

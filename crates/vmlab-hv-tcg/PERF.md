@@ -3,7 +3,7 @@
 ## Result and target
 
 The 50 MIPS target is not met on the realistic mix. Exploratory warm runs
-reached 361.00 MIPS on the scalar loop and 17.36 MIPS on the CoreMark mix.
+reached 361.00 MIPS on the scalar loop and 19.71 MIPS on the CoreMark mix.
 These are single trials, not pinned benchmark medians. They do not establish
 that Linux can boot in minutes. The pruned-interpreter checkpoint below
 predates whole-block specialization.
@@ -436,3 +436,46 @@ unique PCs, so their initial recording dominates this per-step gate; the batch
 regressions and warm mix separately exercise native execution.
 The workspace gate and pinned benchmark history still need repeating. The
 realistic-mix target remains below 50 MIPS.
+
+### Compact physical instructions
+
+Packing scheduled scalar operations into 16-byte records reduces their former
+64-byte stride. Operands use checked 32-bit physical indices; logical types,
+widths, and full shift counts are retained. Constants and inputs remain bound
+outside dispatch. Packed arithmetic tests cover wide values, signed overflow,
+logical widths, oversized shifts, slices, and concatenation. Guard matching is
+inlined across the IR/runtime crate boundary.
+
+The first pinned CPU-16 CoreMark-100 trial takes 1.543990 seconds, or 19.713389
+MIPS, with the same 30,437,270 instructions, CRC checks, native/training counts,
+and zero evictions. Warmup takes 46.471776 seconds. This is an exploratory
+single-trial improvement over the 17.355898 MIPS input-binding measurement.
+It does not meet the mix target.
+
+Packed dispatch passes targeted release tests, all-target clippy, and a fresh
+133/133 oracle comparison over 452,776 instructions, including 4,392 native
+instructions. Logs are `target/tcg/packed-native-{0,1,2}.log`. The container
+generation check also passes with unchanged artifacts. The workspace gate
+and pinned benchmark-history medians remain required before completion.
+
+`Riscv64::trace_profile` reports retained root-trace call counts and residual
+sizes without a counter increment beyond the existing promotion counter.
+`VMLAB_TCG_PROFILE=1` prints the 30 most called roots in the micro-benchmark.
+Counts include warmup and saturate at `u32::MAX`; residual sizes describe the
+trained path, not work completed before an alternate exit. The census finds
+a hot 128-instruction trace with 408 scalar operations and 424 guards. Its
+loaded pointers regain a full 64-bit range and retain generated alignment,
+address-width, and protection checks. Guarded specialization of those values
+is the next experiment; none of those checks may simply be discarded.
+
+### Rejected load-result speculation
+
+Guarding every observed RAM-valued 64-bit load result regresses the mix to
+0.780465 MIPS: 38.998913 seconds timed after 148.158178 seconds of warmup.
+It introduces 286,550 slow continuations and executes 271,658,313 source IR
+operations in the timed pass. CRC checks still pass, and the targeted
+continuation test confirms a failed hint never repeats the completed read.
+The optimization is reverted. A loaded number is not sufficient evidence of
+address use. The continuing experiment derives candidate address arguments
+through shared interprocedural IR data flow and guards them before generated
+address checks. Memory-read results do not inherit their address's provenance.

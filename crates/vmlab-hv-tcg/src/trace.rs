@@ -10,7 +10,7 @@ use vmlab_hv_tcg_ir::native::{
     Graph, Operation, ScalarId, ScalarType, evaluate_binary, evaluate_unary, mask,
 };
 
-type Stage = Vec<(ScalarId, vmlab_hv_tcg_ir::native::linear::Instruction)>;
+type Stage = Vec<vmlab_hv_tcg_ir::native::packed::Packed>;
 
 fn lower_stage(graph: &Graph, slots: &[usize], stage: Vec<ScalarId>) -> Stage {
     stage
@@ -24,7 +24,10 @@ fn lower_stage(graph: &Graph, slots: &[usize], stage: Vec<ScalarId>) -> Stage {
             }
             let mut instruction = vmlab_hv_tcg_ir::native::linear::lower(graph, id)?;
             instruction.remap(slots);
-            Some((slots[id], instruction))
+            Some(
+                vmlab_hv_tcg_ir::native::packed::Packed::new(slots[id], instruction)
+                    .expect("bounded physical scalar instruction"),
+            )
         })
         .collect()
 }
@@ -188,54 +191,11 @@ fn input<'a>(
 
 impl Evaluation<'_> {
     #[inline(always)]
-    fn linear(
-        &mut self,
-        id: ScalarId,
-        instruction: &vmlab_hv_tcg_ir::native::linear::Instruction,
-    ) -> Result<()> {
-        use vmlab_hv_tcg_ir::native::linear::{Instruction, binary64};
-        let get = |id: ScalarId| {
-            debug_assert!(
-                self.stamps[id] == self.epoch || self.stamps[id] == u64::MAX,
-                "scheduled scalar dependency"
-            );
-            self.scalars[id]
-        };
-        let value = match *instruction {
-            Instruction::Copy(value) => get(value),
-            Instruction::Constant(value) => value,
-            Instruction::Add64(a, b, mask) => {
-                u128::from((get(a) as u64).wrapping_add(get(b) as u64) & mask)
-            }
-            Instruction::Sub64(a, b, mask) => {
-                u128::from((get(a) as u64).wrapping_sub(get(b) as u64) & mask)
-            }
-            Instruction::Mul64(a, b, mask) => {
-                u128::from((get(a) as u64).wrapping_mul(get(b) as u64) & mask)
-            }
-            Instruction::And64(a, b, mask) => u128::from((get(a) as u64 & get(b) as u64) & mask),
-            Instruction::Or64(a, b, mask) => u128::from((get(a) as u64 | get(b) as u64) & mask),
-            Instruction::Xor64(a, b, mask) => u128::from((get(a) as u64 ^ get(b) as u64) & mask),
-            Instruction::Input(..) => {
-                return Err(Error::Type("native input was not bound at entry".into()));
-            }
-            Instruction::Unary(op, value, mask) => {
-                evaluate_unary(op, get(value))
-                    .ok_or_else(|| Error::Type("native unary domain".into()))?
-                    & mask
-            }
-            Instruction::Binary(op, ty, a, b) => evaluate_binary(op, ty, get(a), get(b))
-                .ok_or_else(|| Error::Type("native binary domain".into()))?,
-            Instruction::Binary64(op, a, b, width) => binary64(op, get(a) as u64, get(b), width)
-                .ok_or_else(|| Error::Type("native host word operation".into()))?
-                as u128,
-            Instruction::Slice(value, offset, mask) => {
-                get(value).checked_shr(offset.into()).unwrap_or(0) & mask
-            }
-            Instruction::Concat(high, low, width, mask) => {
-                (get(high).checked_shl(width.into()).unwrap_or(0) | get(low)) & mask
-            }
-        };
+    fn linear(&mut self, instruction: &vmlab_hv_tcg_ir::native::packed::Packed) -> Result<()> {
+        let value = instruction
+            .evaluate(&self.scalars)
+            .ok_or_else(|| Error::Type("native scalar domain".into()))?;
+        let id = instruction.output as usize;
         self.scalars[id] = value;
         self.stamps[id] = self.epoch;
         Ok(())
@@ -1264,8 +1224,8 @@ impl Trace {
             };
             let stage = &self.stages[event_index];
             evaluation.completed_steps = self.event_steps[event_index];
-            for (id, instruction) in stage {
-                evaluation.linear(*id, instruction)?;
+            for instruction in stage {
+                evaluation.linear(instruction)?;
             }
             match *event {
                 Event::Guard {
@@ -1353,11 +1313,12 @@ impl Trace {
                     {
                         continue;
                     }
-                    for (id, instruction) in &self.checkpoint_stages[id] {
-                        if evaluation.stamps[*id] != evaluation.epoch
-                            && evaluation.stamps[*id] != u64::MAX
+                    for instruction in &self.checkpoint_stages[id] {
+                        let output = instruction.output as usize;
+                        if evaluation.stamps[output] != evaluation.epoch
+                            && evaluation.stamps[output] != u64::MAX
                         {
-                            evaluation.linear(*id, instruction)?;
+                            evaluation.linear(instruction)?;
                         }
                     }
                     let waiting = if let Some(waiting) = self.waiting[id] {
@@ -1461,6 +1422,31 @@ impl Trace {
     }
     pub fn scalar_count(&self) -> usize {
         self.recorded.block.graph.scalars.len()
+    }
+
+    pub fn profile(&self, pc: u64) -> crate::TraceProfile {
+        crate::TraceProfile {
+            pc,
+            calls: self.successful_runs,
+            instructions: self.trained_steps,
+            operations: self
+                .fast_events
+                .iter()
+                .map(|event| self.stages[*event].len())
+                .sum(),
+            guards: self
+                .fast_events
+                .iter()
+                .filter(|event| matches!(self.recorded.block.events[**event], Event::Guard { .. }))
+                .count(),
+            inputs: self.recorded.inputs.len(),
+            outputs: self
+                .recorded
+                .block
+                .checkpoints
+                .last()
+                .map_or(0, |checkpoint| checkpoint.globals.len()),
+        }
     }
 
     fn promotion_target(&self, limit: u32) -> u32 {

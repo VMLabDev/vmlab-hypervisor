@@ -4,6 +4,17 @@ use vmlab_hv_tcg_ir::{Expr, Function, Location, Op, Target, Type};
 
 const TRACE_CACHE_LIMIT: usize = 8_000_000;
 
+#[derive(Debug)]
+pub struct TraceProfile {
+    pub pc: u64,
+    pub calls: u32,
+    pub instructions: u32,
+    pub operations: usize,
+    pub guards: usize,
+    pub inputs: usize,
+    pub outputs: usize,
+}
+
 fn general_names() -> &'static std::collections::BTreeSet<String> {
     static NAMES: std::sync::OnceLock<std::collections::BTreeSet<String>> =
         std::sync::OnceLock::new();
@@ -87,6 +98,16 @@ pub struct Riscv64<M> {
 }
 
 impl<M: Memory> Riscv64<M> {
+    pub fn trace_profile(&self) -> Vec<TraceProfile> {
+        let mut profiles: Vec<_> = self
+            .traces
+            .iter()
+            .flat_map(|(pc, traces)| traces.iter().map(|trace| trace.profile(*pc)))
+            .collect();
+        profiles.sort_by_key(|profile| std::cmp::Reverse(profile.calls));
+        profiles
+    }
+
     pub fn new(memory: M) -> Result<Self> {
         let mut interpreter = Interpreter::new(vmlab_hv_tcg_riscv64::model(), memory);
         interpreter.initialize()?;
