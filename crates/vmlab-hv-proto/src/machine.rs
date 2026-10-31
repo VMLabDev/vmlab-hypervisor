@@ -21,6 +21,8 @@ pub struct MachineDescription {
     pub machine: Machine,
     #[serde(default, skip_serializing_if = "CpuPolicy::is_host")]
     pub cpu: CpuPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_model: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hyperv: Vec<HyperV>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,6 +57,8 @@ pub struct MachineDescription {
     pub nics: Vec<Nic>,
     /// File the first UART's output is appended to.
     pub serial_log: PathBuf,
+    #[serde(default, skip_serializing_if = "ComPort::is_com1")]
+    pub serial_log_port: ComPort,
     /// Named virtio-serial ports, each served on its own unix socket.
     pub ports: Vec<SerialPort>,
     /// virtio-fs shares: `socket` is served by an external virtiofsd over
@@ -67,6 +71,8 @@ pub struct MachineDescription {
     /// RTC start, RFC 3339. `None` means host time.
     #[serde(default)]
     pub rtc_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floppy: Option<PathBuf>,
 }
 
 /// A pre-bound host PCI function assigned at an explicit guest address.
@@ -143,6 +149,10 @@ pub enum Boot {
 #[serde(deny_unknown_fields)]
 pub struct Disk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pci: Option<PciAddress>,
     #[serde(default, skip_serializing_if = "DiskBus::is_virtio")]
     pub bus: DiskBus,
@@ -173,6 +183,8 @@ pub enum DiskFormat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Nic {
+    #[serde(default, skip_serializing_if = "NicModel::is_virtio")]
+    pub model: NicModel,
     /// PCI option ROM image; absent disables firmware network boot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rom: Option<PathBuf>,
@@ -197,6 +209,8 @@ pub enum NicAttachment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SerialPort {
+    #[serde(default, skip_serializing_if = "SerialTransport::is_virtio")]
+    pub transport: SerialTransport,
     /// Port name the guest sees (e.g. `vmlab.agent.0`, `vmlab.ctl.0`).
     pub name: String,
     /// Unix socket the hypervisor listens on for the host side.
@@ -252,6 +266,7 @@ pub enum Machine {
     #[default]
     Microvm,
     Q35,
+    Pc,
 }
 
 impl Machine {
@@ -296,6 +311,7 @@ pub enum DiskBus {
     #[default]
     Virtio,
     Ahci,
+    Ide,
 }
 
 impl DiskBus {
@@ -327,6 +343,73 @@ pub struct Display {
 pub enum DisplayDevice {
     StdVga,
     VirtioVga,
+    CirrusVga,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NicModel {
+    #[default]
+    Virtio,
+    E1000,
+    Pcnet,
+}
+
+impl NicModel {
+    pub fn is_virtio(&self) -> bool {
+        *self == Self::Virtio
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComPort {
+    #[default]
+    Com1,
+    Com2,
+}
+
+impl ComPort {
+    pub fn is_com1(&self) -> bool {
+        *self == Self::Com1
+    }
+
+    pub fn io_base(self) -> u16 {
+        match self {
+            Self::Com1 => 0x3f8,
+            Self::Com2 => 0x2f8,
+        }
+    }
+
+    pub fn irq(self) -> u32 {
+        match self {
+            Self::Com1 => 4,
+            Self::Com2 => 3,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SerialTransport {
+    #[default]
+    Virtio,
+    Com1,
+    Com2,
+}
+
+impl SerialTransport {
+    pub fn is_virtio(&self) -> bool {
+        *self == Self::Virtio
+    }
+
+    pub fn com_port(self) -> Option<ComPort> {
+        match self {
+            Self::Virtio => None,
+            Self::Com1 => Some(ComPort::Com1),
+            Self::Com2 => Some(ComPort::Com2),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
