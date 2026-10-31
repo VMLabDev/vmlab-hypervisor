@@ -190,6 +190,19 @@ impl<'a> GuestReadTarget<'a, '_> {
 }
 
 impl vmlab_disk::ReadTarget for GuestReadTarget<'_, '_> {
+    fn zero(&mut self, mut len: usize) -> vmlab_disk::Result<()> {
+        while len != 0 {
+            let slice = self.next_span(len)?;
+            let guard = slice.ptr_guard_mut();
+            // SAFETY: the guard retains a validated writable guest mapping
+            // for slice.len() bytes. No Rust reference aliases those bytes.
+            unsafe { std::ptr::write_bytes(guard.as_ptr(), 0, slice.len()) };
+            slice.bitmap().mark_dirty(0, slice.len());
+            len -= slice.len();
+        }
+        Ok(())
+    }
+
     fn write_all(&mut self, mut bytes: &[u8]) -> vmlab_disk::Result<()> {
         while !bytes.is_empty() {
             let slice = self.next_span(bytes.len())?;
@@ -1098,6 +1111,89 @@ mod tests {
         target.offset = 0;
         target.remaining = 512;
         assert!(target.read_file(&file, 0, 512).is_err());
+    }
+
+    #[test]
+    fn zero_reads_preserve_unrequested_data_and_the_status_byte() {
+        use vmlab_disk::ReadTarget;
+
+        let mem = GuestMemoryMmap::from_ranges(&[
+            (GuestAddress(0), 0x10000),
+            (GuestAddress(0x10000), 0x10000),
+        ])
+        .unwrap();
+        let ranges = [(GuestAddress(0xff00), 512), (GuestAddress(0x18000), 1025)];
+        for &(address, len) in &ranges {
+            mem.write_slice(&vec![0xa5; len], address).unwrap();
+        }
+        let mut target = GuestReadTarget {
+            access: GuestAccess {
+                mem: &mem,
+                region: Cell::new(None),
+            },
+            ranges: &ranges,
+            index: 0,
+            offset: 0,
+            remaining: 1536,
+        };
+        target.zero(768).unwrap();
+        assert_eq!(target.remaining, 768);
+        let mut received = [1; 512];
+        mem.read_slice(&mut received, ranges[0].0).unwrap();
+        assert_eq!(received, [0; 512]);
+        let mut received = [1; 1025];
+        mem.read_slice(&mut received, ranges[1].0).unwrap();
+        assert_eq!(&received[..256], &[0; 256]);
+        assert_eq!(&received[256..], &[0xa5; 769]);
+    }
+
+    #[test]
+    #[ignore = "diagnostic: compare zero filling over 4 GiB of guest writes per path"]
+    fn zero_fill_throughput() {
+        use vmlab_disk::ReadTarget;
+
+        struct Buffered<'a>(GuestReadTarget<'a, 'a>);
+        impl ReadTarget for Buffered<'_> {
+            fn write_all(&mut self, bytes: &[u8]) -> vmlab_disk::Result<()> {
+                self.0.write_all(bytes)
+            }
+        }
+        const LEN: usize = 256 << 20;
+        const REPEATS: usize = 16;
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), LEN)]).unwrap();
+        let ranges = [(GuestAddress(0), LEN)];
+        let target = || GuestReadTarget {
+            access: GuestAccess {
+                mem: &mem,
+                region: Cell::new(None),
+            },
+            ranges: &ranges,
+            index: 0,
+            offset: 0,
+            remaining: LEN,
+        };
+        target().zero(LEN).unwrap();
+        for direct in [false, true] {
+            let started = std::time::Instant::now();
+            for _ in 0..REPEATS {
+                if direct {
+                    target().zero(LEN).unwrap();
+                } else {
+                    Buffered(target()).zero(LEN).unwrap();
+                }
+            }
+            let seconds = started.elapsed().as_secs_f64();
+            eprintln!(
+                "zero fill direct={direct}: {:.2} MiB/s ({seconds:.6}s)",
+                (LEN * REPEATS / 1048576) as f64 / seconds
+            );
+            let mut check = [1; 65536];
+            for offset in (0..LEN).step_by(check.len()) {
+                mem.read_slice(&mut check, GuestAddress(offset as u64))
+                    .unwrap();
+                assert!(check.iter().all(|byte| *byte == 0));
+            }
+        }
     }
 
     #[test]
