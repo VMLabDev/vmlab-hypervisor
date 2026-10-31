@@ -15,7 +15,7 @@ use vmlab_hv_proto::control::{
 };
 use vmlab_hv_proto::machine::{
     Accel, Arch, Audio, AudioDevice, Boot, Disk, DiskFormat, FsShare, MachineDescription, Nic,
-    NicAttachment, SerialPort,
+    NicAttachment, PciAddress, SerialPort,
 };
 
 /// Assert that `value` serializes to exactly `json` and parses back.
@@ -53,13 +53,68 @@ fn nic_option_rom_wire() {
     );
 }
 
+#[test]
+fn fs_share_socket_and_path_are_alternatives() {
+    use vmlab_hv_proto::machine::FsBacking;
+    let socket = FsShare {
+        pci: None,
+        tag: "share0".into(),
+        socket: Some("/run/vmlab/web-1/virtiofs.sock".into()),
+        path: None,
+        read_only: false,
+    };
+    wire(
+        &socket,
+        r#"{"tag":"share0","socket":"/run/vmlab/web-1/virtiofs.sock"}"#,
+    );
+    assert_eq!(
+        socket.backing(),
+        Some(FsBacking::Socket("/run/vmlab/web-1/virtiofs.sock".into()))
+    );
+    let path = FsShare {
+        pci: Some(PciAddress {
+            bus: 0,
+            device: 5,
+            function: 0,
+        }),
+        tag: "share0".into(),
+        socket: None,
+        path: Some("/srv/web-1".into()),
+        read_only: false,
+    };
+    wire(
+        &path,
+        r#"{"pci":{"bus":0,"device":5,"function":0},"tag":"share0","path":"/srv/web-1"}"#,
+    );
+    assert_eq!(
+        path.backing(),
+        Some(FsBacking::Directory("/srv/web-1".into()))
+    );
+    // Both or neither leave the backing unresolved; the builder rejects them.
+    let both = FsShare {
+        socket: Some("/sock".into()),
+        path: Some("/srv".into()),
+        ..path.clone()
+    };
+    assert!(!both.read_only);
+    assert_eq!(both.backing(), None);
+    let neither = FsShare {
+        socket: None,
+        path: None,
+        ..path
+    };
+    assert_eq!(neither.backing(), None);
+}
+
 fn sample_machine() -> MachineDescription {
     MachineDescription {
+        vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
         hyperv: vec![],
         display: None,
         tablet: None,
+        usb: None,
         tpm: None,
         console_pci: None,
         ahci_pci: None,
@@ -114,7 +169,9 @@ fn sample_machine() -> MachineDescription {
         shares: vec![FsShare {
             pci: None,
             tag: "share0".to_owned(),
-            socket: PathBuf::from("/run/vmlab/web-1/virtiofs.sock"),
+            socket: Some(PathBuf::from("/run/vmlab/web-1/virtiofs.sock")),
+            path: None,
+            read_only: false,
         }],
         audio: Some(Audio {
             pci: None,
@@ -125,6 +182,37 @@ fn sample_machine() -> MachineDescription {
         }),
         rtc_base: Some("2026-10-30T00:00:00Z".to_owned()),
     }
+}
+
+#[test]
+fn vfio_assignment_wire_shape_and_omitted_default() {
+    use vmlab_hv_proto::machine::{PciAddress, VfioDevice};
+    let mut machine = sample_machine();
+    assert!(
+        serde_json::to_value(&machine)
+            .unwrap()
+            .get("vfio")
+            .is_none()
+    );
+    machine.vfio.push(VfioDevice {
+        host: "0000:65:00.0".into(),
+        pci: PciAddress {
+            bus: 0,
+            device: 6,
+            function: 0,
+        },
+    });
+    let encoded = serde_json::to_value(&machine).unwrap();
+    assert_eq!(
+        encoded["vfio"],
+        serde_json::json!([
+            {"host": "0000:65:00.0", "pci": {"bus": 0, "device": 6, "function": 0}}
+        ])
+    );
+    assert_eq!(
+        serde_json::from_value::<MachineDescription>(encoded).unwrap(),
+        machine
+    );
 }
 
 #[test]
@@ -390,6 +478,37 @@ fn pinned_handshake_rejection() {
 
 #[test]
 fn every_command_round_trips() {
+    wire(
+        &ClientMsg::Request {
+            id: 7,
+            command: Command::DeviceAdd {
+                id: "usbhost-1-2".to_owned(),
+                driver: "usb-host".to_owned(),
+                bus: Some("usbx.0".to_owned()),
+                hostbus: 1,
+                hostaddr: 5,
+                hostport: "2.4".to_owned(),
+            },
+        },
+        r#"{"type":"request","id":7,"command":{"command":"device_add","id":"usbhost-1-2","driver":"usb-host","bus":"usbx.0","hostbus":1,"hostaddr":5,"hostport":"2.4"}}"#,
+    );
+    wire(
+        &ClientMsg::Request {
+            id: 8,
+            command: Command::DeviceDel {
+                id: "usbhost-1-2".to_owned(),
+            },
+        },
+        r#"{"type":"request","id":8,"command":{"command":"device_del","id":"usbhost-1-2"}}"#,
+    );
+    wire(
+        &ServerMsg::Event {
+            event: Event::DeviceDeleted {
+                id: "usbhost-1-2".to_owned(),
+            },
+        },
+        r#"{"type":"event","event":"device_deleted","id":"usbhost-1-2"}"#,
+    );
     round_trip(&Command::Status);
     round_trip(&Command::Resume);
     round_trip(&Command::Pause);

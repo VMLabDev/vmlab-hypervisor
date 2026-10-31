@@ -1,0 +1,15 @@
+[package]
+name = "vmlab-hv-tcg-riscv64"
+description = "Generated Sail RISC-V decoder and instruction IR builders"
+version.workspace = true
+edition.workspace = true
+license = "BSD-2-Clause"
+rust-version.workspace = true
+
+[dependencies]
+vmlab-hv-tcg-ir = { path = "../vmlab-hv-tcg-ir" }
+serde_json.workspace = true
+flate2.workspace = true
+
+[lints.rust]
+non_snake_case = "allow"

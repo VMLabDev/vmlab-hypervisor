@@ -104,10 +104,43 @@ retain pending events rather than overwriting guest-owned entries. Transfers
 are limited to 1 MiB and 256 TRBs per TD. Invalid DMA or cyclic Link walks
 halt the controller with USBSTS.HCE, recoverable through HCRST.
 
-Optional streams are not advertised. Isochronous endpoints and USB hubs are
-outside the built-in tablet path; unsupported endpoint contexts and commands
-return errors. Host passthrough is a later package, not an attached physical
-backend in this implementation.
+Optional streams are not advertised. Isochronous TDs are carried for
+passthrough backends (`transfer_iso`, isochronous IN only); USB hubs are
+outside the built-in tablet path, and unsupported endpoint contexts and
+commands return errors. Host passthrough lives in `usb/host` (next
+section).
+
+## Host passthrough
+
+`usb/host` passes a device on the host's usbdevfs through the controller.
+`HostUsbDevice::open(id, bus, dev)` opens `/dev/bus/usb/<bus>/<dev>`,
+claims every interface of the active configuration (detaching the host
+kernel driver), and serves the guest from the device's descriptors. The
+lift source and its pruning are listed in THIRD_PARTY_NOTICES.
+
+Transfers are asynchronous usbdevfs URBs behind the polled seam: a guest
+TD is submitted as a bulk, interrupt, isochronous or control URB and
+`Nak`ed; the machine's 1 ms poll reaps completions and the retry returns
+the result. Standard requests that belong to the host side —
+SET_ADDRESS, SET_CONFIGURATION, SET_INTERFACE, CLEAR_FEATURE(ENDPOINT_HALT)
+and GET_DESCRIPTOR(Configuration) — are intercepted: configuration and
+interface requests reconfigure and re-claim the device, and the
+configuration descriptor is served from the cached tree with unclaimed
+interfaces rewritten to vendor-specific so guest drivers leave them
+alone. Streams and isochronous OUT are not supported, matching the lift
+source.
+
+Detach paths differ from crosvm deliberately: releasing an interface
+claim leaves the host driverless, because only USBDEVFS_CONNECT rebinds,
+so `device_del`, host unplug and claim failure all release and reconnect
+every claimed interface. A device whose host side disappears is
+reaped as lost; the controller reports the port and the machine detaches
+it with a `device_deleted` event. Online snapshots are refused while a
+host device is attached (D9).
+
+The syscall surface sits behind the `UsbFs` trait; the unit tests run the
+whole backend against a fake kernel side that records claims, releases
+and reconnects.
 
 ## Specifications and black-box observations
 

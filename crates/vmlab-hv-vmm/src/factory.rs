@@ -117,8 +117,9 @@ pub trait DeviceFactory: Send + Sync {
         msi: PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable>;
 
-    /// A vhost-user-fs PCI function backed by an external virtiofsd.
-    fn vhost_user_fs(
+    /// A virtio-fs PCI function for one share: the external virtiofsd
+    /// named by `socket`, or the in-process device rooted at `path`.
+    fn fs_share(
         &self,
         share: &FsShare,
         mem: &GuestMemory,
@@ -193,14 +194,14 @@ impl DeviceFactory for NoDevices {
         ))
     }
 
-    fn vhost_user_fs(
+    fn fs_share(
         &self,
         share: &FsShare,
         _mem: &GuestMemory,
         _msi: crate::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         Err(DeviceUnavailable::new(
-            "vhost-user-fs",
+            "virtio-fs",
             format!(
                 "the device model has not landed in vmlab-hv-devices yet (share `{}`)",
                 share.tag

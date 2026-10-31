@@ -24,6 +24,15 @@ use crate::vm::{Vm, VmShared};
 
 /// Static checks that do not need KVM; each error names what is wrong.
 pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
+    let mut hosts = std::collections::BTreeSet::new();
+    for device in &desc.vfio {
+        crate::vfio::validate_address(&device.host).map_err(VmmError::InvalidMachine)?;
+        if !hosts.insert(&device.host) {
+            return Err(VmmError::InvalidMachine(
+                "duplicate VFIO host address".into(),
+            ));
+        }
+    }
     if desc.arch != Arch::X86_64 {
         return Err(VmmError::InvalidMachine(format!(
             "arch {:?} is not supported: phase 1 builds x86_64 machines only",
@@ -72,7 +81,8 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
         }
     }
     if desc.machine == Machine::Microvm
-        && (desc.display.is_some()
+        && (!desc.vfio.is_empty()
+            || desc.display.is_some()
             || desc.tablet.is_some()
             || desc.tpm.is_some()
             || desc.ahci_pci.is_some()
@@ -153,6 +163,9 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
         Ok(())
     };
     let mut ports = std::collections::BTreeSet::new();
+    for device in &desc.vfio {
+        add(Some(device.pci), "VFIO")?;
+    }
     for disk in &desc.disks {
         match disk.bus {
             DiskBus::Virtio => {
@@ -197,6 +210,13 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
         add(nic.pci, "NIC")?;
     }
     for share in &desc.shares {
+        if share.backing().is_none() {
+            return Err(VmmError::InvalidMachine(format!(
+                "share `{}` must set exactly one of `socket` (external virtiofsd) \
+                 and `path` (in-process)",
+                share.tag
+            )));
+        }
         add(share.pci, &share.tag)?;
     }
     if let Some(display) = &desc.display {
@@ -204,6 +224,16 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
     }
     if let Some(tablet) = desc.tablet {
         add(Some(tablet), "tablet")?;
+    }
+    // The tablet and the passthrough controller are one xHCI function.
+    match (desc.tablet, desc.usb) {
+        (Some(tablet), Some(usb)) if tablet != usb => {
+            return Err(VmmError::InvalidMachine(
+                "the tablet and usb functions must share one xHCI controller".into(),
+            ));
+        }
+        (None, Some(usb)) => add(Some(usb), "usb")?,
+        _ => {}
     }
     if let Some(audio) = &desc.audio {
         // D11: q35's HDA sits at 00:1b.0, where real ICH9 places it.
@@ -251,6 +281,7 @@ pub fn build(
     paused: bool,
 ) -> Result<Vm, VmmError> {
     validate(desc)?;
+    crate::vfio::preflight_machine(desc).map_err(VmmError::InvalidMachine)?;
     let kvm = KvmVm::new()?;
     crate::hyperv::configure_vm(&kvm.kvm, &kvm.vm, &desc.hyperv)?;
     if desc.vcpus as usize > kvm.max_vcpus() {
@@ -530,6 +561,12 @@ pub fn build(
     } else {
         None
     };
+    // Firmware construction adds PAM RAM to GuestMemory. Assign devices only
+    // after those regions exist, so their IOMMU domain sees the complete RAM map.
+    let vfio = crate::vfio::build(desc, &kvm, &ram.mem).map_err(VmmError::Other)?;
+    for (device, config) in vfio.iter().zip(&desc.vfio) {
+        place(device.clone(), Some(config.pci))?;
+    }
     if let Some(chipset) = &chipset {
         snap_nodes.push(DeviceNode::Plain(Arc::new(Mutex::new(
             crate::chipset::ChipsetRegisters(chipset.clone()),
@@ -759,7 +796,7 @@ pub fn build(
     for share in &desc.shares {
         let built = add_pci(
             &pci_root,
-            factory.vhost_user_fs(share, &ram.mem, wiring(share.pci, 2, false)?),
+            factory.fs_share(share, &ram.mem, wiring(share.pci, 2, false)?),
             format!("share `{}`", share.tag),
         )?;
         place(built.function.clone(), share.pci)?;
@@ -777,7 +814,19 @@ pub fn build(
             .register(PM1A_EVT_BASE, PM_BLOCK_LEN, pm.clone())
             .map_err(VmmError::Other)?;
     }
-    let xhci = if let Some(address) = desc.tablet {
+    // One xHCI carries the absolute tablet and the host passthrough ports:
+    // `tablet` places it for input, `usb` (vmlab's `usb = true`, the
+    // controller it names `usbx`) additionally enables hot-plug.
+    let xhci_address = match (desc.tablet, desc.usb) {
+        (Some(tablet), Some(usb)) if tablet != usb => {
+            return Err(VmmError::DeviceUnavailable {
+                device: "usb controller",
+                reason: "the tablet and usb functions must share one xHCI".into(),
+            });
+        }
+        (tablet, usb) => tablet.or(usb),
+    };
+    let xhci = if let Some(address) = xhci_address {
         let transport = wiring(Some(address), 1, false)?;
         let xhci = Arc::new(Mutex::new(vmlab_hv_devices::usb::XhciController::new(
             "xhci",
@@ -904,9 +953,13 @@ pub fn build(
         layout.mmio64_base,
     );
     *shared.mch.lock() = mch;
+    *shared.vfio.lock() = vfio;
     *shared.chipset.lock() = chipset;
     *shared.vga.lock() = vga;
     *shared.xhci.lock() = xhci;
+    shared
+        .usb_hotplug
+        .store(desc.usb.is_some(), std::sync::atomic::Ordering::SeqCst);
     *shared.pflash.lock() = pflash;
     *shared.tpm.lock() = tpm;
     *shared.smi_fwcfg.lock() = smi_fwcfg;
@@ -960,6 +1013,56 @@ fn machine_digest(desc: &MachineDescription) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn vfio_requires_q35_unique_host_and_unoccupied_guest_addresses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut machine = desc();
+        machine.vfio.push(vmlab_hv_proto::machine::VfioDevice {
+            host: "0000:65:00.0".into(),
+            pci: PciAddress {
+                bus: 0,
+                device: 6,
+                function: 0,
+            },
+        });
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("machine=q35")
+        );
+        machine.machine = Machine::Q35;
+        machine.boot = Boot::Firmware {
+            firmware: FirmwareKind::Seabios,
+            code: tiny_bzimage(dir.path()),
+            vars: None,
+            secure_boot: false,
+            bootorder: vec![],
+        };
+        validate(&machine).unwrap();
+        machine.vfio.push(machine.vfio[0].clone());
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate VFIO host")
+        );
+        machine.vfio[1].host = "0000:65:00.1".into();
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate PCI address")
+        );
+        machine.vfio.pop();
+        machine.vfio[0].pci.device = 31;
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("reserved for the chipset")
+        );
+    }
+    #[test]
     fn tablet_serial_uses_the_explicit_controller_address() {
         assert_eq!(
             super::tablet_serial(vmlab_hv_proto::machine::PciAddress {
@@ -983,11 +1086,13 @@ mod tests {
 
     fn desc() -> MachineDescription {
         MachineDescription {
+            vfio: vec![],
             machine: Default::default(),
             cpu: Default::default(),
             hyperv: vec![],
             display: None,
             tablet: None,
+            usb: None,
             tpm: None,
             console_pci: None,
             ahci_pci: None,
@@ -1295,5 +1400,36 @@ mod tests {
         };
         let err = err.to_string();
         assert!(err.contains("serial") && err.contains("COM1"), "{err}");
+    }
+    #[test]
+    fn usb_and_tablet_must_share_one_controller() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut machine = desc();
+        machine.machine = Machine::Q35;
+        machine.boot = Boot::Firmware {
+            firmware: FirmwareKind::Seabios,
+            code: tiny_bzimage(dir.path()),
+            vars: None,
+            secure_boot: false,
+            bootorder: vec![],
+        };
+        machine.tablet = Some(PciAddress {
+            bus: 0,
+            device: 5,
+            function: 0,
+        });
+        machine.usb = Some(PciAddress {
+            bus: 0,
+            device: 6,
+            function: 0,
+        });
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("one xHCI controller")
+        );
+        machine.usb = machine.tablet;
+        validate(&machine).unwrap();
     }
 }

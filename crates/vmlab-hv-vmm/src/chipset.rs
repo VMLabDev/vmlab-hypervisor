@@ -421,7 +421,12 @@ fn install_irq_routes(vm: &VmFd) -> Result<(), VmmError> {
             gsi % 8,
         );
     }
-    vm.set_gsi_routing(&routes.header)
+    let mut table = KvmIrqRouting::new(routes.header.nr as usize)
+        .map_err(|e| VmmError::Other(e.to_string()))?;
+    table
+        .as_mut_slice()
+        .copy_from_slice(&routes.entries[..routes.header.nr as usize]);
+    vm.set_gsi_routing(&table)
         .map_err(|e| VmmError::ioctl("KVM_SET_GSI_ROUTING(q35)", e))
 }
 

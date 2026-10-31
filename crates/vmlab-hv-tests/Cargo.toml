@@ -12,6 +12,7 @@ description = "S1 integration harness and acceptance tests for vmlab-hv"
 
 [dependencies]
 vmlab-hv-proto = { workspace = true }
+vmlab-hv-devices = { workspace = true }
 vmlab-disk = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

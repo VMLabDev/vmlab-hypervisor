@@ -7,6 +7,8 @@ use kvm_ioctls::VcpuFd;
 use parking_lot::{Condvar, Mutex};
 use vmlab_hv_proto::control::{Event, RunState, ShutdownReason};
 
+use vmlab_hv_devices::usb::{UsbDevice, UsbSpeed};
+
 use crate::bus::{IoBus, MmioBus};
 use crate::error::VmmError;
 use crate::kvm::KvmVm;
@@ -15,6 +17,17 @@ use crate::memory::GuestRam;
 use crate::pci::PciRoot;
 use crate::pm::{PmDevice, SleepSignal, SleepState};
 use crate::vcpu::VcpuThread;
+
+/// One host USB device the control protocol attached: the id vmlab chose
+/// and the root port it landed on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbAttachment {
+    pub id: String,
+    pub port: u8,
+    pub hostbus: u16,
+    pub hostaddr: u16,
+    pub hostport: String,
+}
 
 /// Why the machine stopped for good.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +66,7 @@ impl Drop for MemoryUpdateGuard<'_> {
 
 /// Everything the vCPU threads and the control threads share.
 pub struct VmShared {
+    pub(crate) vfio: Mutex<Vec<Arc<Mutex<crate::vfio::AssignedDevice>>>>,
     io_trace: Option<Mutex<std::collections::VecDeque<String>>>,
     pub(crate) display: Mutex<Option<Arc<vmlab_hv_display::DisplayServer>>>,
     pub(crate) display_generation: std::sync::atomic::AtomicU64,
@@ -96,6 +110,11 @@ pub struct VmShared {
     pub(crate) chipset: Mutex<Option<Arc<crate::chipset::Chipset>>>,
     pub(crate) vga: Mutex<Option<crate::display::Video>>,
     pub(crate) xhci: Mutex<Option<Arc<Mutex<vmlab_hv_devices::usb::XhciController>>>>,
+    /// Whether the machine's description asked for the `usbx` passthrough
+    /// controller (`usb = true`): only such machines accept hot-plug.
+    pub(crate) usb_hotplug: std::sync::atomic::AtomicBool,
+    /// Host USB devices attached through the control protocol.
+    pub(crate) usb_attachments: Mutex<Vec<UsbAttachment>>,
     pub(crate) pflash: Mutex<Option<Arc<Mutex<vmlab_hv_devices::pflash::Pflash>>>>,
     pub(crate) tpm: Mutex<Option<Arc<Mutex<vmlab_hv_devices::tpm::TpmTis>>>>,
     pub(crate) smi_fwcfg: Mutex<Option<Arc<Mutex<crate::smm::SmiFwCfg>>>>,
@@ -115,6 +134,7 @@ impl VmShared {
         mmio64_base: u64,
     ) -> Arc<Self> {
         Arc::new(VmShared {
+            vfio: Mutex::new(Vec::new()),
             io_trace: std::env::var_os("VMLAB_HV_DIAGNOSTICS")
                 .map(|_| Mutex::new(std::collections::VecDeque::new())),
             display: Mutex::new(None),
@@ -150,6 +170,8 @@ impl VmShared {
             chipset: Mutex::new(None),
             vga: Mutex::new(None),
             xhci: Mutex::new(None),
+            usb_hotplug: std::sync::atomic::AtomicBool::new(false),
+            usb_attachments: Mutex::new(Vec::new()),
             pflash: Mutex::new(None),
             tpm: Mutex::new(None),
             smi_fwcfg: Mutex::new(None),
@@ -167,6 +189,134 @@ impl VmShared {
     fn emit(&self, event: Event) {
         if let Some(sink) = self.event_sink.lock().as_ref() {
             sink(event);
+        }
+    }
+
+    // ---- host USB passthrough ------------------------------------------
+
+    /// Whether hot-plug commands may run: the description asked for the
+    /// `usbx` controller.
+    pub(crate) fn usb_hotplug(&self) -> bool {
+        self.usb_hotplug.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The first free root port for a device of `speed`: SuperSpeed
+    /// devices belong on ports 1..4, others on 5..8.
+    fn free_usb_port(
+        &self,
+        speed: UsbSpeed,
+        controller: &vmlab_hv_devices::usb::XhciController,
+    ) -> Option<u8> {
+        let attached: std::collections::HashSet<u8> =
+            self.usb_attachments.lock().iter().map(|a| a.port).collect();
+        let candidates: &[u8] = if speed == UsbSpeed::Super {
+            &[1, 2, 3, 4]
+        } else {
+            &[5, 6, 7, 8]
+        };
+        candidates
+            .iter()
+            .copied()
+            .find(|&port| !attached.contains(&port) && controller.port_free(port))
+    }
+
+    /// Attach a host device built by `open`. The controller picks the root
+    /// port by protocol; the id is vmlab's qdev id. Returns the guest port.
+    pub(crate) fn attach_usb(
+        &self,
+        id: &str,
+        hostbus: u16,
+        hostaddr: u16,
+        hostport: &str,
+        open: &dyn Fn() -> Result<Box<dyn UsbDevice>, String>,
+    ) -> Result<u8, (vmlab_hv_proto::control::ErrorCode, String)> {
+        use vmlab_hv_proto::control::ErrorCode;
+        if !self.usb_hotplug() {
+            return Err((
+                ErrorCode::Unsupported,
+                "this machine has no USB passthrough controller: set usb = true and restart it"
+                    .into(),
+            ));
+        }
+        if self.usb_attachments.lock().iter().any(|a| a.id == id) {
+            return Err((
+                ErrorCode::Unsupported,
+                format!("a USB device with id {id:?} is already attached"),
+            ));
+        }
+        let Some(controller_arc) = self.xhci.lock().clone() else {
+            return Err((ErrorCode::Internal, "the USB controller is gone".into()));
+        };
+        let mut controller = controller_arc.lock();
+        // Open and take over the host device before touching the guest's
+        // view: a claim failure returns the device to the host inside the
+        // backend and never reaches the controller.
+        let device = open().map_err(|message| (ErrorCode::Internal, message))?;
+        let speed = device.speed();
+        let Some(port) = self.free_usb_port(speed, &controller) else {
+            return Err((
+                ErrorCode::Unsupported,
+                "no free USB root port for this device".into(),
+            ));
+        };
+        controller
+            .attach(port, device)
+            .map_err(|e| (ErrorCode::Internal, e.to_string()))?;
+        self.usb_attachments.lock().push(UsbAttachment {
+            id: id.to_owned(),
+            port,
+            hostbus,
+            hostaddr,
+            hostport: hostport.to_owned(),
+        });
+        Ok(port)
+    }
+
+    /// Detach the device with qdev id `id`, returning it to the host: the
+    /// backend's drop releases the interfaces and rebinds the host driver.
+    pub(crate) fn detach_usb(&self, id: &str) -> Result<u8, vmlab_hv_proto::control::ErrorCode> {
+        let port = self
+            .usb_attachments
+            .lock()
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.port);
+        let Some(port) = port else {
+            return Err(vmlab_hv_proto::control::ErrorCode::DeviceNotFound);
+        };
+        let Some(controller) = self.xhci.lock().clone() else {
+            return Err(vmlab_hv_proto::control::ErrorCode::Internal);
+        };
+        let detached = controller.lock().detach(port);
+        self.usb_attachments.lock().retain(|a| a.id != id);
+        // Either the detach handed back the backend, whose drop rebinds the
+        // host driver, or the port was already empty (host unplug drained
+        // it); either way the device is back on the host.
+        drop(detached);
+        self.emit(Event::DeviceDeleted { id: id.to_owned() });
+        Ok(port)
+    }
+
+    /// Detach attachments whose host device went away, emitting
+    /// `device_deleted` for each. Called from the poll path.
+    pub(crate) fn detach_lost_usb(&self) {
+        let lost: Vec<UsbAttachment> = {
+            let Some(controller) = self.xhci.lock().clone() else {
+                return;
+            };
+            let ports = controller.lock().lost_ports();
+            if ports.is_empty() {
+                return;
+            }
+            self.usb_attachments
+                .lock()
+                .iter()
+                .filter(|a| ports.contains(&a.port))
+                .cloned()
+                .collect()
+        };
+        for attachment in lost {
+            let _ = self.detach_usb(&attachment.id);
         }
     }
 
@@ -454,11 +604,25 @@ impl VmShared {
         if port >= IO_ALLOC_BASE {
             let mut root = self.pci_root.lock();
             if root.dispatch_io_write(port, data) {
+                let error = if self.vfio.lock().is_empty() {
+                    None
+                } else {
+                    root.take_error()
+                };
+                drop(root);
+                if let Some(error) = error {
+                    self.request_exit(ExitReason::Error(error));
+                }
                 self.take_guest_sleep();
                 return;
             }
         }
         self.io_bus.lock().write(port, data);
+        if !self.vfio.lock().is_empty()
+            && let Some(error) = self.pci_root.lock().take_error()
+        {
+            self.request_exit(ExitReason::Error(error));
+        }
         if _memory_update.is_some()
             && let Err(error) = self.sync_vga_mapping()
         {
@@ -508,6 +672,11 @@ impl VmShared {
             let _memory_update = self.memory_update();
             use vmlab_hv_devices::BusDevice;
             crate::pci::PciEcam::new(self.pci_root.clone()).write(offset, data);
+            if !self.vfio.lock().is_empty()
+                && let Some(error) = self.pci_root.lock().take_error()
+            {
+                self.request_exit(ExitReason::Error(error));
+            }
             if let Err(error) = self.sync_vga_mapping() {
                 self.request_exit(ExitReason::Error(error.to_string()));
             }
@@ -519,6 +688,15 @@ impl VmShared {
         if self.in_pci_window(addr) {
             let mut root = self.pci_root.lock();
             if root.dispatch_mmio_write(addr, data) {
+                let error = if self.vfio.lock().is_empty() {
+                    None
+                } else {
+                    root.take_error()
+                };
+                drop(root);
+                if let Some(error) = error {
+                    self.request_exit(ExitReason::Error(error));
+                }
                 return;
             }
         }
@@ -545,7 +723,7 @@ impl VmShared {
             return true;
         }
         let ((b32, e32), (b64, e64)) = self.pci_windows;
-        (b32 <= addr && addr < e32) || (b64 <= addr && addr < e64)
+        (b32 <= addr && addr < e32) || (b64 <= addr && addr < e64) || !self.vfio.lock().is_empty()
     }
 
     pub(crate) fn sync_vga_mapping(&self) -> Result<(), VmmError> {
@@ -683,6 +861,7 @@ impl VmShared {
         {
             xhci.lock().poll();
         }
+        self.detach_lost_usb();
         let chipset = self.chipset.lock().clone();
         let Some(chipset) = chipset else { return };
         chipset.advance();
@@ -887,6 +1066,11 @@ impl Vm {
     pub fn wait(mut self) -> ExitReason {
         let reason = self.shared.wait_exit();
         self.join_workers();
+        for device in self.shared.vfio.lock().iter() {
+            if let Err(error) = device.lock().reset() {
+                return ExitReason::Error(format!("VFIO reset at VM exit: {error}"));
+            }
+        }
         if let Some(tpm) = self.shared.tpm.lock().as_ref()
             && let Err(e) = tpm.lock().shutdown()
         {
@@ -1096,6 +1280,24 @@ impl VmHandle {
     pub fn set_event_sink(&self, sink: EventSink) {
         self.0.set_event_sink(sink);
     }
+
+    /// `device_add` for a `usb-host`: attach the host device at
+    /// `hostbus`/`hostaddr` and return the guest root port.
+    pub fn attach_usb(
+        &self,
+        id: &str,
+        hostbus: u16,
+        hostaddr: u16,
+        hostport: &str,
+        open: &dyn Fn() -> Result<Box<dyn UsbDevice>, String>,
+    ) -> Result<u8, (vmlab_hv_proto::control::ErrorCode, String)> {
+        self.0.attach_usb(id, hostbus, hostaddr, hostport, open)
+    }
+
+    /// `device_del`: detach the device with qdev id `id` back to the host.
+    pub fn detach_usb(&self, id: &str) -> Result<u8, vmlab_hv_proto::control::ErrorCode> {
+        self.0.detach_usb(id)
+    }
 }
 
 #[cfg(test)]
@@ -1107,6 +1309,55 @@ mod tests {
     struct NullIrq;
     impl vmlab_hv_devices::IrqLine for NullIrq {
         fn set_level(&self, _: bool) {}
+    }
+
+    #[test]
+    fn ordinary_io_does_not_scan_pci_errors_without_vfio() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use vmlab_hv_devices::{BarInfo, BarKind, PciDevice};
+        struct Probe(Arc<AtomicUsize>);
+        impl PciDevice for Probe {
+            fn config_read(&mut self, _: usize) -> u32 {
+                3
+            }
+            fn config_write(&mut self, _: usize, _: u64, _: &[u8]) {}
+            fn bars(&self) -> Vec<BarInfo> {
+                vec![BarInfo {
+                    index: 0,
+                    size: 4096,
+                    kind: BarKind::Mmio32,
+                }]
+            }
+            fn bar_read(&mut self, _: u8, _: u64, _: &mut [u8]) {}
+            fn bar_write(&mut self, _: u8, _: u64, _: &[u8]) {}
+            fn take_error(&mut self) -> Option<String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("SKIP VFIO I/O fast path: /dev/kvm absent");
+            return;
+        }
+        let checks = Arc::new(AtomicUsize::new(0));
+        let mut root = PciRoot::new(1 << 32);
+        root.add_device(Arc::new(Mutex::new(Probe(checks.clone()))))
+            .unwrap();
+        let signal = Arc::new(SleepSignal::default());
+        let shared = VmShared::new(
+            KvmVm::new().unwrap(),
+            IoBus::new(),
+            MmioBus::new(),
+            Arc::new(Mutex::new(root)),
+            Arc::new(Mutex::new(PmDevice::new(Arc::new(NullIrq), signal.sink()))),
+            signal,
+            1 << 32,
+        );
+        for _ in 0..100 {
+            shared.io_write(0x80, &[0]);
+            shared.mmio_write(crate::layout::MMIO32_BASE, &[0]);
+        }
+        assert_eq!(checks.load(Ordering::SeqCst), 0);
     }
 
     #[test]

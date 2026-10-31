@@ -380,11 +380,13 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
     };
 
     let mut desc = MachineDescription {
+        vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
         hyperv: vec![],
         display: None,
         tablet: None,
+        usb: None,
         tpm: None,
         console_pci: None,
         ahci_pci: None,

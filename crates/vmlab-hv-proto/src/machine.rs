@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineDescription {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vfio: Vec<VfioDevice>,
     #[serde(default, skip_serializing_if = "Machine::is_microvm")]
     pub machine: Machine,
     #[serde(default, skip_serializing_if = "CpuPolicy::is_host")]
@@ -22,6 +24,13 @@ pub struct MachineDescription {
     pub display: Option<Display>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tablet: Option<PciAddress>,
+    /// The xHCI controller for host USB passthrough (the VM's `usb = true`):
+    /// the controller vmlab names `usbx`, whose root ports `device_add`
+    /// addresses as `usbx.0`. One controller carries the tablet and the
+    /// passthrough ports; when both this and `tablet` are set they name the
+    /// same PCI function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb: Option<PciAddress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tpm: Option<Tpm>,
     /// PCI address of the shared multiport virtio-serial controller.
@@ -45,7 +54,8 @@ pub struct MachineDescription {
     pub serial_log: PathBuf,
     /// Named virtio-serial ports, each served on its own unix socket.
     pub ports: Vec<SerialPort>,
-    /// vhost-user-fs shares served by an external virtiofsd.
+    /// virtio-fs shares: `socket` is served by an external virtiofsd over
+    /// vhost-user, `path` by the hypervisor's in-process device.
     #[serde(default)]
     pub shares: Vec<FsShare>,
     /// Guest audio device; absent means the machine has no audio.
@@ -54,6 +64,15 @@ pub struct MachineDescription {
     /// RTC start, RFC 3339. `None` means host time.
     #[serde(default)]
     pub rtc_base: Option<String>,
+}
+
+/// A pre-bound host PCI function assigned at an explicit guest address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VfioDevice {
+    /// Canonical domain:bus:device.function, e.g. `0000:65:00.0`.
+    pub host: String,
+    pub pci: PciAddress,
 }
 
 /// The guest audio device and the host streams it plays into.
@@ -188,8 +207,40 @@ pub struct FsShare {
     pub pci: Option<PciAddress>,
     /// Mount tag the guest uses.
     pub tag: String,
-    /// virtiofsd's vhost-user socket.
-    pub socket: PathBuf,
+    /// virtiofsd's vhost-user socket: the share is served by an external
+    /// daemon over vhost-user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<PathBuf>,
+    /// Host directory the hypervisor itself serves with the in-process
+    /// virtio-fs device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Serve the share read-only: every mutating operation is refused with
+    /// EROFS. The in-process device enforces it; an external virtiofsd is
+    /// started read-only by its owner.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+}
+
+/// Where a share's contents come from, resolved from an [`FsShare`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsBacking {
+    /// An external virtiofsd on this vhost-user socket.
+    Socket(PathBuf),
+    /// The in-process device rooted at this host directory.
+    Directory(PathBuf),
+}
+
+impl FsShare {
+    /// The share's backing. `None` when the description sets both `socket`
+    /// and `path` or neither: exactly one must name the server.
+    pub fn backing(&self) -> Option<FsBacking> {
+        match (self.socket.as_ref(), self.path.as_ref()) {
+            (Some(socket), None) => Some(FsBacking::Socket(socket.clone())),
+            (None, Some(path)) => Some(FsBacking::Directory(path.clone())),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

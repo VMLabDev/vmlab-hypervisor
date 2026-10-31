@@ -341,7 +341,7 @@ impl DeviceFactory for TestFactory {
         ))
     }
 
-    fn vhost_user_fs(
+    fn fs_share(
         &self,
         share: &vmlab_hv_proto::machine::FsShare,
         _mem: &vmlab_hv_devices::GuestMemory,
@@ -652,11 +652,13 @@ fn real_kernel_boots_and_resets() {
     let (factory, serial) = TestFactory::new();
     let dir = tempfile::tempdir().unwrap();
     let desc = MachineDescription {
+        vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
         hyperv: vec![],
         display: None,
         tablet: None,
+        usb: None,
         tpm: None,
         console_pci: None,
         ahci_pci: None,
