@@ -142,7 +142,18 @@ clocked platform CPUs now capture timer comparisons, pending IRQs, and
 trap-data CSRs as runtime values. Standalone interpreter policy is unchanged.
 Machine and supervisor timer tests check warm-cache retention, pending-bit
 transitions, and every Sail global against the reference interpreter. Trap
-CSR tests cover EPC, cause, trap value, and scratch registers.
+CSR tests cover EPC, cause (including interrupt causes), trap value, and
+scratch registers. A separate test takes and returns from machine and
+supervisor timer interrupts repeatedly, comparing every Sail global after
+each step. All four platform tests pass. The initial interrupt-test assertion
+incorrectly expected an instruction to retire before trap entry; the corrected
+test expects Sail to take the interrupt first.
+
+Runtime revision `a916903` records three-repeat medians of 0.019441 seconds
+for the scalar loop and 6.117216 seconds for CoreMark (49.738 MIPS).
+`just bench-check` passes with the earlier failed comparisons retained.
+The cold Linux acceptance run uses this runtime; confirmation beyond the
+timer-initialization point is still pending.
 
 edk2 boot, Linux hardware capture, booted-guest snapshot restoration, and
 boot-to-agent-ready timing are pending. This reference does not establish
