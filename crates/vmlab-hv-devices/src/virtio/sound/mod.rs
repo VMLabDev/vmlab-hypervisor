@@ -122,6 +122,13 @@ struct PcmParams {
     rate_code: u8,
 }
 
+impl PcmParams {
+    /// Whole frames in one hardware period.
+    fn period_frames(&self) -> usize {
+        self.period_bytes as usize / self.format.frame_bytes()
+    }
+}
+
 /// The host stream of a prepared PCM stream: one direction only.
 enum HostStream {
     Playback(Box<dyn PlaybackSink>),
@@ -135,6 +142,11 @@ struct Stream {
     host: Option<HostStream>,
     /// Capture only: whole frames of machine time owed by the host source.
     due_frames: u64,
+    /// Playback only: whole frames of machine time the stream may deliver.
+    /// Without it a fast guest would free-run its own ring: completions are
+    /// elapsed-period notifications, so they may only advance at the rate
+    /// the machine clock banks, never faster than real playback.
+    tx_credit: u64,
     /// Sub-frame remainder of the frame accumulator, in ns × rate units.
     fraction: u64,
 }
@@ -172,7 +184,7 @@ impl VirtioSnd {
             host,
             config,
             features: F_RING_EVENT_IDX,
-            acked_features: 0,
+            acked_features: F_RING_EVENT_IDX,
             mem: None,
             interrupt: None,
             queues: Vec::new(),
@@ -306,10 +318,12 @@ impl VirtioSnd {
         if !self.stream_ok(stream_id) {
             return bad_msg();
         }
+        // Re-negotiating a started stream restarts the lifecycle there:
+        // the underrun-recovery path of at least one mainline kernel
+        // re-sends parameters before stopping. The device accepts and
+        // stops, as a stopped stream accepts them too.
         let stream = &mut self.streams[stream_id as usize];
-        if stream.state == PcmState::Started {
-            return bad_msg();
-        }
+
         // The stream information offers no PCM features; none may be picked.
         if features != 0 {
             return status(S_NOT_SUPP);
@@ -346,6 +360,7 @@ impl VirtioSnd {
         stream.state = PcmState::Set;
         stream.due_frames = 0;
         stream.fraction = 0;
+        stream.tx_credit = 0;
         stream.params = Some(PcmParams {
             buffer_bytes,
             period_bytes,
@@ -369,19 +384,28 @@ impl VirtioSnd {
         let index = stream_id as usize;
         // RELEASE also answers from Set: the Linux driver frees hardware
         // parameters it never prepared, with messages already allocated.
+        // The lifecycle table (§5.14.6.6.1) bounds what a well driver may
+        // send; an underrun recovery re-runs prepare, start and stop in
+        // whatever state the xrun left the substream in, so this device
+        // answers the idempotent form instead of BAD_MSG and lets the
+        // guest converge. Nothing the spec makes the device check is
+        // weakened: a message never touches an unprepared stream.
         let allowed = match code {
-            R_PCM_PREPARE => matches!(
-                self.streams[index].state,
-                PcmState::Set | PcmState::Prepared | PcmState::Stopped | PcmState::Released
-            ),
+            R_PCM_PREPARE => {
+                self.streams[index].params.is_some()
+                    && !matches!(self.streams[index].state, PcmState::Unused)
+            }
             R_PCM_START => matches!(
                 self.streams[index].state,
-                PcmState::Prepared | PcmState::Stopped
+                PcmState::Prepared | PcmState::Stopped | PcmState::Started
             ),
-            R_PCM_STOP => self.streams[index].state == PcmState::Started,
+            R_PCM_STOP => matches!(
+                self.streams[index].state,
+                PcmState::Started | PcmState::Stopped
+            ),
             R_PCM_RELEASE => matches!(
                 self.streams[index].state,
-                PcmState::Set | PcmState::Prepared | PcmState::Stopped
+                PcmState::Set | PcmState::Prepared | PcmState::Stopped | PcmState::Released
             ),
             _ => return bad_msg(),
         };
@@ -390,9 +414,9 @@ impl VirtioSnd {
         }
         match code {
             R_PCM_PREPARE => {
-                if self.streams[index].params.is_none() {
-                    return bad_msg();
-                }
+                // Re-preparing a started stream restarts it where it
+                // stands: the host stream reopens, the pacing resets.
+                self.close_host(index);
                 match self.open_host(index, false) {
                     Ok(()) => {}
                     Err(error) => {
@@ -403,10 +427,15 @@ impl VirtioSnd {
                 let stream = &mut self.streams[index];
                 stream.due_frames = 0;
                 stream.fraction = 0;
+                stream.tx_credit = 0;
                 stream.state = PcmState::Prepared;
             }
             R_PCM_START => self.streams[index].state = PcmState::Started,
-            R_PCM_STOP => self.streams[index].state = PcmState::Stopped,
+            R_PCM_STOP => {
+                // Messages already in the queue keep their places: the
+                // guest may resume them with START.
+                self.streams[index].state = PcmState::Stopped;
+            }
             R_PCM_RELEASE => {
                 // §5.14.6.6.5.1: every pending I/O message for this stream
                 // completes before the control request does. The stream is
@@ -453,11 +482,22 @@ impl VirtioSnd {
         let target = params.map_or(0, |p| {
             queued_target(p.period_bytes as usize, p.format.frame_bytes())
         });
+        let period_frames = params.map_or(0, |p| p.period_frames()) as u64;
         let mut used_any = false;
         let mut budget = TX_FRAMES_PER_TICK;
         loop {
             if !all {
                 if !started || budget == 0 {
+                    break;
+                }
+                // A period of machine time must be banked before the next
+                // message may play: completions are elapsed-period
+                // notifications, never faster than real time.
+                if self
+                    .streams
+                    .first()
+                    .is_none_or(|s| s.tx_credit < period_frames)
+                {
                     break;
                 }
                 let queued = match self.streams.first().and_then(|s| s.host.as_ref()) {
@@ -501,16 +541,21 @@ impl VirtioSnd {
                 && u32::from_le_bytes(header) == 0;
             let (code, latency) = if deliver {
                 let frame_bytes = params.unwrap().format.frame_bytes();
-                match self.streams.first_mut().and_then(|s| s.host.as_mut()) {
-                    Some(HostStream::Playback(sink)) => {
-                        for part in pcm.chunks(PUSH_FRAMES * frame_bytes) {
-                            sink.write_period(part);
-                        }
-                        budget = budget.saturating_sub(pcm.len() / frame_bytes);
-                        (S_OK, sink.latency_bytes())
+                let mut outcome = (S_IO_ERR, 0);
+                if let Some(stream) = self.streams.first_mut()
+                    && let Some(HostStream::Playback(sink)) = stream.host.as_mut()
+                {
+                    for part in pcm.chunks(PUSH_FRAMES * frame_bytes) {
+                        sink.write_period(part);
                     }
-                    _ => (S_IO_ERR, 0),
+                    let frames = (pcm.len() / frame_bytes) as u64;
+                    budget = budget.saturating_sub(frames as usize);
+                    // Only delivered audio spends the credit; a cancelled
+                    // message never reaches the speaker.
+                    stream.tx_credit = stream.tx_credit.saturating_sub(frames);
+                    outcome = (S_OK, sink.latency_bytes());
                 }
+                outcome
             } else {
                 (S_IO_ERR, 0)
             };
@@ -532,12 +577,12 @@ impl VirtioSnd {
                 _ => break,
             }
         }
-        if used_any
+        let want = used_any
             && self
                 .queues
                 .get_mut(VQ_TX)
-                .is_some_and(|q| q.needs_notification(&mem).unwrap_or(false))
-        {
+                .is_some_and(|q| q.needs_notification(&mem).unwrap_or(false));
+        if want {
             interrupt.notify_queue(VQ_TX as u16);
         }
     }
@@ -684,14 +729,11 @@ impl VirtioSnd {
             return;
         }
         let mut used_any = false;
-        loop {
-            let Some(chain) = self
-                .queues
-                .get_mut(VQ_CONTROL)
-                .and_then(|q| q.pop_descriptor_chain(&mem))
-            else {
-                break;
-            };
+        while let Some(chain) = self
+            .queues
+            .get_mut(VQ_CONTROL)
+            .and_then(|q| q.pop_descriptor_chain(&mem))
+        {
             let head = chain.head_index();
             let response = match chain.clone().reader(&mem) {
                 Ok(mut reader) => {
@@ -787,14 +829,26 @@ impl AudioClock for VirtioSnd {
         if self.paused {
             return Ok(());
         }
-        if let Some(stream) = self.streams.get_mut(1)
-            && stream.state == PcmState::Started
-            && let Some(params) = stream.params
-        {
-            let frames = u128::from(elapsed.as_nanos()) * u128::from(params.format.rate)
-                + u128::from(stream.fraction);
+        for stream in &mut self.streams {
+            if stream.state != PcmState::Started || stream.params.is_none() {
+                continue;
+            }
+            let rate = stream.params.unwrap().format.rate;
+            let frames = elapsed.as_nanos() * u128::from(rate) + u128::from(stream.fraction);
             stream.fraction = (frames % 1_000_000_000) as u64;
-            stream.due_frames += (frames / 1_000_000_000) as u64;
+            let frames = (frames / 1_000_000_000) as u64;
+            // Capture banks what it is owed; playback banks what it may
+            // deliver. Both accrue at the stream's frame rate, so guest
+            // data never moves faster than real time in either direction.
+            if stream
+                .host
+                .as_ref()
+                .is_some_and(|h| matches!(h, HostStream::Capture(_)))
+            {
+                stream.due_frames += frames;
+            } else {
+                stream.tx_credit += frames;
+            }
         }
         self.drain_tx(false);
         self.drain_rx(false);
@@ -890,9 +944,10 @@ impl VirtioDevice for VirtioSnd {
 const QUEUE_STATE_BYTES: usize = 34;
 
 /// Bytes per stream in the snapshot: state, buffer and period bytes,
-/// features, channels, format, rate, padding, then the capture time
-/// accumulator's two words.
-const STREAM_STATE_BYTES: usize = 33;
+/// features, channels, format, rate, padding, then the two per-direction
+/// time accumulators (capture owed, playback credit) and the shared
+/// sub-frame remainder.
+const STREAM_STATE_BYTES: usize = 41;
 
 const SNAPSHOT_MAGIC: u32 = u32::from_le_bytes(*b"VSND");
 
@@ -962,6 +1017,7 @@ impl Snapshot for VirtioSnd {
             out.push(rate);
             out.push(0); // padding
             out.extend_from_slice(&stream.due_frames.to_le_bytes());
+            out.extend_from_slice(&stream.tx_credit.to_le_bytes());
             out.extend_from_slice(&stream.fraction.to_le_bytes());
         }
         Ok(out)

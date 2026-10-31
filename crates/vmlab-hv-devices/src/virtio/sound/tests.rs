@@ -513,6 +513,11 @@ fn period_pcm(marker: u8) -> Vec<u8> {
     vec![marker; 1024]
 }
 
+/// One 256-frame period of machine time at 48 kHz.
+fn period_time() -> Duration {
+    Duration::from_nanos(5_333_334)
+}
+
 #[test]
 fn pci_discovery_and_config_space() {
     let mut g = Guest::new(Arc::new(RecordingHost::new()), true);
@@ -624,14 +629,18 @@ fn pcm_lifecycle_validates_transitions_and_parameters() {
         assert_eq!(g.set_params(0, 4096, 1024), S_OK);
         assert_eq!(g.pcm_command(R_PCM_PREPARE, 0), S_OK);
         assert_eq!(g.pcm_command(R_PCM_START, 0), S_OK);
-        // Started: no re-negotiation, no re-prepare, no release.
-        assert_eq!(g.set_params(0, 8192, 1024), S_BAD_MSG);
-        assert_eq!(g.pcm_command(R_PCM_PREPARE, 0), S_BAD_MSG);
-        assert_eq!(g.pcm_command(R_PCM_RELEASE, 0), S_BAD_MSG);
+        // While started the device still accepts the underrun-recovery
+        // forms (§5.14.6.6.1 bounds the driver, not the device) but keeps
+        // refusing to touch a stream it knows nothing about.
+        assert_eq!(g.pcm_command(R_PCM_PREPARE, 0), S_OK);
+        assert_eq!(g.pcm_command(R_PCM_START, 0), S_OK);
         assert_eq!(g.pcm_command(R_PCM_STOP, 0), S_OK);
-        // Stopped: restart or release, nothing else.
-        assert_eq!(g.pcm_command(R_PCM_STOP, 0), S_BAD_MSG);
-        assert_eq!(g.set_params(0, 8192, 1024), S_OK); // back to Set
+        assert_eq!(g.pcm_command(R_PCM_STOP, 0), S_OK); // idempotent
+        // Stopped: restart or release; a second release also answers, and
+        // parameters may be re-negotiated at any point past the first.
+        assert_eq!(g.set_params(0, 8192, 1024), S_OK);
+        assert_eq!(g.pcm_command(R_PCM_RELEASE, 0), S_OK);
+        assert_eq!(g.pcm_command(R_PCM_RELEASE, 0), S_OK);
         assert_eq!(g.pcm_command(R_PCM_START, 0), S_BAD_MSG);
         // The Linux driver frees parameters it never prepared.
         assert_eq!(g.pcm_command(R_PCM_RELEASE, 0), S_OK);
@@ -658,21 +667,23 @@ fn tx_completions_follow_host_consumption() {
 
     // One period fits the watermark: the first message is consumed and
     // completed, with the host's latency in its status.
-    g.advance(Duration::from_millis(1));
+    g.advance(period_time());
     assert_eq!(g.used_idx(VQ_TX), 1);
     assert_eq!(g.tx_status(0), (S_OK, 1024 + 123));
     assert_eq!(g.used_entry(VQ_TX, 0).1, 8);
     assert_eq!(host.pcm(), period_pcm(0xAA));
 
-    // The host has not consumed: nothing more completes, however much
-    // machine time passes.
-    g.advance(Duration::from_millis(50));
+    // The host has not consumed: however much machine time banks, the
+    // watermark holds the rest of the queue.
+    for _ in 0..10 {
+        g.advance(period_time());
+    }
     assert_eq!(g.used_idx(VQ_TX), 1);
     assert_eq!(host.pcm(), period_pcm(0xAA));
 
     // Consumption paces the next completion.
     host.drain(1024);
-    g.advance(Duration::from_millis(1));
+    g.advance(period_time());
     assert_eq!(g.used_idx(VQ_TX), 2);
     // The message's own PCM is queued host-side at completion: that plus
     // the graph offset is the latency the guest sees.
@@ -680,7 +691,7 @@ fn tx_completions_follow_host_consumption() {
     assert_eq!(host.pcm(), [period_pcm(0xAA), period_pcm(0xBB)].concat());
 
     host.drain(2048);
-    g.advance(Duration::from_millis(1));
+    g.advance(period_time());
     assert_eq!(g.used_idx(VQ_TX), 3);
     assert_eq!(
         host.pcm(),
@@ -711,12 +722,12 @@ fn tx_pre_buffers_until_started_and_rejects_foreign_streams() {
     // Started: the pre-buffered message plays, and the message naming a
     // nonexistent stream completes cancelled.
     assert_eq!(g.pcm_command(R_PCM_START, 0), S_OK);
-    g.advance(Duration::from_millis(1));
+    g.advance(period_time());
     assert_eq!(g.used_idx(VQ_TX), 1);
     assert_eq!(g.tx_status(0), (S_OK, 1024 + 123));
     assert_eq!(host.pcm(), period_pcm(0x11));
     host.drain(1024);
-    g.advance(Duration::from_millis(1));
+    g.advance(period_time());
     assert_eq!(g.used_idx(VQ_TX), 2);
     assert_eq!(g.tx_status(1), (S_IO_ERR, 0));
     assert_eq!(
@@ -789,14 +800,14 @@ fn stop_freezes_and_release_completes_the_pending() {
 
     g.tx(0, 0, &period_pcm(0x0A));
     g.tx(1, 0, &period_pcm(0x0B));
-    g.advance(Duration::from_millis(1));
+    g.advance(period_time());
     assert_eq!(g.used_idx(VQ_TX), 1);
 
     // STOP: the second message is held, its PCM never reaches the host.
     assert_eq!(g.pcm_command(R_PCM_STOP, 0), S_OK);
     host.drain(1024);
-    g.advance(Duration::from_millis(1));
-    g.advance(Duration::from_millis(1));
+    g.advance(period_time());
+    g.advance(period_time());
     assert_eq!(g.used_idx(VQ_TX), 1, "a stopped stream holds its messages");
 
     // RELEASE completes every pending message before answering: the used
@@ -815,22 +826,23 @@ fn pause_freezes_both_directions() {
     g.setup_queues();
     g.start_streams();
 
-    // The tx kick drains opportunistically: with the host queue empty one
-    // period completes at once, before the machine pauses.
+    // Completions need banked machine time, so nothing completes at the
+    // kick; the pause then holds both directions for as long as it lasts.
     g.tx(0, 0, &period_pcm(0x33));
-    assert_eq!(g.used_idx(VQ_TX), 1);
-    assert_eq!(host.pcm(), period_pcm(0x33));
     g.rx(0, 1, 1024);
+    assert_eq!(g.used_idx(VQ_TX), 0);
     g.device.lock().set_paused(true);
     g.advance(Duration::from_secs(1));
-    assert_eq!(g.used_idx(VQ_TX), 1, "a paused machine completes nothing");
+    assert_eq!(g.used_idx(VQ_TX), 0, "a paused machine completes nothing");
     assert_eq!(g.used_idx(VQ_RX), 0);
+    assert!(host.pcm().is_empty(), "a paused machine plays nothing");
     assert!(host.pulls().is_empty(), "a paused machine captures nothing");
 
     // Resumed: a paused machine loses no time and drops no message.
     g.device.lock().set_paused(false);
-    g.advance(Duration::from_nanos(5_333_334));
+    g.advance(period_time());
     assert_eq!(g.used_idx(VQ_TX), 1);
+    assert_eq!(host.pcm(), period_pcm(0x33));
     assert_eq!(g.used_idx(VQ_RX), 1);
     assert_eq!(g.rx_payload(0, 1024).0, period_pcm(0x77));
 }
@@ -848,7 +860,7 @@ fn snapshot_round_trip_reopens_streams_and_discards_capture() {
     g.tx(0, 0, &period_pcm(0xD1));
     g.tx(1, 0, &period_pcm(0xD2));
     g.rx(0, 1, 1024);
-    g.advance(Duration::from_nanos(5_333_334));
+    g.advance(period_time());
     assert_eq!(g.used_idx(VQ_TX), 1);
     assert_eq!(g.used_idx(VQ_RX), 1);
     assert_eq!(g.rx_payload(0, 1024).0, period_pcm(0x91));
@@ -865,7 +877,7 @@ fn snapshot_round_trip_reopens_streams_and_discards_capture() {
     // The held tx message is still in the restored queue and plays once
     // the (fresh) host queue drains.
     host.drain(1024);
-    g.advance(Duration::from_millis(1));
+    g.advance(period_time());
     assert_eq!(g.used_idx(VQ_TX), 2);
     assert_eq!(g.tx_status(1), (S_OK, 1024 + 123));
     assert_eq!(host.pcm(), [period_pcm(0xD1), period_pcm(0xD2)].concat());
