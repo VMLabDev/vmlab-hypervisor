@@ -385,11 +385,12 @@ class NoiseControlTests(unittest.TestCase):
                 3: ["/opt/android/qemu-system-x86_64", "-avd", "thevault"],
                 4: ["python3", "run.py", "--backend", "vmlab-hv"],
                 5: [],
+                6: ["/worktree/target/debug/vmlab-hv-test-plain", "--machine", "test.json"],
             }.items():
                 os.mkdir(os.path.join(proc, str(pid)))
                 with open(os.path.join(proc, str(pid), "cmdline"), "wb") as f:
                     f.write(b"\0".join(os.fsencode(arg) for arg in argv))
-            self.assertEqual(lib.project_vm_pids(proc), [1, 2])
+            self.assertEqual(lib.project_vm_pids(proc), [1, 2, 6])
 
     def test_two_vm_cap_checked_before_launch(self):
         with mock.patch.object(lib, "project_vm_pids", return_value=[1]):

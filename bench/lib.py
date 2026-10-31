@@ -58,7 +58,7 @@ def project_vm_pids(proc_root="/proc"):
         if not argv or not argv[0]:
             continue
         executable = os.path.basename(os.fsdecode(argv[0]))
-        if executable == "vmlab-hv" or (
+        if executable == "vmlab-hv" or executable.startswith("vmlab-hv-test-") or (
             executable.startswith("qemu-system-") and b"-avd" not in argv
         ):
             pids.append(int(pid))
