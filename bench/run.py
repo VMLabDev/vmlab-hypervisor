@@ -620,6 +620,7 @@ def allocated_span(template_disk):
 
 def x86_one_repeat(args, guest, smp, pin, version, index):
     """One x86_64 VM through the full workload set for its guest."""
+    loadavg_start = lib.read_loadavg()
     run_dir = os.path.join(
         lib.RUN_DIR, lib.run_dir_name(args.backend, "x86_64", guest, smp, index)
     )
@@ -647,7 +648,8 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             args.hv_bin, lib.IPXE_ROM,
         )
     result = {"run": run_dir, "arch": "x86_64", "guest": guest,
-              "vcpus": smp, "backend": args.backend}
+              "vcpus": smp, "backend": args.backend,
+              "loadavg_start": loadavg_start}
     agent = None
     try:
         session = backend.launch()
@@ -705,8 +707,10 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             seq_mib = min(BLK_SEQ_MIB, span_mib)
 
             def randblke(args_str, what):
+                log(f"starting {what}")
                 out = must_sh(agent, f"/tmp/randblke {args_str}", what,
                               timeout=1800)
+                log(f"finished {what}: {out.strip()}")
                 return json.loads(out.strip().splitlines()[-1])
 
 
@@ -741,6 +745,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             # netdev, framing socket). A delivery below 90% of what the
             # guest sent means the measurement is broken, not slow.
             peer.report()  # reset counters
+            log("starting net tx")
             out = must_sh(
                 agent,
                 f"python3 /tmp/vmlab-nettool.py udp-blast {net['peer_ip']} {net['port']} "
@@ -760,6 +765,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
                 )
             samples["net_tx_udp_mbps"] = round(
                 rx["rx_bytes"] * 8 / NET_WINDOW / 1e6, 2)
+            log(f"finished net tx: {samples['net_tx_udp_mbps']} Mbit/s")
 
             # RX: the peer blasts; the rate is read from the guest's own
             # interface counter (kernel-counted, immune to userspace sink
@@ -837,6 +843,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             if os.path.exists(path) and not args.keep:
                 os.remove(path)
         with open(os.path.join(run_dir, "result.json"), "w") as f:
+            result["loadavg_end"] = lib.read_loadavg()
             json.dump(result, f, indent=1)
 
 
@@ -853,12 +860,15 @@ def x86_run_config(args, guest, smp, pin, version, commit, dirty, host):
         "nic_mtu": lib.BENCH_NET["mtu"],
         "net_peer": "bench/netpeer.c framing peer",
         "tools": {},
+        "repeat_loadavg": [],
     }
     for i in range(1, args.repeats + 1):
         log(f"=== {args.backend} x86_64 {guest} smp={smp} repeat {i}/{args.repeats}")
         result, backend, agent = x86_one_repeat(args, guest, smp, pin, version, i)
         env["backend_version"] = backend.backend_version()
         env["tools"] = result.get("tools", {})
+        env["repeat_loadavg"].append({
+            "start": result["loadavg_start"], "end": lib.read_loadavg()})
         for w, value in result["samples"].items():
             all_samples.setdefault(w, []).append(value)
         log(f"repeat {i}: {result['samples']}")
@@ -944,6 +954,7 @@ def g2g_direction(sender, receiver, receiver_ip, port, window):
 
 
 def g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, index):
+    lib.require_vm_slots(2)
     root = os.path.join(
         lib.RUN_DIR, lib.run_dir_name(args.backend, "x86_64", guest, smp, index, "g2g")
     )

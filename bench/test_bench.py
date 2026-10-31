@@ -287,6 +287,29 @@ class HvMachineTests(unittest.TestCase):
 
 
 class NoiseControlTests(unittest.TestCase):
+    def test_host_vm_count_includes_other_worktrees_and_excludes_android(self):
+        with tempfile.TemporaryDirectory() as proc:
+            for pid, argv in {
+                1: ["/other/target/release/vmlab-hv", "--machine", "machine.json"],
+                2: ["qemu-system-x86_64", "-name", "other-project"],
+                3: ["/opt/android/qemu-system-x86_64", "-avd", "thevault"],
+                4: ["python3", "run.py", "--backend", "vmlab-hv"],
+                5: [],
+            }.items():
+                os.mkdir(os.path.join(proc, str(pid)))
+                with open(os.path.join(proc, str(pid), "cmdline"), "wb") as f:
+                    f.write(b"\0".join(os.fsencode(arg) for arg in argv))
+            self.assertEqual(lib.project_vm_pids(proc), [1, 2])
+
+    def test_two_vm_cap_checked_before_launch(self):
+        with mock.patch.object(lib, "project_vm_pids", return_value=[1]):
+            lib.require_vm_slots()
+            with self.assertRaisesRegex(lib.BenchError, "need 2 VM slots"):
+                lib.require_vm_slots(2)
+        with mock.patch.object(lib, "project_vm_pids", return_value=[1, 2]):
+            with self.assertRaisesRegex(lib.BenchError, "running project VM PIDs"):
+                lib.require_vm_slots()
+
     def test_pin_windows(self):
         with mock.patch.object(os, "cpu_count", return_value=32):
             self.assertEqual(lib.pin_cpus(1), "16-19")

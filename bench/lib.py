@@ -42,6 +42,34 @@ MACHINE_ARG = {"aarch64": "virt", "riscv64": "virt,acpi=off"}
 # The safety cap every VM-booting command runs under (wave-4 common brief).
 MEMORY_MAX = "24G"
 
+
+def project_vm_pids(proc_root="/proc"):
+    """Count VMs across worktrees, excluding the owner's Android emulator."""
+    pids = []
+    for pid in os.listdir(proc_root):
+        if not pid.isdecimal():
+            continue
+        try:
+            with open(os.path.join(proc_root, pid, "cmdline"), "rb") as f:
+                argv = f.read().split(b"\0")
+        except FileNotFoundError:
+            continue
+        if not argv or not argv[0]:
+            continue
+        executable = os.path.basename(os.fsdecode(argv[0]))
+        if executable == "vmlab-hv" or (
+            executable.startswith("qemu-system-") and b"-avd" not in argv
+        ):
+            pids.append(int(pid))
+    return sorted(pids)
+
+
+def require_vm_slots(count=1):
+    """Check the host-wide two-VM cap immediately before every launch."""
+    pids = project_vm_pids()
+    if len(pids) + count > 2:
+        raise BenchError(f"need {count} VM slots; running project VM PIDs: {pids}")
+
 # ---------------------------------------------------------------------------
 # x86_64 KVM (phase 2, HV-D28): templates, firmware, workloads
 # ---------------------------------------------------------------------------
