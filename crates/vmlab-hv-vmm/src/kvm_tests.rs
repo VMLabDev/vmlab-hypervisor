@@ -341,7 +341,7 @@ impl DeviceFactory for TestFactory {
         ))
     }
 
-    fn vhost_user_fs(
+    fn fs_share(
         &self,
         share: &vmlab_hv_proto::machine::FsShare,
         _mem: &vmlab_hv_devices::GuestMemory,
