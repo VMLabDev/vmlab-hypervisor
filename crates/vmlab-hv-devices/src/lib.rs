@@ -136,9 +136,8 @@ pub trait Resettable: Send {
 
 /// Layered snapshot access to a PCI function: the function's own state and
 /// the state of the device it wraps, as separate sections. The VMM saves
-/// and restores the function's state first: a virtio transport's restore
-/// re-activates the wrapped device with the restored queues, so the wrapped
-/// device's own state lands after it.
+/// and restores the function's state first. A virtio transport activates
+/// the wrapped device only after its own state and queue indices have landed.
 pub trait PciSnapshot: Resettable {
     /// Stable id of this function instance, keying its snapshot sections.
     fn snapshot_id(&self) -> String;
