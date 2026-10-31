@@ -211,6 +211,15 @@ current-source acceptance result. A new cold Linux S1 run uses the rebuilt
 release binary. Fresh full CI, live Linux acceptance, hardware capture,
 booted-guest snapshot restoration, and D2 boot timings remain pending.
 
+That cold Linux S1 run subsequently failed after 1,876 seconds. The child
+exited at about 415 million instructions without reaching the edk2 banner;
+its last diagnostic line was truncated. The systemd scope recorded a
+7.5 GiB memory peak, and the kernel journal contained no OOM record for
+the interval. The exit cause is unknown. Revision `97a14de` includes the
+child's exit status in this assertion so a repeat failure preserves it.
+The failed log remains at `target/p3b-linux-pc-budget.log`. A fresh,
+serialized `just ci::check` run is in progress; it is not yet a pass.
+
 The benchmark runner's TCG path referenced an undefined `BOOT_DEADLINE`,
 removed by an earlier x86 readiness change. The original 1,800-second
 deadline is restored, retaining `--timeout-scale`. A no-VM regression first
