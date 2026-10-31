@@ -1,6 +1,21 @@
 use super::{Binary, Graph, Operation, Range, ScalarId, ScalarType, Unary};
 
 impl Graph {
+    /// A single comparison for an inclusive, nonwrapping bitvector interval.
+    pub fn unsigned_range(&mut self, value: ScalarId, low: u128, high: u128) -> Option<ScalarId> {
+        let ty = self.scalars[value].ty;
+        let ScalarType::Bits(width) = ty else {
+            return None;
+        };
+        if width > 64 || low > high || high > super::mask(width) {
+            return None;
+        }
+        let lower = self.constant(ty, low);
+        let offset = self.binary(ty, Binary::Sub, value, lower)?;
+        let extent = self.constant(ty, high - low);
+        self.binary(ScalarType::Bool, Binary::LessEqualUnsigned, offset, extent)
+    }
+
     pub fn resolve(&self, mut id: ScalarId) -> ScalarId {
         while let Some(next) = self.aliases.get(&id) {
             id = *next;
@@ -139,6 +154,52 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_modular_guard_preserves_inclusive_bounds_and_refines_its_input() {
+        fn evaluate(graph: &Graph, id: ScalarId, input: u128) -> u128 {
+            let scalar = &graph.scalars[id];
+            match scalar.operation {
+                Operation::Constant(value) => value,
+                Operation::Input(_) => input,
+                Operation::Refine(value) => evaluate(graph, value, input),
+                Operation::Binary(op, a, b) => super::super::evaluate_binary(
+                    op,
+                    scalar.ty,
+                    evaluate(graph, a, input),
+                    evaluate(graph, b, input),
+                )
+                .unwrap(),
+                _ => panic!("unexpected interval operation"),
+            }
+        }
+        for low in [0, 1, 127, 128, 254, 255] {
+            for high in [0, 1, 127, 128, 254, 255]
+                .into_iter()
+                .filter(|high| *high >= low)
+            {
+                let mut graph = Graph::default();
+                let input = graph.input(0, ScalarType::Bits(8), None);
+                let guard = graph.unsigned_range(input, low, high).unwrap();
+                graph.assume_guard(guard, true);
+                let range = graph.scalars[graph.resolve(input)].range.unwrap();
+                for value in 0..=255 {
+                    let matches = value >= low && value <= high;
+                    assert_eq!(evaluate(&graph, guard, value) != 0, matches);
+                    if matches {
+                        assert!(range.contains(value as i128));
+                    }
+                }
+                assert_eq!(
+                    range,
+                    Range {
+                        min: low as i128,
+                        max: high as i128
+                    }
+                );
+            }
+        }
+    }
 
     #[test]
     fn modular_inverse_bounds_never_exclude_a_value_that_satisfies_the_guard() {

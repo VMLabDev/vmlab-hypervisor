@@ -1,5 +1,7 @@
 //! Target-independent emulation IR. Branches address instruction indices.
+mod address;
 mod effects;
+pub use address::address_arguments;
 pub mod indexed;
 pub mod native;
 pub use effects::{Effects, effects, pure_intrinsic};

@@ -407,6 +407,8 @@ impl Graph {
         }
         if let (Some(a), Some(b)) = (self.scalars[left].range, self.scalars[right].range) {
             let comparison = match operation {
+                Binary::Equal if a.min == a.max && a == b => Some(true),
+                Binary::NotEqual if a.min == a.max && a == b => Some(false),
                 Binary::Equal if a.max < b.min || b.max < a.min => Some(false),
                 Binary::NotEqual if a.max < b.min || b.max < a.min => Some(true),
                 Binary::LessSigned | Binary::LessUnsigned
@@ -844,6 +846,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_dominating_alignment_guard_folds_only_subsequent_comparisons() {
+        let mut graph = Graph::default();
+        let input = graph.input(0, ScalarType::Bits(64), None);
+        let seven = graph.constant(ScalarType::Bits(64), 7);
+        let low = graph
+            .binary(ScalarType::Bits(64), Binary::And, input, seven)
+            .unwrap();
+        let zero = graph.constant(ScalarType::Bits(64), 0);
+        let condition = graph
+            .binary(ScalarType::Bool, Binary::Equal, low, zero)
+            .unwrap();
+        assert_eq!(graph.literal(condition), None);
+        graph.assume_guard(condition, true);
+        let following = graph
+            .binary(ScalarType::Bool, Binary::Equal, low, zero)
+            .unwrap();
+        assert_eq!(graph.literal(following), Some(1));
+        assert_eq!(graph.literal(condition), None);
+        assert_eq!(graph.scalars[low].range, Some(Range { min: 0, max: 7 }));
     }
 
     #[test]

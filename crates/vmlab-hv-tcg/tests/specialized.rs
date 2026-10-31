@@ -180,6 +180,98 @@ fn a_batch_fault_keeps_the_completed_instruction_count() {
 }
 
 #[test]
+fn address_specialization_preserves_pointer_reads_and_fault_state() {
+    struct ObservedMemory {
+        ram: FlatMemory,
+        first_reads: usize,
+    }
+    impl Memory for ObservedMemory {
+        fn read(&mut self, address: u64, bytes: &mut [u8]) -> vmlab_hv_tcg::Result<()> {
+            if address == 0x8000_1000 {
+                self.first_reads += 1;
+            }
+            self.ram.read(address, bytes)
+        }
+        fn write(&mut self, address: u64, bytes: &[u8]) -> vmlab_hv_tcg::Result<()> {
+            self.ram.write(address, bytes)
+        }
+        fn generation(&self) -> u64 {
+            self.ram.generation()
+        }
+        fn code_stamp(&self, address: u64, len: usize) -> Option<vmlab_hv_tcg::CodeStamp> {
+            self.ram.code_stamp(address, len)
+        }
+        fn ram_bounds(&self, address: u64) -> Option<(u64, u64)> {
+            self.ram.ram_bounds(address)
+        }
+        fn load_reserved(&mut self, address: u64, bytes: &mut [u8]) -> vmlab_hv_tcg::Result<u64> {
+            self.ram.load_reserved(address, bytes)
+        }
+        fn store_conditional(
+            &mut self,
+            address: u64,
+            bytes: &[u8],
+            generation: u64,
+        ) -> vmlab_hv_tcg::Result<bool> {
+            self.ram.store_conditional(address, bytes, generation)
+        }
+        fn transaction_lock(&self) -> Option<std::sync::Arc<parking_lot::ReentrantMutex<()>>> {
+            None
+        }
+    }
+    let make = || {
+        let mut ram = FlatMemory::new(0x8000_0000, vec![0; 16384]);
+        ram.write(0x8000_0000, &0x0000b183u32.to_le_bytes())
+            .unwrap();
+        ram.write(0x8000_0004, &0x0001b203u32.to_le_bytes())
+            .unwrap();
+        ram.write(0x8000_2000, &17u64.to_le_bytes()).unwrap();
+        ram.write(0x8000_3000, &u64::MAX.to_le_bytes()).unwrap();
+        Riscv64::new(ObservedMemory {
+            ram,
+            first_reads: 0,
+        })
+        .unwrap()
+    };
+    let mut reference = make();
+    let mut specialized = make();
+    specialized.specialize = true;
+    for pointer in [
+        0x8000_2000u64,
+        0x8000_3000,
+        0x8000_2000,
+        0x8000_2001,
+        0x9000_0000,
+    ] {
+        for cpu in [&mut reference, &mut specialized] {
+            cpu.set_pc(0x8000_0000);
+            cpu.set_gpr(1, 0x8000_1000).unwrap();
+            cpu.set_gpr(3, 0).unwrap();
+            cpu.set_gpr(4, 0).unwrap();
+            cpu.interpreter
+                .memory
+                .write(0x8000_1000, &pointer.to_le_bytes())
+                .unwrap();
+            cpu.interpreter.memory.first_reads = 0;
+        }
+        let expected = reference.run(2);
+        let actual = specialized.run(2);
+        assert_eq!(actual.is_err(), expected.is_err(), "pointer {pointer:#x}");
+        if let (Ok(actual), Ok(expected)) = (actual, expected) {
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(specialized.steps, reference.steps, "pointer {pointer:#x}");
+        assert_eq!(
+            *specialized.interpreter.globals, *reference.interpreter.globals,
+            "pointer {pointer:#x}"
+        );
+        assert_eq!(specialized.interpreter.memory.first_reads, 1);
+        assert_eq!(reference.interpreter.memory.first_reads, 1);
+    }
+    assert!(specialized.specialization_stats.hits > 0);
+}
+
+#[test]
 fn warmed_loop_does_not_start_promotions_at_the_run_tail() {
     let mut memory = FlatMemory::new(0x8000_0000, vec![0; 4096]);
     for (index, instruction) in [0x00108093u32, 0xfff10113, 0xfe011ce3].iter().enumerate() {

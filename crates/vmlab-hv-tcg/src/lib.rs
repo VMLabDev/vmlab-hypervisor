@@ -79,6 +79,7 @@ pub struct Interpreter<'a, M> {
     watch_hit: bool,
     source_cache: BTreeMap<String, std::sync::Arc<record::Source>>,
     trace_completed: u32,
+    address_arguments: BTreeMap<String, std::collections::BTreeSet<usize>>,
 }
 
 impl<'a, M: Memory> Interpreter<'a, M> {
@@ -108,6 +109,7 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             watch_hit: false,
             source_cache: BTreeMap::new(),
             trace_completed: 0,
+            address_arguments: vmlab_hv_tcg_ir::address_arguments(program),
         }
     }
 

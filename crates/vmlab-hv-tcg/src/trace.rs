@@ -61,6 +61,7 @@ pub(crate) struct Trace {
     scalar_input_slots: Vec<Option<usize>>,
     slots: Vec<usize>,
     fast_events: Vec<usize>,
+    fast_code: Stage,
     event_steps: Vec<u32>,
     waiting_is_false: bool,
 }
@@ -728,7 +729,7 @@ impl Trace {
             }
         }
         let wide_inputs = (0..recorded.inputs.len()).map(|_| None).collect();
-        let stages = vmlab_hv_tcg_ir::native::schedule::schedule(&recorded.block)
+        let stages: Vec<Stage> = vmlab_hv_tcg_ir::native::schedule::schedule(&recorded.block)
             .into_iter()
             .map(|stage| lower_stage(&recorded.block.graph, &slots, stage))
             .collect();
@@ -777,7 +778,7 @@ impl Trace {
                 fast_events.push(index);
             }
         }
-        let fused_guards = recorded
+        let fused_guards: Vec<Option<vmlab_hv_tcg_ir::native::linear::Guard>> = recorded
             .block
             .events
             .iter()
@@ -799,6 +800,26 @@ impl Trace {
                 _ => None,
             })
             .collect();
+        let mut fast_code = Vec::new();
+        for &index in &fast_events {
+            use vmlab_hv_tcg_ir::native::packed::Packed;
+            fast_code.extend_from_slice(&stages[index]);
+            let instruction = match recorded.block.events[index] {
+                Event::Guard {
+                    condition,
+                    expected,
+                    ..
+                } => {
+                    if let Some(guard) = fused_guards[index] {
+                        Packed::guard(index, guard)
+                    } else {
+                        Packed::boolean_guard(index, slots[condition], expected)
+                    }
+                }
+                _ => Packed::event(index),
+            };
+            fast_code.push(instruction.expect("bounded packed event"));
+        }
         let mut trace = Self {
             recorded,
             revision: None,
@@ -828,6 +849,7 @@ impl Trace {
             scalar_input_slots,
             slots,
             fast_events,
+            fast_code,
             event_steps,
             waiting_is_false,
         };
@@ -1207,25 +1229,54 @@ impl Trace {
         evaluation: &mut Evaluation<'_>,
         limit: u32,
     ) -> Result<Outcome> {
-        let mut fast_position = 0;
+        let mut fast_code = self.fast_code.iter();
         let mut full_next = (!(self.waiting_is_false && limit >= self.trained_steps)).then_some(0);
         loop {
             let event_index = if let Some(index) = full_next {
                 full_next = Some(index + 1);
                 index
-            } else if let Some(index) = self.fast_events.get(fast_position) {
-                fast_position += 1;
-                *index
             } else {
-                break;
+                loop {
+                    use vmlab_hv_tcg_ir::native::packed::Control;
+                    let Some(instruction) = fast_code.next() else {
+                        return Err(Error::Type("trace has no terminal event".into()));
+                    };
+                    match instruction.execute(
+                        &mut evaluation.scalars,
+                        &mut evaluation.stamps,
+                        evaluation.epoch,
+                    ) {
+                        Control::Continue => {}
+                        Control::Event(index) => break index,
+                        Control::GuardFailed(index) => {
+                            evaluation.completed_steps = self.event_steps[index];
+                            let Event::Guard { exit, .. } = self.recorded.block.events[index]
+                            else {
+                                unreachable!("packed guard event");
+                            };
+                            return self.guard_failed(interpreter, evaluation, exit);
+                        }
+                        Control::InvalidArithmetic => {
+                            if let Some(index) = fast_code
+                                .clone()
+                                .find_map(|instruction| instruction.event_index())
+                            {
+                                evaluation.completed_steps = self.event_steps[index];
+                            }
+                            return Err(Error::Type("native scalar domain".into()));
+                        }
+                    }
+                }
             };
             let Some(event) = self.recorded.block.events.get(event_index) else {
                 break;
             };
             let stage = &self.stages[event_index];
             evaluation.completed_steps = self.event_steps[event_index];
-            for instruction in stage {
-                evaluation.linear(instruction)?;
+            if full_next.is_some() {
+                for instruction in stage {
+                    evaluation.linear(instruction)?;
+                }
             }
             match *event {
                 Event::Guard {
@@ -1563,6 +1614,7 @@ impl Trace {
         let breakdown = self.cache_breakdown();
         block.graph.scalars.len()
             + self.fast_events.len()
+            + self.fast_code.len()
             + self.event_steps.len()
             + self.slots.len()
             + self.stages.iter().map(Vec::len).sum::<usize>()
@@ -1902,6 +1954,105 @@ mod tests {
         assert!(
             matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Resumed(value, 1) if value == Value::int(9))
         );
+    }
+
+    #[test]
+    fn native_memory_reads_preserve_full_width_data_without_replaying() {
+        struct CountingMemory {
+            ram: FlatMemory,
+            value: u64,
+            reads: usize,
+        }
+        impl Memory for CountingMemory {
+            fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<()> {
+                assert_eq!((address, bytes.len()), (8, 8));
+                self.reads += 1;
+                bytes.copy_from_slice(&self.value.to_le_bytes());
+                Ok(())
+            }
+            fn write(&mut self, address: u64, bytes: &[u8]) -> Result<()> {
+                self.ram.write(address, bytes)
+            }
+            fn generation(&self) -> u64 {
+                self.ram.generation()
+            }
+            fn ram_bounds(&self, address: u64) -> Option<(u64, u64)> {
+                self.ram.ram_bounds(address)
+            }
+            fn transaction_lock(&self) -> Option<std::sync::Arc<parking_lot::ReentrantMutex<()>>> {
+                None
+            }
+            fn load_reserved(&mut self, address: u64, bytes: &mut [u8]) -> Result<u64> {
+                self.ram.load_reserved(address, bytes)
+            }
+            fn store_conditional(
+                &mut self,
+                address: u64,
+                bytes: &[u8],
+                generation: u64,
+            ) -> Result<bool> {
+                self.ram.store_conditional(address, bytes, generation)
+            }
+        }
+        let function = Function {
+            name: "loaded_pointer".into(),
+            args: vec![],
+            result: Type::Bits(Some(64)),
+            locals: BTreeMap::new(),
+            code: vec![
+                Op::Call(
+                    Location::Id("loaded".into()),
+                    Target::Memory {
+                        name: "read_mem".into(),
+                        write: false,
+                        exclusive: false,
+                        fetch: false,
+                    },
+                    vec![
+                        Expr::Unit,
+                        Expr::Unit,
+                        Expr::Bits("0x0000000000000008".into()),
+                        Expr::Integer("8".into(), None),
+                    ],
+                ),
+                Op::Assign(Location::Id("return".into()), Expr::Id("loaded".into())),
+                Op::Return,
+            ],
+        };
+        let program = Program::default();
+        let mut interpreter = Interpreter::new(
+            &program,
+            CountingMemory {
+                ram: FlatMemory::new(0, vec![0; 256]),
+                value: 16,
+                reads: 0,
+            },
+        );
+        let options = Options {
+            narrow_ram_inputs: true,
+            ..Options::default()
+        };
+        let (mut trace, first) =
+            Trace::record(&mut interpreter, &function, vec![], options).unwrap();
+        assert_eq!(first, Value::bits(64, 16u64));
+        for value in [17, 32, 256, u64::MAX, 0, 8, 19, 512] {
+            interpreter.memory.value = value;
+            let reads = interpreter.memory.reads;
+            let outcome = trace.run(&mut interpreter, &[], 1).unwrap();
+            let (Outcome::Returned(actual, 1) | Outcome::Resumed(actual, 1)) = outcome else {
+                panic!("loaded pointer trace missed");
+            };
+            assert_eq!(actual, Value::bits(64, value));
+            assert_eq!(interpreter.memory.reads, reads + 1);
+        }
+        let operations = interpreter.operations;
+        for value in [17, u64::MAX, 512, 32] {
+            interpreter.memory.value = value;
+            assert!(
+                matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(actual, 1) if actual == Value::bits(64, value))
+            );
+        }
+        assert_eq!(interpreter.operations, operations);
     }
 
     #[test]

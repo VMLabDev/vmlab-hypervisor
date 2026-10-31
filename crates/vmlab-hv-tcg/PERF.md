@@ -479,3 +479,45 @@ The optimization is reverted. A loaded number is not sufficient evidence of
 address use. The continuing experiment derives candidate address arguments
 through shared interprocedural IR data flow and guards them before generated
 address checks. Memory-read results do not inherit their address's provenance.
+
+### Address arguments and flat dispatch experiments
+
+Shared argument-flow analysis follows assignments, helper return values, and
+calls into physical memory address operands. It selects speculation sites;
+runtime guards still prove numeric bounds, and generated protection checks
+remain authoritative. It does not treat returned memory data as a copy of
+its address. Address hints apply only to already evaluated identifier operands.
+No expression or completed effect is evaluated again to obtain a hint.
+
+| Change | CoreMark-100 seconds | MIPS |
+| --- | ---: | ---: |
+| Address-use hints with separate lower and upper guards | 1.693709 | 17.970781 |
+| One modular interval comparison for bitvector addresses | 1.430124 | 21.282965 |
+| Flat stream of packed scalar operations and guards | 1.297510 | 23.458223 |
+
+Each trial retains CRC checks and the same native, training, and slow counts;
+none evicts a cache entry. These are single CPU-16 trials, not noise-controlled
+medians. Argument analysis increases initialization from about 0.2 seconds to
+about 1 second. Flat-stream warmup takes 45.980667 seconds. A failed guard
+retains the original event's source continuation and retired prefix. Stores
+that hit an observation address switch to the full checkpoint plan immediately.
+The inclusive interval comparison and its backward range refinement are tested
+across all eight-bit inputs for endpoint and wraparound cases.
+
+The longer flat-stream profile uses 1,000 iterations and 304,258,499 guest
+instructions. Its ELF passes black-box QEMU userspace CRC checks. Execution
+takes 10.897075 seconds (27.921116 MIPS), after 65.455994 seconds of warmup.
+`stream.data` contains 7,674 samples with none lost. The warm slice attributes
+34.37% to `run_captured` including inlined execution, 10.18% to binding
+publication, 8.60% to scalar evaluation, 6.14% to input binding, 6.13% to native
+global writes, 5.56% to input projection, and 4.04% to named native reads.
+Aggregate mutation and updates account for another 2.48% and 1.76%. This shifts
+the next investigation toward block-boundary state traffic. The pointer-chain
+regression compares every Sail global, retirement, and error outcomes for
+aligned, misaligned, and unmapped pointers, requiring exactly one first load.
+
+This flat-stream checkpoint passes targeted release tests, all-target clippy,
+and a fresh 133/133 lockstep run over 452,776 instructions, including 4,392
+native instructions. Logs are `target/tcg/stream-native-{0,1,2}.log`. The full
+container-backed generation check verifies unchanged artifacts. Later MIP,
+publication-plan, and promotion experiments are outside that gate.

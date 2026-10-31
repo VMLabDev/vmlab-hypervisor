@@ -812,6 +812,16 @@ impl Recorder {
                         .iter()
                         .map(|e| self.expr(interpreter, actual, e))
                         .collect::<Option<_>>()?;
+                    if self.options.narrow_ram_inputs
+                        && let Target::Function(name) = target
+                        && let Some(indices) = interpreter.address_arguments.get(name)
+                    {
+                        for &index in indices {
+                            if let (Some(expr), Some(value)) = (exprs.get(index), args.get(index)) {
+                                self.hint_address(interpreter, actual, expr, *value, pc);
+                            }
+                        }
+                    }
                     let value = match target {
                         Target::Function(name)
                             if interpreter.program.functions.contains_key(name)
@@ -1034,6 +1044,79 @@ impl Recorder {
                     .expect("memory destination");
             }
             _ => {}
+        }
+    }
+
+    fn hint_address<M: Memory>(
+        &mut self,
+        interpreter: &Interpreter<'_, M>,
+        actual: &Frame,
+        expr: &Expr,
+        value: ValueId,
+        pc: usize,
+    ) {
+        let Expr::Id(name) = expr else {
+            return;
+        };
+        let Some(observed) = interpreter
+            .lookup(actual, name)
+            .ok()
+            .and_then(|value| value.u64().ok())
+        else {
+            return;
+        };
+        let Some((low, high)) = interpreter.memory.ram_bounds(observed) else {
+            return;
+        };
+        let Some((value, ty)) = self.scalar(value) else {
+            return;
+        };
+        let value = self.block.graph.resolve(value);
+        if self.block.graph.scalars[value]
+            .range
+            .is_some_and(|range| range.min >= i128::from(low) && range.max <= i128::from(high))
+        {
+            return;
+        }
+        let exit = self.snapshot(Some(pc), None);
+        if let Some(condition) = self
+            .block
+            .graph
+            .unsigned_range(value, low.into(), high.into())
+        {
+            self.block
+                .events
+                .push(vmlab_hv_tcg_ir::native::block::Event::Guard {
+                    condition,
+                    expected: true,
+                    exit,
+                });
+            self.block.graph.assume_guard(condition, true);
+            return;
+        }
+        for (operation, bound, expected) in [
+            (Binary::LessUnsigned, low, false),
+            (Binary::LessEqualUnsigned, high, true),
+        ] {
+            let bound = self.block.graph.constant(ty, bound.into());
+            let Some(condition) =
+                self.block
+                    .graph
+                    .binary(ScalarType::Bool, operation, value, bound)
+            else {
+                return;
+            };
+            if self.block.graph.literal(condition) == Some(u128::from(expected)) {
+                continue;
+            }
+            self.block
+                .events
+                .push(vmlab_hv_tcg_ir::native::block::Event::Guard {
+                    condition,
+                    expected,
+                    exit,
+                });
+            self.block.graph.assume_guard(condition, expected);
         }
     }
 

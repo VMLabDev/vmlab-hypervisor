@@ -1,5 +1,5 @@
 //! Compact physical instructions for scalar interpretation.
-use super::linear::{Instruction, binary64};
+use super::linear::{Guard, Instruction, binary64};
 use super::{Binary, ScalarType, Unary, evaluate_binary, evaluate_unary, mask};
 
 #[derive(Clone, Copy, Debug)]
@@ -22,6 +22,17 @@ enum Opcode {
     TrailingZeros,
     Slice,
     Concat,
+    Guard(Binary),
+    BoolGuard,
+    Event,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    Continue,
+    GuardFailed(usize),
+    Event(usize),
+    InvalidArithmetic,
 }
 
 /// All operands name physical slots. Constants and inputs are bound separately.
@@ -36,6 +47,76 @@ pub struct Packed {
 }
 
 impl Packed {
+    pub fn event_index(&self) -> Option<usize> {
+        matches!(
+            self.opcode,
+            Opcode::Event | Opcode::Guard(_) | Opcode::BoolGuard
+        )
+        .then_some(self.output as usize)
+    }
+
+    pub fn event(event: usize) -> Option<Self> {
+        Some(Self {
+            output: event.try_into().ok()?,
+            left: 0,
+            right: 0,
+            opcode: Opcode::Event,
+            width: 0,
+            extra: 0,
+        })
+    }
+
+    pub fn guard(event: usize, guard: Guard) -> Option<Self> {
+        Some(Self {
+            output: event.try_into().ok()?,
+            left: guard.left.try_into().ok()?,
+            right: guard.right.try_into().ok()?,
+            opcode: Opcode::Guard(guard.operation),
+            width: u8::from(guard.host64) | (u8::from(guard.expected) << 1),
+            extra: 0,
+        })
+    }
+
+    pub fn boolean_guard(event: usize, condition: usize, expected: bool) -> Option<Self> {
+        Some(Self {
+            output: event.try_into().ok()?,
+            left: condition.try_into().ok()?,
+            right: 0,
+            opcode: Opcode::BoolGuard,
+            width: u8::from(expected),
+            extra: 0,
+        })
+    }
+
+    #[inline(always)]
+    pub fn execute(&self, values: &mut [u128], stamps: &mut [u64], epoch: u64) -> Control {
+        let matches = match self.opcode {
+            Opcode::Event => return Control::Event(self.output as usize),
+            Opcode::Guard(operation) => Guard {
+                operation,
+                left: 0,
+                right: 0,
+                expected: self.width & 2 != 0,
+                host64: self.width & 1 != 0,
+            }
+            .matches(values[self.left as usize], values[self.right as usize]),
+            Opcode::BoolGuard => (values[self.left as usize] != 0) == (self.width != 0),
+            _ => {
+                let Some(value) = self.evaluate(values) else {
+                    return Control::InvalidArithmetic;
+                };
+                values[self.output as usize] = value;
+                stamps[self.output as usize] = epoch;
+                return Control::Continue;
+            }
+        };
+        if matches {
+            Control::Continue
+        } else {
+            Control::GuardFailed(self.output as usize)
+        }
+    }
+
     pub fn new(output: usize, instruction: Instruction) -> Option<Self> {
         let mask_width = |bits: u128| {
             let width = bits.trailing_ones() as u8;
@@ -115,6 +196,12 @@ impl Packed {
 
     #[inline(always)]
     pub fn evaluate(&self, values: &[u128]) -> Option<u128> {
+        if matches!(
+            self.opcode,
+            Opcode::Guard(_) | Opcode::BoolGuard | Opcode::Event
+        ) {
+            return None;
+        }
         let left = values[self.left as usize];
         let right = || values[self.right as usize];
         let width = u16::from(self.width);
@@ -145,6 +232,7 @@ impl Packed {
             Opcode::TrailingZeros => evaluate_unary(Unary::TrailingZeros(extra), left)?,
             Opcode::Slice => left.checked_shr(extra.into()).unwrap_or(0),
             Opcode::Concat => left.checked_shl(extra.into()).unwrap_or(0) | right(),
+            Opcode::Guard(_) | Opcode::BoolGuard | Opcode::Event => unreachable!(),
         };
         Some(value & mask(width))
     }
@@ -158,6 +246,40 @@ mod tests {
     fn physical_instructions_fit_sixteen_bytes() {
         assert_eq!(std::mem::size_of::<Packed>(), 16);
         assert!(Packed::new(0, Instruction::And64(0, 1, 5)).is_none());
+    }
+
+    #[test]
+    fn packed_controls_leave_values_unchanged_and_preserve_the_event_index() {
+        let mut values = [3, 9];
+        let mut stamps = [1, 1];
+        let guard = Packed::guard(
+            7,
+            Guard {
+                operation: Binary::LessUnsigned,
+                left: 0,
+                right: 1,
+                expected: true,
+                host64: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            guard.execute(&mut values, &mut stamps, 2),
+            Control::Continue
+        );
+        values[0] = 10;
+        assert_eq!(
+            guard.execute(&mut values, &mut stamps, 2),
+            Control::GuardFailed(7)
+        );
+        assert_eq!(
+            Packed::event(11)
+                .unwrap()
+                .execute(&mut values, &mut stamps, 2),
+            Control::Event(11)
+        );
+        assert_eq!(values, [10, 9]);
+        assert_eq!(stamps, [1, 1]);
     }
 
     #[test]
