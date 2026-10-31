@@ -1479,6 +1479,20 @@ impl Snapshot for XhciController {
 
 // xHCI is a single PCI function. Its snapshot includes all root-port devices;
 // there is no separate transport-wrapped device section.
+impl crate::Resettable for XhciController {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        for device in self.devices.iter_mut().flatten() {
+            device.reset();
+        }
+        self.state = Self::initial_state();
+        self.interrupter = 0;
+        self.reset_ports();
+        self.clock = Instant::now();
+        self.update_interrupt();
+        Ok(())
+    }
+}
+
 impl PciSnapshot for XhciController {
     fn snapshot_id(&self) -> String {
         self.state_id()

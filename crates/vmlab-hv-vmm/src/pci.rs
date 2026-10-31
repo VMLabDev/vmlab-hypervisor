@@ -622,6 +622,21 @@ impl PciConfigIo {
     }
 }
 
+impl vmlab_hv_devices::Snapshot for PciConfigIo {
+    fn state_id(&self) -> String {
+        "pci-config-address".into()
+    }
+    fn save_state(&self) -> Result<Vec<u8>, vmlab_hv_devices::DeviceError> {
+        Ok(self.address.to_le_bytes().to_vec())
+    }
+    fn restore_state(&mut self, state: &[u8]) -> Result<(), vmlab_hv_devices::DeviceError> {
+        self.address = u32::from_le_bytes(state.try_into().map_err(|_| {
+            vmlab_hv_devices::DeviceError::State("invalid PCI config address".into())
+        })?);
+        Ok(())
+    }
+}
+
 impl BusDevice for PciConfigIo {
     fn read(&mut self, offset: u64, data: &mut [u8]) {
         match offset {

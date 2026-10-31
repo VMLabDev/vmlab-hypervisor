@@ -116,8 +116,13 @@ def negotiate(fd, rate, channels):
         span = params.intervals[slot - 3]
         return min(max(span.min, prefer), span.max)
 
-    period = max(resolve(8, 256) & ~63, 64)  # 64-frame steps, like HDA
-    buffer = resolve(12, period * 8)
+    # The refined PERIODS interval bounds how deep the buffer may go, so
+    # a deeper buffer for a loaded host comes with a proportionally
+    # deeper period. The default is the host's 256-frame audio quantum
+    # eight periods deep, rounded to whole 64-frame steps like HDA.
+    depth = int(os.environ.get("ALSA_BUFFER_FRAMES") or 2048)
+    period = max(resolve(8, max(256, depth // 16)) & ~63, 64)
+    buffer = resolve(12, max(period * 2, depth))
     buffer -= buffer % period
     for slot, value in ((8, period), (12, max(buffer, period))):
         params.intervals[slot - 3].min = value
@@ -300,11 +305,14 @@ def main():
     if len(sys.argv) < 4 or sys.argv[1] not in ("play", "record"):
         raise SystemExit(__doc__)
     rate, channels = int(sys.argv[2]), int(sys.argv[3])
+    # The card to open; 0 is the machine's first card (the HDA test's
+    # implicit choice), and virtio-snd guests name theirs through the
+    # environment when it lands elsewhere.
+    card = os.environ.get("ALSA_CARD", "0")
     if sys.argv[1] == "play":
-        play("/dev/snd/pcmC0D0p", rate, channels)
+        play(f"/dev/snd/pcmC{card}D0p", rate, channels)
     else:
-        record("/dev/snd/pcmC0D0c", rate, channels, int(sys.argv[4]))
-
+        record(f"/dev/snd/pcmC{card}D0c", rate, channels, int(sys.argv[4]))
 
 if __name__ == "__main__":
     main()

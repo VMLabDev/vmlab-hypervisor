@@ -953,6 +953,13 @@ impl PciDevice for StandardVga {
     }
 }
 
+impl crate::Resettable for StandardVga {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        let initial = Self::new(self.id.clone(), &self.rom)?.save_state()?;
+        self.restore_state(&initial)
+    }
+}
+
 impl Snapshot for StandardVga {
     fn state_id(&self) -> String {
         self.id.clone()

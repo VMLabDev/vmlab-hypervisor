@@ -236,10 +236,9 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
         _ => {}
     }
     if let Some(audio) = &desc.audio {
-        // D11: q35's HDA sits at 00:1b.0, where real ICH9 places it.
-        // virtio-snd is the audio plan's second device and lands later.
         match audio.device {
             vmlab_hv_proto::machine::AudioDevice::Hda => {
+                // D11: q35's HDA sits at 00:1b.0, where real ICH9 places it.
                 if audio
                     .pci
                     .is_none_or(|a| (a.bus, a.device, a.function) != (0, 0x1b, 0))
@@ -248,10 +247,10 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
                 }
                 add(audio.pci, "audio")?;
             }
+            // virtio-snd is a plain virtio function: any free slot the
+            // description names, like a NIC or a console.
             vmlab_hv_proto::machine::AudioDevice::VirtioSnd => {
-                return Err(VmmError::InvalidMachine(
-                    "virtio-snd has not landed yet; use device = \"hda\"".into(),
-                ));
+                add(audio.pci, "audio")?;
             }
         }
     }
@@ -376,12 +375,9 @@ pub fn build(
     } else {
         PciRoot::new(layout.mmio64_base)
     }));
+    let config_io = Arc::new(Mutex::new(PciConfigIo::new(pci_root.clone())));
     io_bus
-        .register(
-            0xCF8,
-            8,
-            Arc::new(Mutex::new(PciConfigIo::new(pci_root.clone()))),
-        )
+        .register(0xCF8, 8, config_io.clone())
         .map_err(VmmError::Other)?;
     if !q35 {
         mmio_bus
@@ -463,7 +459,7 @@ pub fn build(
         }
     };
     let mut snap_disks = Vec::new();
-    let mut snap_nodes = Vec::new();
+    let mut snap_nodes = vec![DeviceNode::Plain(config_io)];
     let mut pflash = None;
     if q35 {
         let inventory = Arc::new(Mutex::new(
@@ -509,7 +505,7 @@ pub fn build(
                     flash.clone(),
                 )
                 .map_err(VmmError::Other)?;
-            snap_nodes.push(DeviceNode::Plain(flash.clone()));
+            snap_nodes.push(DeviceNode::Resettable(flash.clone()));
             pflash = Some(flash);
             crate::q35::map_pflash_code(&kvm.vm, &image, first_slot)?
         } else {
@@ -585,7 +581,7 @@ pub fn build(
         snap_nodes.extend([
             DeviceNode::Plain(chipset.lpc.clone()),
             DeviceNode::Plain(chipset.smbus.clone()),
-            DeviceNode::Plain(chipset.rtc.clone()),
+            DeviceNode::Resettable(chipset.rtc.clone()),
             DeviceNode::Plain(chipset.ps2.clone()),
             DeviceNode::Plain(chipset.hpet.clone()),
             DeviceNode::Plain(chipset.isa.clone()),
@@ -602,7 +598,7 @@ pub fn build(
         io_bus
             .register(0x70, 8, rtc.clone())
             .map_err(VmmError::Other)?;
-        snap_nodes.push(DeviceNode::Plain(rtc));
+        snap_nodes.push(DeviceNode::Resettable(rtc));
     }
 
     // COM1: 16550A on IRQ 4, output to the serial log.
@@ -666,7 +662,7 @@ pub fn build(
                     .map_err(|e| VmmError::Other(e.to_string()))?;
             }
             place(vga.clone(), Some(display.pci))?;
-            snap_nodes.push(DeviceNode::Plain(vga.clone()));
+            snap_nodes.push(DeviceNode::Resettable(vga.clone()));
             crate::display::Video::Virtio(vga)
         } else {
             let vga = Arc::new(Mutex::new(
@@ -674,7 +670,7 @@ pub fn build(
                     .map_err(|e| VmmError::Other(e.to_string()))?,
             ));
             place(vga.clone(), Some(display.pci))?;
-            snap_nodes.push(DeviceNode::Plain(vga.clone()));
+            snap_nodes.push(DeviceNode::Resettable(vga.clone()));
             crate::display::Video::Standard(vga)
         })
     } else {
@@ -856,21 +852,53 @@ pub fn build(
         // The host backend is picked per machine from the description's
         // node identity; capture opens only when the microphone is on.
         let host = crate::audio::host(section);
-        let hda = Arc::new(Mutex::new(vmlab_hv_devices::hda::Hda::new(
-            "hda",
-            ram.mem.clone(),
-            host,
-            msi.clone(),
-            section.microphone,
-        )));
-        place(hda.clone(), section.pci)?;
-        snap_nodes.push(DeviceNode::Plain(hda.clone()));
-        chipset
-            .as_ref()
-            .expect("audio requires the q35 chipset")
-            .audio
-            .lock()
-            .replace(hda.clone());
+        match section.device {
+            vmlab_hv_proto::machine::AudioDevice::Hda => {
+                let hda = Arc::new(Mutex::new(vmlab_hv_devices::hda::Hda::new(
+                    "hda",
+                    ram.mem.clone(),
+                    host,
+                    msi.clone(),
+                    section.microphone,
+                )));
+                place(hda.clone(), section.pci)?;
+                snap_nodes.push(DeviceNode::Plain(hda.clone()));
+                chipset
+                    .as_ref()
+                    .expect("audio requires the q35 chipset")
+                    .audio
+                    .lock()
+                    .replace(hda.clone());
+            }
+            vmlab_hv_proto::machine::AudioDevice::VirtioSnd => {
+                // One device shared two ways: the transport owns the
+                // PCI-facing handle, the chipset clock paces completions
+                // through the other side of the same mutex.
+                let (snd, pci_device) = vmlab_hv_devices::virtio::sound::VirtioSnd::new_shared(
+                    "virtio-snd",
+                    host,
+                    section.microphone,
+                );
+                let interrupt = wiring(section.pci, 5, true)?;
+                let function = Arc::new(Mutex::new(
+                    vmlab_hv_devices::virtio::pci::VirtioPciDevice::new(
+                        "virtio-snd",
+                        Box::new(pci_device),
+                        ram.mem.clone(),
+                        Some(interrupt.msi),
+                        interrupt.intx,
+                    ),
+                ));
+                place(function.clone(), section.pci)?;
+                snap_nodes.push(DeviceNode::Virtio(function.clone()));
+                chipset
+                    .as_ref()
+                    .expect("audio requires the q35 chipset")
+                    .audio
+                    .lock()
+                    .replace(snd);
+            }
+        }
     }
     let tpm = if let Some(tpm) = &desc.tpm {
         let device = Arc::new(Mutex::new(
@@ -884,7 +912,7 @@ pub fn build(
                 device.clone(),
             )
             .map_err(VmmError::Other)?;
-        snap_nodes.push(DeviceNode::Plain(device.clone()));
+        snap_nodes.push(DeviceNode::Resettable(device.clone()));
         Some(device)
     } else {
         None
@@ -963,6 +991,7 @@ pub fn build(
     *shared.pflash.lock() = pflash;
     *shared.tpm.lock() = tpm;
     *shared.smi_fwcfg.lock() = smi_fwcfg;
+    shared.set_reset_description(desc.clone());
     shared.set_snapshot_registry(Arc::new(SnapshotRegistry {
         digest: machine_digest(desc),
         disks: snap_disks,
@@ -1086,6 +1115,7 @@ mod tests {
 
     fn desc() -> MachineDescription {
         MachineDescription {
+            exit_on_reset: false,
             vfio: vec![],
             machine: Default::default(),
             cpu: Default::default(),
@@ -1327,14 +1357,41 @@ mod tests {
         machine.audio = Some(section(AudioDevice::Hda, Some(HDA_SLOT)));
         validate(&machine).unwrap();
 
-        // virtio-snd is the audio plan's second device; it has not landed.
-        machine.audio = Some(section(AudioDevice::VirtioSnd, Some(HDA_SLOT)));
+        // virtio-snd landed: a plain virtio function that takes the
+        // address the description names, like a NIC.
+        machine.audio = Some(section(AudioDevice::VirtioSnd, None));
         assert!(
             validate(&machine)
                 .unwrap_err()
                 .to_string()
-                .contains("virtio-snd")
+                .contains("requires an explicit PCI address")
         );
+        let slot = PciAddress {
+            bus: 0,
+            device: 5,
+            function: 0,
+        };
+        machine.audio = Some(section(AudioDevice::VirtioSnd, Some(slot)));
+        validate(&machine).unwrap();
+        // It may not take a chipset slot, and the microvm still has none
+        // of this.
+        machine.audio = Some(section(
+            AudioDevice::VirtioSnd,
+            Some(PciAddress {
+                bus: 0,
+                device: 31,
+                function: 3,
+            }),
+        ));
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("reserved for the chipset")
+        );
+        let mut microvm = desc();
+        microvm.audio = Some(section(AudioDevice::VirtioSnd, Some(slot)));
+        assert!(validate(&microvm).is_err());
     }
 
     /// The smallest bzImage `linux-loader` accepts.

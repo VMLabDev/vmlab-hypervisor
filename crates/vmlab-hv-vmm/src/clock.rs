@@ -103,6 +103,14 @@ impl BusDevice for KvmRtc {
     }
 }
 
+impl vmlab_hv_devices::Resettable for KvmRtc {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        let mut state = self.state.lock();
+        self.sync(&mut state)?;
+        vmlab_hv_devices::Resettable::reset(&mut state.rtc)
+    }
+}
+
 impl Snapshot for KvmRtc {
     fn state_id(&self) -> String {
         self.state.lock().rtc.state_id()

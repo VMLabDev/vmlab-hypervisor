@@ -13,6 +13,17 @@ pub struct Rtc {
     irq: Arc<dyn IrqLine>,
 }
 
+impl crate::Resettable for Rtc {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        self.index = [0; 2];
+        self.cmos[0x0b] &= !0xf8;
+        self.cmos[0x0c] = 0;
+        self.periodic_phase = 0;
+        self.update_irq();
+        Ok(())
+    }
+}
+
 impl Rtc {
     /// `rtc_base` is UTC Unix time in seconds; RAM includes memory above 4 GiB.
     pub fn new(ram_bytes: u64, rtc_base: i64, irq: Arc<dyn IrqLine>) -> Self {
@@ -287,6 +298,23 @@ mod tests {
     fn put(rtc: &mut Rtc, reg: u8, value: u8) {
         rtc.write(0, &[reg]);
         rtc.write(1, &[value]);
+    }
+    #[test]
+    fn system_reset_preserves_calendar_and_cmos_but_clears_interrupts() {
+        use crate::Resettable;
+        let irq = Arc::new(Line::default());
+        let mut rtc = Rtc::new(2 << 30, 1_793_355_112, irq.clone());
+        put(&mut rtc, 0x38, 0x42);
+        put(&mut rtc, 0x0b, 0x12);
+        rtc.advance(5_000_000_000);
+        let seconds = rtc.seconds;
+        assert!(irq.0.load(Ordering::SeqCst));
+        rtc.reset().unwrap();
+        assert_eq!(rtc.seconds, seconds);
+        assert_eq!(get(&mut rtc, 0x38), 0x42);
+        assert_eq!(get(&mut rtc, 0x0b), 2);
+        assert_eq!(get(&mut rtc, 0x0c), 0);
+        assert!(!irq.0.load(Ordering::SeqCst));
     }
     #[test]
     fn p4_calendar_update_alarm_and_periodic_irq() {

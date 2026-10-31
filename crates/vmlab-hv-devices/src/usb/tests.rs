@@ -622,6 +622,20 @@ fn truncated_snapshot_is_atomic_and_reset_clears_controller_state() {
 }
 
 #[test]
+fn system_reset_clears_pci_slots_and_msix_and_keeps_the_tablet() {
+    let mut d = Driver::new();
+    d.enumerate();
+    d.configure();
+    d.hc.config_write(1, 0, &7u16.to_le_bytes());
+    crate::Resettable::reset(&mut d.hc).unwrap();
+    assert_eq!(d.hc.config_read(1) & 0xffff, 0);
+    assert_eq!(d.read(0x78), 0);
+    assert_eq!(d.read(0x1020), 0);
+    assert!(!d.hc.port_free(super::TABLET_PORT));
+    assert_eq!(d.read(0x300c), 1);
+}
+
+#[test]
 fn tablet_class_requests_idle_and_snapshot_preserve_input() {
     use super::{SetupPacket, Tablet, UsbDevice, UsbTransfer};
     let mut t = Tablet::default();

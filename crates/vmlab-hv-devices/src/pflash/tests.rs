@@ -8,6 +8,47 @@ fn flash(secure: bool) -> (tempfile::TempDir, Pflash) {
     (dir, flash)
 }
 
+#[test]
+fn system_reset_flushes_vars_and_discards_pending_commands() {
+    use crate::Resettable;
+    let (dir, mut f) = flash(false);
+    for command in [0x10, 0x42] {
+        f.write_access(123, &[command], false).unwrap();
+    }
+    assert!(f.dirty);
+    f.write(0x1000, &[0x20]);
+    f.reset().unwrap();
+    assert!(!f.dirty);
+    assert_eq!(read(&mut f, 123, 1), [0x42]);
+    f.write(0x1000, &[0xd0]);
+    assert_eq!(f.bytes[0x1000], 0xff);
+    let mut reopened =
+        Pflash::open(&dir.path().join("code"), &dir.path().join("vars"), false).unwrap();
+    assert_eq!(read(&mut reopened, 123, 1), [0x42]);
+}
+
+#[test]
+fn word_programming_batches_durability_and_reports_flush_failures() {
+    let (_dir, mut f) = flash(false);
+    f.last_sync = Instant::now() + Duration::from_secs(60);
+    for offset in 0..128 {
+        for byte in [0x10, 0x42] {
+            f.write_access(offset, &[byte], false).unwrap();
+        }
+        assert!(
+            f.dirty,
+            "each word must not issue its own durability barrier"
+        );
+    }
+    f.flush().unwrap();
+    assert!(!f.dirty);
+    f.dirty = true;
+    f.vars = File::open("/dev/null").unwrap();
+    assert!(f.flush().is_err());
+    assert!(f.dirty);
+    assert_ne!(f.status & PROGRAM_ERROR, 0);
+}
+
 fn read(flash: &mut Pflash, offset: u64, n: usize) -> Vec<u8> {
     let mut data = vec![0; n];
     flash.read(offset, &mut data);

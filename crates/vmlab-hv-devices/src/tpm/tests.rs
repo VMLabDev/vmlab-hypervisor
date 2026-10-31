@@ -109,6 +109,26 @@ fn startup(device: &mut TpmTis) {
     submit(device, 0, &packet(0x144, &[0, 0]));
 }
 
+#[test]
+fn system_reset_reinitializes_the_same_swtpm_and_clears_pcrs() {
+    use crate::Resettable;
+    let Some(emulator) = Swtpm::start() else {
+        return;
+    };
+    let mut device = emulator.device(None);
+    startup(&mut device);
+    let initial = pcr_read(&mut device);
+    extend(&mut device, 0x42);
+    assert_ne!(pcr_read(&mut device), initial);
+    device.reset().unwrap();
+    assert_eq!(device.state.active, None);
+    assert!(device.state.command.is_empty());
+    startup(&mut device);
+    assert_eq!(pcr_read(&mut device), initial);
+    assert!(emulator.child.id() > 0);
+    device.shutdown().unwrap();
+}
+
 fn pcr_read(device: &mut TpmTis) -> Vec<u8> {
     let response = submit(
         device,

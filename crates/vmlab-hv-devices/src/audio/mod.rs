@@ -92,6 +92,20 @@ pub trait CaptureSource: Send {
     fn latency_bytes(&self) -> usize;
 }
 
+/// A guest audio device paced by the machine's running-time clock.
+///
+/// The VMM's chipset advances its platform timers from one clock that
+/// only runs while the machine does; audio devices join the same clock so
+/// their guest-visible progress follows real playback and freezes on
+/// pause. [`crate::hda::Hda`] walks its DMA by it; virtio-snd paces its
+/// PCM message completions by it.
+pub trait AudioClock: Send {
+    /// Service `elapsed` of unpaused machine time.
+    fn advance(&mut self, elapsed: std::time::Duration) -> Result<(), DeviceError>;
+    /// Freeze (true) or resume (false) guest-visible progress.
+    fn set_paused(&mut self, paused: bool);
+}
+
 /// A host audio backend: opens streams for one machine's device.
 pub trait HostAudio: Send + Sync {
     /// Backend name for logs (`"pipewire"`, `"pulse"`, `"null"`, ...).

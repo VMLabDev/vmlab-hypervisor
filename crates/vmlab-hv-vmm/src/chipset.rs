@@ -83,10 +83,11 @@ pub struct Chipset {
     pub pirqs: Arc<Mutex<PirqRouter>>,
     pub power: Arc<Mutex<Option<PowerAction>>>,
     pub error: Arc<Mutex<Option<String>>>,
-    /// The machine's HDA function, when it has audio: advanced by the same
+    /// The machine's audio device, when it has one: advanced by the same
     /// running-time clock as the platform timers, so its guest-visible
     /// position never runs ahead of real playback and freezes on pause.
-    pub audio: Mutex<Option<Arc<Mutex<vmlab_hv_devices::hda::Hda>>>>,
+    /// HDA and virtio-snd both sit here.
+    pub audio: Mutex<Option<Arc<Mutex<dyn vmlab_hv_devices::audio::AudioClock>>>>,
     secure_smm: bool,
     clock: Mutex<(Instant, bool)>,
     vm: Arc<VmFd>,
@@ -227,10 +228,11 @@ impl Chipset {
             self.hpet.lock().advance(ns);
             self.isa.lock().advance(ns);
             let audio = self.audio.lock().clone();
-            if let Some(hda) = audio.as_ref() {
-                // A host-stream failure stops that stream (the device raises
-                // its error bits for the guest); it never stops the machine.
-                if let Err(e) = hda.lock().advance(Duration::from_nanos(ns)) {
+            if let Some(device) = audio.as_ref() {
+                // A host-stream failure stops that stream (the device
+                // raises its error state for the guest); it never stops
+                // the machine.
+                if let Err(e) = device.lock().advance(Duration::from_nanos(ns)) {
                     eprintln!("vmlab-hv: audio stream error: {e}");
                 }
             }
@@ -238,9 +240,9 @@ impl Chipset {
         clock.0 = now;
         if let Some(running) = running
             && running != clock.1
-            && let Some(hda) = self.audio.lock().as_ref()
+            && let Some(device) = self.audio.lock().as_ref()
         {
-            hda.lock().set_paused(!running);
+            device.lock().set_paused(!running);
         }
         if let Some(running) = running {
             clock.1 = running;

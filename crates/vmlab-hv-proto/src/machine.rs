@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineDescription {
+    /// Exit cleanly with shutdown{guest_reset} instead of resetting in place.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exit_on_reset: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vfio: Vec<VfioDevice>,
     #[serde(default, skip_serializing_if = "Machine::is_microvm")]
