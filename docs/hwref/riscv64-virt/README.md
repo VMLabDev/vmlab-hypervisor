@@ -189,6 +189,28 @@ including all empty MMIO transports, shutdown, exit-on-reset, and preserved
 RAM across warm reset in the same process. Cold edk2 and Linux acceptance
 remain pending.
 
+The post-merge firmware diagnostics exposed a separate 4,096-PC cache cap.
+It evicted entries while using only 18.8 million of 64 million configured
+metadata units. A unit-level IR CPU reproduces the premature eviction with
+4,097 PCs. Revision `5d40efe` removes that count threshold and retains the
+metadata budget. All 4,097 cached paths then execute natively without Sail
+operations or new recordings, using 45,067 of 8,000,000 units. A separate
+test verifies eviction and bounded usage when the working set exceeds its
+budget.
+
+The full TCG/IR test run and release rebuild pass. This runtime also passes
+all 133 Sail-oracle programs in four disjoint parts. The validation checks
+the exact manifest coverage, including both FP cases, and every part exits
+zero. Its three-repeat warm medians are 0.019256 seconds for scalar code
+and 6.345797 seconds for CoreMark, or 47.946 MIPS. `just bench-check` passes;
+the CoreMark median is slower than the preceding run but remains within the
+suite's measured-noise threshold.
+
+The CI run compiled before this cache change was interrupted and is not a
+current-source acceptance result. A new cold Linux S1 run uses the rebuilt
+release binary. Fresh full CI, live Linux acceptance, hardware capture,
+booted-guest snapshot restoration, and D2 boot timings remain pending.
+
 The benchmark runner's TCG path referenced an undefined `BOOT_DEADLINE`,
 removed by an earlier x86 readiness change. The original 1,800-second
 deadline is restored, retaining `--timeout-scale`. A no-VM regression first
