@@ -9,7 +9,7 @@ import subprocess
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=Path("target/tcg/corpus/manifest.json"))
-    parser.add_argument("--binary", type=Path, default=Path("target/release/examples/lockstep"))
+    parser.add_argument("--binary", type=Path, help="prebuilt Sail driver; otherwise build an isolated driver")
     parser.add_argument("--fp-dir", type=Path, default=Path("target/tcg/fp"))
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--part", type=int, default=0)
@@ -37,6 +37,11 @@ def main():
     for path in paths:
         if not path.is_file():
             parser.error(f"missing ELF: {path}; build the corpus and run --prepare-only first")
+    if args.binary is None:
+        target = Path("target/tcg/lockstep-driver")
+        subprocess.run(["cargo", "build", "--release", "-p", "vmlab-hv-tcg", "--features", "sail",
+                        "--example", "lockstep", "--target-dir", str(target)], check=True)
+        args.binary = target / "release/examples/lockstep"
     command = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=24G",
                "-p", "MemorySwapMax=0", "--", str(args.binary),
                *map(str, paths[args.part::args.parts])]

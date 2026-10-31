@@ -606,6 +606,24 @@ pub fn specialize_constructor(function: &mut Function, constructor: &str) {
         }
     }
     specialize(function);
+    prune_locals(function);
+}
+
+fn prune_locals(function: &mut Function) {
+    let live: BTreeSet<_> = function
+        .code
+        .iter()
+        .filter_map(|op| {
+            if let Op::Declare(name, _, _) = op {
+                Some(name.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    function
+        .locals
+        .retain(|name, _| live.contains(name.as_str()));
 }
 
 /// Specialize an immutable parameter without changing architectural effects.
@@ -663,6 +681,7 @@ pub fn specialize_argument(function: &mut Function, argument: &str, value: Expr)
         }
     }
     specialize(function);
+    prune_locals(function);
     true
 }
 

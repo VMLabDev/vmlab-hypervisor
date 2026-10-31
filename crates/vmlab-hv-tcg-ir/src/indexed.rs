@@ -47,7 +47,7 @@ pub struct IndexedFunction {
 }
 
 pub fn index(function: &Function) -> IndexedFunction {
-    let mut names: Vec<_> = function.locals.keys().cloned().collect();
+    let mut names = Vec::new();
     names.extend(function.args.iter().map(|(name, _)| name.clone()));
     names.push("return".into());
     for op in &function.code {

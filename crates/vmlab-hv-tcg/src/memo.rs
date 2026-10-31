@@ -6,13 +6,7 @@ pub(crate) struct Memo {
     dependencies: Vec<String>,
     slots: Vec<usize>,
     versions: Vec<u64>,
-    writes: Vec<String>,
-    values: BTreeMap<Vec<Value>, Cached>,
-}
-
-struct Cached {
-    result: Value,
-    writes: Vec<(String, Value)>,
+    values: BTreeMap<Vec<Value>, Value>,
 }
 
 impl Memo {
@@ -30,7 +24,6 @@ impl Memo {
                         dependencies: effect.reads.into_iter().collect(),
                         slots: Vec::new(),
                         versions: Vec::new(),
-                        writes: effect.writes.into_iter().collect(),
                         values: BTreeMap::new(),
                     },
                 )
@@ -63,11 +56,9 @@ impl Memo {
                 .map(|slot| globals.version(*slot))
                 .collect();
         }
-        let cached = self.values.get(args)?;
-        for (name, value) in &cached.writes {
-            globals.insert(name.clone(), value.clone());
-        }
-        Some(cached.result.clone())
+        // Writes participate in the guards, and insertion requires that none
+        // changed. Replaying unchanged writes would only copy aggregates.
+        self.values.get(args).cloned()
     }
 
     pub fn insert(&mut self, globals: &Globals, args: Vec<Value>, value: Value) {
@@ -85,17 +76,6 @@ impl Memo {
         if self.values.len() == 128 {
             self.values.clear();
         }
-        let writes = self
-            .writes
-            .iter()
-            .filter_map(|name| globals.get(name).map(|v| (name.clone(), v.clone())))
-            .collect();
-        self.values.insert(
-            args,
-            Cached {
-                result: value,
-                writes,
-            },
-        );
+        self.values.insert(args, value);
     }
 }
