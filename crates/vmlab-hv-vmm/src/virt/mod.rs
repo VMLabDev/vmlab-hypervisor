@@ -15,7 +15,7 @@ use crate::{
 };
 use parking_lot::Mutex;
 pub use runtime::VirtVm;
-use std::{path::Path, sync::Arc};
+use std::{fs::File, os::unix::fs::FileExt, path::Path, sync::Arc};
 use vm_memory::{Bytes, GuestAddress};
 use vmlab_hv_devices::riscv::{Clint, Plic, PlicIrqs};
 use vmlab_hv_devices::{BusDevice, GuestMemory, MsiMessage, MsiSink, PciDevice};
@@ -73,7 +73,12 @@ impl BusDevice for TestDevice {
         if offset == 0 && data.len() == 4 {
             let value = u32::from_le_bytes(data.try_into().unwrap());
             if matches!(value & 0xffff, 0x5555 | 0x7777 | 0x3333) {
-                self.0.store(value, std::sync::atomic::Ordering::SeqCst);
+                let _ = self.0.compare_exchange(
+                    0,
+                    value,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
             }
         }
     }
@@ -396,6 +401,7 @@ pub fn build(desc: &MachineDescription, factory: &dyn DeviceFactory) -> Result<V
         None
     };
     let mut flashes = Vec::new();
+    let mut boot_files = Vec::new();
     let (next_entry, cmdline, initrd) = match &desc.boot {
         Boot::Firmware { code, vars, .. } => {
             let code = Arc::new(Mutex::new(flash::Flash::open("pflash-code", code, false)?));
@@ -407,7 +413,7 @@ pub fn build(desc: &MachineDescription, factory: &dyn DeviceFactory) -> Result<V
             bus.register(0x2000_0000, 32 << 20, code.clone())?;
             bus.register(0x2200_0000, 32 << 20, vars.clone())?;
             flashes.extend([(0x2000_0000, code.clone()), (0x2200_0000, vars.clone())]);
-            nodes.extend([DeviceNode::Plain(code), DeviceNode::Plain(vars)]);
+            nodes.extend([DeviceNode::Resettable(code), DeviceNode::Resettable(vars)]);
             (0x2000_0000, "", None)
         }
         Boot::Kernel {
@@ -415,10 +421,17 @@ pub fn build(desc: &MachineDescription, factory: &dyn DeviceFactory) -> Result<V
             initrd,
             cmdline,
         } => {
-            load(&ram, kernel, RAM_BASE + (2 << 20), size / 2 - (2 << 20))?;
+            boot_files.push(load(
+                &ram,
+                kernel,
+                RAM_BASE + (2 << 20),
+                size / 2 - (2 << 20),
+            )?);
             let initrd = if let Some(path) = initrd {
                 let start = RAM_BASE + size / 2;
-                let length = load(&ram, path, start, size / 4)?;
+                let image = load(&ram, path, start, size / 4)?;
+                let length = image.length;
+                boot_files.push(image);
                 Some((start, start + length))
             } else {
                 None
@@ -426,12 +439,12 @@ pub fn build(desc: &MachineDescription, factory: &dyn DeviceFactory) -> Result<V
             (RAM_BASE + (2 << 20), cmdline.as_str(), initrd)
         }
     };
-    load(
+    boot_files.push(load(
         &ram,
         Path::new("/usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin"),
         RAM_BASE,
         2 << 20,
-    )?;
+    )?);
     let dtb = RAM_BASE + size - (2 << 20);
     let mut seed = [0; 32];
     use std::io::Read;
@@ -442,16 +455,16 @@ pub fn build(desc: &MachineDescription, factory: &dyn DeviceFactory) -> Result<V
     ram.write_slice(&tree, GuestAddress(dtb))
         .map_err(|e| e.to_string())?;
     let dynamic = dtb + 0x100000;
-    for (index, value) in [0x4942_534fu64, 2, next_entry, 1, 0, 0]
-        .into_iter()
-        .enumerate()
-    {
-        ram.write_slice(
-            &value.to_le_bytes(),
-            GuestAddress(dynamic + index as u64 * 8),
-        )
-        .map_err(|e| e.to_string())?;
+    let mut dynamic_bytes = Vec::new();
+    for value in [0x4942_534fu64, 2, next_entry, 1, 0, 0] {
+        dynamic_bytes.extend_from_slice(&value.to_le_bytes());
     }
+    ram.write_slice(&dynamic_bytes, GuestAddress(dynamic))
+        .map_err(|e| e.to_string())?;
+    let boot_images = BootImages {
+        files: boot_files,
+        data: vec![(dtb, tree), (dynamic, dynamic_bytes)],
+    };
     let mut memory = memory::PhysicalMemory::new(ram, size, bus, pci.clone());
     for (base, flash) in flashes {
         memory.map_flash(base, flash);
@@ -482,19 +495,76 @@ pub fn build(desc: &MachineDescription, factory: &dyn DeviceFactory) -> Result<V
         cpus.push(Mutex::new(cpu));
     }
     VirtVm::new(
-        desc, cpus, memory, clint, plic, shutdown, nodes, disks, pci, gpu, xhci, rtc,
+        desc,
+        cpus,
+        memory,
+        clint,
+        plic,
+        shutdown,
+        nodes,
+        disks,
+        pci,
+        gpu,
+        xhci,
+        rtc,
+        boot_images,
     )
 }
 
-fn load(ram: &GuestMemory, path: &Path, address: u64, max: u64) -> Result<u64, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+struct BootFile {
+    file: File,
+    address: u64,
+    length: u64,
+}
+
+impl BootFile {
+    fn restore(&self, ram: &GuestMemory) -> Result<(), String> {
+        let mut buffer = [0; 65536];
+        let mut offset = 0;
+        while offset < self.length {
+            let length = (self.length - offset).min(buffer.len() as u64) as usize;
+            self.file
+                .read_exact_at(&mut buffer[..length], offset)
+                .map_err(|e| e.to_string())?;
+            ram.write_slice(&buffer[..length], GuestAddress(self.address + offset))
+                .map_err(|e| e.to_string())?;
+            offset += length as u64;
+        }
+        Ok(())
+    }
+}
+
+struct BootImages {
+    files: Vec<BootFile>,
+    data: Vec<(u64, Vec<u8>)>,
+}
+
+impl BootImages {
+    fn restore(&self, ram: &GuestMemory) -> Result<(), String> {
+        for file in &self.files {
+            file.restore(ram)?;
+        }
+        for (address, data) in &self.data {
+            ram.write_slice(data, GuestAddress(*address))
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+fn load(ram: &GuestMemory, path: &Path, address: u64, max: u64) -> Result<BootFile, String> {
+    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let length = file.metadata().map_err(|e| e.to_string())?.len();
     if length > max {
         return Err(format!("{} exceeds boot memory range", path.display()));
     }
-    ram.read_exact_volatile_from(GuestAddress(address), &mut &file, length as usize)
-        .map_err(|e| e.to_string())?;
-    Ok(length)
+    let image = BootFile {
+        file,
+        address,
+        length,
+    };
+    image.restore(ram)?;
+    Ok(image)
 }
 
 fn next_slot(pci: &Arc<Mutex<PciRoot>>) -> Result<u8, String> {
@@ -521,6 +591,49 @@ fn placement(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_boot_images_preserve_unrelated_ram() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let image = vec![0x5a; 70001];
+        std::fs::write(file.path(), &image).unwrap();
+        let ram = GuestMemory::from_ranges(&[(GuestAddress(RAM_BASE), 128 << 10)]).unwrap();
+        let boot = BootImages {
+            files: vec![load(&ram, file.path(), RAM_BASE, 80000).unwrap()],
+            data: vec![(RAM_BASE + 90000, vec![1, 2, 3])],
+        };
+        ram.write_slice(&[0; 3], GuestAddress(RAM_BASE)).unwrap();
+        ram.write_slice(&[0], GuestAddress(RAM_BASE + 70000))
+            .unwrap();
+        ram.write_slice(&[9], GuestAddress(RAM_BASE + 100000))
+            .unwrap();
+        boot.restore(&ram).unwrap();
+        let mut restored = vec![0; image.len()];
+        ram.read_slice(&mut restored, GuestAddress(RAM_BASE))
+            .unwrap();
+        assert_eq!(restored, image);
+        let mut tree = [0; 3];
+        ram.read_slice(&mut tree, GuestAddress(RAM_BASE + 90000))
+            .unwrap();
+        assert_eq!(tree, [1, 2, 3]);
+        assert_eq!(
+            ram.read_obj::<u8>(GuestAddress(RAM_BASE + 100000)).unwrap(),
+            9
+        );
+    }
+
+    #[test]
+    fn reset_signal_keeps_the_first_request_until_serviced() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let signal = Arc::new(AtomicU32::new(0));
+        let mut device = TestDevice(signal.clone());
+        device.write(0, &0x7777u32.to_le_bytes());
+        device.write(0, &0x5555u32.to_le_bytes());
+        assert_eq!(signal.load(Ordering::SeqCst), 0x7777);
+        signal.store(u32::MAX, Ordering::SeqCst);
+        device.write(0, &0x3333u32.to_le_bytes());
+        assert_eq!(signal.load(Ordering::SeqCst), u32::MAX);
+    }
 
     #[test]
     fn host_bridge_matches_captured_configuration_header() {

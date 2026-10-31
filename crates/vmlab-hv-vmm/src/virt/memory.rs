@@ -73,6 +73,10 @@ impl PhysicalMemory {
         self.flash.push((base, flash));
     }
 
+    pub(super) fn invalidate_code(&self) {
+        self.code_windows.lock().entries.clear();
+    }
+
     fn is_ram(&self, address: u64, len: usize) -> bool {
         address >= RAM_BASE
             && address
@@ -350,6 +354,20 @@ mod tests {
         assert!(memory.code_stamp(RAM_BASE, 4).is_some());
         assert!(memory.code_stamp(0x20000000, 4).is_some());
         assert!(memory.code_stamp(0x21ffffff, 2).is_none());
+    }
+
+    #[test]
+    fn restoring_ram_discards_old_window_epochs() {
+        let memory = memory();
+        let before = memory.code_stamp(RAM_BASE, 4).unwrap();
+        memory
+            .ram
+            .write_slice(&[1], GuestAddress(RAM_BASE))
+            .unwrap();
+        memory.invalidate_code();
+        let restored = memory.code_stamp(RAM_BASE, 4).unwrap();
+        assert_ne!(restored, before);
+        assert_eq!(memory.code_stamp(RAM_BASE, 4), Some(restored));
     }
 
     #[test]

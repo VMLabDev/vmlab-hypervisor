@@ -28,6 +28,20 @@ fn riscv_paused_control_snapshot_round_trip() {
 
 #[test]
 fn riscv_direct_kernel_receives_hart_and_device_tree_and_powers_off() {
+    direct_kernel(false, false);
+}
+
+#[test]
+fn riscv_direct_kernel_reset_stays_in_process() {
+    direct_kernel(true, false);
+}
+
+#[test]
+fn riscv_direct_kernel_exit_on_reset() {
+    direct_kernel(true, true);
+}
+
+fn direct_kernel(reset: bool, exit_on_reset: bool) {
     if !Path::new("/usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin").is_file() {
         eprintln!("skipping RISC-V direct boot: OpenSBI fw_dynamic is unavailable");
         return;
@@ -43,6 +57,17 @@ fn riscv_direct_kernel_receives_hart_and_device_tree_and_powers_off() {
     let machine = directory.path().join("machine.json");
     // Reject a nonzero hart ID or an a1 pointer that does not address an FDT.
     let mut words = vec![0, 0x0005a303, 0xedfe13b7, 0xdd038393, 0, 0x100002b7];
+    if reset {
+        // Keep a marker outside the boot images. The second boot must see it
+        // in the same RAM, and return through OpenSBI with a fresh device tree.
+        words.extend([0x80100e37, 0x020e1e13, 0x020e5e13, 0x000e4e83]);
+        let branch = words.len();
+        words.push(0);
+        words.extend([
+            0x00100e93, 0x01de0023, 0x001002b7, 0x00007337, 0x77730313, 0x0062a023, 0x0000006f,
+        ]);
+        words[branch] = branch_ne(branch, words.len(), 29, 0);
+    }
     for byte in b"direct-kernel-ok\n" {
         words.extend([
             (*byte as u32) << 20 | 6 << 7 | 0x13,
@@ -53,15 +78,7 @@ fn riscv_direct_kernel_receives_hart_and_device_tree_and_powers_off() {
     let failure = words.len();
     words.extend([0x001002b7, 0x00003337, 0x33330313, 0x0062a023, 0x0000006f]);
     for (index, first, second) in [(0, 10, 0), (4, 6, 7)] {
-        let offset = ((failure - index) * 4) as u32;
-        words[index] = (offset >> 12 & 1) << 31
-            | (offset >> 5 & 0x3f) << 25
-            | second << 20
-            | first << 15
-            | 1 << 12
-            | (offset >> 1 & 15) << 8
-            | (offset >> 11 & 1) << 7
-            | 0x63;
+        words[index] = branch_ne(index, failure, first, second);
     }
     std::fs::write(
         &kernel,
@@ -76,6 +93,7 @@ fn riscv_direct_kernel_receives_hart_and_device_tree_and_powers_off() {
         serde_json::to_vec(&serde_json::json!({
             "name": "vmlab:p3b/direct", "arch": "riscv64", "machine": "virt", "accel": "tcg",
             "vcpus": 1, "memory_mib": 128,
+            "exit_on_reset": exit_on_reset,
             "boot": { "kind": "kernel", "kernel": kernel, "cmdline": "console=ttyS0" },
             "disks": [], "nics": [], "ports": [], "serial_log": serial,
         }))
@@ -112,11 +130,9 @@ fn riscv_direct_kernel_receives_hart_and_device_tree_and_powers_off() {
         assert!(start.elapsed() < timeout);
         std::thread::sleep(Duration::from_millis(25));
     }
+    let mut client = Client::connect(control).unwrap();
     assert!(matches!(
-        Client::connect(control)
-            .unwrap()
-            .call(Control::Resume)
-            .unwrap(),
+        client.call(Control::Resume).unwrap(),
         Outcome::Ok {
             status: Some(RunState::Running)
         }
@@ -131,9 +147,37 @@ fn riscv_direct_kernel_receives_hart_and_device_tree_and_powers_off() {
     let text = std::fs::read_to_string(serial).unwrap_or_default();
     let errors = std::fs::read_to_string(stderr).unwrap_or_default();
     assert!(
-        status.success() && text.contains("direct-kernel-ok"),
+        status.success() && text.contains("direct-kernel-ok") != (reset && exit_on_reset),
         "{status}\n{text}\n{errors}"
     );
+    let expected = if reset && exit_on_reset {
+        vmlab_hv_proto::control::ShutdownReason::GuestReset
+    } else {
+        vmlab_hv_proto::control::ShutdownReason::GuestShutdown
+    };
+    let mut shutdown = None;
+    let mut resets = 0;
+    while let Some(event) = client.wait_event().unwrap() {
+        match event {
+            vmlab_hv_proto::control::Event::Shutdown { reason } => shutdown = Some(reason),
+            vmlab_hv_proto::control::Event::Reset => resets += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(shutdown, Some(expected));
+    assert_eq!(resets, usize::from(reset && !exit_on_reset));
+}
+
+fn branch_ne(index: usize, target: usize, first: u32, second: u32) -> u32 {
+    let offset = ((target - index) * 4) as u32;
+    (offset >> 12 & 1) << 31
+        | (offset >> 5 & 0x3f) << 25
+        | second << 20
+        | first << 15
+        | 1 << 12
+        | (offset >> 1 & 15) << 8
+        | (offset >> 11 & 1) << 7
+        | 0x63
 }
 
 fn template() -> Option<std::path::PathBuf> {

@@ -27,6 +27,14 @@ use vmlab_hv_proto::{
 use vmlab_hv_tcg::{CpuState, Riscv64, Value};
 
 type Cpu = Riscv64<PhysicalMemory>;
+const RESETTING: u32 = u32::MAX;
+
+struct ResetState {
+    cpus: Vec<CpuState>,
+    devices: SavedSections,
+    pci: Vec<(u8, Vec<(u64, bool)>)>,
+    boot: super::BootImages,
+}
 
 struct Failure {
     code: ErrorCode,
@@ -110,6 +118,8 @@ pub(super) struct Shared {
     display: Mutex<Option<Arc<vmlab_hv_display::DisplayServer>>>,
     rtc: Arc<Mutex<vmlab_hv_devices::riscv::rtc::GoldfishRtc>>,
     snapshots_enabled: bool,
+    exit_on_reset: bool,
+    reset: ResetState,
 }
 
 type Handler = Box<dyn Fn(Command) -> Outcome + Send + Sync>;
@@ -146,8 +156,23 @@ impl VirtVm {
         gpu: Option<vmlab_hv_devices::virtio::gpu::Gpu>,
         xhci: Option<Arc<Mutex<vmlab_hv_devices::usb::XhciController>>>,
         rtc: Arc<Mutex<vmlab_hv_devices::riscv::rtc::GoldfishRtc>>,
+        boot: super::BootImages,
     ) -> Result<Self, String> {
         let digest = Sha256::digest(serde_json::to_vec(desc).map_err(|e| e.to_string())?).into();
+        let mut devices = SavedSections::default();
+        for node in &nodes {
+            if matches!(node, DeviceNode::Plain(_)) {
+                for (key, state) in node.save()? {
+                    devices.insert(key, state);
+                }
+            }
+        }
+        let reset = ResetState {
+            cpus: cpus.iter().map(|cpu| cpu.lock().save_state()).collect(),
+            devices,
+            pci: pci.lock().save_bar_states(),
+            boot,
+        };
         let shared = Arc::new(Shared {
             control: Mutex::new(RunControl {
                 state: RunState::Paused,
@@ -176,6 +201,8 @@ impl VirtVm {
                 && desc.disks.iter().all(|disk| {
                     disk.read_only || disk.format == vmlab_hv_proto::machine::DiskFormat::Qcow2
                 }),
+            exit_on_reset: desc.exit_on_reset,
+            reset,
         });
         let mut vm = Self {
             shared,
@@ -413,6 +440,27 @@ impl Shared {
                 xhci.lock().poll();
             }
             let shutdown = self.shutdown.load(Ordering::SeqCst);
+            if shutdown == RESETTING {
+                let mut control = self.control.lock();
+                if control.exit.is_none() {
+                    self.changed
+                        .wait_for(&mut control, Duration::from_millis(1));
+                }
+                continue;
+            }
+            if shutdown == 0x7777 && !self.exit_on_reset {
+                if self
+                    .shutdown
+                    .compare_exchange(0x7777, RESETTING, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let _operation = self.operation.lock();
+                    if let Err(error) = self.warm_reset() {
+                        self.exit(ExitReason::Error(format!("system reset: {error}")));
+                    }
+                }
+                continue;
+            }
             if shutdown != 0 {
                 self.exit(if shutdown & 0xffff == 0x3333 {
                     ExitReason::Error(format!("SiFive test failed: {:#x}", shutdown >> 16))
@@ -442,6 +490,62 @@ impl Shared {
                 _ => {}
             }
         }
+    }
+
+    fn warm_reset(&self) -> Result<(), String> {
+        let was = self.control.lock().state;
+        self.pause()?;
+        for node in &self.nodes {
+            match node {
+                DeviceNode::Plain(device) => device.lock().quiesce(),
+                DeviceNode::Resettable(device) => device.lock().quiesce(),
+                DeviceNode::Virtio(device) => device.lock().quiesce(),
+            }
+        }
+        let result = (|| {
+            for node in &self.nodes {
+                match node {
+                    DeviceNode::Plain(_) => {}
+                    DeviceNode::Resettable(device) => {
+                        device.lock().reset().map_err(|e| e.to_string())?;
+                    }
+                    DeviceNode::Virtio(device) => {
+                        device.lock().reset().map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            for node in &self.nodes {
+                if matches!(node, DeviceNode::Plain(_)) {
+                    node.restore(&self.reset.devices)?;
+                }
+            }
+            let ticks = self.control.lock().clock_ticks;
+            self.clint.lock().advance(ticks);
+            self.rtc.lock().advance(ticks.saturating_mul(100));
+            self.pci.lock().restore_bar_states(&self.reset.pci)?;
+            // Firmware and direct-boot payloads act as reset ROMs. Other RAM,
+            // disk contents, and persistent flash variables survive a reboot.
+            self.reset.boot.restore(&self.memory.ram)?;
+            self.memory.invalidate_code();
+            for (cpu, state) in self.cpus.iter().zip(&self.reset.cpus) {
+                cpu.lock().restore_state(state).map_err(|e| e.to_string())?;
+            }
+            Ok::<_, String>(())
+        })();
+        for node in &self.nodes {
+            match node {
+                DeviceNode::Plain(device) => device.lock().resume_snapshot(),
+                DeviceNode::Resettable(device) => device.lock().resume_snapshot(),
+                DeviceNode::Virtio(device) => device.lock().resume_snapshot(),
+            }
+        }
+        result?;
+        self.shutdown.store(0, Ordering::SeqCst);
+        self.emit(Event::Reset);
+        if was == RunState::Running {
+            self.resume()?;
+        }
+        Ok(())
     }
 
     fn command(&self, command: Command) -> Outcome {
@@ -650,6 +754,7 @@ impl Shared {
         if regions != [(RAM_BASE, self.memory.size)] || !reader.done() {
             return Err("snapshot RAM layout differs".into());
         }
+        self.memory.invalidate_code();
         for (hart, cpu) in self.cpus.iter().enumerate() {
             let state: CpuState = serde_json::from_slice(
                 sections
@@ -690,6 +795,76 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_reset_restores_boot_state_and_preserves_ram_and_time() {
+        use crate::bus::MmioBus;
+        use vmlab_hv_devices::{GuestMemory, riscv::PlicIrqs};
+        use vmlab_hv_tcg::Memory;
+
+        let kernel = tempfile::NamedTempFile::new().unwrap();
+        let desc: MachineDescription = serde_json::from_value(serde_json::json!({
+            "name": "reset-test", "arch": "riscv64", "machine": "virt", "accel": "tcg",
+            "vcpus": 1, "memory_mib": 128,
+            "boot": { "kind": "kernel", "kernel": kernel.path(), "cmdline": "" },
+            "disks": [], "nics": [], "ports": [],
+            "serial_log": kernel.path().with_extension("serial.log")
+        }))
+        .unwrap();
+        let ram = GuestMemory::from_ranges(&[(GuestAddress(RAM_BASE), 4096)]).unwrap();
+        let pci = Arc::new(Mutex::new(PciRoot::q35(0x4_0000_0000)));
+        let mut memory = PhysicalMemory::new(ram, 4096, MmioBus::new(), pci.clone());
+        let mut cpu = Cpu::new(memory.clone()).unwrap();
+        cpu.set_pc(RAM_BASE);
+        cpu.set_gpr(1, 7).unwrap();
+        let clint = Arc::new(Mutex::new(Clint::new(1)));
+        let plic = Arc::new(Mutex::new(Plic::new(1)));
+        let rtc = Arc::new(Mutex::new(vmlab_hv_devices::riscv::rtc::GoldfishRtc::new(
+            0,
+            PlicIrqs::new(plic.clone()).line(11),
+        )));
+        let shutdown = Arc::new(AtomicU32::new(RESETTING));
+        let vm = VirtVm::new(
+            &desc,
+            vec![Mutex::new(cpu)],
+            memory.clone(),
+            clint.clone(),
+            plic.clone(),
+            shutdown.clone(),
+            vec![
+                DeviceNode::Plain(clint.clone()),
+                DeviceNode::Plain(plic),
+                DeviceNode::Plain(rtc.clone()),
+            ],
+            Vec::new(),
+            pci,
+            None,
+            None,
+            rtc,
+            super::super::BootImages {
+                files: Vec::new(),
+                data: vec![(RAM_BASE, vec![1, 2, 3, 4])],
+            },
+        )
+        .unwrap();
+        vm.shared.cpus[0].lock().set_gpr(1, 99).unwrap();
+        vm.shared.cpus[0].lock().set_pc(RAM_BASE + 256);
+        vm.shared.control.lock().clock_ticks = 1234;
+        clint.lock().advance(1234);
+        memory.write(RAM_BASE + 128, &[9]).unwrap();
+        vm.shared.warm_reset().unwrap();
+        assert_eq!(vm.shared.cpus[0].lock().gpr(1).unwrap(), 7);
+        assert_eq!(vm.shared.cpus[0].lock().pc().unwrap(), RAM_BASE);
+        assert_eq!(vm.shared.control.lock().state, RunState::Paused);
+        assert_eq!(clint.lock().time(), 1234);
+        assert_eq!(shutdown.load(Ordering::SeqCst), 0);
+        let mut bytes = [0; 4];
+        memory.read(RAM_BASE, &mut bytes).unwrap();
+        assert_eq!(bytes, [1, 2, 3, 4]);
+        memory.read(RAM_BASE + 128, &mut bytes[..1]).unwrap();
+        assert_eq!(bytes[0], 9);
+    }
+
     #[test]
     fn snapshot_errors_keep_protocol_codes_and_versions() {
         assert!(matches!(

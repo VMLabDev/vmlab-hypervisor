@@ -5,7 +5,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use vmlab_hv_devices::{BusDevice, DeviceError, Snapshot};
+use vmlab_hv_devices::{BusDevice, DeviceError, Resettable, Snapshot};
 
 const SIZE: usize = 32 << 20;
 const BLOCK: usize = 256 << 10;
@@ -241,6 +241,18 @@ impl BusDevice for Flash {
     }
 }
 
+impl Resettable for Flash {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        self.state.command = Command::Array;
+        self.state.status = 0x80;
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("flash generation exhausted");
+        Ok(())
+    }
+}
+
 impl Snapshot for Flash {
     fn state_id(&self) -> String {
         self.id.clone()
@@ -336,6 +348,20 @@ mod tests {
         flash.write(0, &[0xff]);
         assert_eq!(word(&mut flash, 0x104), u32::MAX);
     }
+    #[test]
+    fn reset_preserves_programmed_vars_and_returns_to_array_mode() {
+        let mut flash = device(true);
+        flash.write(0, &[0x40]);
+        flash.write(0x100, &0x12345678u32.to_le_bytes());
+        flash.write(0, &[0x98]);
+        assert!(flash.code_generation().is_none());
+        flash.reset().unwrap();
+        assert_eq!(word(&mut flash, 0x100), 0x12345678);
+        assert!(flash.code_generation().is_some());
+        flash.write(0, &[0x70]);
+        assert_eq!(word(&mut flash, 0), 0x0080_0080);
+    }
+
     #[test]
     fn read_only_rejects_program_and_snapshot_restores_command() {
         let mut flash = device(false);
