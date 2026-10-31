@@ -6,6 +6,8 @@ use kvm_ioctls::{Cap, MsrExitReason, VcpuFd};
 use serde::Deserialize;
 use vmlab_hv_proto::machine::{MachineDescription, MsrPolicy};
 
+const APIC_BUS_KHZ: u32 = 1_000_000;
+
 #[derive(Deserialize)]
 struct Capture {
     leaves: Vec<Leaf>,
@@ -133,7 +135,7 @@ pub(crate) fn configure_tsc(
         entries.push(kvm_cpuid_entry2 {
             function: 0x40000010,
             eax: khz,
-            ebx: khz,
+            ebx: APIC_BUS_KHZ,
             ..Default::default()
         });
     }
@@ -366,7 +368,7 @@ mod tests {
                 Some("Skylake-Client-v4"),
             )
             .unwrap();
-        let khz = cpu.get_tsc_khz().unwrap();
+        let khz = cpu.get_tsc_khz().unwrap() / 2;
         let desc: MachineDescription = serde_json::from_value(serde_json::json!({
             "name":"tsc", "arch":"x86_64", "accel":"kvm", "vcpus":4, "memory_mib":16,
             "boot":{"kind":"kernel","kernel":"unused","cmdline":""},
@@ -381,7 +383,7 @@ mod tests {
             .iter()
             .find(|entry| entry.function == 0x40000010)
             .unwrap();
-        assert_eq!((leaf.eax, leaf.ebx), (khz, khz));
+        assert_eq!((leaf.eax, leaf.ebx), (khz, 1_000_000));
         assert_ne!(
             cpuid
                 .as_slice()

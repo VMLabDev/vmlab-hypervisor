@@ -21,7 +21,7 @@ The runtime model masks HLE and RTM, retains the Intel vendor and KVM
 signature, and adjusts APIC IDs, cache sharing, and topology for the requested
 vCPU count. KVM controls OSXSAVE according to guest CR4.
 
-The QEMU frequency leaf reports TSC kHz in EAX and 1,000,000 in EBX. The
-macOS phase specification requires both EAX and EBX to equal KVM's actual
-TSC kHz. vmlab-hv follows that specification; EBX is an intentional difference
-from this reference.
+The QEMU frequency leaf reports TSC kHz in EAX and the local APIC bus rate,
+1,000,000 kHz, in EBX. vmlab-hv uses the actual `KVM_GET_TSC_KHZ` result in
+EAX and the captured APIC rate in EBX. The owner corrected the original
+specification, which incorrectly required both fields to contain TSC kHz.
