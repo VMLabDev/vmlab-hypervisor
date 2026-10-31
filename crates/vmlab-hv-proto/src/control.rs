@@ -44,6 +44,22 @@ pub enum Command {
     Powerdown,
     /// Stop the machine immediately and exit the process.
     Quit,
+    /// Hot-plug a device. The fields carry what vmlab passes QEMU's
+    /// `usb-host` today: `driver` selects the device model, `bus` names the
+    /// controller root hub (`usbx.0`), and `hostbus`/`hostaddr`/`hostport`
+    /// pin the host device (address plus physical port path).
+    DeviceAdd {
+        id: String,
+        driver: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bus: Option<String>,
+        hostbus: u32,
+        hostaddr: u32,
+        hostport: String,
+    },
+    /// Unplug the device with id `id`; the server confirms with a
+    /// `device_deleted` event once the device is back on the host.
+    DeviceDel { id: String },
     SnapshotSave {
         name: String,
     },
@@ -89,6 +105,8 @@ pub enum ErrorCode {
     InvalidState,
     /// The machine lacks the capability the command needs.
     Unsupported,
+    /// No hot-plugged device carries the id the command named.
+    DeviceNotFound,
     SnapshotNotFound,
     /// The snapshot's device state has an incompatible major version.
     SnapshotIncompatible,
@@ -113,6 +131,9 @@ pub enum Event {
     Resumed,
     Suspend,
     Wakeup,
+    /// A hot-plugged device left the machine: after `device_del`, or when
+    /// the host device itself was unplugged. QEMU's DEVICE_DELETED.
+    DeviceDeleted { id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
