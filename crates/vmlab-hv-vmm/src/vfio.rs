@@ -240,6 +240,24 @@ fn irq_index(mode: InterruptMode) -> u32 {
     }
 }
 
+fn event_pending(
+    active: InterruptMode,
+    requested: InterruptMode,
+    events: &[EventFd],
+    vector: usize,
+) -> bool {
+    active == requested
+        && events.get(vector).is_some_and(|event| {
+            let mut fd = libc::pollfd {
+                fd: event.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: fd points to one valid pollfd, and timeout zero cannot block.
+            unsafe { libc::poll(&mut fd, 1, 0) > 0 && fd.revents & libc::POLLIN != 0 }
+        })
+}
+
 impl Backend for Host {
     fn read(&self, region: u8, offset: u64, data: &mut [u8]) {
         self.device.region_read(u32::from(region), data, offset);
@@ -352,16 +370,8 @@ impl Backend for Host {
         Ok(())
     }
 
-    fn pending(&self, vector: usize) -> bool {
-        self.events.get(vector).is_some_and(|event| {
-            let mut fd = libc::pollfd {
-                fd: event.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY: fd points to one valid pollfd, and timeout zero cannot block.
-            unsafe { libc::poll(&mut fd, 1, 0) > 0 && fd.revents & libc::POLLIN != 0 }
-        })
+    fn pending(&self, mode: InterruptMode, vector: usize) -> bool {
+        event_pending(self.mode, mode, &self.events, vector)
     }
 
     fn interrupts(
@@ -586,6 +596,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn intx_or_msi_events_never_set_msix_pending_bits() {
+        let events = [EventFd::new(libc::EFD_CLOEXEC | libc::EFD_NONBLOCK).unwrap()];
+        events[0].write(1).unwrap();
+        assert!(!event_pending(
+            InterruptMode::Intx,
+            InterruptMode::Msix,
+            &events,
+            0
+        ));
+        assert!(!event_pending(
+            InterruptMode::Msi,
+            InterruptMode::Msix,
+            &events,
+            0
+        ));
+        assert!(event_pending(
+            InterruptMode::Msix,
+            InterruptMode::Msix,
+            &events,
+            0
+        ));
+        assert!(!event_pending(
+            InterruptMode::Msix,
+            InterruptMode::Msix,
+            &events,
+            1
+        ));
+        assert_eq!(events[0].read().unwrap(), 1);
+        assert!(!event_pending(
+            InterruptMode::Msix,
+            InterruptMode::Msix,
+            &events,
+            0
+        ));
+    }
+
+    #[test]
     fn firmware_bar_sizing_and_relocation_reach_the_vfio_mapping_backend() {
         use crate::pci::PciRoot;
         use vmlab_hv_devices::PciDevice;
@@ -607,7 +654,7 @@ mod tests {
             ) -> Result<(), String> {
                 Ok(())
             }
-            fn pending(&self, _: usize) -> bool {
+            fn pending(&self, _: InterruptMode, _: usize) -> bool {
                 false
             }
             fn reset(&mut self) -> Result<(), String> {

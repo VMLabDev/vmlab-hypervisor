@@ -11,7 +11,7 @@ pub trait Backend: Send {
         mode: InterruptMode,
         messages: &[Option<MsiMessage>],
     ) -> Result<(), String>;
-    fn pending(&self, vector: usize) -> bool;
+    fn pending(&self, mode: InterruptMode, vector: usize) -> bool;
     fn reset(&mut self) -> Result<(), String>;
 }
 
@@ -281,7 +281,7 @@ impl<B: Backend> PciDevice for VfioPci<B> {
                     16
                 };
             if self.config[cap + 3] & 1 != 0 && offset == pending {
-                return u32::from(self.backend.pending(0));
+                return u32::from(self.backend.pending(InterruptMode::Msi, 0));
             }
         }
         let mut value: [u8; 4] = self.config[offset..offset + 4].try_into().unwrap();
@@ -408,8 +408,10 @@ impl<B: Backend> PciDevice for VfioPci<B> {
                 {
                     let first = (at - x.pba) as usize * 8;
                     *byte = (0..8).fold(0, |bits, b| {
-                        bits | (u8::from(first + b < x.count && self.backend.pending(first + b))
-                            << b)
+                        bits | (u8::from(
+                            first + b < x.count
+                                && self.backend.pending(InterruptMode::Msix, first + b),
+                        ) << b)
                     });
                     continue;
                 }
@@ -558,7 +560,7 @@ mod tests {
                 .push((mode, messages.to_vec()));
             Ok(())
         }
-        fn pending(&self, vector: usize) -> bool {
+        fn pending(&self, _: InterruptMode, vector: usize) -> bool {
             vector == 1
         }
         fn reset(&mut self) -> Result<(), String> {
