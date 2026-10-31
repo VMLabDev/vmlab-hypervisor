@@ -17,6 +17,7 @@ regression check (D2). TCG baseline method and first numbers:
 | `just bench-run backend='qemu' arch='all' vcpus='1,4' repeats='3' guest='debian-13'` | run the TCG suite, append to the history |
 | `just bench-run-kvm backend='qemu' guest='ubuntu-26.04' repeats='3'` | run the x86_64 KVM suite (guest `ubuntu-26.04` or `windows-10`; vcpus defaults to the template's) |
 | `just bench-run-g2g backend='qemu'` | the x86_64 guest-to-guest net pair (two VMs at once) |
+| `just bench-run qemu riscv64 1 3 flat-rv64gc` | run the flat-image QEMU TCG baseline for the two warm interpreter workloads |
 | `just bench-report` | print the per-workload trend, and hv-vs-qemu against the phase's bar |
 | `just bench-check` | fail (exit 1) if the latest run of a backend regressed beyond measured noise |
 | `just bench-test` | the suite's own unit tests |
@@ -127,6 +128,28 @@ official CoreMark score. Measurements include guest instruction counts,
 execution and initialization time, native and training instructions, slow
 continuations, and cache evictions. Backend selection clears inherited debug
 and execution flags. Guest failures and CRC mismatches fail the run.
+
+### QEMU TCG on the flat images
+
+`just bench-run qemu riscv64 1 3 flat-rv64gc` records the `qemu` backend
+for the same two warm workload keys the `interpreter-specialized` backend
+owns. The interpreter binaries run unchanged: QEMU boots each ELF on the
+minimal `spike` machine (`-bios none`, one `rv64` hart, TCG, no devices
+the images touch), whose HTIF device honours the images' existing `tohost`
+exit store — `bench/rv64/start.S` only grew the `fromhost` symbol and the
+8-byte symbol sizes QEMU's discovery needs, symbol-table changes that leave
+the executed stream and every instruction count identical (the run asserts
+the loop's 3N+overhead count against the interpreter). The scalar loop
+exists as an image too (`bench/rv64/loop.S`): the three encodings
+`examples/micro.rs` writes in `loop` mode, behind a minimal `li x2` stub at
+the common 0x80000000 entry. A one-iteration build measures QEMU's own
+spawn-plus-teardown; its median is subtracted from every sample and both
+numbers land in the record. MIPS uses the instruction count of the same
+flat image measured once under the interpreter, so interpreter and QEMU
+lines share workload keys, binaries, stop condition and unit, and
+`bench-report` prints the D1 ratio directly. QEMU TCG translates as it
+executes; its numbers cannot exclude a training phase the way the warm
+interpreter numbers do, and the records say so (`warmup_excluded: false`).
 
 - **Pinning**: the VM process tree runs under `taskset -c` on full physical
   cores in the top half of the topology (smp1 → e.g. `16-19`, smp4 →

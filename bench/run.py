@@ -1027,7 +1027,8 @@ def sweep_stale_vms():
 
 def main(argv=None):
     args = parse_args(argv)
-    if args.backend in ("interpreter", "interpreter-reference", "interpreter-specialized"):
+    if args.backend in ("interpreter", "interpreter-reference", "interpreter-specialized") or (
+            args.backend == "qemu" and args.guest == "flat-rv64gc"):
         import micro
         commit, dirty = git_commit()
         return micro.run(args, commit, dirty, os.uname().nodename, log)
