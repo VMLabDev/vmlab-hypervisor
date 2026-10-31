@@ -301,10 +301,13 @@ impl Hda {
             let buffer = u64::from_le_bytes(descriptor[0..8].try_into().unwrap());
             let length = u32::from_le_bytes(descriptor[8..12].try_into().unwrap());
             let flags = u32::from_le_bytes(descriptor[12..16].try_into().unwrap());
+
+            // The buffer address needs no 128-byte alignment: Linux's
+            // bdl_pos_adj writes a leading one-frame entry so the second
+            // entry starts at base+4, and real ICH9 walks it happily.
             if length == 0
                 || !length.is_multiple_of(format.frame_bytes() as u32)
                 || stream.offset >= length
-                || buffer & 127 != 0
             {
                 return Err(DeviceError::Memory("invalid HDA buffer descriptor".into()));
             }
@@ -530,6 +533,7 @@ impl BusDevice for Hda {
     fn write(&mut self, offset: u64, data: &[u8]) {
         let old_control = self.regs[8];
         let old_run = [self.regs[0x80], self.regs[0xa0]];
+
         for (i, &byte) in data.iter().enumerate() {
             let Some(address) = offset.checked_add(i as u64).filter(|n| *n < REGS as u64) else {
                 continue;

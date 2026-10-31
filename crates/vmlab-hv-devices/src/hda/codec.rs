@@ -146,7 +146,11 @@ impl Codec {
             (3, 9) => 0x0040_0501, // stereo pin, connection, power
             (4, 9) => 0x0010_051b, // stereo input, amp, connection, override, power
             (5, 9) => 0x0040_0401,
-            (1 | 2 | 4, 0xa) => (1 << 16) | (1 << 5) | (1 << 6) | (1 << 8),
+            // AC_PAR_PCM: bits 0-10 sample rates (44.1, 48, 96 kHz), bit 17
+            // 16-bit samples. Bits 0-4 and 16-20 are widths: 1<<16 is 8-bit,
+            // which the kernel maps to SNDRV_PCM_FORMAT_U8 and no 16-bit
+            // guest format survives refinement.
+            (1 | 2 | 4, 0xa) => (1 << 17) | (1 << 5) | (1 << 6) | (1 << 8),
             (1 | 2 | 4, 0xb) => 1,
             (3, 0xc) => 0x10,
             (5, 0xc) => 0x20,
