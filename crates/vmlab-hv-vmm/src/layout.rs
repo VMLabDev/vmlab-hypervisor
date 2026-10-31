@@ -44,6 +44,15 @@ pub struct MemLayout {
 }
 
 impl MemLayout {
+    pub fn pc(ram_mib: u64) -> Result<Self, String> {
+        let mut layout = Self::new(ram_mib)?;
+        let low = layout.low_ram_top();
+        layout.regions = vec![(0, 0xa0000), (0x100000, low - 0x100000)];
+        if layout.ram > low {
+            layout.regions.push((PCI_HOLE_END, layout.ram - low));
+        }
+        Ok(layout)
+    }
     /// Q35 reserves the legacy VGA/ROM aperture and caps low RAM at 2 GiB.
     pub fn q35(ram_mib: u64) -> Result<Self, String> {
         let mut layout = Self::new(ram_mib)?;

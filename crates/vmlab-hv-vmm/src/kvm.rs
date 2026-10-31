@@ -54,6 +54,40 @@ impl KvmVm {
         self.kvm.get_max_vcpus()
     }
 
+    pub fn processor_id(
+        &self,
+        count: u32,
+        policy: vmlab_hv_proto::machine::CpuPolicy,
+        model: Option<&str>,
+    ) -> Result<[u8; 8], VmmError> {
+        let mut cpuid = self.cpuid.clone();
+        filter_cpuid(&mut cpuid, 0, count, policy)?;
+        if model == Some("pentium3") {
+            pentium3_cpuid(&mut cpuid, 0)?;
+        }
+        let leaf = cpuid
+            .as_slice()
+            .iter()
+            .find(|entry| entry.function == 1)
+            .ok_or_else(|| VmmError::Other("CPUID lacks processor identity".into()))?;
+        let mut bytes = [0; 8];
+        bytes[..4].copy_from_slice(&leaf.eax.to_le_bytes());
+        bytes[4..].copy_from_slice(&leaf.edx.to_le_bytes());
+        Ok(bytes)
+    }
+
+    pub fn physical_address_bits(&self, model: Option<&str>) -> u8 {
+        if model == Some("pentium3") {
+            32
+        } else {
+            self.cpuid
+                .as_slice()
+                .iter()
+                .find(|entry| entry.function == 0x8000_0008)
+                .map_or(36, |leaf| (leaf.eax & 0xff) as u8)
+        }
+    }
+
     /// SeaBIOS places this platform's small prefetchable BARs near the top
     /// of its usable physical address space, with padding when high RAM exists.
     pub(crate) fn seabios_pci64_base(&self, high_ram: bool) -> u64 {
@@ -91,12 +125,25 @@ impl KvmVm {
         count: u32,
         policy: vmlab_hv_proto::machine::CpuPolicy,
     ) -> Result<VcpuFd, VmmError> {
+        self.create_vcpu_with_model(id, count, policy, None)
+    }
+
+    pub fn create_vcpu_with_model(
+        &self,
+        id: u8,
+        count: u32,
+        policy: vmlab_hv_proto::machine::CpuPolicy,
+        model: Option<&str>,
+    ) -> Result<VcpuFd, VmmError> {
         let vcpu = self
             .vm
             .create_vcpu(id as u64)
             .map_err(|e| E::ioctl("KVM_CREATE_VCPU", e))?;
         let mut cpuid = self.cpuid.clone();
         filter_cpuid(&mut cpuid, id, count, policy)?;
+        if model == Some("pentium3") {
+            pentium3_cpuid(&mut cpuid, id)?;
+        }
         vcpu.set_cpuid2(&cpuid)
             .map_err(|e| E::ioctl("KVM_SET_CPUID2", e))?;
         Ok(vcpu)
@@ -122,6 +169,52 @@ impl KvmVm {
             Err(e) => Err(E::ioctl("KVM_SIGNAL_MSI", e)),
         }
     }
+}
+
+fn pentium3_cpuid(cpuid: &mut CpuId, id: u8) -> Result<(), VmmError> {
+    let mut entries = cpuid
+        .as_slice()
+        .iter()
+        .filter(|entry| entry.function <= 3 || (0x4000_0000..0x5000_0000).contains(&entry.function))
+        .copied()
+        .collect::<Vec<_>>();
+    for entry in &mut entries {
+        match entry.function {
+            0 => {
+                entry.eax = 3;
+                entry.ebx = 0x756e6547;
+                entry.edx = 0x49656e69;
+                entry.ecx = 0x6c65746e;
+            }
+            1 => {
+                entry.eax = 0x673;
+                entry.ebx = u32::from(id) << 24;
+                entry.ecx = 1 << 31;
+                entry.edx &= 0x0383_fbff;
+            }
+            2 => {
+                entry.eax = 0x0302_0101;
+                entry.ebx = 0;
+                entry.ecx = 0;
+                entry.edx = 0x0c04_0843;
+            }
+            3 => {
+                entry.eax = 0;
+                entry.ebx = 0;
+                entry.ecx = 0;
+                entry.edx = 0;
+            }
+            _ => {}
+        }
+    }
+    entries.push(kvm_bindings::kvm_cpuid_entry2 {
+        function: 0x8000_0000,
+        eax: 0x8000_0000,
+        ..Default::default()
+    });
+    *cpuid = CpuId::from_entries(&entries)
+        .map_err(|e| VmmError::Other(format!("pentium3 CPUID: {e}")))?;
+    Ok(())
 }
 
 /// One socket, `count` cores, one thread per core. Preserve KVM's supported
@@ -293,6 +386,38 @@ impl vmlab_hv_devices::MsiSink for KvmMsiSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pentium3_cpuid_removes_64_bit_and_modern_features() {
+        let mut cpuid =
+            CpuId::from_entries(&[0, 1, 2, 3, 4, 7, 0x80000000, 0x80000001, 0x80000008].map(
+                |function| kvm_bindings::kvm_cpuid_entry2 {
+                    function,
+                    eax: u32::MAX,
+                    ebx: u32::MAX,
+                    ecx: u32::MAX,
+                    edx: u32::MAX,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        pentium3_cpuid(&mut cpuid, 1).unwrap();
+        let leaf = |function| {
+            cpuid
+                .as_slice()
+                .iter()
+                .find(|entry| entry.function == function)
+        };
+        assert_eq!(leaf(0).unwrap().eax, 3);
+        assert_eq!(leaf(1).unwrap().eax, 0x673);
+        assert_eq!(leaf(1).unwrap().edx, 0x0383fbff);
+        assert_eq!(leaf(1).unwrap().ecx, 1 << 31);
+        assert_eq!(leaf(1).unwrap().ebx, 1 << 24);
+        assert_eq!(leaf(0x80000000).unwrap().eax, 0x80000000);
+        for absent in [4, 7, 0x80000001, 0x80000008] {
+            assert!(leaf(absent).is_none());
+        }
+    }
 
     #[test]
     fn host_cpu_policy_includes_the_native_brand_string() {

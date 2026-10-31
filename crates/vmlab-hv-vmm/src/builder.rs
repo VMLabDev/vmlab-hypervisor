@@ -66,8 +66,10 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
     }
     MemLayout::new(desc.memory_mib).map_err(VmmError::InvalidMachine)?;
     crate::clock::rtc_base(desc.rtc_base.as_deref())?;
+    validate_legacy_features(desc)?;
     for disk in &desc.disks {
-        if (disk.path.is_none() && !(disk.bus == DiskBus::Ahci && disk.cdrom))
+        if (disk.path.is_none()
+            && !(matches!(disk.bus, DiskBus::Ahci | DiskBus::Ide) && disk.cdrom))
             || disk
                 .path
                 .as_ref()
@@ -75,7 +77,7 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
             || (disk.cdrom && disk.vmstate)
         {
             return Err(VmmError::InvalidMachine(format!(
-                "disk `{}` requires an image path; only a non-vmstate AHCI CD-ROM may be empty",
+                "disk `{}` requires an image path; only a non-vmstate CD-ROM may be empty",
                 disk.id
             )));
         }
@@ -104,7 +106,7 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
     let image = match (&desc.machine, &desc.boot) {
         (Machine::Microvm, Boot::Kernel { kernel, .. }) => kernel,
         (
-            Machine::Q35,
+            Machine::Q35 | Machine::Pc,
             Boot::Firmware {
                 firmware,
                 code,
@@ -136,7 +138,7 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
         }
         _ => {
             return Err(VmmError::InvalidMachine(
-                "microvm requires kernel boot; q35 requires firmware boot".into(),
+                "microvm requires kernel boot; q35 and pc require firmware boot".into(),
             ));
         }
     };
@@ -151,6 +153,9 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
 
 fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
     let mut used = std::collections::BTreeSet::from([(0, 0)]);
+    if desc.machine == Machine::Pc {
+        used.extend([(1, 0), (1, 1), (1, 2), (1, 3)]);
+    }
     let mut add = |address: Option<PciAddress>, name: &str| -> Result<(), VmmError> {
         let a = address.ok_or_else(|| {
             VmmError::InvalidMachine(format!("q35 {name} requires an explicit PCI address"))
@@ -188,6 +193,7 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
                     return Err(VmmError::InvalidMachine("CD-ROM must be read_only".into()));
                 }
             }
+            DiskBus::Ide => {}
         }
     }
     if !ports.is_empty() && desc.ahci_pci.is_none() {
@@ -203,7 +209,7 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
         }
         add(Some(a), "AHCI")?;
     }
-    if !desc.ports.is_empty() {
+    if desc.ports.iter().any(|port| port.transport.is_virtio()) {
         add(desc.console_pci, "virtio-serial")?;
     }
     for nic in &desc.nics {
@@ -265,6 +271,105 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
     Ok(())
 }
 
+fn validate_legacy_features(desc: &MachineDescription) -> Result<(), VmmError> {
+    use vmlab_hv_proto::machine::{DisplayDevice, NicModel};
+    let invalid = |reason: &str| Err(VmmError::InvalidMachine(reason.into()));
+    let pc = desc.machine == Machine::Pc;
+    if let Some(model) = desc.cpu_model.as_deref()
+        && (!pc || !matches!(model, "host" | "pentium3"))
+    {
+        return invalid("cpu_model requires pc and must be host or pentium3");
+    }
+    if desc.floppy.is_some() {
+        return invalid(if pc {
+            "pc floppy requires phase 4c"
+        } else {
+            "floppy requires machine=pc"
+        });
+    }
+    if pc {
+        if !matches!(
+            desc.boot,
+            Boot::Firmware {
+                firmware: FirmwareKind::Seabios,
+                ..
+            }
+        ) {
+            return invalid("pc requires SeaBIOS firmware boot");
+        }
+        if desc.tablet.is_some() || desc.usb.is_some() {
+            return invalid("pc UHCI tablet and USB require phase 4c");
+        }
+        if !desc.nics.is_empty() {
+            return invalid("pc networking requires phase 4b");
+        }
+        if desc.ahci_pci.is_some() || desc.disks.iter().any(|disk| disk.bus == DiskBus::Ahci) {
+            return invalid("pc uses PIIX IDE, not q35 AHCI");
+        }
+        if desc
+            .display
+            .as_ref()
+            .is_some_and(|display| display.device != DisplayDevice::StdVga)
+        {
+            return invalid("pc requires std-vga; Cirrus requires phase 4d");
+        }
+        if desc.audio.is_some() || desc.tpm.is_some() || !desc.vfio.is_empty() {
+            return invalid("audio, TPM and VFIO require machine=q35");
+        }
+    } else if desc.nics.iter().any(|nic| nic.model != NicModel::Virtio) {
+        return invalid("e1000 and pcnet require machine=pc and phase 4b");
+    }
+    if desc
+        .display
+        .as_ref()
+        .is_some_and(|display| display.device == DisplayDevice::CirrusVga)
+    {
+        return invalid("Cirrus requires machine=pc and phase 4d");
+    }
+    let mut slots = std::collections::BTreeSet::new();
+    for disk in &desc.disks {
+        if disk.bus == DiskBus::Ide {
+            if !pc {
+                return invalid("IDE requires machine=pc; IDE on q35 is unsupported");
+            }
+            if disk.channel.is_none_or(|channel| channel > 1)
+                || disk.unit.is_none_or(|unit| unit > 1)
+                || disk.pci.is_some()
+                || disk.port.is_some()
+            {
+                return invalid("IDE requires channel and unit in 0..=1, without pci or port");
+            }
+            if !slots.insert((disk.channel.unwrap(), disk.unit.unwrap())) {
+                return invalid("duplicate IDE slot; at most four IDE devices are supported");
+            }
+            if disk.cdrom && !disk.read_only {
+                return invalid("CD-ROM must be read_only");
+            }
+        } else if disk.channel.is_some() || disk.unit.is_some() {
+            return invalid("channel and unit require an IDE disk");
+        }
+    }
+    let mut coms = std::collections::BTreeSet::from([desc.serial_log_port.io_base()]);
+    let mut sockets = std::collections::BTreeSet::new();
+    for port in &desc.ports {
+        if !sockets.insert(&port.socket) {
+            return invalid("duplicate serial socket path");
+        }
+        if let Some(com) = port.transport.com_port() {
+            if !pc {
+                return invalid("ISA serial agent ports require machine=pc");
+            }
+            if !coms.insert(com.io_base()) {
+                return invalid("serial port is occupied by the log or another agent");
+            }
+        }
+    }
+    if !pc && !desc.serial_log_port.is_com1() {
+        return invalid("selectable serial log ports require machine=pc");
+    }
+    Ok(())
+}
+
 fn tablet_serial(address: PciAddress) -> String {
     format!(
         "28754-0000:{:02x}:{:02x}.{}-1",
@@ -292,6 +397,8 @@ pub fn build(
     }
 
     let q35 = desc.machine == Machine::Q35;
+    let pc = desc.machine == Machine::Pc;
+    let firmware_machine = q35 || pc;
     let ovmf = matches!(
         desc.boot,
         Boot::Firmware {
@@ -299,7 +406,9 @@ pub fn build(
             ..
         }
     );
-    let mut layout = if q35 {
+    let mut layout = if pc {
+        MemLayout::pc(desc.memory_mib)
+    } else if q35 {
         MemLayout::q35(desc.memory_mib)
     } else {
         MemLayout::new(desc.memory_mib)
@@ -326,13 +435,15 @@ pub fn build(
     }
     // A machine with shares hands its RAM to virtiofsd: back it with a
     // shared memfd. Everything else maps anonymous private memory.
-    let mut ram = if desc.shares.is_empty() {
+    let mut ram = if pc {
+        GuestRam::pc(layout.clone(), kvm.vm.clone())?
+    } else if desc.shares.is_empty() {
         GuestRam::anonymous(layout.clone())?
     } else {
         GuestRam::shared_memfd(layout.clone())?
     };
     register_memslots(&kvm.vm, &ram)?;
-    if q35 {
+    if firmware_machine {
         if !kvm.kvm.check_extension(kvm_ioctls::Cap::X86Smm) {
             return Err(VmmError::KvmCap("x86 SMM for SeaBIOS initialization"));
         }
@@ -370,7 +481,7 @@ pub fn build(
     // Buses and the PCI root.
     let mut io_bus = IoBus::new();
     let mut mmio_bus = MmioBus::new();
-    let pci_root = Arc::new(Mutex::new(if q35 {
+    let pci_root = Arc::new(Mutex::new(if firmware_machine {
         PciRoot::q35(layout.mmio64_base)
     } else {
         PciRoot::new(layout.mmio64_base)
@@ -379,7 +490,7 @@ pub fn build(
     io_bus
         .register(0xCF8, 8, config_io.clone())
         .map_err(VmmError::Other)?;
-    if !q35 {
+    if !firmware_machine {
         mmio_bus
             .register(
                 MMCONFIG_BASE,
@@ -394,7 +505,14 @@ pub fn build(
     // order for snapshot orchestration.
     let vm_fd = kvm.vm.clone();
     let msi: Arc<dyn MsiSink> = Arc::new(KvmMsiSink::new(vm_fd.clone()));
-    let chipset = if q35 {
+    let chipset = if pc {
+        Some(crate::chipset::Chipset::pc(
+            vm_fd.clone(),
+            &layout,
+            crate::clock::rtc_base(desc.rtc_base.as_deref())?,
+            ram.a20.as_ref().unwrap().clone(),
+        )?)
+    } else if q35 {
         Some(crate::chipset::Chipset::new(
             vm_fd.clone(),
             &layout,
@@ -418,13 +536,19 @@ pub fn build(
                 Arc::new(KvmIrqLine::new(vm_fd.clone(), gsi as u32)) as Arc<dyn IrqLine>
             }))
         });
+    let isa_irq = |id, gsi| -> Arc<dyn IrqLine> {
+        chipset.as_ref().map_or_else(
+            || Arc::new(KvmIrqLine::new(vm_fd.clone(), gsi)) as Arc<dyn IrqLine>,
+            |chipset| chipset.irq_source(id, gsi),
+        )
+    };
     let wiring = |address: Option<PciAddress>,
                   vectors: u16,
                   transitional: bool|
      -> Result<crate::factory::PciWiring, VmmError> {
         Ok(crate::factory::PciWiring {
             msi: msi.clone(),
-            intx: if q35 {
+            intx: if firmware_machine {
                 Some(
                     crate::q35::PirqRouter::line(
                         &pirqs,
@@ -439,14 +563,14 @@ pub fn build(
                 None
             },
             msix_vectors: vectors,
-            transitional: q35 && transitional,
+            transitional: firmware_machine && transitional,
         })
     };
     let place = |function: Arc<Mutex<dyn vmlab_hv_devices::PciDevice>>,
                  address: Option<PciAddress>|
      -> Result<(), VmmError> {
         let mut root = pci_root.lock();
-        if q35 {
+        if firmware_machine {
             let address = address.ok_or_else(|| {
                 VmmError::InvalidMachine("q35 function requires PCI address".into())
             })?;
@@ -461,7 +585,7 @@ pub fn build(
     let mut snap_disks = Vec::new();
     let mut snap_nodes = vec![DeviceNode::Plain(config_io)];
     let mut pflash = None;
-    if q35 {
+    if firmware_machine {
         let inventory = Arc::new(Mutex::new(
             vmlab_hv_devices::chipset::cpu::CpuInventory::new(desc.vcpus),
         ));
@@ -511,6 +635,10 @@ pub fn build(
         } else {
             crate::q35::map_bios(&kvm.vm, &image, first_slot)?
         });
+        if let Some(a20) = &ram.a20 {
+            a20.lock()
+                .attach_rom(ram.firmware_rom.as_ref().unwrap().clone(), first_slot)?;
+        }
         let pam = Arc::new(Mutex::new(if secure_smm {
             crate::q35::Pam::with_isolated_smram(&image, kvm.vm.clone(), first_slot + 1)?
         } else {
@@ -529,7 +657,14 @@ pub fn build(
         mmio_bus
             .register(0xc0000, 0x40000, pam.clone())
             .map_err(VmmError::Other)?;
-        let mut mch = crate::q35::Mch::new(pam);
+        if let Some(a20) = &ram.a20 {
+            a20.lock().attach_pam(pam.clone());
+        }
+        let mut mch = if pc {
+            crate::q35::Mch::i440fx(pam, layout.ram)
+        } else {
+            crate::q35::Mch::new(pam)
+        };
         if secure_smm {
             let control = crate::smm::SmramControl::new(physical_low_end, 64)?;
             let mut geometry = control.clone();
@@ -567,14 +702,26 @@ pub fn build(
         snap_nodes.push(DeviceNode::Plain(Arc::new(Mutex::new(
             crate::chipset::ChipsetRegisters(chipset.clone()),
         ))));
-        pci_root
-            .lock()
-            .add_device_at(31, 0, chipset.lpc.clone())
-            .map_err(VmmError::Other)?;
-        pci_root
-            .lock()
-            .add_device_at(31, 3, chipset.smbus.clone())
-            .map_err(VmmError::Other)?;
+        if let Some(bridge) = &chipset.bridge {
+            pci_root
+                .lock()
+                .add_device_at(1, 0, bridge.clone())
+                .map_err(VmmError::Other)?;
+            pci_root
+                .lock()
+                .add_device_at(1, 3, chipset.lpc.clone())
+                .map_err(VmmError::Other)?;
+            snap_nodes.push(DeviceNode::Plain(bridge.clone()));
+        } else {
+            pci_root
+                .lock()
+                .add_device_at(31, 0, chipset.lpc.clone())
+                .map_err(VmmError::Other)?;
+            pci_root
+                .lock()
+                .add_device_at(31, 3, chipset.smbus.clone())
+                .map_err(VmmError::Other)?;
+        }
         mmio_bus
             .register(0xfed00000, 0x400, chipset.hpet.clone())
             .map_err(VmmError::Other)?;
@@ -588,7 +735,7 @@ pub fn build(
         ]);
     }
 
-    if !q35 {
+    if !firmware_machine {
         let rtc = Arc::new(Mutex::new(crate::clock::KvmRtc::new(
             desc.memory_mib << 20,
             crate::clock::rtc_base(desc.rtc_base.as_deref())?,
@@ -601,8 +748,11 @@ pub fn build(
         snap_nodes.push(DeviceNode::Resettable(rtc));
     }
 
-    // COM1: 16550A on IRQ 4, output to the serial log.
-    let irq4: Arc<dyn IrqLine> = Arc::new(KvmIrqLine::new(vm_fd.clone(), 4));
+    let mut serials = Vec::new();
+    let irq4 = isa_irq(
+        6 + u32::from(!desc.serial_log_port.is_com1()),
+        desc.serial_log_port.irq(),
+    );
     let serial =
         factory
             .serial(&desc.serial_log, irq4)
@@ -611,10 +761,31 @@ pub fn build(
                 reason: format!("serial (COM1): {}", e.reason),
             })?;
     io_bus
-        .register(0x3F8, 8, serial.device)
+        .register(desc.serial_log_port.io_base(), 8, serial.device)
         .map_err(VmmError::Other)?;
     if let Some(node) = serial.snapshot {
         snap_nodes.push(DeviceNode::Plain(node));
+    }
+    if let Some(clock) = serial.clock {
+        serials.push(clock);
+    }
+    for port in desc.ports.iter().filter(|port| !port.transport.is_virtio()) {
+        let com = port.transport.com_port().unwrap();
+        let serial = Arc::new(Mutex::new(
+            vmlab_hv_devices::serial::Serial::socket(
+                format!("serial-{:?}", com),
+                &port.socket,
+                isa_irq(6 + u32::from(!com.is_com1()), com.irq()),
+            )
+            .map_err(|error| {
+                VmmError::Other(format!("serial socket {}: {error}", port.socket.display()))
+            })?,
+        ));
+        io_bus
+            .register(com.io_base(), 8, serial.clone())
+            .map_err(VmmError::Other)?;
+        snap_nodes.push(DeviceNode::Resettable(serial.clone()));
+        serials.push(serial);
     }
 
     let vga = if let Some(display) = &desc.display {
@@ -687,7 +858,45 @@ pub fn build(
         Ok(built)
     };
 
-    // Rootfs and scratch disks in order: /dev/vda, /dev/vdb, ...
+    let ide = if pc {
+        let ide = Arc::new(Mutex::new(vmlab_hv_devices::ide::Ide::new(
+            "piix3-ide",
+            ram.mem.clone(),
+            [isa_irq(8, 14), isa_irq(9, 15)],
+        )));
+        pci_root
+            .lock()
+            .add_device_at(1, 1, ide.clone())
+            .map_err(VmmError::Other)?;
+        for (channel, task, control) in [(0, 0x1f0, 0x3f6), (1, 0x170, 0x376)] {
+            io_bus
+                .register(
+                    task,
+                    8,
+                    Arc::new(Mutex::new(vmlab_hv_devices::ide::IdePorts::new(
+                        ide.clone(),
+                        channel,
+                        false,
+                    ))),
+                )
+                .map_err(VmmError::Other)?;
+            io_bus
+                .register(
+                    control,
+                    1,
+                    Arc::new(Mutex::new(vmlab_hv_devices::ide::IdePorts::new(
+                        ide.clone(),
+                        channel,
+                        true,
+                    ))),
+                )
+                .map_err(VmmError::Other)?;
+        }
+        snap_nodes.push(DeviceNode::Virtio(ide.clone()));
+        Some(ide)
+    } else {
+        None
+    };
     let ahci = if let Some(address) = desc.ahci_pci {
         let transport = wiring(Some(address), 1, false)?;
         let ahci = Arc::new(Mutex::new(vmlab_hv_devices::ahci::Ahci::new(
@@ -703,6 +912,43 @@ pub fn build(
         None
     };
     for disk in &desc.disks {
+        if disk.bus == DiskBus::Ide {
+            let image = disk
+                .path
+                .as_ref()
+                .map(|_| crate::factory::open_image(disk))
+                .transpose()
+                .map_err(|error| VmmError::Other(error.to_string()))?;
+            let mut controller = ide.as_ref().unwrap().lock();
+            let channel = disk.channel.unwrap() as usize;
+            let unit = disk.unit.unwrap() as usize;
+            if disk.cdrom {
+                controller.attach_cdrom(
+                    channel,
+                    unit,
+                    image.as_ref().map(|image| {
+                        Box::new(crate::factory::SharedDisk(image.clone()))
+                            as Box<dyn vmlab_disk::DiskImage>
+                    }),
+                )
+            } else {
+                controller.attach_disk(
+                    channel,
+                    unit,
+                    Box::new(crate::factory::SharedDisk(image.as_ref().unwrap().clone())),
+                )
+            }
+            .map_err(|error| VmmError::Other(format!("IDE {}: {error}", disk.id)))?;
+            if let Some(image) = image {
+                snap_disks.push(DiskNode {
+                    id: disk.id.clone(),
+                    writable: !disk.read_only,
+                    vmstate: disk.vmstate,
+                    image,
+                });
+            }
+            continue;
+        }
         if disk.bus == DiskBus::Ahci {
             if disk.cdrom && disk.path.is_none() {
                 ahci.as_ref()
@@ -765,10 +1011,16 @@ pub fn build(
         });
     }
     // One multiport console with the named ports.
-    if !desc.ports.is_empty() {
+    let virtio_ports: Vec<_> = desc
+        .ports
+        .iter()
+        .filter(|port| port.transport.is_virtio())
+        .cloned()
+        .collect();
+    if !virtio_ports.is_empty() {
         let built = add_pci(
             &pci_root,
-            factory.virtio_console(&desc.ports, &ram.mem, wiring(desc.console_pci, 2, true)?),
+            factory.virtio_console(&virtio_ports, &ram.mem, wiring(desc.console_pci, 2, true)?),
             "virtio-console ports".to_string(),
         )?;
         place(built.function.clone(), desc.console_pci)?;
@@ -805,7 +1057,7 @@ pub fn build(
     let sleep_signal = Arc::new(SleepSignal::default());
     let sci: Arc<dyn IrqLine> = Arc::new(KvmIrqLine::new(vm_fd, SCI_GSI));
     let pm = Arc::new(Mutex::new(PmDevice::new(sci, sleep_signal.sink())));
-    if !q35 {
+    if !firmware_machine {
         io_bus
             .register(PM1A_EVT_BASE, PM_BLOCK_LEN, pm.clone())
             .map_err(VmmError::Other)?;
@@ -954,21 +1206,74 @@ pub fn build(
             tpm: tpm.is_some(),
             smm: secure_smm,
         };
-        let options = vmlab_hv_firmware::FirmwareOptions {
-            bootorder: bootorder.clone(),
+        let mut options = vmlab_hv_firmware::FirmwareOptions {
+            bootorder: if pc && bootorder.is_empty() {
+                crate::pc::bootorder(&desc.disks)
+            } else {
+                bootorder.clone()
+            },
             nographic: desc.display.is_none(),
             ..Default::default()
         };
-        let fw_cfg = vmlab_hv_firmware::FwCfg::for_platform(ram.mem.clone(), &platform, &options)
-            .map_err(VmmError::Other)?;
-        let fw_cfg = Arc::new(Mutex::new(
-            crate::smm::SmiFwCfg::new(fw_cfg, ram.mem.clone()).map_err(VmmError::Other)?,
-        ));
+        if pc {
+            options.smbios.processor_id =
+                kvm.processor_id(desc.vcpus, desc.cpu, desc.cpu_model.as_deref())?;
+        }
+        let fw_cfg = if pc {
+            let platform = vmlab_hv_firmware::pc::Platform {
+                vcpus: platform.vcpus,
+                max_cpus: platform.max_cpus,
+                ram_regions: platform.ram_regions,
+                pci_devices: platform.pci_devices.into_iter().map(Into::into).collect(),
+                pci64_base: if layout.ram_top() > 1 << 32 {
+                    platform.pci64_base
+                } else {
+                    None
+                },
+                com2: !desc.serial_log_port.is_com1()
+                    || desc.ports.iter().any(|port| {
+                        port.transport == vmlab_hv_proto::machine::SerialTransport::Com2
+                    }),
+                physical_address_bits: kvm.physical_address_bits(desc.cpu_model.as_deref()),
+            };
+            vmlab_hv_firmware::FwCfg::for_pc(ram.mem.clone(), &platform, &options)
+        } else {
+            vmlab_hv_firmware::FwCfg::for_platform(ram.mem.clone(), &platform, &options)
+        }
+        .map_err(VmmError::Other)?;
+        let fw_cfg = Arc::new(Mutex::new(if pc {
+            crate::smm::SmiFwCfg::without_negotiation(fw_cfg, ram.mem.clone())
+        } else {
+            crate::smm::SmiFwCfg::new(fw_cfg, ram.mem.clone()).map_err(VmmError::Other)?
+        }));
         io_bus
             .register(0x510, 0xc, fw_cfg.clone())
             .map_err(VmmError::Other)?;
         snap_nodes.push(DeviceNode::Plain(fw_cfg.clone()));
         smi_fwcfg = Some(fw_cfg);
+    }
+
+    if pc {
+        let mut disks = [None; 4];
+        for disk in desc
+            .disks
+            .iter()
+            .filter(|disk| disk.bus == DiskBus::Ide && !disk.cdrom)
+        {
+            let image = snap_disks.iter().find(|image| image.id == disk.id).unwrap();
+            disks[(disk.channel.unwrap() * 2 + disk.unit.unwrap()) as usize] =
+                Some(image.image.lock().size() / 512);
+        }
+        let cd_first = desc.disks.iter().any(|disk| disk.cdrom);
+        chipset
+            .as_ref()
+            .unwrap()
+            .rtc
+            .lock()
+            .configure_pc(disks, cd_first, desc.vcpus as u8);
+    }
+    if let Some(a20) = &ram.a20 {
+        snap_nodes.push(DeviceNode::Plain(a20.clone()));
     }
 
     let shared = VmShared::new(
@@ -981,6 +1286,7 @@ pub fn build(
         layout.mmio64_base,
     );
     *shared.mch.lock() = mch;
+    *shared.serials.lock() = serials;
     *shared.vfio.lock() = vfio;
     *shared.chipset.lock() = chipset;
     *shared.vga.lock() = vga;
@@ -1002,9 +1308,12 @@ pub fn build(
     // reset state until the kernel's INIT-SIPI-SIPI wakes them.
     let mut vcpu_fds = Vec::with_capacity(desc.vcpus as usize);
     for id in 0..desc.vcpus {
-        let mut vcpu = shared
-            .kvm
-            .create_vcpu_with_policy(id as u8, desc.vcpus, desc.cpu)?;
+        let mut vcpu = shared.kvm.create_vcpu_with_model(
+            id as u8,
+            desc.vcpus,
+            desc.cpu,
+            desc.cpu_model.as_deref(),
+        )?;
         crate::hyperv::configure_vcpu(&shared.kvm.kvm, &vcpu, &desc.hyperv)?;
         if id == 0
             && let Some(boot) = &boot
@@ -1119,6 +1428,9 @@ mod tests {
             vfio: vec![],
             machine: Default::default(),
             cpu: Default::default(),
+            cpu_model: None,
+            floppy: None,
+            serial_log_port: Default::default(),
             hyperv: vec![],
             display: None,
             tablet: None,
@@ -1198,6 +1510,8 @@ mod tests {
         );
         machine.ahci_pci = None;
         machine.disks.push(Disk {
+            channel: None,
+            unit: None,
             pci: None,
             bus: DiskBus::Ahci,
             port: Some(0),
@@ -1234,6 +1548,8 @@ mod tests {
             function: 2,
         });
         machine.disks.push(Disk {
+            channel: None,
+            unit: None,
             pci: None,
             bus: DiskBus::Ahci,
             port: Some(2),
@@ -1426,6 +1742,8 @@ mod tests {
         d.serial_log = dir.path().join("serial.log");
         std::fs::write(dir.path().join("broken-vmlinuz"), b"not a bzImage").unwrap();
         d.disks = vec![Disk {
+            channel: None,
+            unit: None,
             pci: None,
             bus: Default::default(),
             port: None,

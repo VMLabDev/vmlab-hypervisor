@@ -107,6 +107,8 @@ pub struct VmShared {
     /// `resume` take it briefly.
     snapshot_op: Mutex<()>,
     pub(crate) mch: Mutex<Option<Arc<Mutex<crate::q35::Mch>>>>,
+    pub(crate) serials: Mutex<Vec<Arc<Mutex<vmlab_hv_devices::serial::Serial>>>>,
+    serial_clock: Mutex<(std::time::Instant, bool)>,
     pub(crate) chipset: Mutex<Option<Arc<crate::chipset::Chipset>>>,
     pub(crate) vga: Mutex<Option<crate::display::Video>>,
     pub(crate) xhci: Mutex<Option<Arc<Mutex<vmlab_hv_devices::usb::XhciController>>>>,
@@ -171,6 +173,8 @@ impl VmShared {
             snapshot: Mutex::new(None),
             snapshot_op: Mutex::new(()),
             mch: Mutex::new(None),
+            serials: Mutex::new(Vec::new()),
+            serial_clock: Mutex::new((std::time::Instant::now(), false)),
             chipset: Mutex::new(None),
             vga: Mutex::new(None),
             xhci: Mutex::new(None),
@@ -574,7 +578,11 @@ impl VmShared {
     pub(crate) fn restore_pci_bars(&self, bytes: &[u8]) -> Result<(), String> {
         let states: Vec<(u8, Vec<(u64, bool)>)> =
             serde_json::from_slice(bytes).map_err(|e| format!("pci-root state: {e}"))?;
-        self.pci_root.lock().restore_bar_states(&states)
+        self.pci_root.lock().restore_bar_states(&states)?;
+        if let Some(chipset) = self.chipset.lock().as_ref() {
+            chipset.sync_pirqs();
+        }
+        Ok(())
     }
 
     /// Whether the machine has an exit reason.
@@ -638,6 +646,7 @@ impl VmShared {
     // ---- dispatch (called from vCPU threads) ---------------------------
 
     pub(crate) fn io_read(&self, port: u16, data: &mut [u8]) {
+        self.advance_serials(None);
         self.trace_io(port, data, false);
         if self.chipset.lock().is_none() && data.len() == 1 && matches!(port, 0xcf9 | 0x64) {
             data[0] = if port == 0xcf9 {
@@ -668,6 +677,7 @@ impl VmShared {
     }
 
     pub(crate) fn io_write(&self, port: u16, data: &[u8]) {
+        self.advance_serials(None);
         self.trace_io(port, data, true);
         if self.chipset.lock().is_none() && data.len() == 1 {
             if port == 0xcf9 {
@@ -685,7 +695,15 @@ impl VmShared {
                 return;
             }
         }
-        let _memory_update = if (0xcfc..=0xcff).contains(&port) && self.mch.lock().is_some() {
+        let _memory_update = if ((0xcfc..=0xcff).contains(&port)
+            || (matches!(port, 0x60 | 0x64 | 0x92)
+                && self
+                    .ram
+                    .lock()
+                    .as_ref()
+                    .is_some_and(|ram| ram.a20.is_some())))
+            && self.mch.lock().is_some()
+        {
             Some(self.memory_update())
         } else {
             None
@@ -702,6 +720,11 @@ impl VmShared {
             .as_ref()
             .is_some_and(|chipset| chipset.io_write(port, data));
         if handled {
+            if _memory_update.is_some()
+                && let Err(error) = self.sync_vga_mapping()
+            {
+                self.request_exit(ExitReason::Error(error.to_string()));
+            }
             self.poll_chipset();
             return;
         }
@@ -744,6 +767,7 @@ impl VmShared {
     }
 
     pub(crate) fn mmio_read(&self, addr: u64, data: &mut [u8]) {
+        let addr = self.cpu_address(addr);
         self.advance_chipset();
         if (0xa0000..0xc0000).contains(&addr)
             && let Some(vga) = self.vga.lock().as_ref()
@@ -765,6 +789,7 @@ impl VmShared {
         self.mmio_bus.lock().read(addr, data);
     }
     pub(crate) fn mmio_write(&self, addr: u64, data: &[u8]) {
+        let addr = self.cpu_address(addr);
         self.advance_chipset();
         if (0xa0000..0xc0000).contains(&addr)
             && let Some(vga) = self.vga.lock().as_ref()
@@ -866,7 +891,8 @@ impl VmShared {
         drop(root);
         vga.set_aperture_base(blob_base)?;
         let base = base.filter(|base| {
-            self.ecam_offset(*base).is_none()
+            self.cpu_address(1 << 20) == 1 << 20
+                && self.ecam_offset(*base).is_none()
                 && self
                     .ecam_offset(*base + vga.framebuffer_size() as u64 - 1)
                     .is_none()
@@ -924,6 +950,7 @@ impl VmShared {
     }
 
     fn clock_running(&self, running: bool) {
+        self.advance_serials(Some(running));
         if let Some(chipset) = self.chipset.lock().as_ref() {
             chipset.set_running(running);
         }
@@ -932,6 +959,37 @@ impl VmShared {
     fn advance_chipset(&self) {
         if let Some(chipset) = self.chipset.lock().as_ref() {
             chipset.advance();
+        }
+    }
+
+    fn cpu_address(&self, addr: u64) -> u64 {
+        if self
+            .ram
+            .lock()
+            .as_ref()
+            .and_then(|ram| ram.a20.as_ref())
+            .is_some_and(|a20| !a20.lock().enabled())
+        {
+            addr & !(1 << 20)
+        } else {
+            addr
+        }
+    }
+
+    fn advance_serials(&self, running: Option<bool>) {
+        let mut clock = self.serial_clock.lock();
+        let now = std::time::Instant::now();
+        let ns = if clock.1 {
+            now.duration_since(clock.0).as_nanos().min(u64::MAX as u128) as u64
+        } else {
+            0
+        };
+        for serial in self.serials.lock().iter() {
+            serial.lock().advance(ns);
+        }
+        clock.0 = now;
+        if let Some(running) = running {
+            clock.1 = running;
         }
     }
 
@@ -980,6 +1038,7 @@ impl VmShared {
     }
 
     fn poll_chipset(&self) {
+        self.advance_serials(None);
         self.poll_display();
         if self.status() == RunState::Running
             && let Some(xhci) = self.xhci.lock().as_ref()
@@ -1292,6 +1351,7 @@ impl Vm {
                 eprintln!(
                     "VGA text: {}",
                     String::from_utf8_lossy(&text)
+                        .replace('\u{fffd}', "")
                         .split_whitespace()
                         .collect::<Vec<_>>()
                         .join(" ")

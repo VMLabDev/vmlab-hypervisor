@@ -25,6 +25,16 @@ pub struct SmiFwCfg {
 }
 
 impl SmiFwCfg {
+    pub fn without_negotiation(inner: FwCfg, memory: vmlab_hv_devices::GuestMemory) -> Self {
+        Self {
+            inner,
+            memory,
+            requested_key: u16::MAX,
+            ok_key: u16::MAX,
+            negotiation: Negotiation::default(),
+        }
+    }
+
     pub fn new(mut inner: FwCfg, memory: vmlab_hv_devices::GuestMemory) -> Result<Self, String> {
         inner.add_file(
             "etc/smi/supported-features",
@@ -216,5 +226,31 @@ impl Snapshot for SmiFwCfg {
         self.inner.restore_state(&inner)?;
         self.negotiation = negotiation;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod pc_tests {
+    use super::*;
+
+    #[test]
+    fn pc_preserves_fw_cfg_inventory_without_q35_smi_negotiation() {
+        let memory = vmlab_hv_devices::GuestMemory::new();
+        let config = vmlab_hv_firmware::FwCfg::for_pc(
+            memory.clone(),
+            &vmlab_hv_firmware::pc::Platform::default(),
+            &vmlab_hv_firmware::FirmwareOptions::default(),
+        )
+        .unwrap();
+        let wrapped = SmiFwCfg::without_negotiation(config, memory);
+        for name in [
+            "etc/smi/supported-features",
+            "etc/smi/requested-features",
+            "etc/smi/features-ok",
+        ] {
+            assert!(wrapped.inner.file(name).is_none());
+        }
+        assert!(wrapped.inner.file("etc/acpi/rsdp").is_some());
+        assert!(!wrapped.broadcast());
     }
 }

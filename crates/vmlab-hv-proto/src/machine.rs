@@ -55,7 +55,7 @@ pub struct MachineDescription {
     /// Disks in guest enumeration order (`/dev/vda`, `/dev/vdb`, ...).
     pub disks: Vec<Disk>,
     pub nics: Vec<Nic>,
-    /// File the first UART's output is appended to.
+    /// File the selected log UART's output is appended to.
     pub serial_log: PathBuf,
     #[serde(default, skip_serializing_if = "ComPort::is_com1")]
     pub serial_log_port: ComPort,
@@ -68,7 +68,7 @@ pub struct MachineDescription {
     /// Guest audio device; absent means the machine has no audio.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<Audio>,
-    /// RTC start, RFC 3339. `None` means host time.
+    /// RTC start: RFC 3339 or `localtime`. `None` means host UTC time.
     #[serde(default)]
     pub rtc_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

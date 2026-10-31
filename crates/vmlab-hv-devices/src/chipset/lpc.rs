@@ -25,6 +25,7 @@ pub enum PowerAction {
 /// Route ports b2/b3/cf9 through [`Self::read_port`]/[`Self::write_port`].
 /// The PM window is 128 bytes; its base/enable may change after config writes.
 pub struct Lpc {
+    piix4: bool,
     config: [u8; 256],
     pm_status: u16,
     pm_enable: u16,
@@ -51,6 +52,7 @@ impl Lpc {
         config[0x68..0x6c].fill(0x80);
         config[0x82] = 5;
         let device = Self {
+            piix4: false,
             config,
             pm_status: 0,
             pm_enable: 0,
@@ -68,6 +70,33 @@ impl Lpc {
         device
     }
 
+    pub fn piix4(sci: Arc<dyn IrqLine>, action: Arc<dyn Fn(PowerAction) + Send + Sync>) -> Self {
+        let mut device = Self::new(sci, action);
+        device.piix4 = true;
+        device.config.fill(0);
+        device.config[..4].copy_from_slice(&0x7113_8086u32.to_le_bytes());
+        device.config[6..8].copy_from_slice(&0x0280u16.to_le_bytes());
+        device.config[8..12].copy_from_slice(&[3, 0, 0x80, 6]);
+        device.config[0x2c..0x30].copy_from_slice(&0x1100_1af4u32.to_le_bytes());
+        device.config[0x3c..0x3e].copy_from_slice(&[9, 1]);
+        device.config[0x40] = 1;
+        device.config[0x5f] = 0x90;
+        device.config[0x63] = 0x60;
+        device.config[0x67] = 0x98;
+        device.config[0x90] = 1;
+        device.config[0xd2] = 9;
+        device
+    }
+
+    pub fn piix4_smi_enabled(&self) -> bool {
+        self.piix4 && self.config[0x5b] & 2 != 0
+    }
+
+    pub fn smbus_base(&self) -> Option<u16> {
+        (self.piix4 && self.config[0xd2] & 1 != 0)
+            .then(|| u16::from_le_bytes([self.config[0x90], self.config[0x91]]) & 0xfff0)
+    }
+
     /// Legacy PIC destination of PIRQ A through H; None means disabled.
     /// The VMM must recompute routing after writes to 60-63h or 68-6bh.
     /// APIC-mode PCI routing to GSI16-23 is described separately by `_PRT`.
@@ -82,11 +111,16 @@ impl Lpc {
     }
 
     pub fn pm_base(&self) -> u16 {
-        u16::from_le_bytes([self.config[0x40], self.config[0x41]]) & 0xff80
+        u16::from_le_bytes([self.config[0x40], self.config[0x41]])
+            & if self.piix4 { 0xffc0 } else { 0xff80 }
     }
 
     pub fn pm_enabled(&self) -> bool {
-        self.config[0x44] & 0x80 != 0
+        if self.piix4 {
+            self.config[0x80] & 1 != 0
+        } else {
+            self.config[0x44] & 0x80 != 0
+        }
     }
 
     /// Advance only while the machine runs. The counter is 24 bits, as FACP
@@ -137,6 +171,19 @@ impl Lpc {
     /// Absolute port accesses for the three sparse LPC I/O ranges. Returns
     /// false for an unclaimed port, so the machine can route another device.
     pub fn read_port(&mut self, port: u16, data: &mut [u8]) -> bool {
+        if self.piix4 && (0xafe0..0xafe4).contains(&port) {
+            let offset = (port - 0xafe0) as usize;
+            for (i, byte) in data.iter_mut().enumerate() {
+                *byte = if offset + i < 2 {
+                    self.gpe_status[offset + i]
+                } else if offset + i < 4 {
+                    self.gpe_enable[offset + i - 2]
+                } else {
+                    0
+                };
+            }
+            return true;
+        }
         if self.pm_enabled() && port.wrapping_sub(self.pm_base()) < 128 {
             self.read(u64::from(port - self.pm_base()), data);
             true
@@ -153,6 +200,18 @@ impl Lpc {
     }
 
     pub fn write_port(&mut self, port: u16, data: &[u8]) -> bool {
+        if self.piix4 && (0xafe0..0xafe4).contains(&port) {
+            let offset = (port - 0xafe0) as usize;
+            for (i, byte) in data.iter().enumerate() {
+                if offset + i < 2 {
+                    self.gpe_status[offset + i] &= !byte;
+                } else if offset + i < 4 {
+                    self.gpe_enable[offset + i - 2] = *byte;
+                }
+            }
+            self.update_sci();
+            return true;
+        }
         if self.pm_enabled() && port.wrapping_sub(self.pm_base()) < 128 {
             self.write(u64::from(port - self.pm_base()), data);
             true
@@ -167,8 +226,8 @@ impl Lpc {
                 self.apm[(port - 0xb2) as usize] = data[0];
                 if port == 0xb2 {
                     match data[0] {
-                        2 => self.pm_control |= 1,
-                        3 => self.pm_control &= !1,
+                        2 | 0xf1 => self.pm_control |= 1,
+                        3 | 0xf0 => self.pm_control &= !1,
                         _ => {}
                     }
                     self.update_sci();
@@ -191,8 +250,8 @@ impl BusDevice for Lpc {
                 Some(o @ 8..=11) => {
                     ((self.timer_ticks & 0xffffff) as u32).to_le_bytes()[o as usize - 8]
                 }
-                Some(o @ 0x20..=0x27) => self.gpe_status[o as usize - 0x20],
-                Some(o @ 0x28..=0x2f) => self.gpe_enable[o as usize - 0x28],
+                Some(o @ 0x20..=0x27) if !self.piix4 => self.gpe_status[o as usize - 0x20],
+                Some(o @ 0x28..=0x2f) if !self.piix4 => self.gpe_enable[o as usize - 0x28],
                 _ => 0,
             };
         }
@@ -216,8 +275,8 @@ impl BusDevice for Lpc {
                         & 0x1c03;
                     sleep |= o == 5 && byte & 0x20 != 0;
                 }
-                Some(o @ 0x20..=0x27) => self.gpe_status[o as usize - 0x20] &= !byte,
-                Some(o @ 0x28..=0x2f) => self.gpe_enable[o as usize - 0x28] = byte,
+                Some(o @ 0x20..=0x27) if !self.piix4 => self.gpe_status[o as usize - 0x20] &= !byte,
+                Some(o @ 0x28..=0x2f) if !self.piix4 => self.gpe_enable[o as usize - 0x28] = byte,
                 _ => {}
             }
         }
@@ -257,19 +316,35 @@ impl PciDevice for Lpc {
             let Some(index) = start.checked_add(i).filter(|n| *n < 256) else {
                 break;
             };
-            let mask = match index {
-                4 => 0x0f,
-                5 => 1,
-                0x3c => 0xff,
-                0x40 => 0x80,
-                0x41 => 0xff,
-                0x44 => 0x80,
-                0x60..=0x63 | 0x68..=0x6b => 0x8f,
-                0x4e..=0x4f | 0x80..=0x93 | 0xa0..=0xab => 0xff,
-                0xf0 => 1,
-                0xf1 => 0xc0,
-                0xf2 | 0xf3 => 0xff,
-                _ => 0,
+            let mask = if self.piix4 {
+                match index {
+                    4 => 0x0f,
+                    5 => 1,
+                    0x0c | 0x0d | 0x3c => 0xff,
+                    0x40 => 0xc0,
+                    0x41 => 0xff,
+                    0x80 => 1,
+                    0x90 => 0xf0,
+                    0x91 => 0xff,
+                    0xd2 => 0x0f,
+                    0x58..=0x5b => 0xff,
+                    _ => 0,
+                }
+            } else {
+                match index {
+                    4 => 0x0f,
+                    5 => 1,
+                    0x3c => 0xff,
+                    0x40 => 0x80,
+                    0x41 => 0xff,
+                    0x44 => 0x80,
+                    0x60..=0x63 | 0x68..=0x6b => 0x8f,
+                    0x4e..=0x4f | 0x80..=0x93 | 0xa0..=0xab => 0xff,
+                    0xf0 => 1,
+                    0xf1 => 0xc0,
+                    0xf2 | 0xf3 => 0xff,
+                    _ => 0,
+                }
             };
             self.config[index] = (self.config[index] & !mask) | (byte & mask);
         }
@@ -286,7 +361,7 @@ impl PciDevice for Lpc {
 
 impl Snapshot for Lpc {
     fn state_id(&self) -> String {
-        "ich9-lpc".into()
+        if self.piix4 { "piix4-pm" } else { "ich9-lpc" }.into()
     }
 
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
