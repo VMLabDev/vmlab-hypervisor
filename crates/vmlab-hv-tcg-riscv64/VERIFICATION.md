@@ -7,6 +7,7 @@
 - sail-riscv fc074f99f578954376214c4ca9490152d35d0ec2.
 - Configuration `rv64d_v128_e64.json`, VLEN 128 and ELEN 64.
 - riscv-tests 3df703cd52d5f0d8224e3c50bf03c6cb70efff98.
+- riscv-arch-test eb66181dd27ff7847e2c3a010705b13490b0bf75.
 
 The local generation used the research toolchain with these flags:
 
@@ -17,10 +18,11 @@ isla-sail -dno_cast -O -Oconstant_fold -memo_z3 -c_no_main
   --config build/config/rv64d_v128_e64.json -o target/tcg/riscv64
 ```
 
-The toolchain package owns `just tcg-ir-generate`. After that recipe emits
-`target/tcg/riscv64.ir`, this package's `just tcg-generate` emits the Rust
-builders and compressed IR. `just tcg-generate-check` compares both artifacts
-without rewriting them. Both accept an optional input path.
+Both `just tcg-generate` and `just tcg-generate-check` first run the toolchain
+package's `tcg-ir-generate` recipe. The former emits Rust builders and
+compressed IR; the latter compares both committed artifacts without rewriting
+them. Both accept an optional input path. The complete container-backed
+`just tcg-generate-check` passed with byte-identical artifacts.
 
 The generated checksum covers executable IR, excluding Jib's debug file paths
 and source-location IDs. This avoids a difference between a container's
@@ -28,7 +30,9 @@ absolute source paths and a local checkout's paths.
 
 ## Parser and generated artifact
 
-The full input contains 14,135,859 bytes and 5,734 definitions. The parser
+The research input contains 14,135,859 bytes; the pinned container input
+contains 14,135,209 bytes. Both contain 5,734 definitions and produce identical
+executable artifacts despite their different debug paths. The parser
 round-trips its bytes, emits canonical Jib from the AST independently of the
 original source, and reparses both forms to the same AST:
 
@@ -110,7 +114,7 @@ lost updates before the transaction lock was added.
 ## Interpreter speed and remaining precision costs
 
 The release interpreter executed a 3,000-instruction scalar loop in
-6.854221 seconds, or 0.000438 MIPS. The loop contains an increment, a
+7.027901 seconds, or 0.000427 MIPS. The loop contains an increment, a
 decrement, and a backward conditional branch. Timing excludes model
 initialization and includes fetch, decode, generated interrupt and retirement
 logic, and the interpreter's dispatch. It executed 30,250,295 IR operations.
@@ -138,11 +142,26 @@ establish a Linux TCG boot, VMM integration, or performance parity. Those
 checks belong to the machine and JIT work packages. No S1 TCG template boot
 is claimed.
 
+After merging the lockstep, GPU, toolchain, benchmark, and display packages
+from local main, `just ci::check` passed with `RUST_TEST_THREADS=1` inside the
+24 GiB memory cap. This runs formatting, workspace Clippy with warnings denied,
+tests, and doctests. The existing slow 1 GiB disk-throughput test remains
+ignored. An earlier gate timed out in the Ubuntu AHCI agent setup; the exact
+isolated test passed in 36.78 seconds, and it also passed in the final full
+gate without an AHCI change.
+
+`just bench-check` passed with only one QEMU baseline entry per group. There
+was no comparable TCG benchmark entry, so that result does not establish a
+performance regression bound.
+
 ## Independent Sail lockstep
 
 After merging the lockstep package from local main, the runtime's optional
-adapter passed all 67 `riscv-tests` RV64I/M programs against the independently
-compiled Sail C++ model. Comparison checks integer and raw FP registers,
+adapter passed all 131 RV64I/M corpus programs against the independently
+compiled Sail C++ model: 67 from `riscv-tests` and 64 from `riscv-arch-test`.
+Two additional `riscv-tests` programs, FADD.S and FADD.D, also matched.
+The final cache-fixed runtime matched all 133 programs across 450,726
+instructions. Comparison checks integer and raw FP registers,
 privilege, virtualization, the supplied CSR set, and each instruction's
 ordered physical-memory writes. The oracle and corpus are built locally
 under `target/tcg/lockstep-oracle` and `target/tcg/lockstep-corpus` using the
