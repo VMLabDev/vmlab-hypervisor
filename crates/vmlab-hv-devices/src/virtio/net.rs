@@ -33,6 +33,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use virtio_queue::{Queue, QueueOwnedT, QueueState, QueueT};
+use vm_memory::{Bytes, GuestAddress};
 
 use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
 
@@ -57,6 +58,8 @@ const F_VERSION_1: u64 = 1 << 32;
 const S_LINK_UP: u16 = 1;
 /// Queue size offered for both virtqueues (QEMU's virtio-net default).
 const QUEUE_SIZE: u16 = 256;
+/// Split-ring driver flag suppressing used-buffer interrupts.
+const AVAIL_F_NO_INTERRUPT: u16 = 1;
 /// The receiveq index.
 const RXQ: u16 = 0;
 /// The transmitq index.
@@ -471,6 +474,18 @@ fn read_frames(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(
     Ok(())
 }
 
+fn needs_interrupt(queue: &mut Queue, mem: &GuestMemory) -> bool {
+    // virtio-queue handles used_event and the publication fence. It does not
+    // check avail.flags without EVENT_IDX.
+    if !queue.needs_notification(mem).unwrap_or(false) {
+        return false;
+    }
+    queue.event_idx_enabled()
+        || mem
+            .load::<u16>(GuestAddress(queue.avail_ring()), Ordering::Relaxed)
+            .is_ok_and(|flags| u16::from_le(flags) & AVAIL_F_NO_INTERRUPT == 0)
+}
+
 /// Move pending frames into free receiveq buffers, header first.
 fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
     let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
@@ -522,7 +537,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
             }
             sh.rx_pending.pop_front();
         }
-        if used_any && q.needs_notification(mem).unwrap_or(false) {
+        if used_any && needs_interrupt(q, mem) {
             irq = sh.interrupt.clone().map(|irq| (irq, RXQ));
         }
     }
@@ -583,7 +598,7 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
                 }
                 used_any = true;
             }
-            if used_any && q.needs_notification(mem).unwrap_or(false) {
+            if used_any && needs_interrupt(q, mem) {
                 irq = sh.interrupt.clone().map(|irq| (irq, TXQ));
             }
         }
@@ -1264,6 +1279,74 @@ mod tests {
         place_rx_frames(&f.dev.shared, 12);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
         assert!(f.irq.queues.lock().is_empty());
+    }
+
+    #[test]
+    fn driver_can_suppress_and_reenable_transmit_and_receive_interrupts() {
+        let mut f = Fixture::new();
+        let mut switch = f.take_switch_side();
+        switch
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let frame = b"interrupt suppression";
+        for suppressed in [true, false] {
+            for queue in &f.vqs {
+                f.mem
+                    .write_obj(u16::from(suppressed).to_le(), GuestAddress(queue.avail))
+                    .unwrap();
+            }
+            f.irq.queues.lock().clear();
+            f.dev.resume_snapshot();
+            let tx_used = f.vqs[1].used_idx(&f.mem) + 1;
+            let rx_used = f.vqs[0].used_idx(&f.mem) + 1;
+            f.queue_tx(frame);
+            let receive_addr = f.data(2);
+            f.vqs[0].add_chain(&f.mem, &[(receive_addr, 128, true)]);
+            f.dev.queue_notify(TXQ);
+            f.dev.queue_notify(RXQ);
+            let mut prefix = [0; 4];
+            switch.read_exact(&mut prefix).unwrap();
+            assert_eq!(u32::from_be_bytes(prefix), frame.len() as u32);
+            let mut received = vec![0; frame.len()];
+            switch.read_exact(&mut received).unwrap();
+            assert_eq!(received, frame);
+            switch
+                .write_all(&(frame.len() as u32).to_be_bytes())
+                .unwrap();
+            switch.write_all(frame).unwrap();
+            wait_for("suppressed queue completions", || {
+                f.vqs[0].used_idx(&f.mem) == rx_used && f.vqs[1].used_idx(&f.mem) == tx_used
+            });
+            f.dev.quiesce();
+            let interrupts = f.irq.queues.lock();
+            if suppressed {
+                assert!(
+                    interrupts.is_empty(),
+                    "suppressed interrupts: {interrupts:?}"
+                );
+            } else {
+                assert!(interrupts.contains(&RXQ));
+                assert!(interrupts.contains(&TXQ));
+            }
+        }
+    }
+
+    #[test]
+    fn event_idx_ignores_classic_interrupt_suppression() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        lock(&f.dev.shared).queues[usize::from(TXQ)]
+            .as_mut()
+            .unwrap()
+            .set_event_idx(true);
+        f.mem
+            .write_obj(AVAIL_F_NO_INTERRUPT.to_le(), GuestAddress(f.vqs[1].avail))
+            .unwrap();
+        f.queue_tx(b"event-index notification");
+        f.dev.queue_notify(TXQ);
+        wait_for("event-index completion", || f.vqs[1].used_idx(&f.mem) == 1);
+        f.dev.quiesce();
+        assert!(f.irq.queues.lock().contains(&TXQ));
     }
 
     #[test]
