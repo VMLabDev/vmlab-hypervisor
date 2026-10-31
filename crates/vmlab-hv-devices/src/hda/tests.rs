@@ -112,7 +112,7 @@ fn codec_discovery_and_stateful_verbs_via_immediate_commands() {
         (3, 9, 0x400501),
         (4, 9, 0x10051b),
         (5, 9, 0x400401),
-        (2, 0xa, 0x10160),
+        (2, 0xa, 0x20160),
         (2, 0xb, 1),
         (4, 0xd, 0x80034a4a),
         (3, 0xe, 1),
@@ -139,6 +139,38 @@ fn codec_discovery_and_stateful_verbs_via_immediate_commands() {
     assert_eq!(verb(&mut hda, 3, 0xf0700), 0x40);
     write(&mut hda, 0x68, 2, 2);
     assert_eq!(read(&mut hda, 0x68, 2), 0);
+}
+
+/// The PCM parameter must decode, the way the kernel's
+/// `snd_hdac_query_supported_pcm` does, to exactly the codec's contract:
+/// 16-bit samples at 44.1, 48 and 96 kHz. The width bits are 16-20 of
+/// AC_PAR_PCM (bit 16 is *8-bit*, which maps to `SNDRV_PCM_FORMAT_U8`);
+/// getting them wrong leaves a real guest with no 16-bit format at all —
+/// found against snd_hda_intel on the ubuntu-26.04 template.
+#[test]
+fn pcm_parameter_decodes_to_16_bit_44_1_48_and_96_khz() {
+    let (mut hda, _, _) = fixture(Arc::new(RecordingHost::new()), true);
+    let value = verb(&mut hda, 2, 0xf000a);
+    let rates = [
+        (0u32, 8000),
+        (1, 11025),
+        (2, 16000),
+        (3, 22050),
+        (4, 32000),
+        (5, 44100),
+        (6, 48000),
+        (7, 88200),
+        (8, 96000),
+        (9, 176400),
+        (10, 192000),
+    ];
+    let supported: Vec<u32> = rates
+        .iter()
+        .filter(|(bit, _)| value & (1 << bit) != 0)
+        .map(|(_, hz)| *hz)
+        .collect();
+    assert_eq!(supported, [44100, 48000, 96000], "rate bits of {value:#x}");
+    assert_eq!(value >> 16, 2, "exactly 16-bit width, no other");
 }
 
 #[test]
@@ -188,6 +220,57 @@ fn corb_rirb_dma_wrap_pointer_reset_and_msi_acknowledgement() {
             2
         ]
     );
+}
+
+/// Linux opens playback with `bdl_pos_adj`: the first BDL entry is a
+/// one-frame nibble that raises an early completion, so the *second*
+/// entry's buffer address is not 128-byte aligned. The controller must
+/// walk it anyway (found against snd_hda_intel on the ubuntu-26.04
+/// template, where the old 128-byte check errored the stream on the first
+/// period).
+#[test]
+fn bdl_with_a_position_adjustment_entry_plays_without_error() {
+    let host = RecordingHost::new();
+    let (mut hda, mem, _) = fixture(Arc::new(host.clone()), false);
+    // Entry 0: one frame at the buffer start, interrupt on completion.
+    // Entry 1: the first period's remainder, starting four bytes in.
+    // Entry 2: the second period, itself unaligned by the leading frame.
+    let entry = |index: usize, buffer: u64, length: u32| {
+        let mut descriptor = [0; 16];
+        descriptor[..8].copy_from_slice(&buffer.to_le_bytes());
+        descriptor[8..12].copy_from_slice(&length.to_le_bytes());
+        descriptor[12..].copy_from_slice(&1u32.to_le_bytes());
+        mem.write_slice(&descriptor, GuestAddress(0x2000 + index as u64 * 16))
+            .unwrap();
+    };
+    entry(0, 0x4000, 4);
+    entry(1, 0x4004, 0x3fc);
+    entry(2, 0x4404, 0x400);
+    let playback = samples(-500, 500, 512);
+    mem.write_slice(&playback, GuestAddress(0x4000)).unwrap();
+    // Same converter and pin bring-up as setup_stream, with a custom BDL.
+    verb(&mut hda, 2, 0x70610);
+    verb(&mut hda, 2, 0x20011);
+    verb(&mut hda, 2, 0x3b04a);
+    write(&mut hda, 0xa8, 0xc00, 4);
+    write(&mut hda, 0xac, 2, 2);
+    write(&mut hda, 0xb2, 0x11, 2);
+    write(&mut hda, 0xb8, 0x2000, 4);
+    write(&mut hda, 0xa2, 0x10, 1);
+    write(&mut hda, 0xa0, 0x1e, 1);
+    // One interval serves 48 frames; 64 of them wrap the 768-frame cyclic
+    // buffer eight times. What must hold: no stream error, the first
+    // period's PCM intact, and the full runtime's worth of bytes moved.
+    for _ in 0..64 {
+        interval(&mut hda);
+    }
+    assert_eq!(read(&mut hda, 0xa3, 1) & 0x10, 0, "no stream error");
+    let dumped = host.playback_pcm();
+    assert!(
+        dumped.starts_with(&playback[..192]),
+        "the first period flows through the unaligned descriptors"
+    );
+    assert_eq!(dumped.len(), 64 * 192);
 }
 
 #[test]
@@ -293,7 +376,6 @@ fn stream_tag_format_pin_and_power_gate_playback() {
         (2, 0x70503, 0x70500),
         (1, 0x70503, 0x70500),
         (3, 0x70503, 0x70500),
-        (3, 0x70c00, 0x70c02),
     ] {
         verb(&mut hda, node, disable);
         interval(&mut hda);
@@ -302,6 +384,11 @@ fn stream_tag_format_pin_and_power_gate_playback() {
         interval(&mut hda);
         assert_eq!(host.periods().last().unwrap().pcm, pcm[..192]);
     }
+    // EAPD powers a board amplifier; it must not gate the converter's
+    // stream. The generic parser leaves it untouched at boot.
+    verb(&mut hda, 3, 0x70c00);
+    interval(&mut hda);
+    assert_eq!(host.periods().last().unwrap().pcm, pcm[..192]);
 }
 
 struct BufferedHost {

@@ -390,3 +390,75 @@ mod hyperv_wire_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod audio_wire_tests {
+    use super::{Audio, AudioDevice, MachineDescription, PciAddress};
+
+    /// The audio section's wire shape, pinned (hv-audio D7): `device`,
+    /// `microphone` defaulting off, the node identity, and the optional
+    /// q35 PCI address.
+    #[test]
+    fn pinned_audio_section() {
+        let json = r#"{"device":"hda","microphone":true,"node_name":"vmlab.lab.machine",
+                "node_description":"vmlab machine"}"#
+            .replace('\n', "");
+        let audio: Audio = serde_json::from_str(&json).unwrap();
+        assert_eq!(audio.device, AudioDevice::Hda);
+        assert!(audio.microphone);
+        assert_eq!(audio.node_name, "vmlab.lab.machine");
+        assert_eq!(audio.node_description, "vmlab machine");
+        assert_eq!(audio.pci, None);
+
+        let json = r#"{"device":"virtio_snd","microphone":false,
+                "node_name":"n","node_description":"d",
+                "pci":{"bus":0,"device":27,"function":0}}"#
+            .replace('\n', "");
+        let audio: Audio = serde_json::from_str(&json).unwrap();
+        assert_eq!(audio.device, AudioDevice::VirtioSnd);
+        assert!(!audio.microphone);
+        assert_eq!(
+            audio.pci,
+            Some(PciAddress {
+                bus: 0,
+                device: 27,
+                function: 0
+            })
+        );
+
+        // `microphone` is optional and defaults off; nothing else is.
+        let minimal: Audio =
+            serde_json::from_str(r#"{"device":"hda","node_name":"n","node_description":"d"}"#)
+                .unwrap();
+        assert!(!minimal.microphone);
+        assert!(serde_json::from_str::<Audio>(r#"{"device":"hda"}"#).is_err());
+        // The wire name of the device variants is snake_case.
+        assert_eq!(
+            serde_json::to_string(&AudioDevice::VirtioSnd).unwrap(),
+            "\"virtio_snd\""
+        );
+    }
+
+    /// The audio section rides at the top level of the machine description
+    /// and is absent by default.
+    #[test]
+    fn audio_section_of_the_machine_description() {
+        let base = serde_json::json!({
+            "name": "m", "arch": "x86_64", "accel": "kvm", "vcpus": 1, "memory_mib": 64,
+            "boot": {"kind": "kernel", "kernel": "/k", "initrd": null, "cmdline": ""},
+            "disks": [], "nics": [], "serial_log": "/log", "ports": [],
+        });
+        let plain: MachineDescription = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(plain.audio, None);
+
+        let mut with_audio = base;
+        with_audio["audio"] = serde_json::json!({
+            "device": "hda", "node_name": "n", "node_description": "d",
+            "pci": {"bus": 0, "device": 27, "function": 0},
+        });
+        let desc: MachineDescription = serde_json::from_value(with_audio).unwrap();
+        let audio = desc.audio.unwrap();
+        assert_eq!(audio.device, AudioDevice::Hda);
+        assert_eq!(audio.node_name, "n");
+    }
+}

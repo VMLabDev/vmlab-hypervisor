@@ -29,6 +29,10 @@ vfio-ioctls = "0.10"
 vfio-bindings = "0.7"
 vmm-sys-util = "0.15"
 
+[features]
+# The file-backed recording host for seam A3: test binaries only.
+testing = ["vmlab-hv-devices/testing"]
+
 [dev-dependencies]
 tempfile = "3"
 

@@ -146,7 +146,11 @@ impl Codec {
             (3, 9) => 0x0040_0501, // stereo pin, connection, power
             (4, 9) => 0x0010_051b, // stereo input, amp, connection, override, power
             (5, 9) => 0x0040_0401,
-            (1 | 2 | 4, 0xa) => (1 << 16) | (1 << 5) | (1 << 6) | (1 << 8),
+            // AC_PAR_PCM: bits 0-10 sample rates (44.1, 48, 96 kHz), bit 17
+            // 16-bit samples. Bits 0-4 and 16-20 are widths: 1<<16 is 8-bit,
+            // which the kernel maps to SNDRV_PCM_FORMAT_U8 and no 16-bit
+            // guest format survives refinement.
+            (1 | 2 | 4, 0xa) => (1 << 17) | (1 << 5) | (1 << 6) | (1 << 8),
             (1 | 2 | 4, 0xb) => 1,
             (3, 0xc) => 0x10,
             (5, 0xc) => 0x20,
@@ -157,6 +161,11 @@ impl Codec {
         }
     }
 
+    /// Whether the converter is live: matching stream tag, matching
+    /// converter format, every widget in D0, and the pin enabled in the
+    /// stream's direction. EAPD is deliberately absent: it powers a board
+    /// amplifier, and the generic parser leaves it untouched — a controller
+    /// must not mute the stream for it.
     pub fn connected(&self, input: bool, tag: u8, format: u16) -> bool {
         let converter = if input { 4 } else { 2 } * 24;
         let pin = if input { 5 } else { 3 } * 24;
@@ -169,7 +178,6 @@ impl Codec {
             && self.bytes[converter + 5] == 0
             && self.bytes[pin + 5] == 0
             && self.bytes[pin + 7] & if input { 0x20 } else { 0x40 } != 0
-            && (input || self.bytes[pin + 9] & 2 != 0)
     }
 
     pub fn amplify(&self, input: bool, pcm: &mut [u8], channels: usize) {

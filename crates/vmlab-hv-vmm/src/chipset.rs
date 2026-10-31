@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kvm_ioctls::VmFd;
 use parking_lot::Mutex;
@@ -83,6 +83,10 @@ pub struct Chipset {
     pub pirqs: Arc<Mutex<PirqRouter>>,
     pub power: Arc<Mutex<Option<PowerAction>>>,
     pub error: Arc<Mutex<Option<String>>>,
+    /// The machine's HDA function, when it has audio: advanced by the same
+    /// running-time clock as the platform timers, so its guest-visible
+    /// position never runs ahead of real playback and freezes on pause.
+    pub audio: Mutex<Option<Arc<Mutex<vmlab_hv_devices::hda::Hda>>>>,
     secure_smm: bool,
     clock: Mutex<(Instant, bool)>,
     vm: Arc<VmFd>,
@@ -196,6 +200,7 @@ impl Chipset {
             pirqs,
             power,
             error,
+            audio: Mutex::new(None),
             secure_smm,
             clock: Mutex::new((Instant::now(), false)),
             vm,
@@ -221,8 +226,22 @@ impl Chipset {
             self.rtc.lock().advance(ns);
             self.hpet.lock().advance(ns);
             self.isa.lock().advance(ns);
+            let audio = self.audio.lock().clone();
+            if let Some(hda) = audio.as_ref() {
+                // A host-stream failure stops that stream (the device raises
+                // its error bits for the guest); it never stops the machine.
+                if let Err(e) = hda.lock().advance(Duration::from_nanos(ns)) {
+                    eprintln!("vmlab-hv: audio stream error: {e}");
+                }
+            }
         }
         clock.0 = now;
+        if let Some(running) = running
+            && running != clock.1
+            && let Some(hda) = self.audio.lock().as_ref()
+        {
+            hda.lock().set_paused(!running);
+        }
         if let Some(running) = running {
             clock.1 = running;
         }
@@ -599,5 +618,87 @@ mod tests {
         chipset.clock_step_at(base + std::time::Duration::from_secs(4), None);
         chipset.lpc.lock().read(8, &mut bytes);
         assert_eq!(u32::from_le_bytes(bytes), 7_159_090);
+    }
+
+    /// A null host and a sink MSI, for driving the HDA model headlessly.
+    struct SilentHost;
+    impl vmlab_hv_devices::audio::HostAudio for SilentHost {
+        fn name(&self) -> &'static str {
+            "silent"
+        }
+        fn open_playback(
+            &self,
+            _: vmlab_hv_devices::audio::AudioFormat,
+        ) -> Result<Box<dyn vmlab_hv_devices::audio::PlaybackSink>, vmlab_hv_devices::DeviceError>
+        {
+            Ok(Box::new(SilentSink))
+        }
+        fn open_capture(
+            &self,
+            _: vmlab_hv_devices::audio::AudioFormat,
+        ) -> Result<Box<dyn vmlab_hv_devices::audio::CaptureSource>, vmlab_hv_devices::DeviceError>
+        {
+            Ok(Box::new(SilentSource))
+        }
+    }
+    struct SilentSink;
+    impl vmlab_hv_devices::audio::PlaybackSink for SilentSink {
+        fn write_period(&mut self, _: &[u8]) {}
+        fn latency_bytes(&self) -> usize {
+            0
+        }
+    }
+    struct SilentSource;
+    impl vmlab_hv_devices::audio::CaptureSource for SilentSource {
+        fn read_period(&mut self, out: &mut [u8]) {
+            out.fill(0);
+        }
+        fn latency_bytes(&self) -> usize {
+            0
+        }
+    }
+    struct NoMsi;
+    impl vmlab_hv_devices::MsiSink for NoMsi {
+        fn signal(&self, _: vmlab_hv_devices::MsiMessage) {}
+    }
+
+    #[test]
+    fn audio_clock_freezes_between_pause_and_resume() {
+        let kvm = match crate::kvm::KvmVm::new() {
+            Ok(kvm) => kvm,
+            Err(error) => {
+                eprintln!("skipping audio clock test: {error}");
+                return;
+            }
+        };
+        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0, false).unwrap();
+        let memory =
+            vmlab_hv_devices::GuestMemory::from_ranges(&[(vm_memory::GuestAddress(0), 0x1000)])
+                .unwrap();
+        let hda = Arc::new(Mutex::new(vmlab_hv_devices::hda::Hda::new(
+            "hda",
+            memory,
+            Arc::new(SilentHost),
+            Arc::new(NoMsi),
+            false,
+        )));
+        use vmlab_hv_devices::BusDevice;
+        hda.lock().write(8, &[1]); // GCTL: the controller leaves reset.
+        chipset.audio.lock().replace(hda.clone());
+        let wall = || {
+            let mut bytes = [0; 4];
+            hda.lock().read(0x30, &mut bytes);
+            u32::from_le_bytes(bytes)
+        };
+        let base = chipset.clock.lock().0;
+        chipset.clock_step_at(base, Some(true));
+        chipset.clock_step_at(base + Duration::from_secs(1), Some(false));
+        // The 24 MHz wall clock advanced exactly one running second and
+        // then froze with the machine.
+        assert_eq!(wall(), 24_000_000);
+        chipset.clock_step_at(base + Duration::from_secs(3), Some(true));
+        assert_eq!(wall(), 24_000_000);
+        chipset.clock_step_at(base + Duration::from_secs(4), None);
+        assert_eq!(wall(), 48_000_000);
     }
 }
