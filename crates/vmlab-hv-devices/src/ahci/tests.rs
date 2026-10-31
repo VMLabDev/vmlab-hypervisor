@@ -363,6 +363,12 @@ fn hba_reset_six_ports_and_indexed_io() {
 #[test]
 fn system_reset_clears_pci_and_hba_state_and_keeps_attached_drives() {
     let mut d = Driver::new();
+    d.hba.attach_cdrom(2, None).unwrap();
+    let Some(Drive::Cdrom(optical)) = &mut d.hba.drives[2] else {
+        panic!("CD-ROM missing")
+    };
+    let optical_mode = optical.transfer_mode;
+    optical.transfer_mode = 0x20;
     d.hba
         .attach_disk(5, image(vec![0x42; 4096], false))
         .unwrap();
@@ -379,6 +385,10 @@ fn system_reset_clears_pci_and_hba_state_and_keeps_attached_drives() {
     let mut sector = [0; 512];
     disk.image.read_at(0, &mut sector).unwrap();
     assert_eq!(sector, [0x42; 512]);
+    let Some(Drive::Cdrom(optical)) = &d.hba.drives[2] else {
+        panic!("CD-ROM detached")
+    };
+    assert_eq!(optical.transfer_mode, optical_mode);
 }
 
 #[test]

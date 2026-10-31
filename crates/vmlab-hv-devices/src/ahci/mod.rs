@@ -1045,7 +1045,7 @@ impl crate::Resettable for Ahci {
                     disk.write_cache = true;
                     disk.transfer_mode = 0x22;
                 }
-                Drive::Cdrom(optical) => optical.transfer_mode = 0x22,
+                Drive::Cdrom(optical) => optical.transfer_mode = Optical::new(None).transfer_mode,
             }
         }
         self.reset();
