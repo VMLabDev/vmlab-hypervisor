@@ -21,6 +21,7 @@ pub mod memory;
 pub mod pci;
 pub mod pm;
 pub mod q35;
+mod reset;
 pub mod smm;
 pub mod snapshot;
 pub mod vcpu;

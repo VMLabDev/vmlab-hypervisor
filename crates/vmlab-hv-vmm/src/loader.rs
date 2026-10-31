@@ -134,6 +134,10 @@ fn setup_long_mode(mem: &GuestMemoryMmap, top: u64) -> Result<(), VmmError> {
     const PTE_PS: u64 = 0x80;
 
     let gb_pages = top.div_ceil(1 << 30).max(1);
+    for address in [PML4_ADDR, PDPT_ADDR] {
+        mem.write_slice(&[0; 4096], GuestAddress(address))
+            .map_err(|e| VmmError::Kernel(format!("clearing boot page table: {e}")))?;
+    }
     // One PML4E points at the PDPT, which covers 512 GiB with 1 GiB pages.
     let pml4e = PDPT_ADDR | PTE_P | PTE_RW;
     mem.write_slice(&pml4e.to_le_bytes(), GuestAddress(PML4_ADDR))

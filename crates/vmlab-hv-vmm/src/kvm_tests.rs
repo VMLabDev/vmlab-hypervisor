@@ -553,6 +553,161 @@ fn triple_fault_is_guest_reset() {
 }
 
 #[test]
+fn q35_reset_sources_restart_firmware_and_keep_control_connected() {
+    let Some(kvm) = kvm_or_skip() else { return };
+    drop(kvm);
+    // ACPI's FADT RESET_REG names CF9; test both the full-reset value and
+    // the legacy reset-control edge as well as the i8042 and triple fault.
+    for (name, reset) in [
+        ("cf9", vec![0xba, 0xf9, 0x0c, 0xb0, 2, 0xee, 0xb0, 6, 0xee]),
+        ("acpi", vec![0xba, 0xf9, 0x0c, 0xb0, 0x0e, 0xee]),
+        ("i8042", vec![0xba, 0x64, 0, 0xb0, 0xfe, 0xee]),
+        (
+            "triple-fault",
+            vec![
+                0x0f, 0x01, 0x1e, 0x10, 0x70, 0x0f, 0x20, 0xc0, 0x0c, 1, 0x0f, 0x22, 0xc0, 0xcc,
+            ],
+        ),
+        (
+            "hyperv",
+            vec![
+                0x66, 0xb9, 3, 0, 0, 0x40, 0x66, 0x31, 0xd2, 0x66, 0xb8, 1, 0, 0, 0, 0x0f, 0x30,
+            ],
+        ),
+        ("smm", vec![]),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let bios = dir.path().join("bios.bin");
+        let mut image = vec![0; 65536];
+        // Keep a RAM boot counter across reset. The second boot halts so
+        // that a duplicate reset is observable as a third serial byte.
+        let mut code = vec![
+            0xfa, 0x31, 0xc0, 0x8e, 0xd8, 0x80, 0x3e, 0, 0x70, 0, 0x75, 0, 0xc6, 0x06, 0, 0x70, 1,
+            0xba, 0xf8, 3, 0xb0, b'1', 0xee,
+        ];
+        // SYSENTER_CS is outside the small online-snapshot MSR list. Reset
+        // must also clear this and hardware breakpoint addresses.
+        code.extend([
+            0x66, 0xb9, 0x74, 1, 0, 0, 0x66, 0x31, 0xd2, 0x66, 0xb8, 0x42, 0, 0, 0, 0x0f, 0x30,
+            0x0f, 0x23, 0xc0,
+        ]);
+        code.extend(reset);
+        code.extend([0xf4, 0xeb, 0xfd]);
+        let second = code.len();
+        code[11] = (second - 12) as u8;
+        code.extend([0xba, 0xf8, 3, 0xb0, b'2', 0xee, 0xf4, 0xeb, 0xfd]);
+        image[..code.len()].copy_from_slice(&code);
+        image[0xfff0..0xfff5].copy_from_slice(&[0xea, 0, 0, 0, 0xf0]);
+        std::fs::write(&bios, image).unwrap();
+        let desc: MachineDescription = serde_json::from_value(serde_json::json!({
+            "machine":"q35", "name":name, "arch":"x86_64", "accel":"kvm",
+            "vcpus":2, "memory_mib":64, "hyperv":["reset"],
+            "boot":{"kind":"firmware", "firmware":"seabios", "code":bios},
+            "disks":[], "nics":[], "ports":[], "serial_log":dir.path().join("serial.log")
+        }))
+        .unwrap();
+        let (factory, serial) = TestFactory::new();
+        let vm = builder::build(&desc, &factory, true).unwrap();
+        let handle = vm.handle();
+        if name == "smm" {
+            let handler = [
+                0xfa, 0x31, 0xc0, 0x8e, 0xd8, 0xc6, 0x06, 0, 0x70, 1, 0xba, 0xf8, 3, 0xb0, b'1',
+                0xee, 0xba, 0xf9, 0x0c, 0xb0, 6, 0xee, 0xf4, 0xeb, 0xfd,
+            ];
+            vm.ram
+                .mem
+                .write_slice(&handler, GuestAddress(0x38000))
+                .unwrap();
+            handle.shared().vcpus.lock()[0].1.lock().smi().unwrap();
+        }
+        watchdog(&handle);
+        let socket = dir.path().join("control.sock");
+        crate::control::serve(&socket, &handle).unwrap();
+        let mut client = vmlab_hv_proto::client::Client::connect(&socket).unwrap();
+        client.call(Command::Resume).unwrap();
+        loop {
+            match client
+                .wait_event()
+                .unwrap()
+                .expect("reset must keep control open")
+            {
+                Event::Reset => break,
+                Event::Stopped | Event::Resumed => {}
+                event => panic!("{name}: unexpected event {event:?}"),
+            }
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while serial.lock().len() < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        client.call(Command::Pause).unwrap();
+        handle
+            .shared()
+            .wait_quiesced(Duration::from_secs(3))
+            .unwrap();
+        let diagnostics = {
+            let cpus = handle.shared().vcpus.lock();
+            let fd = cpus[0].1.lock();
+            (
+                fd.get_regs(),
+                fd.get_sregs(),
+                fd.get_vcpu_events(),
+                fd.get_mp_state(),
+            )
+        };
+        assert_eq!(
+            &*serial.lock(),
+            b"12",
+            "{name}: firmware did not restart once: {diagnostics:?}; events={:?}",
+            client.take_events()
+        );
+        let cpus = handle.shared().vcpus.lock();
+        let bsp = cpus[0].1.lock();
+        let mut sysenter = kvm_bindings::Msrs::from_entries(&[kvm_bindings::kvm_msr_entry {
+            index: 0x174,
+            ..Default::default()
+        }])
+        .unwrap();
+        assert_eq!(bsp.get_msrs(&mut sysenter).unwrap(), 1);
+        assert_eq!(
+            sysenter.as_slice()[0].data,
+            0,
+            "{name}: SYSENTER_CS survived reset"
+        );
+        assert_eq!(
+            bsp.get_debug_regs().unwrap().db[0],
+            0,
+            "{name}: DR0 survived reset"
+        );
+        drop(bsp);
+        let tsc = |fd: &kvm_ioctls::VcpuFd| {
+            let mut value = kvm_bindings::Msrs::from_entries(&[kvm_bindings::kvm_msr_entry {
+                index: 0x10,
+                ..Default::default()
+            }])
+            .unwrap();
+            assert_eq!(fd.get_msrs(&mut value).unwrap(), 1);
+            value.as_slice()[0].data
+        };
+        let before = tsc(&cpus[0].1.lock());
+        let ap_tsc = tsc(&cpus[1].1.lock());
+        let after = tsc(&cpus[0].1.lock());
+        assert!(
+            (before..=after).contains(&ap_tsc),
+            "{name}: reset left unsynchronized TSCs: BSP {before}..{after}, AP {ap_tsc}"
+        );
+        assert_eq!(
+            cpus[1].1.lock().get_mp_state().unwrap().mp_state,
+            kvm_bindings::KVM_MP_STATE_UNINITIALIZED,
+            "{name}: AP must wait for SIPI"
+        );
+        drop(cpus);
+        client.call(Command::Quit).unwrap();
+        assert_eq!(vm.wait(), ExitReason::Shutdown(ShutdownReason::HostRequest));
+    }
+}
+
+#[test]
 fn paused_machine_resumes_and_reports_events() {
     let Some((mut vm, handle, serial)) = payload_vm(&s5_payload(), true, false) else {
         return;
@@ -572,6 +727,96 @@ fn paused_machine_resumes_and_reports_events() {
         ExitReason::Shutdown(ShutdownReason::GuestShutdown)
     );
     assert_eq!(*serial.lock(), b"hello-s5\n");
+}
+
+#[test]
+fn q35_reset_allows_three_application_processors_to_start_again() {
+    let Some(kvm) = kvm_or_skip() else { return };
+    drop(kvm);
+    let dir = tempfile::tempdir().unwrap();
+    let mut code = vec![
+        0xfa, 0x31, 0xc0, 0x8e, 0xd8, 0xc7, 0x06, 1, 0x71, 0, 0, 0xc6, 0x06, 3, 0x71, 0,
+    ];
+    // x2APIC MSRs avoid real-mode segment limits on the high MMIO aperture.
+    code.extend([
+        0x66, 0xb9, 0x1b, 0, 0, 0, 0x0f, 0x32, 0x66, 0x0d, 0, 4, 0, 0, 0x0f, 0x30,
+    ]);
+    let mut messages = vec![(0x80fu32, 0x1ffu32, 0u32)];
+    for destination in 1..4 {
+        messages.extend([
+            (0x830, 0x4500, destination),
+            (0x830, 0x4608, destination),
+            (0x830, 0x4608, destination),
+        ]);
+    }
+    for (index, value, destination) in messages {
+        code.extend([0x66, 0xb9]);
+        code.extend(index.to_le_bytes());
+        code.extend([0x66, 0xba]);
+        code.extend(destination.to_le_bytes());
+        code.extend([0x66, 0xb8]);
+        code.extend(value.to_le_bytes());
+        code.extend([0x0f, 0x30]);
+    }
+    let poll = code.len();
+    code.extend([0x81, 0x3e, 1, 0x71, 1, 1, 0x75, 0]);
+    let first = code.len() - 1;
+    code[first] = (poll as isize - code.len() as isize) as i8 as u8;
+    code.extend([0x80, 0x3e, 3, 0x71, 1, 0x75, 0]);
+    let second = code.len() - 1;
+    code[second] = (poll as isize - code.len() as isize) as i8 as u8;
+    code.extend([
+        0xfe, 0x06, 0, 0x70, 0xa0, 0, 0x70, 0x04, b'0', 0xba, 0xf8, 3, 0xee, 0x3c, b'1', 0x74, 3,
+        0xf4, 0xeb, 0xfd, 0xba, 0xf9, 0x0c, 0xb0, 6, 0xee, 0xf4, 0xeb, 0xfd,
+    ]);
+    let mut image = vec![0; 65536];
+    image[..code.len()].copy_from_slice(&code);
+    image[0xfff0..0xfff5].copy_from_slice(&[0xea, 0, 0, 0, 0xf0]);
+    let bios = dir.path().join("bios.bin");
+    std::fs::write(&bios, image).unwrap();
+    let mut features = crate::hyperv::WINDOWS_FEATURES.to_vec();
+    if crate::hyperv::host_apic_virtualization() {
+        features.push(vmlab_hv_proto::machine::HyperV::Avic);
+    }
+    let desc: MachineDescription = serde_json::from_value(serde_json::json!({
+        "machine":"q35", "name":"smp-reset", "arch":"x86_64", "accel":"kvm",
+        "vcpus":4, "memory_mib":64, "hyperv":features,
+        "boot":{"kind":"firmware", "firmware":"seabios", "code":bios},
+        "disks":[], "nics":[], "ports":[], "serial_log":dir.path().join("serial.log")
+    }))
+    .unwrap();
+    let (factory, serial) = TestFactory::new();
+    let vm = builder::build(&desc, &factory, true).unwrap();
+    vm.ram
+        .mem
+        .write_slice(
+            &[
+                0xfa, 0x31, 0xc0, 0x8e, 0xd8, 0x66, 0xb8, 1, 0, 0, 0, 0x0f, 0xa2, 0x66, 0xc1, 0xeb,
+                24, 0xc6, 0x87, 0, 0x71, 1, 0xf4, 0xeb, 0xfd,
+            ],
+            GuestAddress(0x8000),
+        )
+        .unwrap();
+    let handle = vm.handle();
+    watchdog(&handle);
+    let socket = dir.path().join("control.sock");
+    crate::control::serve(&socket, &handle).unwrap();
+    let mut client = vmlab_hv_proto::client::Client::connect(&socket).unwrap();
+    client.call(Command::Resume).unwrap();
+    loop {
+        match client.wait_event().unwrap().expect("control remains open") {
+            Event::Reset => break,
+            Event::Stopped | Event::Resumed => {}
+            event => panic!("SMP reset: {event:?}; serial={:?}", serial.lock()),
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while serial.lock().len() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    client.call(Command::Quit).unwrap();
+    assert_eq!(vm.wait(), ExitReason::Shutdown(ShutdownReason::HostRequest));
+    assert_eq!(&*serial.lock(), b"12");
 }
 
 #[test]
@@ -652,6 +897,7 @@ fn real_kernel_boots_and_resets() {
     let (factory, serial) = TestFactory::new();
     let dir = tempfile::tempdir().unwrap();
     let desc = MachineDescription {
+        exit_on_reset: true,
         vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),

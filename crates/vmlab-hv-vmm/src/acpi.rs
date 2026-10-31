@@ -60,7 +60,16 @@ pub fn install(mem: &GuestMemoryMmap, cfg: &AcpiConfig) -> Result<AcpiPlacement,
     fadt.pm1_cnt_len = 2;
     fadt.century = 0x32;
     fadt.preferred_pm_profile = PmProfile::EnterpriseServer as u8;
-    fadt.flags = ((Flags::Wbinvd as u32) | (Flags::Headless as u32)).into();
+    fadt.flags =
+        ((Flags::Wbinvd as u32) | (Flags::Headless as u32) | (Flags::ResetRegSup as u32)).into();
+    fadt.reset_reg = acpi_tables::gas::GAS::new(
+        acpi_tables::gas::AddressSpace::SystemIo,
+        8,
+        0,
+        acpi_tables::gas::AccessSize::ByteAccess,
+        0xcf9,
+    );
+    fadt.reset_value = 6;
     let fadt = fadt.dsdt_64(dsdt_addr).finalize();
     let fadt_addr = cursor.push_aml(mem, &fadt)?;
 

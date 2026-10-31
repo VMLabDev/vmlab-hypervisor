@@ -75,6 +75,16 @@ impl PmDevice {
     }
 }
 
+impl vmlab_hv_devices::Resettable for PmDevice {
+    fn reset(&mut self) -> Result<(), vmlab_hv_devices::DeviceError> {
+        self.sts = STS_WAK;
+        self.en = 0;
+        self.cnt = 0;
+        self.update_sci();
+        Ok(())
+    }
+}
+
 impl BusDevice for PmDevice {
     fn read(&mut self, offset: u64, data: &mut [u8]) {
         let value = match offset {
