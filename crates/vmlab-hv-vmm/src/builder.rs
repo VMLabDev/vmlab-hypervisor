@@ -429,10 +429,6 @@ pub fn build(
         }
     };
     let mut snap_disks = Vec::new();
-    let vfio = crate::vfio::build(desc, &kvm, &ram.mem).map_err(VmmError::Other)?;
-    for (device, config) in vfio.iter().zip(&desc.vfio) {
-        place(device.clone(), Some(config.pci))?;
-    }
     let mut snap_nodes = Vec::new();
     let mut pflash = None;
     if q35 {
@@ -531,6 +527,12 @@ pub fn build(
     } else {
         None
     };
+    // Firmware construction adds PAM RAM to GuestMemory. Assign devices only
+    // after those regions exist, so their IOMMU domain sees the complete RAM map.
+    let vfio = crate::vfio::build(desc, &kvm, &ram.mem).map_err(VmmError::Other)?;
+    for (device, config) in vfio.iter().zip(&desc.vfio) {
+        place(device.clone(), Some(config.pci))?;
+    }
     if let Some(chipset) = &chipset {
         snap_nodes.push(DeviceNode::Plain(Arc::new(Mutex::new(
             crate::chipset::ChipsetRegisters(chipset.clone()),
