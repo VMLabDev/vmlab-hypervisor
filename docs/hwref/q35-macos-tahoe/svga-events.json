@@ -1,0 +1,13 @@
+{
+  "vmware_palette_read": 0,
+  "vmware_palette_write": 0,
+  "vmware_scratch_read": 0,
+  "vmware_scratch_write": 0,
+  "vmware_setmode": 0,
+  "vmware_update_rect_delayed_flush": 0,
+  "vmware_value_read": 0,
+  "vmware_value_write": 0,
+  "vmware_verify_rect_greater_than_bound": 0,
+  "vmware_verify_rect_less_than_zero": 0,
+  "vmware_verify_rect_surface_bound_exceeded": 0
+}

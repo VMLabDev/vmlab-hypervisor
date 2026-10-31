@@ -1,0 +1,14 @@
+[
+  {
+    "absolute": false,
+    "current": false,
+    "index": 2,
+    "name": "QEMU PS/2 Mouse"
+  },
+  {
+    "absolute": true,
+    "current": true,
+    "index": 4,
+    "name": "QEMU HID Tablet"
+  }
+]

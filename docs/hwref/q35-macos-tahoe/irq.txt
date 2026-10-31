@@ -1,0 +1,7 @@
+IRQ statistics for kvm-ioapic:
+ 1: 14
+10: 18616
+16: 18616
+IRQ statistics for kvm-i8259:
+ 1: 14
+10: 18616

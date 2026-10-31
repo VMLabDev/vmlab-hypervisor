@@ -1,0 +1,21 @@
+{
+  "captured_on": "2026-10-31",
+  "hashes": {
+    "/home/wil/.local/share/vmlab/guest/firmware/x86_64/OVMF_CODE_4M.fd": "7e34e3b83224968bb0714c0ebc88f75c5c37b4cc892c902e511ccc7a7c107f94",
+    "/home/wil/.local/share/vmlab/templates/x86_64/macos-tahoe/26.7.0/template.wcl": "c83b487b2afd5d9a7979c7d363f6ea7cc6056600c46e9958eca380c1f4a67b8d",
+    "/home/wil/dev/vmlab/target/debug/vmlab": "7f945673636070938866fda7e5f63f4d08a6c9108a1a96bd5444bdafd4fcc275",
+    "/usr/bin/qemu-system-x86_64": "a2250f5e2b3b07c754473c0817df1cccf6c3c2443fc616dc474c4c311fa6ef1c"
+  },
+  "ignore_msrs": "Y",
+  "method": "vmlab up, isolated runtime and state directories, scratch overlay",
+  "msr_list": "deferred by owner to vmlab-hv D2 userspace exits",
+  "observation_flags": [
+    "-trace events=...,file=...",
+    "-qmp unix:.../observe.sock,server=on,wait=off",
+    "-qtest unix:.../qtest.sock,server=on,wait=off",
+    "-qtest-log /dev/null"
+  ],
+  "recorded_at": "2026-10-31T13:31:13.772262+00:00",
+  "report_ignored_msrs": "N",
+  "uname": "#1 SMP PREEMPT_DYNAMIC Wed, 14 Oct 2026 07:02:02 +0000"
+}
