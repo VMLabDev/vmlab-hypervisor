@@ -46,8 +46,8 @@ fn platform_dynamic_names() -> &'static std::collections::BTreeSet<String> {
         std::sync::OnceLock::new();
     NAMES.get_or_init(|| {
         let mut names = dynamic_names().clone();
-        // Platform IRQs and guest handlers update these values independently
-        // of the instruction stream. They do not configure instruction decode.
+        // Platform timers, IRQs, and trap handlers change these data values.
+        // They must not invalidate otherwise reusable instruction traces.
         names.extend(
             [
                 "zmtimecmp",
