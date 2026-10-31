@@ -10,6 +10,7 @@ fn snapshot_restores_architecture_and_rebuilds_translation_cache() {
         .write(0x80000004, &0xffdff06fu32.to_le_bytes())
         .unwrap();
     let mut cpu = Riscv64::new(memory).unwrap();
+    cpu.set_trace_cache_limit(16_000_000).unwrap();
     cpu.specialize = true;
     cpu.interpreter.operation_limit = u64::MAX;
     cpu.set_pc(0x80000000);
@@ -28,6 +29,7 @@ fn snapshot_restores_architecture_and_rebuilds_translation_cache() {
     assert!(cpu.specialize);
     assert_eq!(cpu.interpreter.operation_limit, u64::MAX);
     assert!(cpu.trace_profile().is_empty());
+    assert_eq!(cpu.trace_cache_usage(), (0, 16_000_000));
     cpu.run(64).unwrap();
     assert_eq!(cpu.gpr(1).unwrap(), x1 + 32);
 }
@@ -61,4 +63,53 @@ fn external_timer_is_not_advanced_by_retirement_and_survives_restore() {
     cpu.run(96).unwrap();
     assert_eq!(cpu.interpreter.globals["zmtime"].u64().unwrap(), 123456);
     assert_eq!(cpu.interpreter.globals["zmcycle"].u64().unwrap(), 192);
+}
+
+#[test]
+fn cache_budget_retains_a_working_set_without_changing_architecture() {
+    fn make() -> Riscv64<FlatMemory> {
+        let mut memory = FlatMemory::new(0x80000000, vec![0; 8 * 4096]);
+        for page in 0..8 {
+            memory
+                .write(0x80000000 + page * 4096, &0x00108093u32.to_le_bytes())
+                .unwrap();
+            memory
+                .write(0x80000004 + page * 4096, &0xffdff06fu32.to_le_bytes())
+                .unwrap();
+        }
+        let mut cpu = Riscv64::new(memory).unwrap();
+        cpu.specialize = true;
+        cpu.interpreter.operation_limit = u64::MAX;
+        cpu
+    }
+    fn visit(cpu: &mut Riscv64<FlatMemory>) {
+        for page in 0..8 {
+            cpu.set_pc(0x80000000 + page * 4096);
+            cpu.run(64).unwrap();
+        }
+    }
+    let mut large = make();
+    for _ in 0..4 {
+        visit(&mut large);
+    }
+    let working_set = large.trace_cache_usage().0;
+    assert!(working_set > 0);
+    let mut small = make();
+    small.set_trace_cache_limit(working_set / 4).unwrap();
+    for _ in 0..4 {
+        visit(&mut small);
+    }
+    let small_before = small.specialization_stats.recordings;
+    let large_before = large.specialization_stats.recordings;
+    visit(&mut small);
+    visit(&mut large);
+    assert!(small.specialization_stats.recordings > small_before);
+    assert_eq!(large.specialization_stats.recordings, large_before);
+    assert!(small.trace_cache_usage().0 <= small.trace_cache_usage().1);
+    assert_eq!(*small.interpreter.globals, *large.interpreter.globals);
+    assert!(large.set_trace_cache_limit(0).is_err());
+    assert_eq!(large.trace_cache_usage().0, working_set);
+    large.set_trace_cache_limit(working_set).unwrap();
+    assert!(large.trace_profile().is_empty());
+    assert_eq!(large.trace_cache_usage(), (0, working_set));
 }

@@ -102,6 +102,7 @@ pub struct Riscv64<M> {
     pub specialization_stats: SpecializationStats,
     traces: BTreeMap<u64, Vec<crate::trace::Trace>>,
     cache_units: usize,
+    cache_limit: usize,
     cache_clock: u64,
     external_clock: bool,
 }
@@ -148,6 +149,7 @@ impl<M: Memory> Riscv64<M> {
         restored.interpreter.memoize = self.interpreter.memoize;
         restored.interpreter.indexed = self.interpreter.indexed;
         restored.interpreter.operation_limit = self.interpreter.operation_limit;
+        restored.cache_limit = self.cache_limit;
         *self = restored;
         Ok(())
     }
@@ -162,6 +164,31 @@ impl<M: Memory> Riscv64<M> {
         profiles
     }
 
+    /// Set a positive weighted metadata budget and discard existing traces.
+    /// Units account for recipes, scalar operations, and continuation state;
+    /// they are not bytes. Architectural state is unchanged.
+    pub fn set_trace_cache_limit(&mut self, units: usize) -> Result<()> {
+        if units == 0 {
+            return Err(crate::Error::Type(
+                "trace cache budget must be positive".into(),
+            ));
+        }
+        self.specialization_stats.evictions += self
+            .traces
+            .values()
+            .map(|variants| variants.len() as u64)
+            .sum::<u64>();
+        self.traces.clear();
+        self.cache_units = 0;
+        self.cache_limit = units;
+        Ok(())
+    }
+
+    /// Current weighted metadata usage and its configured limit.
+    pub fn trace_cache_usage(&self) -> (usize, usize) {
+        (self.cache_units, self.cache_limit)
+    }
+
     pub fn new(memory: M) -> Result<Self> {
         let mut interpreter = Interpreter::new(vmlab_hv_tcg_riscv64::model(), memory);
         interpreter.initialize()?;
@@ -174,6 +201,7 @@ impl<M: Memory> Riscv64<M> {
             specialization_stats: SpecializationStats::default(),
             traces: BTreeMap::new(),
             cache_units: 0,
+            cache_limit: TRACE_CACHE_LIMIT,
             cache_clock: 0,
             external_clock: false,
         })
@@ -477,18 +505,18 @@ impl<M: Memory> Riscv64<M> {
                     Some((pc, trace.cache_units(), trace.cache_breakdown()));
             }
         }
-        variants.retain(|trace| trace.cache_units() <= TRACE_CACHE_LIMIT);
+        variants.retain(|trace| trace.cache_units() <= self.cache_limit);
         if variants.is_empty() {
             return;
         }
         let mut cache_units: usize = variants.iter().map(crate::trace::Trace::cache_units).sum();
-        while cache_units > TRACE_CACHE_LIMIT {
+        while cache_units > self.cache_limit {
             cache_units -= variants.remove(0).cache_units();
             self.specialization_stats.evictions += 1;
         }
-        while cache_units <= TRACE_CACHE_LIMIT
+        while cache_units <= self.cache_limit
             && !self.traces.is_empty()
-            && (self.traces.len() >= 4096 || self.cache_units + cache_units > TRACE_CACHE_LIMIT)
+            && (self.traces.len() >= 4096 || self.cache_units + cache_units > self.cache_limit)
         {
             let oldest = *self
                 .traces

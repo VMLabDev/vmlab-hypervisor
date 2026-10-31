@@ -427,12 +427,15 @@ impl Shared {
                 && last_progress.elapsed() >= Duration::from_secs(10)
             {
                 eprintln!(
-                    "RISC-V hart {hart}: PC={pc:#x}, steps={steps}, native={}, recordings={}, training={}, misses={}, evictions={}, mcause={:?}, mepc={:?}",
+                    "RISC-V hart {hart}: PC={pc:#x}, steps={steps}, native={}, recordings={}, training={}, misses={}, evictions={}, cache={:?}, max_trace={:?}, stops={:?}, mcause={:?}, mepc={:?}",
                     cpu.specialization_stats.hits,
                     cpu.specialization_stats.recordings,
                     cpu.specialization_stats.training_steps,
                     cpu.specialization_stats.misses,
                     cpu.specialization_stats.evictions,
+                    cpu.trace_cache_usage(),
+                    cpu.specialization_stats.max_trace,
+                    cpu.specialization_stats.stop_reasons,
                     cpu.interpreter.globals.get("zmcause"),
                     cpu.interpreter.globals.get("zmepc")
                 );

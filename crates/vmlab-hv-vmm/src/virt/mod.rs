@@ -472,6 +472,8 @@ pub fn build(desc: &MachineDescription, factory: &dyn DeviceFactory) -> Result<V
     let mut cpus = Vec::new();
     for hart in 0..desc.vcpus {
         let mut cpu = Riscv64::new(memory.clone()).map_err(|e| e.to_string())?;
+        cpu.set_trace_cache_limit(64_000_000 / desc.vcpus as usize)
+            .map_err(|e| e.to_string())?;
         cpu::configure_memory(&mut cpu, size)?;
         cpu.specialize = true;
         cpu.interpreter.operation_limit = u64::MAX;
