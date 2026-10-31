@@ -170,6 +170,50 @@ fn q35_seabios_banner_through_control_socket() {
     );
 }
 
+/// A virtio-snd audio section builds into a PCI function at its own
+/// address, and the machine's running-time clock can pace it (hv-audio
+/// D2's second device).
+#[test]
+fn audio_virtio_snd_builds_and_joins_the_machine_clock() {
+    const BIOS: &str = "/usr/share/qemu/bios-256k.bin";
+    if !Path::new(BIOS).exists() {
+        eprintln!("skipping: SeaBIOS firmware {BIOS} is not installed");
+        return;
+    }
+    let Some(kvm) = kvm_or_skip() else { return };
+    drop(kvm);
+    let dir = tempfile::tempdir().unwrap();
+    let desc: MachineDescription = serde_json::from_value(serde_json::json!({
+        "machine": "q35", "name": "virtio-snd-test", "arch": "x86_64", "accel": "kvm",
+        "vcpus": 1, "memory_mib": 256,
+        "boot": { "kind": "firmware", "firmware": "seabios", "code": BIOS },
+        "disks": [], "nics": [], "ports": [], "serial_log": dir.path().join("serial.log"),
+        "audio": { "device": "virtio_snd", "microphone": true,
+            "node_name": "vmlab.test.snd", "node_description": "virtio-snd build test",
+            "pci": {"bus": 0, "device": 5, "function": 0} }
+    }))
+    .unwrap();
+    let (factory, _serial) = TestFactory::new();
+    let vm = builder::build(&desc, &factory, true).unwrap();
+    let handle = vm.handle();
+    let guard = handle.shared().chipset.lock();
+    let chipset = guard.as_ref().unwrap();
+    {
+        let audio = chipset.audio.lock();
+        let device = audio.as_ref().expect("virtio-snd joins the chipset clock");
+        // Pacing and pausing an unactivated device is a no-op, not an
+        // error. The guard must not outlive the machine's timer thread,
+        // which takes this same lock every tick.
+        device.lock().set_paused(true);
+        device.lock().advance(Duration::from_millis(5)).unwrap();
+        device.lock().set_paused(false);
+    }
+    drop(guard);
+    handle.quit();
+    drop(handle);
+    let _ = vm.wait();
+}
+
 fn check_native_display_and_keyboard(handle: &VmHandle, directory: &Path) {
     use std::os::unix::fs::FileExt;
     use vmlab_hv_display::{Capabilities, Client, Message};
