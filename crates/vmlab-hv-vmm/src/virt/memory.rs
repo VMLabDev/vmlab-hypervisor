@@ -21,6 +21,7 @@ struct ReadObservation {
 struct CodeWindow {
     bytes: [u8; 16],
     generation: u64,
+    page_generation: u64,
 }
 
 #[derive(Default)]
@@ -105,25 +106,34 @@ impl PhysicalMemory {
 impl PhysicalMemory {
     /// Validate precisely the fetched bytes. Firmware often keeps writable
     /// data beside code; changing that data must not invalidate the code.
-    fn dma_code_generation(&self, address: u64, len: usize) -> Option<u64> {
+    fn ram_code_generation(&self, address: u64, len: usize) -> Option<u64> {
         if len > 16 {
             return None;
         }
+        let page_generation = self.access_generation(address, len)?;
+        let mut windows = self.code_windows.lock();
+        let key = (address, len);
         let mut actual = [0; 16];
-        self.ram
-            .read_slice(&mut actual[..len], GuestAddress(address))
-            .ok()?;
+        if self.cache_safe.load(std::sync::atomic::Ordering::SeqCst)
+            && let Some(window) = windows.entries.get(&key)
+            && window.page_generation == page_generation
+        {
+            actual = window.bytes;
+        } else {
+            self.ram
+                .read_slice(&mut actual[..len], GuestAddress(address))
+                .ok()?;
+        }
         if let Some(read) = &self.last_read
             && (read.address, read.len) == (address, len)
             && actual[..len] != read.bytes[..len]
         {
             return None;
         }
-        let mut windows = self.code_windows.lock();
-        let key = (address, len);
-        if let Some(window) = windows.entries.get(&key)
+        if let Some(window) = windows.entries.get_mut(&key)
             && window.bytes == actual
         {
+            window.page_generation = page_generation;
             return Some(window.generation);
         }
         if windows.entries.len() == MAX_CODE_WINDOWS && !windows.entries.contains_key(&key) {
@@ -139,6 +149,7 @@ impl PhysicalMemory {
             CodeWindow {
                 bytes: actual,
                 generation,
+                page_generation,
             },
         );
         Some(generation)
@@ -181,8 +192,8 @@ impl Memory for PhysicalMemory {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .wrapping_add(1);
         // These platform registers cannot initiate DMA. Any other MMIO write
-        // switches RAM stamps to exact code-window validation before firmware can
-        // start PCI or fw_cfg DMA. Device writes bypass this CPU memory adapter.
+        // disables the page-epoch shortcut before firmware can start PCI or
+        // fw_cfg DMA. Device writes bypass this CPU memory adapter.
         if !self.is_ram(address, bytes.len())
             && !matches!(address,
             0x100000..=0x101fff | 0x2000000..=0x200ffff | 0xc000000..=0xc5fffff | 0x10000000..=0x100000ff | 0x20000000..=0x23ffffff)
@@ -229,15 +240,14 @@ impl Memory for PhysicalMemory {
         if len == 0 {
             return None;
         }
-        if !self.cache_safe.load(std::sync::atomic::Ordering::SeqCst) && self.is_ram(address, len) {
+        if self.is_ram(address, len) {
             return Some(CodeStamp {
                 identity: self.identity,
-                // Distinct windows must not coalesce into one page guard. The
-                // high bit also separates this namespace from pre-DMA stamps.
+                // Distinct windows must not coalesce into one page guard.
                 mapping: address | WINDOW_MAPPING,
                 first_page: 0,
                 last_page: 0,
-                generation: self.dma_code_generation(address, len)?,
+                generation: self.ram_code_generation(address, len)?,
             });
         }
         let generation = self.access_generation(address, len)?;
@@ -263,18 +273,7 @@ impl Memory for PhysicalMemory {
                 });
             }
         }
-        if !self.is_ram(address, len) {
-            return None;
-        }
-        let first = (address - RAM_BASE) / 4096;
-        let last = (address - RAM_BASE + len as u64 - 1) / 4096;
-        Some(CodeStamp {
-            identity: self.identity,
-            mapping: RAM_BASE,
-            first_page: first,
-            last_page: last,
-            generation,
-        })
+        None
     }
     fn load_reserved(&mut self, address: u64, bytes: &mut [u8]) -> Result<u64> {
         let transaction = self.transaction.clone();
@@ -405,6 +404,11 @@ mod tests {
 
     #[test]
     fn nearby_data_stores_do_not_retrain_a_warm_instruction_loop() {
+        nearby_data_stores(false);
+        nearby_data_stores(true);
+    }
+
+    fn nearby_data_stores(dma: bool) {
         let mut memory = memory();
         for (index, word) in [0x00000117u32, 0x00108093, 0x08113023, 0xff9ff06f]
             .into_iter()
@@ -414,7 +418,9 @@ mod tests {
                 .write(RAM_BASE + index as u64 * 4, &word.to_le_bytes())
                 .unwrap();
         }
-        memory.write(0x30008004, &[7]).unwrap();
+        if dma {
+            memory.write(0x30008004, &[7]).unwrap();
+        }
         let mut cpu = vmlab_hv_tcg::Riscv64::new(memory).unwrap();
         cpu.specialize = true;
         cpu.interpreter.operation_limit = u64::MAX;
@@ -426,10 +432,7 @@ mod tests {
         assert_eq!(cpu.gpr(1).unwrap(), 128);
         let retrained = cpu.specialization_stats.recordings - trained;
         eprintln!("unchanged warm loop: {retrained} retrainings over 64 iterations");
-        assert!(
-            retrained < 16,
-            "unchanged instructions retrained {retrained} times"
-        );
+        assert_eq!(retrained, 0, "unchanged instructions were retrained");
     }
 
     #[test]
@@ -441,7 +444,7 @@ mod tests {
         let prefix = memory.code_stamp(RAM_BASE, 2).unwrap();
         let whole = memory.code_stamp(RAM_BASE, 4).unwrap();
         let suffix = memory.code_stamp(RAM_BASE + 2, 2).unwrap();
-        assert_ne!(page.mapping, whole.mapping);
+        assert_eq!(page, whole);
         assert_ne!(prefix.generation, whole.generation);
         assert_ne!(prefix.mapping, suffix.mapping);
         memory
