@@ -442,7 +442,7 @@ pub fn build(desc: &MachineDescription, factory: &dyn DeviceFactory) -> Result<V
     ram.write_slice(&tree, GuestAddress(dtb))
         .map_err(|e| e.to_string())?;
     let dynamic = dtb + 0x100000;
-    for (index, value) in [0x4942_534fu64, 2, next_entry, 1, 0, u64::MAX]
+    for (index, value) in [0x4942_534fu64, 2, next_entry, 1, 0, 0]
         .into_iter()
         .enumerate()
     {
