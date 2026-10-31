@@ -775,6 +775,75 @@ fn capture_paces_from_the_scripted_source() {
 }
 
 #[test]
+fn capture_does_not_bank_time_without_receive_buffers() {
+    let host = RecordingHost::with_capture_script(vec![period_pcm(0x51)]);
+    let mut g = Guest::new(Arc::new(host), true);
+    g.negotiate();
+    g.setup_queues();
+    assert_eq!(g.set_params(1, 8192, 1024), S_OK);
+    assert_eq!(g.pcm_command(R_PCM_PREPARE, 1), S_OK);
+    assert_eq!(g.pcm_command(R_PCM_START, 1), S_OK);
+
+    // A starved receive queue cannot record PCM for future buffers.
+    g.advance(Duration::from_secs(1));
+    for slot in 0..8 {
+        g.rx(slot, 1, 1024);
+    }
+    assert_eq!(
+        g.used_idx(VQ_RX),
+        0,
+        "refilling must not complete a whole ring"
+    );
+    g.advance(period_time());
+    assert_eq!(g.used_idx(VQ_RX), 1);
+    assert_eq!(g.rx_payload(0, 1024), (period_pcm(0x51), (S_OK, 0)));
+
+    // Exhausting posted buffers also drops time before the next refill.
+    for _ in 1..8 {
+        g.advance(period_time());
+    }
+    assert_eq!(g.used_idx(VQ_RX), 8);
+    g.advance(Duration::from_secs(1));
+    for slot in 8..16 {
+        g.rx(slot, 1, 1024);
+    }
+    assert_eq!(g.used_idx(VQ_RX), 8);
+    g.advance(period_time());
+    assert_eq!(g.used_idx(VQ_RX), 9);
+    assert_eq!(g.rx_payload(8, 1024).1, (S_OK, 0));
+}
+
+#[test]
+fn capture_does_not_complete_a_ring_after_a_clock_stall() {
+    let mut g = Guest::new(Arc::new(RecordingHost::new()), true);
+    g.negotiate();
+    g.setup_queues();
+    assert_eq!(g.set_params(1, 8192, 1024), S_OK);
+    assert_eq!(g.pcm_command(R_PCM_PREPARE, 1), S_OK);
+    for slot in 0..8 {
+        g.rx(slot, 1, 1024);
+    }
+    g.advance(Duration::from_secs(1));
+    assert_eq!(g.used_idx(VQ_RX), 0);
+    assert_eq!(g.pcm_command(R_PCM_START, 1), S_OK);
+
+    // A delayed host tick must not wrap the guest's whole PCM pointer.
+    g.advance(Duration::from_secs(1));
+    assert_eq!(g.used_idx(VQ_RX), 1);
+    g.advance(Duration::ZERO);
+    assert_eq!(g.used_idx(VQ_RX), 1);
+    g.advance(period_time());
+    assert_eq!(g.used_idx(VQ_RX), 2);
+    assert_eq!(g.rx_payload(0, 1024).1, (S_OK, 0));
+
+    // Sub-period ticks retain their remainder and the negotiated rate.
+    for _ in 0..32 {
+        g.advance(Duration::from_millis(1));
+    }
+    assert_eq!(g.used_idx(VQ_RX), 8);
+}
+
+#[test]
 fn microphone_off_opens_no_capture_stream() {
     let host = RecordingHost::new();
     let mut g = Guest::new(Arc::new(host.clone()), false);

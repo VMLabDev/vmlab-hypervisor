@@ -13,7 +13,10 @@
 //! `latency_bytes` in every status is the host seam's answer at that
 //! moment. A started input stream banks machine time — the machine clock
 //! calls [`VirtioSnd::advance`] — and fills one rx message per
-//! `period_bytes` of it, straight from the host source.
+//! `period_bytes` of it, straight from the host source. Time without rx
+//! buffers is discarded rather than charged to a later refill. After a
+//! clock stall, capture drops missed periods instead of bursting them
+//! into the guest's ring.
 //!
 //! The device is shared between the virtio-pci transport ([`SoundPci`])
 //! and the machine's running-time clock ([`audio::AudioClock`]): the vCPU
@@ -709,6 +712,18 @@ impl VirtioSnd {
                 break;
             }
         }
+        if !all && capture_exists {
+            let queue = &self.queues[VQ_RX];
+            if queue
+                .avail_idx(&mem, std::sync::atomic::Ordering::Acquire)
+                .is_ok_and(|idx| idx.0 == queue.next_avail())
+            {
+                // No RX buffer held these frames. Carrying this time into
+                // a refill would complete fresh buffers immediately, which
+                // can wrap the driver's PCM pointer without visible progress.
+                self.streams[1].due_frames = 0;
+            }
+        }
         if used_any
             && self
                 .queues
@@ -845,7 +860,12 @@ impl AudioClock for VirtioSnd {
                 .as_ref()
                 .is_some_and(|h| matches!(h, HostStream::Capture(_)))
             {
-                stream.due_frames += frames;
+                let period = stream.params.unwrap().period_frames() as u64;
+                let due = stream.due_frames.saturating_add(frames);
+                // Bound catch-up to one period. A burst can wrap the
+                // guest's entire PCM pointer before it observes progress.
+                // Keep the remainder so regular ticks retain the frame rate.
+                stream.due_frames = due.min(period + due % period);
             } else {
                 stream.tx_credit += frames;
             }
