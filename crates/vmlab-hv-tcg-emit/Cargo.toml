@@ -1,0 +1,18 @@
+[package]
+name = "vmlab-hv-tcg-emit"
+description = "Generate Rust emulation IR builders from Sail Jib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vmlab-hv-sail-ir = { path = "../vmlab-hv-sail-ir" }
+vmlab-hv-tcg-ir = { path = "../vmlab-hv-tcg-ir" }
+serde_json.workspace = true
+sha2.workspace = true
+flate2.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

@@ -255,18 +255,24 @@ impl DeviceFactory for TestFactory {
         ))
     }
 
-    fn vhost_user_fs(
+    fn fs_share(
         &self,
         share: &FsShare,
         mem: &GuestMemory,
         msi: vmlab_hv_vmm::factory::PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable> {
         let id = format!("fs-{}", share.tag);
+        let Some(socket) = share.socket.clone() else {
+            return Err(DeviceUnavailable::new(
+                "vhost-user-fs",
+                format!("share `{}` is not a vhost-user socket", share.tag),
+            ));
+        };
         let fs = Fs::new(
             id.clone(),
             FsConfig {
                 tag: share.tag.clone(),
-                socket: share.socket.clone(),
+                socket,
             },
         )
         .map_err(|e| {
@@ -420,7 +426,9 @@ fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
         shares: vec![FsShare {
             pci: None,
             tag: TAG.into(),
-            socket: socket.to_path_buf(),
+            socket: Some(socket.to_path_buf()),
+            path: None,
+            read_only: false,
         }],
         audio: None,
         rtc_base: None,
