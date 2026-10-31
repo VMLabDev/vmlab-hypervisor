@@ -297,8 +297,16 @@ def must_sh(agent, cmd, what, timeout=X86_EXEC_TIMEOUT, stdin_data=None):
     code, out, err = sh(agent, cmd, timeout, stdin_data)
     if code != 0:
         raise lib.BenchError(f"{what} exited {code}: {err[-400:]}")
-    return out
 
+def respawn_hv(backend, run_dir):
+    """vmlab-hv exits 0 on a guest reset (triple fault); vmlab restarts the
+    process, so the bench does too — same machine description, same disks."""
+    for name in ("control.sock", "agent.sock", "display.sock", "vnc.sock"):
+        path = os.path.join(run_dir, name)
+        if os.path.exists(path):
+            os.remove(path)
+    backend.launch()
+    backend.release_cpus()
 
 WINDOWS_MARKER = "C:\\\\Windows\\\\Temp\\\\vmlab-firstboot.done"
 
@@ -342,7 +350,7 @@ def windows_boot_id(agent):
     for argv in probes:
         try:
             chan = win_exec(agent, ["cmd.exe", "/C"] + argv, 60)
-        except (TimeoutError, ConnectionError, lib.BenchError):
+        except (TimeoutError, ConnectionError, lib.BenchError, OSError):
             return None
         out = chan["data"].decode(errors="replace").strip()
         if chan["code"] == 0 and out:
@@ -410,7 +418,7 @@ class WindowsReady:
                         log("windows first boot finished; clearing marker")
                         win_exec(agent, ["cmd.exe", "/C", f"del /f /q {WINDOWS_MARKER}"], 60)
                         return agent, hello
-                except (TimeoutError, ConnectionError, lib.BenchError):
+                except (TimeoutError, ConnectionError, lib.BenchError, OSError):
                     pass
                 agent.close()
             time.sleep(5)
@@ -427,7 +435,7 @@ class WindowsReady:
                 if chan["code"] == 0 and state == "done":
                     log("windows OOBE finished")
                     return
-            except (TimeoutError, ConnectionError, lib.BenchError):
+            except (TimeoutError, ConnectionError, lib.BenchError, OSError):
                 agent.close()
                 agent, _ = self.connect()
                 if agent is None:
@@ -451,7 +459,7 @@ class WindowsReady:
         )
         try:
             win_ps(agent, ps, 600)
-        except (TimeoutError, ConnectionError, lib.BenchError) as e:
+        except (TimeoutError, ConnectionError, lib.BenchError, OSError) as e:
             log(f"windows appx settle skipped ({e})")
 
     def request_reboot(self, agent, round_index):
@@ -465,7 +473,7 @@ class WindowsReady:
             chan = win_exec(agent, argv, 60)
             log(f"windows reboot request {round_index + 1}: exit {chan['code']} "
                 f"{(chan['data'] + chan['stderr']).decode(errors='replace')[:80]!r}")
-        except (TimeoutError, ConnectionError, lib.BenchError) as e:
+        except (TimeoutError, ConnectionError, lib.BenchError, OSError) as e:
             log(f"windows reboot request {round_index + 1} got no reply "
                 f"(reboot likely underway): {e}")
 
