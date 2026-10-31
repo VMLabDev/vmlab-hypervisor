@@ -760,7 +760,19 @@ pub fn build(
             .register(PM1A_EVT_BASE, PM_BLOCK_LEN, pm.clone())
             .map_err(VmmError::Other)?;
     }
-    let xhci = if let Some(address) = desc.tablet {
+    // One xHCI carries the absolute tablet and the host passthrough ports:
+    // `tablet` places it for input, `usb` (vmlab's `usb = true`, the
+    // controller it names `usbx`) additionally enables hot-plug.
+    let xhci_address = match (desc.tablet, desc.usb) {
+        (Some(tablet), Some(usb)) if tablet != usb => {
+            return Err(VmmError::DeviceUnavailable {
+                device: "usb controller",
+                reason: "the tablet and usb functions must share one xHCI".into(),
+            });
+        }
+        (tablet, usb) => tablet.or(usb),
+    };
+    let xhci = if let Some(address) = xhci_address {
         let transport = wiring(Some(address), 1, false)?;
         let xhci = Arc::new(Mutex::new(vmlab_hv_devices::usb::XhciController::new(
             "xhci",
@@ -876,6 +888,9 @@ pub fn build(
     *shared.chipset.lock() = chipset;
     *shared.vga.lock() = vga;
     *shared.xhci.lock() = xhci;
+    shared
+        .usb_hotplug
+        .store(desc.usb.is_some(), std::sync::atomic::Ordering::SeqCst);
     *shared.pflash.lock() = pflash;
     *shared.tpm.lock() = tpm;
     *shared.smi_fwcfg.lock() = smi_fwcfg;
@@ -957,6 +972,7 @@ mod tests {
             hyperv: vec![],
             display: None,
             tablet: None,
+            usb: None,
             tpm: None,
             console_pci: None,
             ahci_pci: None,

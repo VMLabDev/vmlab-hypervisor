@@ -254,6 +254,14 @@ fn writable_disks(reg: &SnapshotRegistry) -> impl Iterator<Item = &DiskNode> {
 pub fn save(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
     let shared = handle.shared();
     let _op = shared.begin_snapshot();
+    if let Some(xhci) = shared.xhci.lock().as_ref()
+        && xhci.lock().has_host_devices()
+    {
+        return Err(SnapshotError::Unsupported(
+            "online snapshots are refused while host USB devices are attached (D9): detach them              first"
+                .into(),
+        ));
+    }
     if shared
         .vga
         .lock()
@@ -445,6 +453,14 @@ fn save_kernel_state(
 pub fn load(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
     let shared = handle.shared();
     let _op = shared.begin_snapshot();
+    if let Some(xhci) = shared.xhci.lock().as_ref()
+        && xhci.lock().has_host_devices()
+    {
+        return Err(SnapshotError::Unsupported(
+            "online snapshots are refused while host USB devices are attached (D9): detach them              first"
+                .into(),
+        ));
+    }
     if shared
         .vga
         .lock()

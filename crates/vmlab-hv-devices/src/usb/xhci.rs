@@ -300,6 +300,11 @@ impl XhciController {
         }
         Ok(port as usize - 1)
     }
+    /// Whether root port `port` carries no device.
+    pub fn port_free(&self, port: u8) -> bool {
+        Self::port_index(port).map(|p| self.devices[p].is_none()).unwrap_or(false)
+    }
+
     /// Root ports whose backend reports the physical device gone. The
     /// machine detaches these, which drops the backend and returns the
     /// host device to the host.

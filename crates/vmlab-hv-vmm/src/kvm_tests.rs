@@ -657,6 +657,7 @@ fn real_kernel_boots_and_resets() {
         hyperv: vec![],
         display: None,
         tablet: None,
+        usb: None,
         tpm: None,
         console_pci: None,
         ahci_pci: None,

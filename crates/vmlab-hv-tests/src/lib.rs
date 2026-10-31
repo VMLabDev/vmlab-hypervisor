@@ -358,6 +358,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         hyperv: vec![],
         display: None,
         tablet: None,
+        usb: None,
         tpm: None,
         console_pci: None,
         ahci_pci: None,
