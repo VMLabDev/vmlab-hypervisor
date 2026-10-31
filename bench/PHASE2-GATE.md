@@ -1,110 +1,186 @@
 # Phase-2 performance gate (HV-D28)
 
-First full measurement of the HV-D28 bar: *before the VM default flips,
-vmlab-hv must be no slower than QEMU on boot to agent ready, and reach at
-least 80 % of QEMU's virtio-blk and virtio-net throughput, measured on this
-host* (`notes/29-performance.md`).
+**Verdict: NOT passed. Eight of ten bars meet D28; G1 and G3 fail.**
+The VM default must remain unchanged.
 
-**Verdict: the gate is NOT passed.** Three of ten bars hold; seven fail.
-The numbers below are the medians of 3 repeats per configuration from
-`bench/history/x86_64.jsonl` (commit `92ba17149`, 2026-10-31), run by
-`just bench-run-kvm` / `just bench-run-g2g` with the suite's usual noise
-control (taskset pin 16-23, systemd-run memory cap, fresh overlay per
-repeat). What each workload measures is in `bench/README.md`.
+## Final full run
 
-## Bars
+These are medians of three repeats per configuration on 2026-10-31, from
+`bench/history/x86_64.jsonl`. Both backends ran the full Ubuntu suite,
+Windows boot suite, and guest-to-guest suite through `just bench-run-kvm`
+and `just bench-run-g2g`. `just bench-report x86_64` reports the same
+verdicts. The bars remain boot <= QEMU and throughput >= 80% of QEMU.
 
-| Guest | Workload | QEMU | vmlab-hv | hv/qemu | Bar | Verdict |
-|---|---|---|---|---|---|---|
-| ubuntu-26.04 | boot_to_agent_ready | 9.04 s ±0.9 | 16.12 s ±0.1 | 1.78x | ≤ 1.00x | **FAILS** |
-| windows-10 | boot_to_agent_ready | 209.44 s ±109 | 307.12 s ±160 | 1.47x | ≤ 1.00x | **FAILS** |
-| ubuntu-26.04 | blk_seq_read | 15410.6 MiB/s | 218.3 MiB/s | 0.01x | ≥ 0.80x | **FAILS** |
-| ubuntu-26.04 | blk_seq_write | 177.8 MiB/s | 214.3 MiB/s | 1.21x | ≥ 0.80x | meets |
-| ubuntu-26.04 | blk_rand_read_4k | 44541 iops | 51186 iops | 1.15x | ≥ 0.80x | meets |
-| ubuntu-26.04 | blk_rand_write_4k | 11534 iops | 3957 iops | 0.34x | ≥ 0.80x | **FAILS** |
-| ubuntu-26.04 | net_tx_udp | 30276 Mbit/s | 19895 Mbit/s | 0.66x | ≥ 0.80x | **FAILS** |
-| ubuntu-26.04 | net_rx_udp | 58261 Mbit/s | 10480 Mbit/s | 0.18x | ≥ 0.80x | **FAILS** |
-| ubuntu-26.04 | net_g2g_a2b_tcp | 25908 Mbit/s | 11628 Mbit/s | 0.45x | ≥ 0.80x | **FAILS** |
-| ubuntu-26.04 | net_g2g_b2a_tcp | 25963 Mbit/s | 11752 Mbit/s | 0.45x | ≥ 0.80x | **FAILS** |
-| ubuntu-26.04 | idle_cpu_pct (no bar) | 2.27 % | 5.20 % | 2.3x | — | reported |
+| Bar | Guest | Workload | QEMU | vmlab-hv | hv/qemu | Bar | Verdict |
+|---|---|---|---|---|---|---|---|
+| G1 | ubuntu-26.04 | boot to agent ready (s) | 6.73 | 12.23 | 1.817 | <= 1.000 | FAILS |
+| G2 | windows-10 | boot to agent ready (s) | 171.86 | 119.78 | 0.697 | <= 1.000 | meets |
+| G3 | ubuntu-26.04 | sequential read (MiB/s) | 19541.84 | 9560.08 | 0.489 | >= 0.800 | FAILS |
+| G4 | ubuntu-26.04 | sequential write (MiB/s) | 495.25 | 3654.79 | 7.380 | >= 0.800 | meets |
+| G5 | ubuntu-26.04 | random read 4 KiB (IOPS) | 50386.00 | 62425.70 | 1.239 | >= 0.800 | meets |
+| G6 | ubuntu-26.04 | random write 4 KiB (IOPS) | 10475.10 | 22621.30 | 2.160 | >= 0.800 | meets |
+| G7 | ubuntu-26.04 | UDP TX (Mbit/s) | 36398.85 | 31162.01 | 0.856 | >= 0.800 | meets |
+| G8 | ubuntu-26.04 | UDP RX (Mbit/s) | 86691.53 | 75662.23 | 0.873 | >= 0.800 | meets |
+| G9 | ubuntu-26.04 | guest TCP A to B (Mbit/s) | 26312.27 | 21313.36 | 0.810 | >= 0.800 | meets |
+| G10 | ubuntu-26.04 | guest TCP B to A (Mbit/s) | 26602.37 | 21445.48 | 0.806 | >= 0.800 | meets |
 
-Notes on noise: the two write workloads spread widely on both backends
-(qemu blk_seq_write samples 159–2015 MiB/s; blk_rand_write 4.8k–20k iops
-under hv) — the host was shared with other agents' VM work during the run
-(load average 4–7 recorded per repeat in the history env). The failing
-verdicts are all far outside that noise; the two "meets" verdicts on write
-workloads should be re-read when the host is quiet. Boot and net_rx repeats
-were tight (±0.1 s, ±1 Gbit/s).
+Idle CPU has no D28 bar: QEMU 1.00% and vmlab-hv 2.60% of one core.
 
-## Where the time goes (failed bars)
+Windows and writes still vary widely on a quiet host. Windows samples are
+108.44, 188.60, 171.86 seconds for QEMU and 188.91, 103.39, 119.78 seconds
+for vmlab-hv. Sequential writes range from 328.32 to 1736.24 MiB/s for
+QEMU and 1684.48 to 3947.11 MiB/s for vmlab-hv. All samples are retained.
 
-Method: the host's `perf` userland tool is not installed and
-`ptrace_scope=1` blocks `gdb` attach to non-child processes, but
-`perf_event_paranoid=1` allows user-space event sampling of own-uid
-processes. The profiles are leaf-instruction-pointer histograms at ~1 kHz
-per thread, symbolised across the binary and its DSOs
-(`/tmp/ipsample.c`, output under `bench/run/profiles/`), taken during one
-vmlab-hv run of each failing workload. Two caveats: kernel frames are
-excluded (the bar's host cost is therefore attributed to the userspace
-hypervisor), and release inlining means a symbol names the outermost
-monomorphised function.
+The guest-to-guest margins are small. G9 passes at 0.810x and G10 at
+0.806x; one G10 sample is below 80% of QEMU's median. These are median
+verdicts, not a claim that every sample passes.
 
-### net_rx_udp (0.18x) — the clearest signal
+### Host and reproducibility
 
-72 % of all samples in the hottest two symbols, both in the virtio-net
-device (`crates/vmlab-hv-devices/src/virtio/net.rs`):
+The measured tree is `251187d41` on `wp/p2-perf`. The recorded dirty
+marker comes from appended benchmark history; Rust sources did not change
+during the final run. QEMU is 11.1.2 and vmlab-hv reports 0.1.0.
 
-| share | symbol |
-|---|---|
-| 47 % | `vmlab_hv_devices::virtio::net::fire_config` |
-| 25 % | `vmlab_hv_devices::virtio::net::process_tx` |
+The host has 32 logical CPUs and the performance governor. Single VMs use
+pin 16-23; the guest pair uses 16-19 and 20-23. Templates are Ubuntu
+26.04.3 and Windows 19045.2006.9, standard variant. Ubuntu uses 2 vCPUs
+and 4 GiB; Windows uses 4 vCPUs and 8 GiB. The Ubuntu NIC MTU is 65520.
 
-The RX path spends its cycles firing virtio config-change notifications
-and in queue processing — the device re-raises config interrupts far more
-often than QEMU's netdev path does, and each jumbo frame walks that path.
-`fire_config` is the first thing to fix for every net bar: g2g (0.45x) and
-net_tx (0.66x) show the same device code hot (net_tx additionally spends
-~25 % of samples in libc copy/write frames).
+Other project sessions deferred VM boots and heavy work for the final
+window. Before each configuration, both existing test-slot locks were
+held and no project VM was running. Each launch also checked the
+host-wide two-VM limit. The guest pair used exactly two slots.
+Every VM ran under `MemoryMax=24G` and `MemorySwapMax=0`. The owner's
+Android emulator was excluded from the VM count and left untouched.
 
-### blk_seq_read (0.01x)
+The table records one-minute load averages at each repeat's start and end.
+The history retains all three load averages at both endpoints. The higher
+guest-pair load includes the two measured VMs.
 
-218 MiB/s vs 15.4 GiB/s. The histogram is spread thin (top leaf 5.7 %)
-across `vmlab_hv_vmm::loader`-region code, PCI and device frames — no
-single hotspot; the cost is per-operation overhead through the whole
-guest-exit → virtqueue → vmlab-disk stack. Two structural differences
-against QEMU stand independent of sampling: vmlab-disk reads the backing
-chain synchronously cluster-by-cluster (plain buffered `OpenOptions`,
-no readahead batching), while QEMU's block layer serves the same reads
-from large page-cached reads of the template. The tight repeats (±3 MiB/s)
-say this is steady-state behaviour, not noise.
+| Run | Configuration | Repeat 1 | Repeat 2 | Repeat 3 |
+|---|---|---|---|---|
+| E1 | qemu Ubuntu | 1.68 to 0.68 | 0.68 to 0.56 | 0.56 to 0.55 |
+| E2 | vmlab-hv Ubuntu | 0.59 to 0.57 | 0.57 to 0.57 | 0.57 to 0.71 |
+| E3 | qemu Windows | 0.71 to 1.59 | 1.59 to 1.06 | 1.06 to 1.08 |
+| E4 | vmlab-hv Windows | 0.99 to 1.31 | 1.31 to 1.92 | 1.92 to 1.69 |
+| E5 | qemu guest pair | 1.69 to 2.82 | 2.82 to 3.36 | 3.36 to 3.03 |
+| E6 | vmlab-hv guest pair | 3.03 to 2.58 | 2.58 to 2.50 | 2.50 to 2.35 |
 
-### blk_rand_write (0.34x)
+### QEMU cache mode
 
-Same shape as seq_read: thin spread, no single hotspot; the cost is
-per-op qcow2 allocation work in vmlab-disk on the write path (reads of
-this same image at 4k granularity hold 1.15x, so the gap is specific to
-allocation/refcount updates, not the read path).
+The benchmark uses vmlab's blockdev argv without a cache override.
+Black-box QMP `query-block` on this argv reports
+`writeback=true, direct=false, no-flush=false`. Thus the host page cache
+is enabled and guest flush requests are honored. The disk crate retains
+the same buffered-I/O and flush semantics. No unsafe cache mode was used.
 
-### boot_to_agent_ready, ubuntu (1.78x) and windows (1.47x)
+## What moved the bars
 
-Boot profiles are spread thin (top leaf 2.6 %, half the samples in libc
-and unresolved DSO frames): no single boot hotspot; the cost is the
-per-exit device-processing overhead spread over firmware, kernel and
-systemd bring-up. The windows number carries one structural hv cost the
-ubuntu one does not: vmlab-hv exits cleanly on every guest reset, so the
-sysprep first boot (3 resets) respawns the process and re-runs OVMF each
-time (samples 210–371 s vs QEMU's 121–230 s; the respawn path is part of
-what a vmlab user waits).
+The following before/after figures are single-repeat diagnostics on a
+shared host, not the final gate evidence above.
 
-## What would move the bars
+- C1. `4036c5c` skips unchanged chipset IRQ source levels before scanning
+  the wired-OR inputs. Ubuntu boot moved from 16.22 to 12.19 seconds.
+  The corrected block profile's `Source::set_level` share moved from
+  40.13% to 10.56%. Shared-line delivery semantics are unchanged.
+- C2. `8047d0d` advertises 254 data segments, indirect descriptors,
+  and a 256-entry block queue. Installed QEMU device help confirms the
+  same queue default and indirect-descriptor support. Sequential reads
+  moved from 275.14 to 9846.36 MiB/s. Device and transport tests cover
+  scatter-gather data, status, queue validation, snapshot, and reset.
+- C3. `0b75d36` parses network payloads with slice copies, removes
+  pending-frame clones, and avoids redundant TX copies. UDP RX moved
+  from 11574.96 to 74564.50 Mbit/s. A new fragmented/jumbo/empty-frame
+  test also reproduces and fixes the previous empty-frame panic.
+- C4. `c2f6977` coalesces adjacent qcow2 mappings and uses positional
+  I/O; `d47c0d9` reuses block request scratch. Neither demonstrated an
+  isolated sequential-read throughput gain. The final read profile
+  explains why further disk mapping work alone cannot close G3.
 
-1. `virtio::net::fire_config` / `process_tx` (net_rx, g2g, net_tx):
-   coalesce config-change notifications and batch queue processing.
-2. Bulk reads and write batching in the vmlab-disk qcow2 read/write path
-   (blk_seq_read, blk_rand_write).
-3. The boot gap shares the per-exit overhead with the net path; fixing
-   (1) is likely to move it, and the windows respawn path is worth a look
-   (three process respawns per first boot).
+The first current-branch Windows diagnostic was already 119.42 seconds,
+rather than the stale 307.12-second result. Reset-in-place predates this
+work; it is not credited to these changes. Metadata caches also already
+existed. No refcount batching or durability relaxation was added to
+obtain the random-write result.
 
-Re-run with `just bench-run-kvm vmlab-hv` after each change;
-`just bench-report` prints every bar against D28.
+The benchmark client now allocates distinct channel IDs across execs and
+reconnects. This fixes a reproduced QEMU run failure after readiness.
+Admission failures preserve their original error and reap peers and
+partially started pairs. Guest-to-guest labels now identify the actual
+sender and receiver; historical records retain their old, swapped keys.
+New records for both backends use the corrected labels.
+
+## Remaining failures and profiles
+
+The sampler is committed as `bench/ipsample.c`. It resolves ELF load
+segments and symbol sizes, supports dynamic DSO symbols, requests 1 kHz
+sampling, and requests kernel/guest exclusion. PIE and non-PIE
+symbol-resolution tests pass. Unresolved samples remain visible and are
+not assigned to a nearby symbol.
+
+The old sampler used mapping start minus file offset as the load bias.
+This executable's text segment differs by 4096 bytes, which displaced
+symbol attribution. In particular, the old `fire_config` diagnosis was
+wrong. Source inspection confirms that config notifications occur on link
+transitions, not per packet. Notification semantics were left intact.
+
+### G1: Ubuntu boot
+
+The final medians are 12.23 seconds versus 6.73 seconds, a 5.50-second
+gap. Kernel serial output in the diagnostic boots reports a kvm-clock
+startup offset near 6.0 seconds under vmlab-hv and 1.4 seconds under
+QEMU. Much of the remaining gap precedes the kernel's normal boot log.
+
+`bench/profiles/phase2-20261031-boot.txt` retains 1825 samples from an
+approximately six-second window after control-socket resume. Of those,
+496 are unresolved. The largest resolved leaves are `run_vcpu` at
+12.60%, `should_run` at 5.10%, and chipset clock advancement at 4.05%.
+Condition-variable waiting, notification, and lock-bucket operations are
+also visible. This is distributed startup/exit and synchronization cost;
+the leaf profile does not establish one sufficient, safe fix.
+
+G1 remains unfinished. Removing mapping quiescence or timer
+synchronization without replacement would risk reset, SMM, and snapshot
+correctness. No such shortcut was made.
+
+### G3: sequential block reads
+
+The final median is 9560.08 MiB/s. The required rate is 15633.47 MiB/s,
+80% of QEMU's 19541.84 MiB/s.
+
+`bench/profiles/phase2-20261031-seqread.txt` retains 5584 samples while
+repeating the same 8 GiB direct guest read for a long enough profile.
+This diagnostic does not append gate results. There are 2598 unresolved
+samples. Two guest-memory slice iterator functions account for 13.14%
+and 10.01%; descriptor-chain iteration accounts for 3.99%, guest-memory
+`read_slice` for 3.98%, and writer construction for 2.63%.
+Qcow2 `read_bytes` accounts for 0.50%.
+
+The remaining read path spends substantially more resolved samples on
+descriptor/address handling than on qcow2 reads. G3 needs further work
+on that request path. Coalescing mappings and reusing scratch did not
+meet the bar. Guest-memory validation and snapshot tracking were not
+bypassed to raise the number.
+
+These are leaf-IP histograms, not call counts or wall-time breakdowns.
+Unresolved code limits the attribution. No claim assigns those samples
+to allocation, copying, or storage I/O without evidence.
+
+## Correctness and verification
+
+`just ci::check` passed with `RUST_TEST_THREADS=1`, inside the 24 GiB
+scope. This includes firmware acceptance, S1 snapshot/reset and network
+restore checks, and snapshot during fsync writes. All 23 active S2 tests
+passed against qemu-img; the normally ignored 1 GiB S2 integrity and
+throughput test was also run explicitly and passed. All 333 device unit
+tests and all 67 benchmark tests passed.
+
+Guest flushes still reach `DiskImage::flush` and durable host sync.
+Metadata cache, refcount flush, and snapshot ordering were not weakened.
+No shared Rust trait or control protocol type changed. No scoped
+`todo!()` or `unimplemented!()` remains. No host PCI/USB binding or reset
+operation was performed. Measurement VMs, peers, and profiler processes
+were reaped. No merge, rebase, default flip, or push was performed.
+
+Work stops with G1 and G3 measured and profiled, as the task's failed-bar
+condition requires. D28 remains the gate for any future default change.

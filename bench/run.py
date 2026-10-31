@@ -556,9 +556,9 @@ def wait_x86_ready(backend, args, guest, run_dir, t0):
     template's whole first-boot sequence — the specialize marker, the user
     OOBE gate, the AppX settle, and one in-guest reboot watched by boot id —
     because the agent answers long before the machine is usable and the
-    reboot must not land mid-Oobe. vmlab-hv exits 0 on a guest reset and is
-    respawned; QEMU reboots in-process. The clock starts at the first spawn
-    and never resets.
+    reboot must not land mid-Oobe. Both current backends reboot in-process;
+    the respawn path supports older vmlab-hv binaries. The clock starts at
+    the first spawn and never resets.
     """
     if guest == "windows-10":
         return WindowsReady(backend, args, run_dir, t0).run()
