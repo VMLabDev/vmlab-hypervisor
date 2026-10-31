@@ -823,6 +823,18 @@ impl Snapshot for Hda {
     }
 }
 
+/// The machine-clock side of the controller: the inherent methods carry
+/// the behaviour, this puts it behind the seam the chipset paces every
+/// audio device through.
+impl crate::audio::AudioClock for Hda {
+    fn advance(&mut self, elapsed: std::time::Duration) -> Result<(), DeviceError> {
+        Hda::advance(self, elapsed)
+    }
+    fn set_paused(&mut self, paused: bool) {
+        Hda::set_paused(self, paused)
+    }
+}
+
 struct StateReader<'a>(&'a [u8]);
 impl StateReader<'_> {
     fn take<const N: usize>(&mut self) -> Result<[u8; N], DeviceError> {
