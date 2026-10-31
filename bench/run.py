@@ -331,6 +331,9 @@ def wait_x86_ready(backend, args, guest, run_dir, t0):
     reboots in-process. The clock starts at the first spawn and never
     resets.
     """
+    windows = guest == "windows-10"
+    deadline = t0 + X86_BOOT_DEADLINE[guest] * args.timeout_scale
+    resets = 0
     reboot_requested = False
     reboot_done = False
     saw_agent_down = False
