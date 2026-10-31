@@ -51,6 +51,7 @@ pub(crate) struct Trace {
     global_identity: u64,
     input_values: Vec<bool>,
     entry_guards: Vec<(ScalarId, bool)>,
+    has_entry_inputs: bool,
     successful_runs: u32,
     returned_runs: u32,
     trained_steps: u32,
@@ -902,6 +903,10 @@ impl Trace {
                     .unwrap_or(instruction),
             );
         }
+        let has_entry_inputs = recorded
+            .inputs
+            .iter()
+            .any(|input| input.source.has_entry_index());
         let mut trace = Self {
             recorded,
             revision: None,
@@ -916,6 +921,7 @@ impl Trace {
             global_identity: interpreter.globals.identity(),
             input_values: Vec::new(),
             entry_guards,
+            has_entry_inputs,
             successful_runs: 0,
             returned_runs: 0,
             trained_steps: steps,
@@ -1004,6 +1010,20 @@ impl Trace {
         steps: Option<u64>,
         limit: u32,
     ) -> Result<Outcome> {
+        if self.has_entry_inputs {
+            self.run_inputs_indexed::<M, true>(interpreter, args, steps, limit)
+        } else {
+            self.run_inputs_indexed::<M, false>(interpreter, args, steps, limit)
+        }
+    }
+
+    fn run_inputs_indexed<M: Memory, const INDEXED: bool>(
+        &mut self,
+        interpreter: &mut Interpreter<'_, M>,
+        args: &[Value],
+        steps: Option<u64>,
+        limit: u32,
+    ) -> Result<Outcome> {
         interpreter.trace_completed = 0;
         let transaction = interpreter.memory.transaction_lock();
         let _atomic = transaction.as_ref().map(|lock| lock.lock());
@@ -1012,7 +1032,7 @@ impl Trace {
         }
         self.begin_capture();
         for id in 0..self.recorded.inputs.len() {
-            let resolved = if self.recorded.inputs[id].source.has_entry_index() {
+            let resolved = if INDEXED && self.recorded.inputs[id].source.has_entry_index() {
                 let Some(source) = self.resolve_source(id)? else {
                     return Ok(Outcome::Miss);
                 };
@@ -1111,16 +1131,14 @@ impl Trace {
         interpreter: &Interpreter<'_, M>,
         args: &[Value],
     ) -> bool {
-        self.entry_valid(interpreter)
+        !self.has_entry_inputs
+            && self.entry_valid(interpreter)
             && self
                 .recorded
                 .inputs
                 .iter()
                 .enumerate()
                 .all(|(id, descriptor)| {
-                    if descriptor.source.has_entry_index() {
-                        return false;
-                    }
                     if let Some(word) =
                         self.input_slots[id].and_then(|slot| interpreter.globals.native_slot(slot))
                     {
@@ -1180,18 +1198,33 @@ impl Trace {
         interpreter: &mut Interpreter<'_, M>,
         limit: u32,
     ) -> Result<Outcome> {
-        let (outcome, steps, complete) = self.evaluate(|trace, evaluation| {
-            for &(condition, expected) in &trace.entry_guards {
+        let mut evaluation = Evaluation {
+            recorded: &self.recorded,
+            wide_inputs: std::mem::take(&mut self.wide_inputs),
+            scalar_input_slots: &self.scalar_input_slots,
+            scalars: std::mem::take(&mut self.scratch),
+            stamps: std::mem::take(&mut self.stamps),
+            epoch: self.epoch,
+            completed_steps: 0,
+            complete_path: false,
+            binding_slots: &self.binding_slots,
+            slots: &self.slots,
+        };
+        let outcome = (|| {
+            for &(condition, expected) in &self.entry_guards {
                 if (evaluation.scalar(condition)? != 0) != expected {
                     return Ok(Outcome::Miss);
                 }
             }
-            trace.execute(interpreter, evaluation, limit)
-        });
-        interpreter.trace_completed = steps;
+            self.execute(interpreter, &mut evaluation, limit)
+        })();
+        interpreter.trace_completed = evaluation.completed_steps;
+        self.scratch = evaluation.scalars;
+        self.stamps = evaluation.stamps;
+        self.wide_inputs = evaluation.wide_inputs;
         if matches!(outcome, Ok(Outcome::Returned(_, _))) {
             self.returned_runs = self.returned_runs.saturating_add(1);
-            if complete {
+            if evaluation.complete_path {
                 self.successful_runs = self.successful_runs.saturating_add(1);
             }
         }
@@ -1204,12 +1237,25 @@ impl Trace {
         parent: &mut Evaluation<'_>,
         exit: usize,
     ) -> Result<Outcome> {
+        if self.has_entry_inputs {
+            self.run_bound_indexed::<M, true>(interpreter, parent, exit)
+        } else {
+            self.run_bound_indexed::<M, false>(interpreter, parent, exit)
+        }
+    }
+
+    fn run_bound_indexed<M: Memory, const INDEXED: bool>(
+        &mut self,
+        interpreter: &mut Interpreter<'_, M>,
+        parent: &mut Evaluation<'_>,
+        exit: usize,
+    ) -> Result<Outcome> {
         if !self.entry_valid(interpreter) {
             return Ok(Outcome::Miss);
         }
         self.begin_capture();
         for id in 0..self.recorded.inputs.len() {
-            let resolved = if self.recorded.inputs[id].source.has_entry_index() {
+            let resolved = if INDEXED && self.recorded.inputs[id].source.has_entry_index() {
                 let Some(source) = self.resolve_source(id)? else {
                     return Ok(Outcome::Miss);
                 };
