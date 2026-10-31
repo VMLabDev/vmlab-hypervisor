@@ -134,6 +134,16 @@ The regression reproduces cause 5 before the PMA fix and reads each
 transport after CPU-state restoration. Direct-kernel S1 tests also probe
 every transport before printing their success marker.
 
+After timer initialization, a later cold boot dropped to hundreds of
+instructions per second and retrained almost every instruction. A regression
+reproduced this by changing only a future timer deadline: the deadline was
+a constant context guard even though no interrupt should fire. Externally
+clocked platform CPUs now capture timer comparisons, pending IRQs, and
+trap-data CSRs as runtime values. Standalone interpreter policy is unchanged.
+Machine and supervisor timer tests check warm-cache retention, pending-bit
+transitions, and every Sail global against the reference interpreter. Trap
+CSR tests cover EPC, cause, trap value, and scratch registers.
+
 edk2 boot, Linux hardware capture, booted-guest snapshot restoration, and
 boot-to-agent-ready timing are pending. This reference does not establish
 a phase-3b parity pass.

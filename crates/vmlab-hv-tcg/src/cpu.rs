@@ -41,6 +41,35 @@ fn dynamic_names() -> &'static std::collections::BTreeSet<String> {
     })
 }
 
+fn platform_dynamic_names() -> &'static std::collections::BTreeSet<String> {
+    static NAMES: std::sync::OnceLock<std::collections::BTreeSet<String>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names = dynamic_names().clone();
+        // Platform IRQs and guest handlers update these values independently
+        // of the instruction stream. They do not configure instruction decode.
+        names.extend(
+            [
+                "zmtimecmp",
+                "zstimecmp",
+                "zmsip",
+                "zmip",
+                "zmepc",
+                "zsepc",
+                "zmcause",
+                "zscause",
+                "zmtval",
+                "zstval",
+                "zmscratch",
+                "zsscratch",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        names
+    })
+}
+
 #[derive(Default, Debug)]
 pub struct SpecializationStats {
     pub recordings: u64,
@@ -434,11 +463,16 @@ impl<M: Memory> Riscv64<M> {
         } else {
             limit.min(32)
         };
+        let names = if self.external_clock {
+            platform_dynamic_names()
+        } else {
+            dynamic_names()
+        };
         let dynamic_globals = self
             .interpreter
             .globals
             .keys()
-            .filter(|name| name.starts_with("zrvfi_") || dynamic_names().contains(name.as_str()))
+            .filter(|name| name.starts_with("zrvfi_") || names.contains(name.as_str()))
             .cloned()
             .collect();
         let options = crate::record::Options {
