@@ -287,6 +287,33 @@ class HvMachineTests(unittest.TestCase):
 
 
 class NoiseControlTests(unittest.TestCase):
+    def test_exec_does_not_reuse_a_channel_before_guest_cleanup(self):
+        from collections import deque
+        seen = set()
+        replies = deque()
+
+        def send(frame):
+            message = json.loads(frame[13:])
+            cid = message["id"]
+            if cid in seen:
+                replies.append((0, 0, json.dumps({"event": "error", "id": cid,
+                    "msg": "channel id already in use"}).encode()))
+            else:
+                seen.add(cid)
+                replies.extend((0, 0, json.dumps(message).encode()) for message in [
+                    {"event": "eof", "id": cid},
+                    {"event": "exited", "id": cid, "code": 0}])
+
+        with mock.patch.object(socket, "socket") as factory:
+            factory.return_value.sendall.side_effect = send
+            for _ in range(2):
+                client = lib.AgentClient("unused")
+                client._recv_frame = lambda _timeout: replies.popleft()
+                for _ in range(3):
+                    self.assertEqual(client.exec(["true"], 1)["code"], 0)
+                client.close()
+        self.assertEqual(len(seen), 6)
+
     def test_sampler_resolves_elf_virtual_addresses_for_pie_and_exec(self):
         import subprocess
         with tempfile.TemporaryDirectory() as tmp:

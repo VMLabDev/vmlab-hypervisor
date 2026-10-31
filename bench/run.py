@@ -783,6 +783,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
                 "net rx sink start",
             )
             time.sleep(NET_SETTLE)
+            log("starting net rx")
             rx0 = nic_rx_bytes()
             peer.blast(NET_WINDOW, net["udp_payload"])
             # The ack returns at the blast's start; the window is timed
@@ -801,6 +802,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             # drain), so the rate is the whole delta over the window.
             samples["net_rx_udp_mbps"] = round(
                 (rx1 - rx0) * 8 / NET_WINDOW / 1e6, 2)
+            log(f"finished net rx: {samples['net_rx_udp_mbps']} Mbit/s")
             sh(agent, "pkill -f vmlab-nettool || true")
 
             # --- idle host CPU ---------------------------------------------
@@ -1007,10 +1009,14 @@ def g2g_run_config(args, guest, smp, pin_a, pin_b, version, commit, dirty, host)
         "host_cpus": os.cpu_count(),
         "nic_mtu": lib.BENCH_NET["mtu"],
         "net_peer": "bench/netpeer.c hub (2 ports)",
+        "repeat_loadavg": [],
     }
     for i in range(1, args.repeats + 1):
         log(f"=== {args.backend} x86_64 g2g {guest} repeat {i}/{args.repeats}")
+        loadavg_start = lib.read_loadavg()
         result, a = g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, i)
+        env["repeat_loadavg"].append({
+            "start": loadavg_start, "end": lib.read_loadavg()})
         env["backend_version"] = a.backend_version()
         for w, value in result["samples"].items():
             all_samples[w].append(value)

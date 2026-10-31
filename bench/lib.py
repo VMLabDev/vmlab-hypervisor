@@ -11,6 +11,7 @@ The QEMU argv below is vmlab's own argv for a linux-modern profile VM on the
 `target/p3-research/g3/bench.py`). Do not drift it without re-baselining.
 """
 
+import itertools
 import json
 import os
 import shutil
@@ -262,6 +263,8 @@ class AgentClient:
     eaten before the guest opens the port and never answered (notes/03 §1).
     """
 
+    _channel_ids = itertools.count(1)
+
     def __init__(self, path):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.connect(path)
@@ -298,7 +301,9 @@ class AgentClient:
         return json.loads(payload)
 
     def exec(self, argv, timeout, idle_timeout=None, stdin_data=None):
-        cid = 1
+        cid = next(self._channel_ids)
+        if cid > 0xffffffff:
+            raise BenchError("agent channel ID space exhausted")
         self.channels[cid] = {"data": b"", "stderr": b"", "code": None, "eof": False}
         msg = json.dumps({"cmd": "open_exec", "id": cid, "argv": argv}).encode()
         self.sock.sendall(agent_frame(0, 0, msg))
@@ -338,7 +343,7 @@ class AgentClient:
                     raise BenchError(f"agent error: {m}")
                 chan = self.channels[cid]
                 if chan["code"] is not None and chan["eof"]:
-                    return chan
+                    return self.channels.pop(cid)
             elif kind == 1 and ch == cid:
                 self.channels[cid]["data"] += payload
             elif kind == 2 and ch == cid:
