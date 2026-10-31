@@ -287,6 +287,15 @@ class HvMachineTests(unittest.TestCase):
 
 
 class NoiseControlTests(unittest.TestCase):
+    def test_sampler_resolves_elf_virtual_addresses_for_pie_and_exec(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = os.path.join(tmp, "ipsample")
+            source = os.path.join(lib.BENCH_DIR, "ipsample.c")
+            for flags in (["-fPIE", "-pie"], ["-fno-pie", "-no-pie"]):
+                subprocess.run(["cc", "-O2", *flags, "-o", binary, source], check=True)
+                subprocess.run([binary, "--self-test"], check=True, capture_output=True)
+
     def test_host_vm_count_includes_other_worktrees_and_excludes_android(self):
         with tempfile.TemporaryDirectory() as proc:
             for pid, argv in {
