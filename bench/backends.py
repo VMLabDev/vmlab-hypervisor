@@ -402,6 +402,13 @@ def qemu_x86_vm_argv(guest, smp, overlay, code_fd, vars_fd, serial, agent_sock,
         "virtio-blk-pci,drive=disk0"
         + (",bootindex=50" if profile["firmware"] == "seabios" else ""),
     ]
+    if switch_sock is None:
+        # No network segment: `-nic none` is vmlab's own shape for it (and
+        # the boot-only windows guest runs exactly that — the reference lab
+        # boots this template without a NIC).
+        argv += ["-nic", "none", "-device", "virtio-vga", "-usb",
+                 "-device", "usb-tablet", "-S"]
+        return argv
     mtu = f",host_mtu={host_mtu}" if host_mtu else ""
     argv += [
         "-netdev",
@@ -468,14 +475,17 @@ def hv_x86_machine_description(run_dir, guest, smp, overlay, code_fd, vars_fd,
             "vars": vars_fd,
             "secure_boot": False,
         }
-    nic = {
-        "pci": at(3),
-        "mac": nic_mac,
-        "attachment": {"kind": "stream", "socket": switch_sock},
-        "rom": ipxe_rom,
-    }
-    if host_mtu:
-        nic["mtu"] = host_mtu
+    nics = []
+    if switch_sock is not None:
+        nic = {
+            "pci": at(3),
+            "mac": nic_mac,
+            "attachment": {"kind": "stream", "socket": switch_sock},
+            "rom": ipxe_rom,
+        }
+        if host_mtu:
+            nic["mtu"] = host_mtu
+        nics.append(nic)
     desc = {
         "machine": "q35",
         "name": f"vmlab:bench/{guest}",
@@ -494,7 +504,7 @@ def hv_x86_machine_description(run_dir, guest, smp, overlay, code_fd, vars_fd,
         }],
         "console_pci": at(1),
         "ahci_pci": {"bus": 0, "device": 31, "function": 2},
-        "nics": [nic],
+        "nics": nics,
         "display": {
             "device": "virtio-vga",
             "pci": at(4),

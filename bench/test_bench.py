@@ -520,6 +520,22 @@ class X86QemuArgvTests(unittest.TestCase):
         )
         self.assertNotIn("bootindex", " ".join(argv))
 
+    def test_no_network_is_vmlab_shape(self):
+        from backends import hv_x86_machine_description, qemu_x86_vm_argv
+
+        argv = qemu_x86_vm_argv(
+            "windows-10", 4, "/run/ov.qcow2", "/c", "/v", "/s", "/a", "/q", "/vc",
+            None, "52:54:00:12:34:56", None,
+        )
+        self.assertIn("-nic", argv)
+        self.assertEqual(argv[argv.index("-nic") + 1], "none")
+        self.assertNotIn("-netdev", argv)
+        desc = hv_x86_machine_description(
+            "/run", "windows-10", 4, "/run/ov.qcow2", "/c", "/v", None,
+            "52:54:00:12:34:56", None, None,
+        )
+        self.assertEqual(desc["nics"], [])
+
 
 class X86HvMachineTests(unittest.TestCase):
     def make(self, guest, mtu=65520):

@@ -451,17 +451,23 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
     os.makedirs(run_dir)
     overlay, code_fd, vars_fd = lib.prepare_run_dir(run_dir, "x86_64", guest, version)
     net = lib.BENCH_NET
-    peer = netpeer.Peer(run_dir, net["guest_ip"], net["guest_mac"], net["port"], log)
     windows = guest == "windows-10"
+    # The boot-only windows guest runs vmlab's no-network shape exactly
+    # (the reference lab boots this template without a NIC; a jumbo-MTU
+    # NIC on it wedges the first-boot reboot).
+    peer = None if windows else netpeer.Peer(
+        run_dir, net["guest_ip"], net["guest_mac"], net["port"], log)
+    switch_sock = None if windows else peer.switch_sock
+    mtu = None if windows else net["mtu"]
     if args.backend == "qemu":
         backend = X86QemuBackend(
             run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
-            peer.switch_sock, net["guest_mac"], net["mtu"], log,
+            switch_sock, net["guest_mac"], mtu, log,
         )
     else:
         backend = X86HvBackend(
             run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
-            peer.switch_sock, net["guest_mac"], net["mtu"], log,
+            switch_sock, net["guest_mac"], mtu, log,
             args.hv_bin, lib.IPXE_ROM,
         )
     result = {"run": run_dir, "arch": "x86_64", "guest": guest,
@@ -629,7 +635,8 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
 
         result["samples"] = samples
         result["tools"] = env_tool
-        result["peer"] = peer.report()
+        if peer is not None:
+            result["peer"] = peer.report()
         return result, backend, agent
     finally:
         try:
@@ -647,7 +654,8 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
         result["vm_exit"] = backend.session.exit_code()
         if result["vm_exit"] != 0:
             log(f"warning: VM exit code {result['vm_exit']}")
-        peer.kill()
+        if peer is not None:
+            peer.kill()
         for name in ("overlay.qcow2", "vars.fd"):
             path = os.path.join(run_dir, name)
             if os.path.exists(path) and not args.keep:
