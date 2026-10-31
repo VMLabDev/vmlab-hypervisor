@@ -361,7 +361,7 @@ fn transitional_block_legacy_msix_vectors_masking_and_config_shift() {
     g.pci.bar_write(1, 12, &[0]);
     assert_eq!(*g.msi.messages.lock(), vec![(0xfee0_0000, 0x41)]);
     assert_eq!(read::<8>(&mut g.pci, 1, 0x800), [0; 8]);
-    TransportInterrupt(g.pci.int.clone()).notify_config();
+    TransportInterrupt::new(g.pci.int.clone()).notify_config();
     assert_eq!(
         *g.msi.messages.lock(),
         vec![(0xfee0_0000, 0x41), (0xfee0_0000, 0x42)]

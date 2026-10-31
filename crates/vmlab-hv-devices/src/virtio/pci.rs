@@ -124,6 +124,9 @@ struct MsixEntry {
 /// Interrupt state shared between the PCI function (config and BAR accesses)
 /// and the [`VirtioInterrupt`] handle handed to the device.
 struct InterruptState {
+    /// Host-only activation epoch; stale worker callbacks must not reach a
+    /// reset device or a restored snapshot.
+    epoch: u64,
     msi: Option<Arc<dyn MsiSink>>,
     intx: Option<Arc<dyn IrqLine>>,
     msix_enabled: bool,
@@ -149,6 +152,7 @@ impl InterruptState {
             "the transport PBA covers at most 64 vectors"
         );
         Self {
+            epoch: 0,
             msi,
             intx,
             msix_enabled: false,
@@ -229,11 +233,21 @@ impl InterruptState {
 
 /// The device-side handle of the transport: raises queue and
 /// configuration-change interrupts.
-struct TransportInterrupt(Arc<Mutex<InterruptState>>);
+struct TransportInterrupt(Arc<Mutex<InterruptState>>, u64);
+
+impl TransportInterrupt {
+    fn new(state: Arc<Mutex<InterruptState>>) -> Self {
+        let epoch = state.lock().epoch;
+        Self(state, epoch)
+    }
+}
 
 impl VirtioInterrupt for TransportInterrupt {
     fn notify_queue(&self, queue: u16) {
         let mut s = self.0.lock();
+        if s.epoch != self.1 {
+            return;
+        }
         let vector = s
             .queue_vectors
             .get(queue as usize)
@@ -244,6 +258,9 @@ impl VirtioInterrupt for TransportInterrupt {
 
     fn notify_config(&self) {
         let mut s = self.0.lock();
+        if s.epoch != self.1 {
+            return;
+        }
         // The generation must change before the interrupt is sent.
         s.config_generation = s.config_generation.wrapping_add(1);
         let vector = s.config_vector;
@@ -448,6 +465,7 @@ impl VirtioPciDevice {
             legacy.active = false;
         }
         let mut int = self.int.lock();
+        int.epoch = int.epoch.wrapping_add(1);
         int.config_vector = NO_VECTOR;
         int.queue_vectors.fill(NO_VECTOR);
         int.isr = 0;
@@ -538,7 +556,7 @@ impl VirtioPciDevice {
             queues.push(queue);
         }
         let interrupt: Arc<dyn VirtioInterrupt> =
-            Arc::new(TransportInterrupt(Arc::clone(&self.int)));
+            Arc::new(TransportInterrupt::new(Arc::clone(&self.int)));
         match self.device.activate(self.mem.clone(), interrupt, queues) {
             Ok(()) => self.activated = true,
             Err(_) => self.driver_status |= device_status::DEVICE_NEEDS_RESET,
@@ -1189,6 +1207,10 @@ impl Snapshot for VirtioPciDevice {
 
         // Apply: reset the device, then rebuild driver-visible state, then
         // re-activate so the restored inner device gets its queues back.
+        {
+            let mut int = self.int.lock();
+            int.epoch = int.epoch.wrapping_add(1);
+        }
         self.device.reset();
         self.driver_status = 0;
         self.activated = false;
@@ -1498,6 +1520,24 @@ mod tests {
         fn status_byte(&self) -> u8 {
             self.mem.read_obj(GuestAddress(DATA + 0x800)).unwrap()
         }
+    }
+
+    #[test]
+    fn system_reset_discards_interrupts_from_previous_activation() {
+        let mut guest = Guest::new();
+        let old = TransportInterrupt::new(guest.pci.int.clone());
+        crate::Resettable::reset(&mut guest.pci).unwrap();
+        old.notify_queue(0);
+        old.notify_config();
+        assert_eq!(guest.pci.int.lock().isr, 0);
+        assert_eq!(guest.pci.int.lock().config_generation, 0);
+        let state = guest.pci.save_state().unwrap();
+        let old = TransportInterrupt::new(guest.pci.int.clone());
+        guest.pci.restore_state(&state).unwrap();
+        old.notify_queue(0);
+        old.notify_config();
+        assert_eq!(guest.pci.int.lock().isr, 0);
+        assert_eq!(guest.pci.int.lock().config_generation, 0);
     }
 
     #[test]
