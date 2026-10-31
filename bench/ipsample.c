@@ -24,6 +24,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <linux/perf_event.h>
@@ -50,12 +51,32 @@ struct dso {
 static struct dso dsos[48];
 static int ndso;
 
-static int load_dso(const char *path, uint64_t base) {
-    char cmd[1200];
-    snprintf(cmd, sizeof(cmd), "nm -nS --defined-only '%s' 2>/dev/null", path);
-    FILE *nm = popen(cmd, "r");
-    if (!nm)
+static int load_dso_symbols(const char *path, uint64_t base, int dynamic) {
+    int output[2];
+    if (pipe(output) < 0) return -1;
+    pid_t child = fork();
+    if (child < 0) {
+        close(output[0]);
+        close(output[1]);
         return -1;
+    }
+    if (child == 0) {
+        close(output[0]);
+        dup2(output[1], STDOUT_FILENO);
+        close(output[1]);
+        int quiet = open("/dev/null", O_WRONLY);
+        if (quiet >= 0) dup2(quiet, STDERR_FILENO);
+        if (dynamic) execlp("nm", "nm", "-DnS", "--defined-only", path, NULL);
+        else execlp("nm", "nm", "-nS", "--defined-only", path, NULL);
+        _exit(127);
+    }
+    close(output[1]);
+    FILE *nm = fdopen(output[0], "r");
+    if (!nm) {
+        close(output[0]);
+        waitpid(child, NULL, 0);
+        return -1;
+    }
     int cap = 8192, n = 0;
     struct sym *syms = malloc(cap * sizeof(*syms));
     char line[1100];
@@ -76,9 +97,11 @@ static int load_dso(const char *path, uint64_t base) {
         syms[n].name = strdup(name);
         n++;
     }
-    pclose(nm);
+    fclose(nm);
+    waitpid(child, NULL, 0);
     if (n == 0) {
         free(syms);
+        if (!dynamic) return load_dso_symbols(path, base, 1);
         return -1;
     }
     snprintf(dsos[ndso].path, sizeof(dsos[ndso].path), "%s", path);
@@ -128,7 +151,7 @@ static void load_dsos(pid_t pid) {
                 }
             }
             fclose(elf);
-            if (matched && load_dso(file, base) == 0) {
+            if (matched && load_dso_symbols(file, base, 0) == 0) {
                 dsos[ndso - 1].start = start;
                 dsos[ndso - 1].end = end;
             }
@@ -228,9 +251,12 @@ int main(int argc, char **argv) {
             attr.config = PERF_COUNT_SW_CPU_CLOCK;
         }
         if (probe >= 0) close(probe);
-        attr.sample_period = 400000;
+        attr.freq = 1;
+        attr.sample_freq = 1000;
+        attr.wakeup_events = 1;
         attr.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID;
         attr.exclude_kernel = 1;
+        attr.exclude_guest = 1;
         int fd = (int)perf_event_open(&attr, tid, -1, -1, 0);
         if (fd < 0)
             continue;

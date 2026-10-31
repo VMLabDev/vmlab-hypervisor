@@ -287,6 +287,37 @@ class HvMachineTests(unittest.TestCase):
 
 
 class NoiseControlTests(unittest.TestCase):
+    def test_capacity_failure_does_not_start_a_peer(self):
+        import run
+        with mock.patch.object(lib, "require_vm_slots", side_effect=lib.BenchError("full")), \
+                mock.patch.object(run.netpeer, "Peer") as peer:
+            with self.assertRaisesRegex(lib.BenchError, "full"):
+                run.x86_one_repeat(None, "ubuntu-26.04", 2, "16-23", "test", 1)
+            peer.assert_not_called()
+
+    def test_launch_failure_preserves_error_and_reaps_peer(self):
+        import run
+        backend = argparse.Namespace(
+            launch=mock.Mock(side_effect=lib.BenchError("launch blocked")),
+            quit=mock.Mock())
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(lib, "RUN_DIR", tmp), \
+                mock.patch.object(lib, "require_vm_slots"), \
+                mock.patch.object(lib, "prepare_run_dir", return_value=("overlay", "code", "vars")), \
+                mock.patch.object(run.netpeer, "Peer") as peer, \
+                mock.patch.object(run, "X86HvBackend", return_value=backend):
+            args = run.parse_args(["--backend", "vmlab-hv"])
+            with self.assertRaisesRegex(lib.BenchError, "launch blocked"):
+                run.x86_one_repeat(args, "ubuntu-26.04", 2, "16-23", "test", 1)
+            peer.return_value.kill.assert_called_once()
+
+    def test_g2g_teardown_handles_a_partial_pair(self):
+        import run
+        backend = argparse.Namespace(name="vmlab-hv", quit=mock.Mock(),
+            session=argparse.Namespace(kill=mock.Mock()))
+        run.g2g_teardown([backend, None], [None, None])
+        backend.session.kill.assert_called_once()
+
     def test_exec_does_not_reuse_a_channel_before_guest_cleanup(self):
         from collections import deque
         seen = set()

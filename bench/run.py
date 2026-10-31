@@ -307,8 +307,14 @@ def respawn_hv(backend, run_dir):
         path = os.path.join(run_dir, name)
         if os.path.exists(path):
             os.remove(path)
-    backend.launch()
-    backend.release_cpus()
+    try:
+        backend.launch()
+        backend.release_cpus()
+    except Exception:
+        session = getattr(backend, "session", None)
+        if session is not None:
+            session.kill()
+        raise
 
 WINDOWS_MARKER = "C:\\\\Windows\\\\Temp\\\\vmlab-firstboot.done"
 
@@ -620,6 +626,7 @@ def allocated_span(template_disk):
 
 def x86_one_repeat(args, guest, smp, pin, version, index):
     """One x86_64 VM through the full workload set for its guest."""
+    lib.require_vm_slots()
     loadavg_start = lib.read_loadavg()
     run_dir = os.path.join(
         lib.RUN_DIR, lib.run_dir_name(args.backend, "x86_64", guest, smp, index)
@@ -823,21 +830,24 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             result["peer"] = peer.report()
         return result, backend, agent
     finally:
+        session = getattr(backend, "session", None)
         try:
             if agent is not None:
                 agent.shutdown()
                 agent.close()
             if args.backend == "vmlab-hv":
                 backend.quit()
-            code = backend.session.wait_exit(X86_SHUTDOWN_TIMEOUT)
-            if code is None:
-                log(f"VM did not exit within {X86_SHUTDOWN_TIMEOUT}s")
+            if session is not None:
+                code = session.wait_exit(X86_SHUTDOWN_TIMEOUT)
+                if code is None:
+                    log(f"VM did not exit within {X86_SHUTDOWN_TIMEOUT}s")
         except Exception as e:  # noqa: BLE001 - cleanup must reach the kills
             log(f"note: graceful shutdown failed ({e}); killing")
-        backend.session.kill()
-        result["vm_exit"] = backend.session.exit_code()
-        if result["vm_exit"] != 0:
-            log(f"warning: VM exit code {result['vm_exit']}")
+        if session is not None:
+            session.kill()
+            result["vm_exit"] = session.exit_code()
+            if result["vm_exit"] != 0:
+                log(f"warning: VM exit code {result['vm_exit']}")
         if peer is not None:
             peer.kill()
         for name in ("overlay.qcow2", "vars.fd"):
@@ -910,6 +920,8 @@ def g2g_teardown(backends, agents):
         except Exception:
             pass
     for backend in backends:
+        if backend is None:
+            continue
         try:
             if args_backend_quit(backend):
                 backend.quit()
