@@ -122,15 +122,27 @@ pub struct DiskNode {
 pub enum DeviceNode {
     /// A single-section device: the UART.
     Plain(Arc<Mutex<dyn Snapshot>>),
+    /// A device whose reset differs from restoring its initial snapshot.
+    Resettable(Arc<Mutex<dyn ResetSnapshot>>),
     /// A PCI function with layered state: the function (a virtio transport)
     /// is saved and restored before the device it wraps.
     Virtio(Arc<Mutex<dyn PciSnapshot>>),
 }
 
+pub trait ResetSnapshot: Snapshot + vmlab_hv_devices::Resettable {}
+impl<T: Snapshot + vmlab_hv_devices::Resettable> ResetSnapshot for T {}
+
 impl DeviceNode {
     /// The sections this node contributes, in save order: `(key, bytes)`.
     pub fn save(&self) -> Result<Vec<Section>, String> {
         match self {
+            DeviceNode::Resettable(dev) => {
+                let dev = dev.lock();
+                Ok(vec![(
+                    dev.state_id(),
+                    dev.save_state().map_err(|e| e.to_string())?,
+                )])
+            }
             DeviceNode::Plain(dev) => {
                 let dev = dev.lock();
                 let state = dev
@@ -159,6 +171,14 @@ impl DeviceNode {
     /// error: a machine whose digest matched must find every section.
     pub fn restore(&self, sections: &SavedSections) -> Result<(), String> {
         match self {
+            DeviceNode::Resettable(dev) => {
+                let mut dev = dev.lock();
+                let key = dev.state_id();
+                let state = sections
+                    .get(&key)
+                    .ok_or_else(|| format!("snapshot lacks section {key:?}"))?;
+                dev.restore_state(state).map_err(|e| format!("{key}: {e}"))
+            }
             DeviceNode::Plain(dev) => {
                 let mut dev = dev.lock();
                 let key = dev.state_id();
@@ -197,11 +217,11 @@ pub struct SavedSections {
 }
 
 impl SavedSections {
-    fn get(&self, key: &str) -> Option<&[u8]> {
+    pub(crate) fn get(&self, key: &str) -> Option<&[u8]> {
         self.map.get(key).map(|v| v.as_slice())
     }
 
-    fn insert(&mut self, key: String, value: Vec<u8>) {
+    pub(crate) fn insert(&mut self, key: String, value: Vec<u8>) {
         self.map.insert(key, value);
     }
 }
@@ -387,7 +407,7 @@ fn stream_ram_out(
 }
 
 /// The in-kernel and per-vCPU state, as sections.
-fn save_kernel_state(
+pub(crate) fn save_kernel_state(
     shared: &crate::vm::VmShared,
     sections: &mut Vec<Section>,
 ) -> Result<(), SnapshotError> {
@@ -794,7 +814,7 @@ fn decode_lapic(bytes: &[u8]) -> Result<kvm_lapic_state, SnapshotError> {
 
 /// Restore the in-kernel and per-vCPU state from the saved sections, in the
 /// order the kernel expects: irqchip, timers, clock, then each vCPU.
-fn restore_kernel_state(
+pub(crate) fn restore_kernel_state(
     shared: &crate::vm::VmShared,
     sections: &SavedSections,
 ) -> Result<(), SnapshotError> {

@@ -27,6 +27,7 @@ pub struct VirtioVga {
     transport: VirtioPciDevice,
     config: [u8; 256],
     accelerated: bool,
+    power_on_config: [u8; 256],
 }
 
 impl VirtioVga {
@@ -84,6 +85,7 @@ impl VirtioVga {
             transport,
             config,
             accelerated: false,
+            power_on_config: config,
         })
     }
 
@@ -100,6 +102,7 @@ impl VirtioVga {
         self.config[0xa0..0xa4].copy_from_slice(&0x4802u32.to_le_bytes());
         self.config[0xa4..0xac].copy_from_slice(&[9, 0x98, 24, 8, 4, 1, 0, 0]);
         self.config[0xb8..0xbc].copy_from_slice(&1u32.to_le_bytes());
+        self.power_on_config = self.config;
         Ok(())
     }
 
@@ -405,6 +408,15 @@ impl Snapshot for VirtioVga {
         self.transport.restore_state(sections[1])?;
         self.gpu.restore_state(sections[2])?;
         self.config.copy_from_slice(&state[8..264]);
+        Ok(())
+    }
+}
+
+impl crate::Resettable for VirtioVga {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        crate::Resettable::reset(&mut self.transport)?;
+        crate::Resettable::reset(&mut self.vga)?;
+        self.config = self.power_on_config;
         Ok(())
     }
 }

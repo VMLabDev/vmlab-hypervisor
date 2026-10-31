@@ -127,12 +127,18 @@ pub trait Snapshot: Send {
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError>;
 }
 
+/// Return volatile guest-visible state to power-on defaults without replacing
+/// host connections, attached media, or persistent storage. The VMM calls this
+/// only after every vCPU has stopped.
+pub trait Resettable: Send {
+    fn reset(&mut self) -> Result<(), DeviceError>;
+}
+
 /// Layered snapshot access to a PCI function: the function's own state and
 /// the state of the device it wraps, as separate sections. The VMM saves
-/// and restores the function's state first: a virtio transport's restore
-/// re-activates the wrapped device with the restored queues, so the wrapped
-/// device's own state lands after it.
-pub trait PciSnapshot: Send {
+/// and restores the function's state first. A virtio transport activates
+/// the wrapped device only after its own state and queue indices have landed.
+pub trait PciSnapshot: Resettable {
     /// Stable id of this function instance, keying its snapshot sections.
     fn snapshot_id(&self) -> String;
     fn save_function_state(&self) -> Result<Vec<u8>, DeviceError>;

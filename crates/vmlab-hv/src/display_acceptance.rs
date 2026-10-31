@@ -182,6 +182,24 @@ pub(super) struct Observer {
 }
 
 impl Observer {
+    pub(super) fn frame_count(&self) -> u64 {
+        self.state.0.lock().unwrap().frames
+    }
+
+    pub(super) fn wait_after_reset(&self, before: u64) {
+        self.wait("display after guest reset", |state| {
+            state.frames > before
+                && state
+                    .images
+                    .latest
+                    .pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[..3] != [0; 3])
+        });
+    }
+
     pub(super) fn connect(path: &Path) -> Self {
         let client = Arc::new(Client::connect(path, Capabilities::ALL).unwrap());
         let state = Arc::new((Mutex::new(State::default()), Condvar::new()));

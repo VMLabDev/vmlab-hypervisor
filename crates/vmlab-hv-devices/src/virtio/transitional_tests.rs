@@ -33,6 +33,25 @@ fn pci_command_does_not_claim_memory_write_invalidate() {
 }
 
 #[test]
+fn system_reset_restores_modern_and_transitional_transport_power_on_state() {
+    for mut pci in [
+        Driver::new().pci,
+        VirtioPciDevice::new("modern", block(), memory(), None, None),
+    ] {
+        let initial = pci.save_state().unwrap();
+        let wrapped = pci.device().save_state().unwrap();
+        config_write(&mut pci, 4, &7u16.to_le_bytes());
+        pci.bar_write(4, 0x14, &[3]);
+        pci.bar_write(4, 0x3000, &[0x42; 8]);
+        pci.bar_write(4, 0x4000, &[0x42; 16]);
+        config_write(&mut pci, 0x3c, &[11]);
+        crate::Resettable::reset(&mut pci).unwrap();
+        assert_eq!(pci.save_state().unwrap(), initial);
+        assert_eq!(pci.device().save_state().unwrap(), wrapped);
+    }
+}
+
+#[test]
 fn modern_default_queue_size_activates_and_resets() {
     let mut driver = Driver::new();
     for _ in 0..2 {
@@ -342,7 +361,7 @@ fn transitional_block_legacy_msix_vectors_masking_and_config_shift() {
     g.pci.bar_write(1, 12, &[0]);
     assert_eq!(*g.msi.messages.lock(), vec![(0xfee0_0000, 0x41)]);
     assert_eq!(read::<8>(&mut g.pci, 1, 0x800), [0; 8]);
-    TransportInterrupt(g.pci.int.clone()).notify_config();
+    TransportInterrupt::new(g.pci.int.clone()).notify_config();
     assert_eq!(
         *g.msi.messages.lock(),
         vec![(0xfee0_0000, 0x41), (0xfee0_0000, 0x42)]

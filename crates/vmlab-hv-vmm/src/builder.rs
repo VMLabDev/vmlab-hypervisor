@@ -376,12 +376,9 @@ pub fn build(
     } else {
         PciRoot::new(layout.mmio64_base)
     }));
+    let config_io = Arc::new(Mutex::new(PciConfigIo::new(pci_root.clone())));
     io_bus
-        .register(
-            0xCF8,
-            8,
-            Arc::new(Mutex::new(PciConfigIo::new(pci_root.clone()))),
-        )
+        .register(0xCF8, 8, config_io.clone())
         .map_err(VmmError::Other)?;
     if !q35 {
         mmio_bus
@@ -463,7 +460,7 @@ pub fn build(
         }
     };
     let mut snap_disks = Vec::new();
-    let mut snap_nodes = Vec::new();
+    let mut snap_nodes = vec![DeviceNode::Plain(config_io)];
     let mut pflash = None;
     if q35 {
         let inventory = Arc::new(Mutex::new(
@@ -509,7 +506,7 @@ pub fn build(
                     flash.clone(),
                 )
                 .map_err(VmmError::Other)?;
-            snap_nodes.push(DeviceNode::Plain(flash.clone()));
+            snap_nodes.push(DeviceNode::Resettable(flash.clone()));
             pflash = Some(flash);
             crate::q35::map_pflash_code(&kvm.vm, &image, first_slot)?
         } else {
@@ -585,7 +582,7 @@ pub fn build(
         snap_nodes.extend([
             DeviceNode::Plain(chipset.lpc.clone()),
             DeviceNode::Plain(chipset.smbus.clone()),
-            DeviceNode::Plain(chipset.rtc.clone()),
+            DeviceNode::Resettable(chipset.rtc.clone()),
             DeviceNode::Plain(chipset.ps2.clone()),
             DeviceNode::Plain(chipset.hpet.clone()),
             DeviceNode::Plain(chipset.isa.clone()),
@@ -602,7 +599,7 @@ pub fn build(
         io_bus
             .register(0x70, 8, rtc.clone())
             .map_err(VmmError::Other)?;
-        snap_nodes.push(DeviceNode::Plain(rtc));
+        snap_nodes.push(DeviceNode::Resettable(rtc));
     }
 
     // COM1: 16550A on IRQ 4, output to the serial log.
@@ -666,7 +663,7 @@ pub fn build(
                     .map_err(|e| VmmError::Other(e.to_string()))?;
             }
             place(vga.clone(), Some(display.pci))?;
-            snap_nodes.push(DeviceNode::Plain(vga.clone()));
+            snap_nodes.push(DeviceNode::Resettable(vga.clone()));
             crate::display::Video::Virtio(vga)
         } else {
             let vga = Arc::new(Mutex::new(
@@ -674,7 +671,7 @@ pub fn build(
                     .map_err(|e| VmmError::Other(e.to_string()))?,
             ));
             place(vga.clone(), Some(display.pci))?;
-            snap_nodes.push(DeviceNode::Plain(vga.clone()));
+            snap_nodes.push(DeviceNode::Resettable(vga.clone()));
             crate::display::Video::Standard(vga)
         })
     } else {
@@ -884,7 +881,7 @@ pub fn build(
                 device.clone(),
             )
             .map_err(VmmError::Other)?;
-        snap_nodes.push(DeviceNode::Plain(device.clone()));
+        snap_nodes.push(DeviceNode::Resettable(device.clone()));
         Some(device)
     } else {
         None
@@ -963,6 +960,7 @@ pub fn build(
     *shared.pflash.lock() = pflash;
     *shared.tpm.lock() = tpm;
     *shared.smi_fwcfg.lock() = smi_fwcfg;
+    shared.set_reset_description(desc.clone());
     shared.set_snapshot_registry(Arc::new(SnapshotRegistry {
         digest: machine_digest(desc),
         disks: snap_disks,
@@ -1086,6 +1084,7 @@ mod tests {
 
     fn desc() -> MachineDescription {
         MachineDescription {
+            exit_on_reset: false,
             vfio: vec![],
             machine: Default::default(),
             cpu: Default::default(),

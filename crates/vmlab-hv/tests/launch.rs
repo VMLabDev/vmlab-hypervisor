@@ -39,6 +39,7 @@ impl Dir {
         let json = format!(
             r#"{{
                 "name": "launch-test",
+                "exit_on_reset": true,
                 "arch": "x86_64",
                 "accel": "kvm",
                 "vcpus": 1,
@@ -207,6 +208,106 @@ fn boots_kernel_and_exits_zero_on_guest_reset() {
 }
 
 #[test]
+fn kernel_reset_reboots_in_the_same_process_and_control_connection() {
+    if !kernel_available() {
+        eprintln!("skipping: /dev/kvm or the container kernel is not present");
+        return;
+    }
+    for method in ["t", "k", "p", "a"] {
+        kernel_reset_with_method(method);
+    }
+}
+
+fn kernel_reset_with_method(method: &str) {
+    let dir = Dir::new("in-place-reset");
+    let machine = dir.machine();
+    let mut description: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&machine).unwrap()).unwrap();
+    description.as_object_mut().unwrap().remove("exit_on_reset");
+    description["vcpus"] = 2.into();
+    description["boot"]["cmdline"] = format!("console=ttyS0 panic=-1 reboot={method}").into();
+    let switch = std::os::unix::net::UnixListener::bind(dir.path.join("switch.sock")).unwrap();
+    switch.set_nonblocking(true).unwrap();
+    description["nics"] = serde_json::json!([{
+        "mac":"52:54:00:00:00:01", "attachment":{"kind":"stream", "socket":dir.path.join("switch.sock")}
+    }]);
+    std::fs::write(&machine, serde_json::to_vec(&description).unwrap()).unwrap();
+    let mut child = ManagedChild::spawn(
+        Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+            .arg("--machine")
+            .arg(machine)
+            .arg("--control")
+            .arg(dir.control())
+            .arg("--paused")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut client = loop {
+        if let Ok(client) = Client::connect(dir.control()) {
+            break client;
+        }
+        assert!(Instant::now() < deadline, "control startup timeout");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    client.call(Ctrl::Resume).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (mut network, _) = loop {
+        match switch.accept() {
+            Ok(connection) => break connection,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "NIC connection timeout");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("NIC connection: {error}"),
+        }
+    };
+    network
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    for _ in 0..2 {
+        loop {
+            match client
+                .wait_event()
+                .unwrap()
+                .expect("control remains connected")
+            {
+                Event::Reset => break,
+                Event::Stopped | Event::Resumed => {}
+                event => panic!("unexpected event during reset: {event:?}"),
+            }
+        }
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "reset ended the process"
+        );
+        assert!(matches!(
+            client.call(Ctrl::Status).unwrap(),
+            Outcome::Ok { .. }
+        ));
+        use std::io::Read;
+        match network.read(&mut [0; 4096]) {
+            Ok(count) => assert_ne!(count, 0, "reset closed the NIC stream"),
+            Err(error) => assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+                "NIC stream failed after reset: {error}"
+            ),
+        }
+        assert!(
+            matches!(switch.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "reset reconnected the NIC stream"
+        );
+    }
+    client.call(Ctrl::Quit).unwrap();
+    assert!(wait_for_exit(child, Duration::from_secs(10)).success());
+    assert!(serial_log_text(&dir).matches("Linux version").count() >= 2);
+}
+
+#[test]
 fn paused_machine_resumes_over_the_control_socket() {
     if !kernel_available() {
         eprintln!("skipping: /dev/kvm or the container kernel is not present");
@@ -342,6 +443,7 @@ fn virtio_devices_are_enumerated_through_the_pci_root() {
     let json = format!(
         r#"{{
             "name": "virtio-test",
+            "exit_on_reset": true,
             "arch": "x86_64",
             "accel": "kvm",
             "vcpus": 1,

@@ -46,6 +46,7 @@ pub(super) fn template(name: &str, variable: &str) -> Option<PathBuf> {
 enum DisplayTest {
     None,
     Stream,
+    Reset,
     Screenshot(&'static str),
 }
 
@@ -148,7 +149,7 @@ fn boot_template(
         }
         child
     };
-    let mut swtpm = tpm.then(spawn_tpm);
+    let _swtpm = tpm.then(spawn_tpm);
     let disk = dir.path().join("disk.qcow2");
     vmlab_disk::ops::create_linked_clone(&template, &disk).unwrap();
     let control = dir.path().join("control.sock");
@@ -326,7 +327,6 @@ fn boot_template(
         .map(|v| v.parse().unwrap())
         .unwrap_or(if windows { 600 } else { 120 });
     let deadline = Instant::now() + Duration::from_secs(timeout);
-    let mut reboots = 0;
     let mut windows_setup = windows;
     let mut requested_reboot = false;
     let mut setup_status = String::new();
@@ -356,63 +356,17 @@ fn boot_template(
                 Err(error) => setup_status = error,
             }
         }
-        if let Some(status) = process.0.try_wait().unwrap() {
-            let mut reset = false;
-            while let Ok(Some(event)) = client.wait_event() {
-                reset |= event
-                    == vmlab_hv_proto::control::Event::Shutdown {
-                        reason: vmlab_hv_proto::control::ShutdownReason::GuestReset,
-                    };
-            }
-            assert!(
-                windows && status.success() && reset && reboots < 3,
-                "{name} exited before agent ready: {}",
-                diagnostics()
-            );
-            reboots += 1;
-            eprintln!("{name}: restarting after guest reset {reboots}");
-            if requested_reboot {
+        assert!(
+            process.0.try_wait().unwrap().is_none(),
+            "{name} exited before agent ready: {}",
+            diagnostics()
+        );
+        client.call(Control::Status).unwrap();
+        for event in client.take_events() {
+            if event == vmlab_hv_proto::control::Event::Reset && requested_reboot {
                 requested_reboot = false;
                 windows_setup = false;
             }
-            drop(process);
-            if let Some(previous) = swtpm.take() {
-                drop(previous);
-                let socket = dir.path().join("tpm.sock");
-                if socket.exists() {
-                    std::fs::remove_file(socket).unwrap();
-                }
-                swtpm = Some(spawn_tpm());
-            }
-            for socket in [
-                &control,
-                &agent,
-                &native,
-                &rfb,
-                &dir.path().join("display.sock"),
-                &dir.path().join("vnc.sock"),
-            ] {
-                if socket.exists() {
-                    std::fs::remove_file(socket).unwrap();
-                }
-            }
-            process = spawn();
-            let ready = Instant::now() + Duration::from_secs(20);
-            client = loop {
-                if let Ok(client) = Client::connect(&control) {
-                    break client;
-                }
-                assert!(
-                    process.0.try_wait().unwrap().is_none() && Instant::now() < ready,
-                    "{name} restart failed: {}",
-                    diagnostics()
-                );
-                std::thread::sleep(Duration::from_millis(20));
-            };
-            assert!(matches!(
-                client.call(Control::Resume).unwrap(),
-                Outcome::Ok { .. }
-            ));
         }
         if Instant::now() >= deadline {
             let _ = client.call(Control::Quit);
@@ -447,6 +401,62 @@ fn boot_template(
         String::from_utf8_lossy(&result.stdout).trim(),
         "firmware-agent-ready"
     );
+    if matches!(display_test, DisplayTest::Reset) {
+        let observer = crate::display_acceptance::Observer::connect(&native);
+        let pid = process.0.id();
+        let reboot = if windows {
+            vec!["shutdown.exe", "/r", "/t", "2", "/f"]
+        } else {
+            vec![
+                "sh",
+                "-c",
+                "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 </dev/null &",
+            ]
+        };
+        assert_eq!(
+            guest
+                .exec(&reboot, Duration::from_secs(20))
+                .unwrap()
+                .exit_code,
+            0
+        );
+        drop(guest);
+        loop {
+            match client
+                .wait_event()
+                .unwrap()
+                .expect("control must survive guest reset")
+            {
+                vmlab_hv_proto::control::Event::Reset => break,
+                vmlab_hv_proto::control::Event::Shutdown { reason } => {
+                    panic!("reset shut down: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+        let before = observer.frame_count();
+        assert!(
+            process.0.try_wait().unwrap().is_none(),
+            "guest reset ended process: {}",
+            diagnostics()
+        );
+        assert_eq!(process.0.id(), pid);
+        guest = AgentClient::connect(&agent, Duration::from_secs(timeout))
+            .unwrap_or_else(|error| panic!("{name} agent after reset: {error}; {}", diagnostics()));
+        let output = guest
+            .exec(&[shell, flag, "echo rebooted"], Duration::from_secs(20))
+            .unwrap();
+        assert_eq!(output.exit_code, 0);
+        assert!(String::from_utf8_lossy(&output.stdout).contains("rebooted"));
+        observer.wait_after_reset(before);
+        assert!(matches!(
+            client.call(Control::Status).unwrap(),
+            Outcome::Ok { .. }
+        ));
+        eprintln!(
+            "{name}: in-place reset retained PID {pid}, control and display; agent re-handshook"
+        );
+    }
     if firmware == Firmware::SecureOvmf {
         let secure = guest.exec(&["/bin/sh", "-c", "od -An -tu1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"], Duration::from_secs(20)).unwrap();
         assert_eq!(secure.exit_code, 0, "{:?}", secure);
@@ -561,7 +571,14 @@ fn boot_template(
                 ],
                 Duration::from_secs(20),
             )
-            .unwrap();
+            .unwrap_or_else(|error| {
+                let _ = client.call(Control::Quit);
+                let _ = process.0.wait();
+                panic!(
+                    "{name} exec after snapshot load: {error}; {}",
+                    diagnostics()
+                );
+            });
         assert_eq!(String::from_utf8_lossy(&restored.stdout).trim(), "before");
     }
     assert!(matches!(
@@ -671,6 +688,30 @@ fn windows_10_ovmf_agent_and_snapshot() {
         true,
         vmlab_hv_proto::machine::DiskBus::Virtio,
         DisplayTest::None,
+        Firmware::Ovmf,
+    );
+}
+
+#[test]
+fn ubuntu_26_04_agent_reboot_keeps_process_control_and_display() {
+    boot_template(
+        "ubuntu-26.04",
+        "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
+        false,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+        DisplayTest::Reset,
+        Firmware::SeaBios,
+    );
+}
+
+#[test]
+fn windows_10_agent_reboot_keeps_process_control_and_display() {
+    boot_template(
+        "windows-10",
+        "VMLAB_HV_TEMPLATE_WINDOWS_10",
+        false,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+        DisplayTest::Reset,
         Firmware::Ovmf,
     );
 }

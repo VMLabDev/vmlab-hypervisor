@@ -673,13 +673,15 @@ impl VirtioDevice for Net {
     }
 
     fn reset(&mut self) {
+        self.pending_queues = None;
+        self.negotiated.store(0, Ordering::SeqCst);
         let mut sh = lock(&self.shared);
         sh.queues = (0..2).map(|_| None).collect();
         sh.mem = None;
         sh.interrupt = None;
-        sh.rx = RxRead::Idle;
         sh.rx_pending.clear();
-        sh.tx_out.clear();
+        // The switch stream survives reset. Keep partial frame decoding and
+        // finish already-framed output so neither endpoint loses alignment.
     }
 }
 
@@ -1275,6 +1277,34 @@ mod tests {
         wait_for("tx buffer returned", || f.vqs[1].used_idx(&f.mem) == 1);
         let (_, len) = f.vqs[1].used_entry(&f.mem, 0);
         assert_eq!(len as usize, 12 + frame.len());
+    }
+
+    #[test]
+    fn system_reset_keeps_partial_switch_framing_and_the_same_connection() {
+        let mut f = Fixture::new();
+        let mut switch = f.take_switch_side();
+        let frame = b"frame split across reset";
+        let mut bytes = (frame.len() as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(frame);
+        switch.write_all(&bytes[..2]).unwrap();
+        wait_for("partial frame prefix", || {
+            matches!(lock(&f.dev.shared).rx, RxRead::Prefix { got: 2, .. })
+        });
+        f.dev.reset();
+        assert!(matches!(
+            lock(&f.dev.shared).rx,
+            RxRead::Prefix { got: 2, .. }
+        ));
+        assert!(lock(&f.dev.shared).mem.is_none());
+        switch.write_all(&bytes[2..]).unwrap();
+        wait_for("complete frame after reset", || {
+            !lock(&f.dev.shared).rx_pending.is_empty()
+        });
+        assert_eq!(lock(&f.dev.shared).rx_pending.front().unwrap(), frame);
+        f.switch.as_ref().unwrap().set_nonblocking(true).unwrap();
+        assert!(
+            matches!(f.switch.as_ref().unwrap().accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
     }
 
     #[test]

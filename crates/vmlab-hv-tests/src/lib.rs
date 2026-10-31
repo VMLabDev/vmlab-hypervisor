@@ -386,6 +386,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
     };
 
     let mut desc = MachineDescription {
+        exit_on_reset: false,
         vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),

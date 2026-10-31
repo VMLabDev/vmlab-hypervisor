@@ -120,6 +120,10 @@ pub struct VmShared {
     pub(crate) smi_fwcfg: Mutex<Option<Arc<Mutex<crate::smm::SmiFwCfg>>>>,
     pending_smis: Mutex<std::collections::BTreeSet<u8>>,
     smi_delivery: Condvar,
+    reset_description: Mutex<Option<vmlab_hv_proto::machine::MachineDescription>>,
+    reset_state: Mutex<Option<crate::reset::ResetState>>,
+    reset_pending: std::sync::atomic::AtomicBool,
+    legacy_reset_control: Mutex<u8>,
 }
 
 impl VmShared {
@@ -177,6 +181,10 @@ impl VmShared {
             smi_fwcfg: Mutex::new(None),
             pending_smis: Mutex::new(std::collections::BTreeSet::new()),
             smi_delivery: Condvar::new(),
+            reset_description: Mutex::new(None),
+            reset_state: Mutex::new(None),
+            reset_pending: std::sync::atomic::AtomicBool::new(false),
+            legacy_reset_control: Mutex::new(0),
         })
     }
 
@@ -189,6 +197,76 @@ impl VmShared {
     fn emit(&self, event: Event) {
         if let Some(sink) = self.event_sink.lock().as_ref() {
             sink(event);
+        }
+    }
+
+    pub(crate) fn set_reset_description(&self, desc: vmlab_hv_proto::machine::MachineDescription) {
+        *self.reset_description.lock() = Some(desc);
+    }
+
+    #[track_caller]
+    pub(crate) fn request_reset(&self) {
+        if std::env::var_os("VMLAB_HV_DIAGNOSTICS").is_some() {
+            eprintln!("reset requested at {}", std::panic::Location::caller());
+        }
+        if self
+            .reset_description
+            .lock()
+            .as_ref()
+            .is_none_or(|desc| desc.exit_on_reset)
+        {
+            self.request_exit(ExitReason::Shutdown(ShutdownReason::GuestReset));
+            return;
+        }
+        self.reset_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.kick_all();
+        self.state_cv.notify_all();
+    }
+
+    fn service_reset(&self) {
+        let Some(_op) = self.snapshot_op.try_lock() else {
+            return;
+        };
+        if !self.reset_pending.load(std::sync::atomic::Ordering::SeqCst) || self.exited() {
+            return;
+        }
+        let result = (|| {
+            let was = self.stop_for_snapshot(std::time::Duration::from_secs(10))?;
+            self.reset_pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            if self.exited() {
+                return Ok(());
+            }
+            let mut reset = self.reset_state.lock();
+            reset
+                .as_mut()
+                .ok_or("machine has no reset state")?
+                .reset(self, self.reset_description.lock().as_ref())?;
+            if !self.exited() {
+                self.emit(Event::Reset);
+                self.finish_snapshot(if was == RunState::Paused {
+                    crate::snapshot::format::RUN_PAUSED
+                } else {
+                    crate::snapshot::format::RUN_RUNNING
+                });
+            }
+            Ok::<_, String>(())
+        })();
+        if let Err(error) = result {
+            self.request_exit(ExitReason::Error(format!("system reset: {error}")));
+        }
+    }
+
+    pub(crate) fn reset_platform(&self) {
+        use vmlab_hv_devices::Resettable;
+        let _ = self.pm.lock().reset();
+        self.sleep_signal.take();
+        self.pending_smis.lock().clear();
+        *self.legacy_reset_control.lock() = 0;
+        if let Some(chipset) = self.chipset.lock().as_ref() {
+            chipset.power.lock().take();
+            chipset.error.lock().take();
         }
     }
 
@@ -275,20 +353,18 @@ impl VmShared {
     /// Detach the device with qdev id `id`, returning it to the host: the
     /// backend's drop releases the interfaces and rebinds the host driver.
     pub(crate) fn detach_usb(&self, id: &str) -> Result<u8, vmlab_hv_proto::control::ErrorCode> {
-        let port = self
-            .usb_attachments
-            .lock()
-            .iter()
-            .find(|a| a.id == id)
-            .map(|a| a.port);
-        let Some(port) = port else {
-            return Err(vmlab_hv_proto::control::ErrorCode::DeviceNotFound);
-        };
         let Some(controller) = self.xhci.lock().clone() else {
             return Err(vmlab_hv_proto::control::ErrorCode::Internal);
         };
-        let detached = controller.lock().detach(port);
-        self.usb_attachments.lock().retain(|a| a.id != id);
+        let mut controller = controller.lock();
+        let mut attachments = self.usb_attachments.lock();
+        let Some(index) = attachments.iter().position(|a| a.id == id) else {
+            return Err(vmlab_hv_proto::control::ErrorCode::DeviceNotFound);
+        };
+        let port = attachments.remove(index).port;
+        let detached = controller.detach(port);
+        drop(attachments);
+        drop(controller);
         // Either the detach handed back the backend, whose drop rebinds the
         // host driver, or the port was already empty (host unplug drained
         // it); either way the device is back on the host.
@@ -357,6 +433,7 @@ impl VmShared {
             return false;
         }
         *self.state.lock() == RunState::Running
+            && !self.reset_pending.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Block until the machine runs again or exits; called by parked vCPU
@@ -369,7 +446,10 @@ impl VmShared {
             self.parked_cv.notify_all();
         }
         let mut state = self.state.lock();
-        while *state != RunState::Running && self.exit.lock().is_none() {
+        while (*state != RunState::Running
+            || self.reset_pending.load(std::sync::atomic::Ordering::SeqCst))
+            && self.exit.lock().is_none()
+        {
             self.state_cv.wait(&mut state);
         }
         drop(state);
@@ -559,6 +639,14 @@ impl VmShared {
 
     pub(crate) fn io_read(&self, port: u16, data: &mut [u8]) {
         self.trace_io(port, data, false);
+        if self.chipset.lock().is_none() && data.len() == 1 && matches!(port, 0xcf9 | 0x64) {
+            data[0] = if port == 0xcf9 {
+                *self.legacy_reset_control.lock()
+            } else {
+                0
+            };
+            return;
+        }
         if matches!(port, 0x3b0..=0x3df | 0x1ce..=0x1d0)
             && let Some(vga) = self.vga.lock().as_ref()
         {
@@ -581,6 +669,22 @@ impl VmShared {
 
     pub(crate) fn io_write(&self, port: u16, data: &[u8]) {
         self.trace_io(port, data, true);
+        if self.chipset.lock().is_none() && data.len() == 1 {
+            if port == 0xcf9 {
+                let mut control = self.legacy_reset_control.lock();
+                let reset = *control & 4 == 0 && data[0] & 4 != 0;
+                *control = data[0] & 0x0e;
+                drop(control);
+                if reset {
+                    self.request_reset();
+                }
+                return;
+            }
+            if port == 0x64 && data[0] == 0xfe {
+                self.request_reset();
+                return;
+            }
+        }
         let _memory_update = if (0xcfc..=0xcff).contains(&port) && self.mch.lock().is_some() {
             Some(self.memory_update())
         } else {
@@ -856,6 +960,14 @@ impl VmShared {
 
     fn poll_chipset(&self) {
         self.poll_display();
+        let flash_error = self
+            .pflash
+            .lock()
+            .as_ref()
+            .and_then(|flash| flash.lock().flush_if_due().err());
+        if let Some(error) = flash_error {
+            self.request_exit(ExitReason::Error(format!("pflash flush: {error}")));
+        }
         if self.status() == RunState::Running
             && let Some(xhci) = self.xhci.lock().as_ref()
         {
@@ -871,9 +983,7 @@ impl VmShared {
             Some(PowerAction::PowerOff | PowerAction::Hibernate) => {
                 self.request_exit(ExitReason::Shutdown(ShutdownReason::GuestShutdown))
             }
-            Some(PowerAction::Reset) => {
-                self.request_exit(ExitReason::Shutdown(ShutdownReason::GuestReset))
-            }
+            Some(PowerAction::Reset) => self.request_reset(),
             Some(PowerAction::Suspend) => {
                 *self.state.lock() = RunState::Suspended;
                 self.clock_running(false);
@@ -1014,6 +1124,10 @@ impl Vm {
             .map(|(id, fd)| (id, Arc::new(Mutex::new(fd))))
             .collect();
         *shared.vcpus.lock() = fds.clone();
+        *shared.reset_state.lock() = Some(
+            crate::reset::ResetState::capture(&shared)
+                .map_err(|e| VmmError::Other(format!("capturing power-on state: {e}")))?,
+        );
         // Own each thread immediately, including during partial construction.
         let mut machine = Self {
             shared,
@@ -1027,17 +1141,18 @@ impl Vm {
                     .map_err(|e| VmmError::Other(format!("spawning vCPU threads: {e}")))?,
             );
         }
-        machine.timer = if machine.shared.chipset.lock().is_some() {
+        machine.timer = {
             let weak = Arc::downgrade(&machine.shared);
             Some(
                 std::thread::Builder::new()
-                    .name("q35-timers".into())
+                    .name("machine-events".into())
                     .spawn(move || {
                         while let Some(shared) = weak.upgrade() {
                             if shared.exited() {
                                 break;
                             }
                             shared.poll_chipset();
+                            shared.service_reset();
                             let mut state = shared.state.lock();
                             shared
                                 .state_cv
@@ -1046,8 +1161,6 @@ impl Vm {
                     })
                     .map_err(|e| VmmError::Other(format!("spawning chipset timer: {e}")))?,
             )
-        } else {
-            None
         };
         Ok(machine)
     }
@@ -1066,6 +1179,11 @@ impl Vm {
     pub fn wait(mut self) -> ExitReason {
         let reason = self.shared.wait_exit();
         self.join_workers();
+        if let Some(flash) = self.shared.pflash.lock().as_ref()
+            && let Err(error) = flash.lock().flush()
+        {
+            return ExitReason::Error(format!("pflash flush at VM exit: {error}"));
+        }
         for device in self.shared.vfio.lock().iter() {
             if let Err(error) = device.lock().reset() {
                 return ExitReason::Error(format!("VFIO reset at VM exit: {error}"));
@@ -1096,6 +1214,24 @@ impl Vm {
                         "vcpu {id}: cs={:#x} rip={:#x} ax={:#x} dx={:#x} cr0={:#x}",
                         sregs.cs.base, regs.rip, regs.rax, regs.rdx, sregs.cr0
                     );
+                    eprintln!("vcpu {id} MP state: {:?}", fd.get_mp_state());
+                    if let Ok(address) = fd.translate_gva(sregs.cs.base.wrapping_add(regs.rip))
+                        && address.valid != 0
+                    {
+                        use vm_memory::Bytes;
+                        let mut code = [0; 64];
+                        if self
+                            .ram
+                            .mem
+                            .read_slice(
+                                &mut code,
+                                vm_memory::GuestAddress(address.physical_address),
+                            )
+                            .is_ok()
+                        {
+                            eprintln!("vcpu {id} instructions: {code:02x?}");
+                        }
+                    }
                 }
                 eprintln!(
                     "vcpu {id} SMI state: {:?}",
@@ -1172,6 +1308,11 @@ impl Drop for Vm {
     fn drop(&mut self) {
         self.handle().quit();
         self.join_workers();
+        if let Some(flash) = self.shared.pflash.lock().as_ref()
+            && let Err(error) = flash.lock().flush()
+        {
+            eprintln!("pflash flush while dropping VM: {error}");
+        }
         if let Some(display) = self.shared.display.lock().as_ref() {
             display.shutdown();
         }

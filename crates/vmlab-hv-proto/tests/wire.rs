@@ -108,6 +108,7 @@ fn fs_share_socket_and_path_are_alternatives() {
 
 fn sample_machine() -> MachineDescription {
     MachineDescription {
+        exit_on_reset: false,
         vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
@@ -182,6 +183,24 @@ fn sample_machine() -> MachineDescription {
         }),
         rtc_base: Some("2026-10-30T00:00:00Z".to_owned()),
     }
+}
+
+#[test]
+fn reset_defaults_to_in_place_and_exit_on_reset_is_explicit() {
+    let description = sample_machine();
+    let mut value = serde_json::to_value(&description).unwrap();
+    assert!(value.get("exit_on_reset").is_none());
+    assert!(
+        !serde_json::from_value::<MachineDescription>(value.clone())
+            .unwrap()
+            .exit_on_reset
+    );
+    value["exit_on_reset"] = true.into();
+    assert!(
+        serde_json::from_value::<MachineDescription>(value)
+            .unwrap()
+            .exit_on_reset
+    );
 }
 
 #[test]

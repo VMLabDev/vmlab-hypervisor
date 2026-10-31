@@ -361,6 +361,37 @@ fn hba_reset_six_ports_and_indexed_io() {
 }
 
 #[test]
+fn system_reset_clears_pci_and_hba_state_and_keeps_attached_drives() {
+    let mut d = Driver::new();
+    d.hba.attach_cdrom(2, None).unwrap();
+    let Some(Drive::Cdrom(optical)) = &mut d.hba.drives[2] else {
+        panic!("CD-ROM missing")
+    };
+    let optical_mode = optical.transfer_mode;
+    optical.transfer_mode = 0x20;
+    d.hba
+        .attach_disk(5, image(vec![0x42; 4096], false))
+        .unwrap();
+    d.hba.config_write(1, 0, &7u16.to_le_bytes());
+    d.start(5);
+    crate::Resettable::reset(&mut d.hba).unwrap();
+    assert_eq!(d.hba.config_read(1) & 0xffff, 0);
+    assert_eq!(d.read(4), 1 << 31);
+    assert_eq!(d.read(port_base(5) + 0x18), 6);
+    assert_eq!(d.read(port_base(5) + 0x24), 0x101);
+    let Some(Drive::Disk(disk)) = &mut d.hba.drives[5] else {
+        panic!("drive detached")
+    };
+    let mut sector = [0; 512];
+    disk.image.read_at(0, &mut sector).unwrap();
+    assert_eq!(sector, [0x42; 512]);
+    let Some(Drive::Cdrom(optical)) = &d.hba.drives[2] else {
+        panic!("CD-ROM detached")
+    };
+    assert_eq!(optical.transfer_mode, optical_mode);
+}
+
+#[test]
 fn p4_identify_dma_write_read_flush_and_fis() {
     let mut d = Driver::new();
     let flushes = Arc::new(Mutex::new(0));

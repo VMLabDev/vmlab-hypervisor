@@ -399,6 +399,7 @@ fn initrd_overlay_is_complete_before_returning() {
 /// One machine description with a single share on `socket`.
 fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
     MachineDescription {
+        exit_on_reset: false,
         vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
@@ -542,10 +543,9 @@ fn device_state_round_trips_through_virtiofsd() {
     virtiofsd_a.stop();
 
     // Machine B: a fresh virtiofsd on the same shared dir, a paused machine,
-    // and the sections restored in the snapshot order — transport first (it
-    // re-activates the device), then the device section, which replays the
-    // ring bases and pushes the state blob through SET_DEVICE_STATE_FD into
-    // the new daemon.
+    // and the sections restored in snapshot order: transport first, then
+    // device state. Activation applies the saved ring bases and pushes the
+    // state blob through SET_DEVICE_STATE_FD into the new daemon.
     let virtiofsd_b = Virtiofsd::start(&dir, "b", &shared);
     let dir_b = Dir::new("roundtrip-b");
     let initrd_b = initrd_with_init_script(&dir_b);

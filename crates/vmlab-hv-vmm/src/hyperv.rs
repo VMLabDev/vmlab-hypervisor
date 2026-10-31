@@ -285,17 +285,38 @@ pub fn configure_vcpu(kvm: &Kvm, vcpu: &VcpuFd, features: &[HyperV]) -> Result<(
         .map_err(|e| VmmError::ioctl("KVM_SET_CPUID2(Hyper-V)", e))
 }
 
-/// Complete Hyper-V exits that need userspace participation. SynIC notices
-/// need no routing changes without VMBus devices. KVM handles timer delivery,
-/// TLB flushes and IPIs; unsupported userspace hypercalls return TLFS status 2.
-pub(crate) fn handle_exit(run: &mut kvm_bindings::kvm_run) -> Result<(), VmmError> {
+/// Complete Hyper-V exits that need userspace participation. SynIC2 leaves
+/// guest-enabled pages for userspace to initialize; host snapshot restoration
+/// does not generate these notices and must preserve the saved page contents.
+pub(crate) fn handle_exit(
+    run: &mut kvm_bindings::kvm_run,
+    memory: &vmlab_hv_devices::GuestMemory,
+) -> Result<(), VmmError> {
     if run.exit_reason != kvm_bindings::KVM_EXIT_HYPERV {
         return Err(invalid("expected a Hyper-V KVM exit"));
     }
     // SAFETY: KVM_EXIT_HYPERV selects the hyperv member of the run union.
     let exit = unsafe { &mut run.__bindgen_anon_1.hyperv };
     match exit.type_ {
-        kvm_bindings::KVM_EXIT_HYPERV_SYNIC => Ok(()),
+        kvm_bindings::KVM_EXIT_HYPERV_SYNIC => {
+            use vm_memory::{Bytes, GuestAddress, GuestMemory, Permissions};
+            // SAFETY: KVM_EXIT_HYPERV_SYNIC selects this union member.
+            let synic = unsafe { exit.u.synic };
+            let page = match synic.msr {
+                0x4000_0082 => synic.evt_page, // SIEFP
+                0x4000_0083 => synic.msg_page, // SIMP
+                _ => return Ok(()),
+            };
+            let address = GuestAddress(page & !0xfff);
+            // The TLFS makes pages outside the partition's GPA space
+            // inaccessible, rather than making them a host error.
+            if page & 1 != 0 && memory.check_range(address, 4096, Permissions::Write) {
+                memory
+                    .write_slice(&[0; 4096], address)
+                    .map_err(|e| VmmError::Memory(format!("initializing SynIC page: {e}")))?;
+            }
+            Ok(())
+        }
         kvm_bindings::KVM_EXIT_HYPERV_HCALL => {
             exit.u.hcall.result = 2;
             Ok(())
@@ -598,6 +619,55 @@ mod tests {
     }
 
     #[test]
+    fn guest_synic_page_enables_clear_reused_memory() {
+        let Some(vm) = kvm() else { return };
+        let ram =
+            crate::memory::GuestRam::anonymous(crate::layout::MemLayout::new(16).unwrap()).unwrap();
+        crate::memory::register_memslots(&vm.vm, &ram).unwrap();
+        let mut cpu = vm.create_vcpu(0).unwrap();
+        configure_vcpu(&vm.kvm, &cpu, WINDOWS_FEATURES).unwrap();
+        let writes = [
+            (BASE + 0x83, 0x9001u32, Some(0x9000)),
+            (BASE + 0x82, 0xa001, Some(0xa000)),
+            (BASE + 0x83, 0x9001, Some(0x9000)),
+            (BASE + 0x82, 0, None),
+            (BASE + 0x83, 0xffff_f001, None),
+        ];
+        let mut code = Vec::new();
+        for (index, value, _) in writes {
+            code.extend([0x66, 0xb9]);
+            code.extend(index.to_le_bytes());
+            code.extend([0x66, 0xb8]);
+            code.extend(value.to_le_bytes());
+            code.extend([0x66, 0x31, 0xd2, 0x0f, 0x30]);
+        }
+        code.extend([0xe6, 0xe9]);
+        ram.mem.write_slice(&code, GuestAddress(0x8000)).unwrap();
+        crate::loader::init_real_mode(&mut cpu, 0x8000).unwrap();
+        for (index, _, cleared) in writes {
+            for address in [0x9000, 0xa000] {
+                ram.mem
+                    .write_slice(&[0xa5; 4096], GuestAddress(address))
+                    .unwrap();
+            }
+            assert!(matches!(cpu.run().unwrap(), VcpuExit::Hyperv));
+            handle_exit(cpu.get_kvm_run(), &ram.mem).unwrap();
+            for address in [0x9000, 0xa000] {
+                let mut page = [0; 4096];
+                ram.mem
+                    .read_slice(&mut page, GuestAddress(address))
+                    .unwrap();
+                let expected = if cleared == Some(address) { 0 } else { 0xa5 };
+                assert!(
+                    page.iter().all(|byte| *byte == expected),
+                    "MSR {index:#x}: page {address:#x} did not contain {expected:#x}"
+                );
+            }
+        }
+        assert!(matches!(cpu.run().unwrap(), VcpuExit::IoOut(0xe9, _)));
+    }
+
+    #[test]
     fn hyperv_migration_msrs_round_trip_to_fresh_vcpu() {
         let Some(source) = kvm() else { return };
         let destination = KvmVm::new().unwrap();
@@ -692,9 +762,13 @@ mod tests {
             msr(BASE, 42),
             msr(BASE + 0x90, 0x10040),
             msr(BASE + 0xb1, 789),
+            msr(BASE + 0x83, 0xb001),
         ])
         .unwrap();
-        assert_eq!(cpu.set_msrs(&saved_state).unwrap(), 3);
+        assert_eq!(cpu.set_msrs(&saved_state).unwrap(), 4);
+        ram.mem
+            .write_slice(&[0x5a; 4096], GuestAddress(0xb000))
+            .unwrap();
         let signal = Arc::new(SleepSignal::default());
         let pm = Arc::new(Mutex::new(PmDevice::new(Arc::new(NullIrq), signal.sink())));
         let shared = VmShared::new(
@@ -734,6 +808,13 @@ mod tests {
             let changed = Msrs::from_entries(&[msr(BASE, 99), msr(BASE + 0xb1, 1000)]).unwrap();
             assert_eq!(fd.set_msrs(&changed).unwrap(), 2);
         }
+        handle
+            .shared()
+            .ram()
+            .unwrap()
+            .mem
+            .write_slice(&[0xa5; 4096], GuestAddress(0xb000))
+            .unwrap();
         let outcome = client
             .call(Command::SnapshotLoad {
                 name: "hyperv".into(),
@@ -744,9 +825,18 @@ mod tests {
             let cpus = handle.shared().vcpus.lock();
             let fd = cpus[0].1.lock();
             let mut restored = Msrs::from_entries(saved_state.as_slice()).unwrap();
-            assert_eq!(fd.get_msrs(&mut restored).unwrap(), 3);
+            assert_eq!(fd.get_msrs(&mut restored).unwrap(), 4);
             assert_eq!(restored.as_slice(), saved_state.as_slice());
         }
+        let mut page = [0; 4096];
+        handle
+            .shared()
+            .ram()
+            .unwrap()
+            .mem
+            .read_slice(&mut page, GuestAddress(0xb000))
+            .unwrap();
+        assert_eq!(page, [0x5a; 4096], "snapshot restore cleared the SIM page");
         let outcome = client.call(Command::Resume).unwrap();
         assert!(matches!(outcome, Outcome::Ok { .. }), "{outcome:?}");
         // A bounded watchdog also releases the VM if the payload faults.

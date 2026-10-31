@@ -86,6 +86,11 @@ impl Backend {
         Ok(bit[0] != 0)
     }
 
+    pub(super) fn reset(&mut self) -> io::Result<()> {
+        self.call(0x0e, &[])?;
+        self.call(2, &1u32.to_be_bytes())
+    }
+
     pub(super) fn reset_established(&mut self, locality: u8) -> io::Result<()> {
         self.call(0x0b, &[locality])
     }

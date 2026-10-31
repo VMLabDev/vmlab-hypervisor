@@ -249,6 +249,31 @@ impl TpmTis {
     }
 }
 
+impl crate::Resettable for TpmTis {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        self.backend.get_mut().unwrap().reset()?;
+        self.state = State {
+            version: 1,
+            active: None,
+            pending: 0,
+            seized: 0,
+            status: 0,
+            command: Vec::new(),
+            response: Vec::new(),
+            cursor: 0,
+            enable: [8; 5],
+            interrupts: [0; 5],
+            vector: [0; 5],
+            interface_locked: false,
+            hashing: false,
+            ppi: vec![0; 0x1000],
+        };
+        self.error = None;
+        self.update_irq();
+        Ok(())
+    }
+}
+
 impl BusDevice for TpmTis {
     fn read(&mut self, offset: u64, data: &mut [u8]) {
         data.fill(0);

@@ -249,6 +249,7 @@ fn initrd_with_init_script(dir: &Dir) -> PathBuf {
 /// One machine description with a single in-process share on `path`.
 fn machine(dir: &Dir, share: &Path, initrd: &Path, read_only: bool) -> MachineDescription {
     MachineDescription {
+        exit_on_reset: false,
         vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
