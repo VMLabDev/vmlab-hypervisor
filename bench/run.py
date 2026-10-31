@@ -300,64 +300,247 @@ def must_sh(agent, cmd, what, timeout=X86_EXEC_TIMEOUT, stdin_data=None):
     return out
 
 
-def windows_firstboot_marker(agent):
-    """vmlab's real gate: the sysprep-unattend specialize pass writes the
-    `vmlab-firstboot.done` marker under Windows' Temp directory when the
-    first boot genuinely finishes (the registry setup keys read 0 for a
-    while *before* sysprep starts, so they cannot gate the reboot).
-    Returns ('present'|'absent', probe output)."""
-    probe = (
-        "powershell.exe -NoProfile -NonInteractive -Command "
-        "\"if (Test-Path 'C:\\Windows\\Temp\\vmlab-firstboot.done') { "
-        "Write-Output present; exit 0 }; Write-Output absent; exit 1\""
+WINDOWS_MARKER = "C:\\\\Windows\\\\Temp\\\\vmlab-firstboot.done"
+
+# vmlab's user-OOBE gate (the template's first-boot script): the marker
+# fires before the oobeSystem pass, so setup must be idle, autologon gone,
+# and the last autologon line in setupact.log the clear, not msoobe's
+# enable — rebooting earlier wedges the clone.
+WINDOWS_OOBE_PS = (
+    "$s = Get-ItemProperty HKLM:\\SYSTEM\\Setup; "
+    "if ($s.SystemSetupInProgress -ne 0 -or $s.OOBEInProgress -ne 0) { 'setup'; exit }; "
+    "if ((Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon')"
+    ".SystemAutoLogon) { 'autologon'; exit }; "
+    "$l = Select-String -Path C:\\Windows\\Panther\\UnattendGC\\setupact.log "
+    "-Pattern 'fEnableAutologon = 1|Clearing Auto-logon values' -ErrorAction SilentlyContinue "
+    "| Select-Object -Last 1; "
+    "if ($l -and $l.Line -notmatch 'Clearing') { 'user-oobe'; exit }; 'done'"
+)
+
+
+def win_exec(agent, argv, timeout=90):
+    return agent.exec(argv, timeout, timeout)
+
+
+def win_ps(agent, script, timeout=90):
+    return win_exec(
+        agent,
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        timeout,
     )
-    try:
-        chan = agent.exec(["cmd.exe", "/C", probe], 60, 60)
-    except (TimeoutError, ConnectionError, lib.BenchError):
-        return "agent-gone", ""
-    out = chan["data"].decode(errors="replace")
-    return ("present" if "present" in out else "absent"), out.strip()[:60]
+
+
+def windows_boot_id(agent):
+    """vmlab's boot identity (labd/boot_id.rs): the PrefetchParameters
+    BootId counter, falling back to LastBootUpTime."""
+    probes = (
+        ["reg", "query",
+         "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\"
+         "Memory Management\\PrefetchParameters", "/v", "BootId"],
+        ["wmic", "os", "get", "LastBootUpTime", "/value"],
+    )
+    for argv in probes:
+        try:
+            chan = win_exec(agent, ["cmd.exe", "/C"] + argv, 60)
+        except (TimeoutError, ConnectionError, lib.BenchError):
+            return None
+        out = chan["data"].decode(errors="replace").strip()
+        if chan["code"] == 0 and out:
+            return out
+    return None
+
+
+class WindowsReady:
+    """State for the windows first-boot sequence (see windows_provision)."""
+
+    def __init__(self, backend, args, run_dir, t0):
+        self.backend = backend
+        self.args = args
+        self.run_dir = run_dir
+        self.t0 = t0
+        self.deadline = t0 + X86_BOOT_DEADLINE["windows-10"] * args.timeout_scale
+        self.resets = 0
+
+    def ensure_vm(self):
+        """vmlab-hv exits 0 on every guest reset; vmlab restarts it, and so
+        does the bench (up to X86_MAX_RESETS — sysprep's internal reboots
+        plus the provision reboot)."""
+        if not self.backend.session.exited():
+            return
+        code = self.backend.session.exit_code()
+        if code != 0:
+            raise lib.BenchError(
+                f"VM exited (code {code}) before agent ready: "
+                f"{self.backend.session.stderr_text()[-1500:]}"
+            )
+        self.resets += 1
+        if self.resets > X86_MAX_RESETS + 3:
+            raise lib.BenchError("too many guest resets during first boot")
+        log(f"guest reset {self.resets}: respawning vmlab-hv")
+        respawn_hv(self.backend, self.run_dir)
+
+    def connect(self):
+        """The answered agent, or None. An early persistent connection's
+        Hello is never answered, so every attempt is a fresh dial."""
+        self.ensure_vm()
+        cand = None
+        try:
+            cand = lib.AgentClient(self.backend.agent_socket())
+            hello = cand.handshake(3)
+            return cand, hello
+        except Exception:
+            if cand is not None:
+                cand.close()
+            return None, None
+
+    def wait_marker(self):
+        """Phase 1: the specialize marker, `cmd if exist` like vmlab's
+        script (powershell is not dependable this early)."""
+        while time.monotonic() < self.deadline:
+            agent, hello = self.connect()
+            if agent is not None:
+                try:
+                    chan = win_exec(
+                        agent,
+                        ["cmd.exe", "/C",
+                         f"if exist {WINDOWS_MARKER} (exit 0) else (exit 1)"],
+                        60,
+                    )
+                    if chan["code"] == 0:
+                        log("windows first boot finished; clearing marker")
+                        win_exec(agent, ["cmd.exe", "/C", f"del /f /q {WINDOWS_MARKER}"], 60)
+                        return agent, hello
+                except (TimeoutError, ConnectionError, lib.BenchError):
+                    pass
+                agent.close()
+            time.sleep(5)
+        raise TimeoutError("windows first-boot marker never appeared")
+
+    def wait_oobe(self, agent):
+        """Phase 2: user OOBE done (best-effort ~10 min, like the script:
+        a stuck OOBE costs time, never the boot)."""
+        end = min(time.monotonic() + 600, self.deadline)
+        while time.monotonic() < end:
+            try:
+                chan = win_ps(agent, WINDOWS_OOBE_PS)
+                state = chan["data"].decode(errors="replace").strip()
+                if chan["code"] == 0 and state == "done":
+                    log("windows OOBE finished")
+                    return
+            except (TimeoutError, ConnectionError, lib.BenchError):
+                agent.close()
+                agent, _ = self.connect()
+                if agent is None:
+                    time.sleep(5)
+                    continue
+            time.sleep(5)
+        log("windows OOBE still running after ~10 minutes; continuing")
+
+    def settle_appx(self, agent):
+        """Phase 3: consume the staged-AppX reconciliation (best-effort,
+        like the script; the removal attempt itself settles it)."""
+        ps = (
+            "$prov = (Get-AppxProvisionedPackage -Online).DisplayName; "
+            "Get-AppxPackage -AllUsers | Where-Object { -not $_.IsFramework "
+            "-and -not $_.IsResourcePackage -and $prov -notcontains $_.Name "
+            "-and -not ($_.PackageUserInformation | Where-Object InstallState "
+            "-eq 'Installed') } | ForEach-Object { $r = 'removed'; "
+            "try { Remove-AppxPackage -Package $_.PackageFullName -AllUsers "
+            "-ErrorAction Stop } catch { $r = 'settled' }; "
+            "Write-Output ($r + ' ' + $_.PackageFullName) }"
+        )
+        try:
+            win_ps(agent, ps, 600)
+        except (TimeoutError, ConnectionError, lib.BenchError) as e:
+            log(f"windows appx settle skipped ({e})")
+
+    def request_reboot(self, agent, round_index):
+        line = "shutdown /r /t 0 /f"
+        if round_index == 1:
+            line = "shutdown /a & shutdown /r /t 0 /f /d p:4:1"
+        argv = (["cmd.exe", "/C", line] if round_index < 2 else
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                 "Restart-Computer -Force"])
+        try:
+            chan = win_exec(agent, argv, 60)
+            log(f"windows reboot request {round_index + 1}: exit {chan['code']} "
+                f"{(chan['data'] + chan['stderr']).decode(errors='replace')[:80]!r}")
+        except (TimeoutError, ConnectionError, lib.BenchError) as e:
+            log(f"windows reboot request {round_index + 1} got no reply "
+                f"(reboot likely underway): {e}")
+
+    def reboot_and_return(self, agent):
+        """Phase 4: one in-guest reboot, watched by boot id, escalating and
+        finally host-restarting exactly like the script's reboot_guest."""
+        before = windows_boot_id(agent)
+        agent.close()
+        for round_index in range(3):
+            agent, _ = self.connect()
+            if agent is None:
+                time.sleep(5)
+                continue
+            self.request_reboot(agent, round_index)
+            end = time.monotonic() + 60
+            while time.monotonic() < end:
+                agent, _ = self.connect()
+                if agent is not None:
+                    now_id = windows_boot_id(agent)
+                    if before is None or (now_id is not None and now_id != before):
+                        return self.wait_post_reboot_agent(agent)
+                    agent.close()
+                time.sleep(5)
+            log(f"windows still on the same boot ~60 s after request "
+                f"{round_index + 1}")
+        log("windows in-guest reboot never took; forcing a host restart")
+        if self.args.backend == "qemu":
+            self.backend.session.kill()
+            session = self.backend.launch()
+            self.backend.release_cpus()
+        else:
+            self.backend.session.kill()
+            respawn_hv(self.backend, self.run_dir)
+        agent, hello = self.wait_agent(self.deadline)
+        return agent, hello
+
+    def wait_agent(self, deadline):
+        while time.monotonic() < deadline:
+            agent, hello = self.connect()
+            if agent is not None:
+                return agent, hello
+            time.sleep(2)
+        raise TimeoutError("windows agent never answered after the reboot")
+
+    def wait_post_reboot_agent(self, agent):
+        """The reboot is observed; the machine can spend minutes on the way
+        up, so wait out the agent blip before declaring ready."""
+        agent.close()
+        return self.wait_agent(min(time.monotonic() + 900, self.deadline))
+
+    def run(self):
+        agent, hello = self.wait_marker()
+        self.wait_oobe(agent)
+        self.settle_appx(agent)
+        agent, hello = self.reboot_and_return(agent)
+        return agent, hello, round(time.monotonic() - self.t0, 2)
 
 
 def wait_x86_ready(backend, args, guest, run_dir, t0):
     """Boot to agent ready, vmlab's readiness semantics.
 
-    Linux: the agent answers its Hello and runs an exec. Windows: the agent
-    answers during sysprep specialize long before the machine is usable, so
-    readiness waits for the first-boot marker vmlab's provision script gates
-    on, deletes it, requests the reboot, and waits for the agent to answer
-    again after it (vmlab's own first-boot sequence). vmlab-hv exits 0 on
-    the guest reset (triple fault = clean exit) and is respawned; QEMU
-    reboots in-process. The clock starts at the first spawn and never
-    resets.
+    Linux: the agent answers its Hello and runs an exec. Windows: the
+    template's whole first-boot sequence — the specialize marker, the user
+    OOBE gate, the AppX settle, and one in-guest reboot watched by boot id —
+    because the agent answers long before the machine is usable and the
+    reboot must not land mid-Oobe. vmlab-hv exits 0 on a guest reset and is
+    respawned; QEMU reboots in-process. The clock starts at the first spawn
+    and never resets.
     """
-    windows = guest == "windows-10"
+    if guest == "windows-10":
+        return WindowsReady(backend, args, run_dir, t0).run()
     deadline = t0 + X86_BOOT_DEADLINE[guest] * args.timeout_scale
-    resets = 0
-    reboot_requested = False
-    reboot_done = False
-    saw_agent_down = False
-    setup_status = ""
     while time.monotonic() < deadline:
-        if windows and int(time.monotonic() - t0) % 60 == 0:
-            serial_bytes = 0
-            try:
-                serial_bytes = os.path.getsize(
-                    os.path.join(run_dir, "serial.log"))
-            except OSError:
-                pass
-            log(f"waiting for {guest}: {time.monotonic() - t0:.0f}s, "
-                f"serial {serial_bytes} B, firstboot {setup_status[:60]!r}")
         if backend.session.exited():
             code = backend.session.exit_code()
-            if (windows and code == 0 and args.backend == "vmlab-hv"
-                    and resets < X86_MAX_RESETS):
-                resets += 1
-                log(f"guest reset {resets}: respawning vmlab-hv")
-                respawn_hv(backend, run_dir)
-                if reboot_requested:
-                    reboot_done = True
-                continue
             raise lib.BenchError(
                 f"VM exited (code {code}) before agent ready: "
                 f"{backend.session.stderr_text()[-1500:]}"
@@ -372,39 +555,13 @@ def wait_x86_ready(backend, args, guest, run_dir, t0):
             if cand is not None:
                 cand.close()
         if agent is None:
-            if reboot_requested:
-                saw_agent_down = True
             time.sleep(1)
             continue
-        if not windows:
-            out = must_sh(agent, "printf hv-agent-ready", "ready echo")
-            if "hv-agent-ready" not in out:
-                raise lib.BenchError(f"guest agent echo failed: {out!r}")
-            return agent, hello, round(time.monotonic() - t0, 2)
-        if reboot_requested and (reboot_done or saw_agent_down):
-            # hv: the respawn after the reset exit proved the reboot.
-            # QEMU: the agent has to disappear once (the guest going down)
-            # before the next answered Hello counts as the post-reboot
-            # agent — otherwise the pre-reboot agent still answers with
-            # the deleted marker and reads as a false ready.
-            return agent, hello, round(time.monotonic() - t0, 2)
-        marker, setup_status = windows_firstboot_marker(agent)
-        if marker == "present" and not reboot_requested:
-            log("windows first boot finished; requesting the provision reboot")
-            agent.exec(["cmd.exe", "/C",
-                        "del /f C:\\Windows\\Temp\\vmlab-firstboot.done"], 30, 30)
-            chan = agent.exec(["cmd.exe", "/C", "shutdown.exe /r /t 5 /f"], 60, 60)
-            if chan["code"] != 0:
-                raise lib.BenchError(
-                    f"windows first-boot reboot failed: {chan['stderr'][-300:]!r}"
-                )
-            reboot_requested = True
-            agent.close()
-            time.sleep(6)  # /t 5 plus the shutdown grace
-            continue
-        agent.close()
-        time.sleep(2)
-    raise TimeoutError(f"{guest} never reached agent ready (firstboot: {setup_status})")
+        out = must_sh(agent, "printf hv-agent-ready", "ready echo")
+        if "hv-agent-ready" not in out:
+            raise lib.BenchError(f"guest agent echo failed: {out!r}")
+        return agent, hello, round(time.monotonic() - t0, 2)
+    raise TimeoutError(f"{guest} never reached agent ready")
 
 
 def guest_nic(agent):
