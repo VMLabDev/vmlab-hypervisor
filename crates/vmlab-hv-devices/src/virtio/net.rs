@@ -9,6 +9,7 @@
 //! One receiveq and one transmitq, no control queue: the offered features are
 //! `VIRTIO_NET_F_MAC`, `VIRTIO_NET_F_STATUS` and `VIRTIO_NET_F_MTU` (only when
 //! an MTU other than 1500 is configured, matching what vmlab passes to QEMU).
+//! Indirect descriptor tables let one ring entry describe a scatter/gather packet.
 //! The `virtio_net_hdr` (12 bytes for a modern device) is stripped on transmit
 //! and prepended with `num_buffers` = 1 on receive.
 //!
@@ -48,6 +49,8 @@ const F_MAC: u64 = 1 << 5;
 const F_MRG_RXBUF: u64 = 1 << 15;
 /// `VIRTIO_NET_F_STATUS` (feature bit 16).
 const F_STATUS: u64 = 1 << 16;
+/// `VIRTIO_F_RING_INDIRECT_DESC` (feature bit 28).
+const F_INDIRECT_DESC: u64 = 1 << 28;
 /// `VIRTIO_F_VERSION_1` (feature bit 32): this is a modern virtio device.
 const F_VERSION_1: u64 = 1 << 32;
 /// `VIRTIO_NET_S_LINK_UP` (status bit 0).
@@ -640,7 +643,7 @@ impl VirtioDevice for Net {
     }
 
     fn features(&self) -> u64 {
-        let mut features = F_MAC | F_STATUS | F_VERSION_1;
+        let mut features = F_MAC | F_STATUS | F_INDIRECT_DESC | F_VERSION_1;
         if self.config.mtu != DEFAULT_MTU {
             features |= F_MTU;
         }
@@ -1280,6 +1283,7 @@ mod tests {
         assert_ne!(features & F_MTU, 0);
         assert_ne!(features & F_MAC, 0);
         assert_ne!(features & F_STATUS, 0);
+        assert_ne!(features & F_INDIRECT_DESC, 0);
         assert_ne!(features & F_VERSION_1, 0);
         assert_eq!(big.config_len(), 12);
         let mut config = [0u8; 12];
@@ -1393,6 +1397,51 @@ mod tests {
         wait_for("tx buffer returned", || f.vqs[1].used_idx(&f.mem) == 1);
         let (_, len) = f.vqs[1].used_entry(&f.mem, 0);
         assert_eq!(len as usize, 12 + frame.len());
+    }
+
+    #[test]
+    fn indirect_transmit_chain_reaches_the_switch() {
+        let mut f = Fixture::new();
+        let mut switch = f.take_switch_side();
+        switch
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let frame = b"indirect transmit frame";
+        let header = f.data(0);
+        let payload = f.data(1);
+        f.mem.write_slice(frame, GuestAddress(payload)).unwrap();
+        let table = 0x8_0000;
+        let mut descriptors = [0u8; 32];
+        descriptors[..8].copy_from_slice(&header.to_le_bytes());
+        descriptors[8..12].copy_from_slice(&12u32.to_le_bytes());
+        descriptors[12..14].copy_from_slice(&VRING_DESC_F_NEXT.to_le_bytes());
+        descriptors[14..16].copy_from_slice(&1u16.to_le_bytes());
+        descriptors[16..24].copy_from_slice(&payload.to_le_bytes());
+        descriptors[24..28].copy_from_slice(&(frame.len() as u32).to_le_bytes());
+        f.mem
+            .write_slice(&descriptors, GuestAddress(table))
+            .unwrap();
+        let head = f.vqs[1].add_chain(&f.mem, &[(table, 32, false)]);
+        f.mem
+            .write_obj(
+                4u16,
+                GuestAddress(f.vqs[1].desc + u64::from(head) * 16 + 12),
+            )
+            .unwrap();
+        f.dev.queue_notify(TXQ);
+        let mut prefix = [0u8; 4];
+        switch.read_exact(&mut prefix).unwrap();
+        assert_eq!(u32::from_be_bytes(prefix), frame.len() as u32);
+        let mut received = vec![0; frame.len()];
+        switch.read_exact(&mut received).unwrap();
+        assert_eq!(received, frame);
+        wait_for("indirect transmit completion", || {
+            f.vqs[1].used_idx(&f.mem) == 1
+        });
+        assert_eq!(
+            f.vqs[1].used_entry(&f.mem, 0),
+            (u32::from(head), 12 + frame.len() as u32)
+        );
     }
 
     #[test]
