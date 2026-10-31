@@ -39,6 +39,11 @@ fn phase_boundaries_refuse_undelivered_devices_and_invalid_machine_combinations(
     let bios = tempfile::NamedTempFile::new().unwrap();
     let base = machine(bios.path());
     for (field, value, error) in [
+        (
+            "serial_log_port",
+            serde_json::json!("com2"),
+            "requires a COM1 agent",
+        ),
         ("floppy", serde_json::json!("/floppy.img"), "phase 4c"),
         (
             "tablet",

@@ -364,6 +364,9 @@ fn validate_legacy_features(desc: &MachineDescription) -> Result<(), VmmError> {
             }
         }
     }
+    if pc && !coms.contains(&0x3f8) {
+        return invalid("a COM2 serial log requires a COM1 agent socket on pc");
+    }
     if !pc && !desc.serial_log_port.is_com1() {
         return invalid("selectable serial log ports require machine=pc");
     }
