@@ -40,7 +40,7 @@ def project_vms():
 
 @contextlib.contextmanager
 def permit(timeout):
-    directory = Path(tempfile.gettempdir()) / f"vmlab-hv-vm-slots-{os.geteuid()}"
+    directory = Path("/tmp") / f"vmlab-hv-vm-slots-{os.geteuid()}"
     directory.mkdir(exist_ok=True)
     deadline = time.monotonic() + timeout
     held = None
