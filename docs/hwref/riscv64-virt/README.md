@@ -152,8 +152,31 @@ test expects Sail to take the interrupt first.
 Runtime revision `a916903` records three-repeat medians of 0.019441 seconds
 for the scalar loop and 6.117216 seconds for CoreMark (49.738 MIPS).
 `just bench-check` passes with the earlier failed comparisons retained.
-The cold Linux acceptance run uses this runtime; confirmation beyond the
-timer-initialization point is still pending.
+The subsequent cold Linux run executed about 425 million instructions in
+45 minutes, reaching neither edk2's banner nor the agent. At the owner's
+request it was stopped as throughput-defect evidence, not accepted as a
+boot result. The CI driver was also terminated to prevent another VM launch
+during the shared benchmark window. Its failed log is retained; CI must run
+again after the runtime changes.
+
+The saved profile showed allocation and aggregate cloning during trace
+recording. The named executor used by the recorder cloned a whole struct
+before selecting a field, and both executors cloned a whole vector before
+selecting an element. A no-VM allocation regression reproduced this:
+ten named field selections grew from 16,110 to 1,654,110 allocated bytes
+when an unread vector grew from one to 4,096 entries. Vector selection grew
+from 10,410 to 1,648,410 bytes.
+
+Revision `5dfc0ed` borrows field and union projections and vector-selection
+inputs, cloning only the selected result. The same ten-call regressions now
+allocate 8,410 bytes in the named executor and 1,200 bytes in the indexed
+executor, independently of unread aggregate size. Bounds, type errors,
+bit selection, nested projections, and ownership tests pass. Repeated
+code/data TLB conflicts stay native, and machine/supervisor timer entry and
+return still match every Sail global. Formatting and TCG clippy pass.
+These checks establish the reproduced allocation fix; full lockstep,
+performance measurements, and live throughput confirmation for this
+revision are pending the end of the shared benchmark window.
 
 The benchmark runner's TCG path referenced an undefined `BOOT_DEADLINE`,
 removed by an earlier x86 readiness change. The original 1,800-second
