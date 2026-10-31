@@ -576,6 +576,8 @@ fn boot_template(
     }
     if snapshot {
         let mut guest = guest;
+        client.call(Control::Status).unwrap();
+        client.take_events();
         guest
             .exec(
                 &[
@@ -669,7 +671,11 @@ fn boot_template(
                         format!("{name} exec after snapshot load {cycle}: {error}"),
                     )
                 });
-            if restored.exit_code != 0
+            client.call(Control::Status).unwrap();
+            let events = client.take_events();
+            let unexpected_reset = events.contains(&vmlab_hv_proto::control::Event::Reset);
+            if unexpected_reset
+                || restored.exit_code != 0
                 || String::from_utf8_lossy(&restored.stdout).trim() != "before"
             {
                 if windows {
@@ -677,12 +683,24 @@ fn boot_template(
                         "Get-CimInstance Win32_OperatingSystem | Select-Object LastBootUpTime,LocalDateTime | Format-List; \
                          Get-WinEvent -FilterHashtable @{LogName='System';Id=41,1001,1074,6008} -MaxEvents 6 -ErrorAction Continue | Format-List TimeCreated,Id,Message; \
                          [Convert]::ToBase64String([IO.File]::ReadAllBytes('C:\\Windows\\Temp\\vmlab-hv-snapshot'))"], Duration::from_secs(30));
-                    eprintln!("{name} guest report after snapshot load {cycle}: {report:?}");
+                    match report {
+                        Ok(report) => eprintln!(
+                            "{name} guest report after snapshot load {cycle}: exit={}\n{}\n{}",
+                            report.exit_code,
+                            String::from_utf8_lossy(&report.stdout),
+                            String::from_utf8_lossy(&report.stderr)
+                        ),
+                        Err(error) => {
+                            eprintln!("{name} guest report after snapshot load {cycle}: {error}")
+                        }
+                    }
                 }
                 fail(
                     &mut client,
                     &mut process,
-                    format!("{name} snapshot load {cycle} returned {restored:?}"),
+                    format!(
+                        "{name} snapshot load {cycle} returned {restored:?}; control events {events:?}"
+                    ),
                 );
             }
             eprintln!(
