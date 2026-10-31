@@ -1240,6 +1240,30 @@ impl Snapshot for VirtioPciDevice {
     }
 }
 
+impl crate::Resettable for VirtioPciDevice {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        self.virtio_reset();
+        self.command = 0;
+        self.bar4 = 0;
+        self.interrupt_line = 0;
+        if let Some(legacy) = &mut self.transitional {
+            legacy.bar0 = 0;
+            legacy.bar1 = 0;
+            legacy.rom = 0;
+            legacy.pci_cfg.fill(0);
+        }
+        let mut int = self.int.lock();
+        int.msix_enabled = false;
+        int.function_masked = false;
+        int.entries.fill(MsixEntry {
+            masked: self.transitional.is_some(),
+            ..MsixEntry::default()
+        });
+        int.pba = 0;
+        Ok(())
+    }
+}
+
 impl PciSnapshot for VirtioPciDevice {
     fn snapshot_id(&self) -> String {
         Snapshot::state_id(self)

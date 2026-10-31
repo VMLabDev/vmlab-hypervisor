@@ -7,6 +7,7 @@
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::{BusDevice, DeviceError, Snapshot};
 
@@ -40,6 +41,8 @@ pub struct Pflash {
     mode: Mode,
     status: u8,
     erase_block: usize,
+    dirty: bool,
+    last_sync: Instant,
 }
 
 impl Pflash {
@@ -62,12 +65,15 @@ impl Pflash {
             mode: Mode::Array,
             status: READY,
             erase_block: 0,
+            dirty: false,
+            last_sync: Instant::now(),
         })
     }
 
     /// Intel commands use the low byte of a byte/word/dword bus transaction.
-    /// Persistence completes before ready status is returned. On an I/O failure
-    /// the error is returned to the VMM and latched in the flash status.
+    /// File writes complete before ready status is returned. Durability is
+    /// batched by `flush_if_due`; reset, snapshot and shutdown call `flush`.
+    /// Host I/O failures are returned to the VMM and latched in flash status.
     pub fn write_access(
         &mut self,
         offset: u64,
@@ -137,15 +143,33 @@ impl Pflash {
     fn persist(&mut self, start: usize, data: Vec<u8>, error: u8) -> Result<(), DeviceError> {
         // Callers must stop on a host persistence error. A failed write or
         // sync may leave partially changed file contents without durability.
-        if let Err(e) = self
-            .vars
-            .write_all_at(&data, start as u64)
-            .and_then(|()| self.vars.sync_data())
-        {
+        if let Err(e) = self.vars.write_all_at(&data, start as u64) {
             self.status |= error;
             return Err(e.into());
         }
         self.bytes[start..start + data.len()].copy_from_slice(&data);
+        self.dirty = true;
+        self.flush_if_due()?;
+        Ok(())
+    }
+
+    /// Bound the durability window without an fdatasync for each NOR word.
+    pub fn flush_if_due(&mut self) -> Result<(), DeviceError> {
+        if self.dirty && self.last_sync.elapsed() >= Duration::from_millis(16) {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<(), DeviceError> {
+        if self.dirty {
+            if let Err(error) = self.vars.sync_data() {
+                self.status |= PROGRAM_ERROR;
+                return Err(error.into());
+            }
+            self.dirty = false;
+            self.last_sync = Instant::now();
+        }
         Ok(())
     }
 
@@ -195,11 +219,24 @@ impl BusDevice for Pflash {
     }
 }
 
+impl crate::Resettable for Pflash {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        self.flush()?;
+        self.mode = Mode::Array;
+        self.status = READY;
+        self.erase_block = 0;
+        Ok(())
+    }
+}
+
 impl Snapshot for Pflash {
     fn state_id(&self) -> String {
         "ovmf-pflash".into()
     }
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
+        if self.dirty {
+            self.vars.sync_data()?;
+        }
         let mut state = b"PFL1".to_vec();
         state.extend([self.secure as u8, self.mode as u8, self.status, 0]);
         state.extend((self.erase_block as u64).to_le_bytes());

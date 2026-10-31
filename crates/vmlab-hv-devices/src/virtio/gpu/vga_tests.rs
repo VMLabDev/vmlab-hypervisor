@@ -166,6 +166,25 @@ fn code(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes[..4].try_into().unwrap())
 }
 
+#[test]
+fn system_reset_returns_native_gpu_to_firmware_vga() {
+    let mut d = Driver::new();
+    d.start();
+    d.create(1, 8, 8, 1);
+    d.backing(1, &[0x42; 256]);
+    d.transfer(1, 8, 8);
+    d.ok(0x103, &[0, 0, 8, 8, 0, 1]);
+    assert_eq!(d.dev.frame().mode.width, 8);
+    let generation = d.dev.scanout_generation();
+    crate::Resettable::reset(&mut d.dev).unwrap();
+    assert_eq!(d.dev.frame().mode.width, 720);
+    assert_ne!(d.dev.scanout_generation(), generation);
+    assert_eq!(d.dev.config_read(1) & 0xffff, 0);
+    let mut status = [0xff];
+    d.dev.bar_read(2, 0x1014, &mut status);
+    assert_eq!(status, [0]);
+}
+
 struct ProbeMapper;
 impl crate::virtio::gpu::BlobMapper for ProbeMapper {
     fn set_base(&self, _: Option<u64>) -> Result<(), DeviceError> {

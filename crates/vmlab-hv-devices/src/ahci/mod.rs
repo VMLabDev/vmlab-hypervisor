@@ -1030,6 +1030,29 @@ impl Snapshot for Ahci {
     }
 }
 
+impl crate::Resettable for Ahci {
+    fn reset(&mut self) -> Result<(), DeviceError> {
+        let power_on = Self::new(
+            self.id.clone(),
+            self.memory.clone(),
+            self.irq.clone(),
+            self.msi.clone(),
+        );
+        self.config = power_on.config;
+        for drive in self.drives.iter_mut().flatten() {
+            match drive {
+                Drive::Disk(disk) => {
+                    disk.write_cache = true;
+                    disk.transfer_mode = 0x22;
+                }
+                Drive::Cdrom(optical) => optical.transfer_mode = 0x22,
+            }
+        }
+        self.reset();
+        Ok(())
+    }
+}
+
 impl PciSnapshot for Ahci {
     fn snapshot_id(&self) -> String {
         self.state_id()

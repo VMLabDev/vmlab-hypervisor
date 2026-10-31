@@ -595,17 +595,15 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, clients: &mut [Option<UnixStream>], p
 /// when the socket would block.
 fn flush_tx(shared: &Arc<Mutex<Shared>>, i: usize, client: &mut UnixStream) {
     loop {
-        let chunk = {
-            let sh = lock(shared);
-            if sh.ports[i].tx_stage.is_empty() {
-                return;
-            }
-            let take = sh.ports[i].tx_stage.len().min(READ_CHUNK);
-            sh.ports[i].tx_stage[..take].to_vec()
-        };
-        match client.write(&chunk) {
+        let mut sh = lock(shared);
+        if sh.ports[i].tx_stage.is_empty() {
+            return;
+        }
+        let take = sh.ports[i].tx_stage.len().min(READ_CHUNK);
+        // The socket is nonblocking. Keep reset from clearing the stage
+        // between this write and draining the bytes it accepted.
+        match client.write(&sh.ports[i].tx_stage[..take]) {
             Ok(n) => {
-                let mut sh = lock(shared);
                 sh.ports[i].tx_stage.drain(..n);
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => return,
@@ -831,6 +829,7 @@ impl VirtioDevice for Console {
     }
 
     fn reset(&mut self) {
+        self.pending_queues = None;
         let mut sh = lock(&self.shared);
         sh.queues = (0..self.queue_count()).map(|_| None).collect();
         sh.mem = None;
