@@ -65,8 +65,8 @@ regression test reproduces the fault with the defaults and executes the
 pflash instruction with the virt PMAs, including after CPU-state restore.
 The paused S1 snapshot save/load/delete round trip passes.
 
-Runtime revision `b7747be8` passes the complete Sail-oracle corpus: 133
-programs, including the two FP regressions, with no divergences.
+Runtime revisions `b7747be8` and `a916903` each pass the complete Sail-oracle
+corpus: 133 programs, including the two FP regressions, with no divergences.
 `just tcg-generate-check` reproduces both
 committed generated artifacts byte-for-byte. The three-repeat warm run for
 `b7747be8` passes `just bench-check`; its CoreMark median is 46.861 MIPS
@@ -154,6 +154,13 @@ for the scalar loop and 6.117216 seconds for CoreMark (49.738 MIPS).
 `just bench-check` passes with the earlier failed comparisons retained.
 The cold Linux acceptance run uses this runtime; confirmation beyond the
 timer-initialization point is still pending.
+
+The benchmark runner's TCG path referenced an undefined `BOOT_DEADLINE`,
+removed by an earlier x86 readiness change. The original 1,800-second
+deadline is restored, retaining `--timeout-scale`. A no-VM regression first
+reproduces the `NameError`, then exercises CPU release, agent waiting,
+boot-only samples, result persistence, and cleanup. All 63 benchmark unit
+tests pass; existing socket and file cleanup warnings remain.
 
 edk2 boot, Linux hardware capture, booted-guest snapshot restoration, and
 boot-to-agent-ready timing are pending. This reference does not establish
