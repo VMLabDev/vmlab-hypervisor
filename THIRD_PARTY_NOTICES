@@ -3,6 +3,223 @@ Third-party code included in this repository
 Each entry names the file or directory, its origin, and its licence. The licence
 text of each origin follows its entry.
 
+crates/vmlab-hv-tcg-riscv64/src/lib.rs and src/model.json.gz
+  Derived from riscv/sail-riscv fc074f99f578954376214c4ca9490152d35d0ec2
+  and Sail 0.20.3, emitted through rems-project/isla
+  e9b5d945394277656593a0d429466d7fa0a2b4b3. BSD-2-Clause.
+
+crates/vmlab-hv-tcg/vendor/softfloat/
+  Berkeley SoftFloat 3e, ucb-bar/berkeley-softfloat-3
+  0a5ad290c6b287f6605bb99a35ad0842c1e61aa5. BSD-3-Clause.
+  Source files retain their original headers. No QEMU source is included.
+
+Sail RISC-V model licence:
+
+RISCV Sail Model
+
+This Sail RISC-V architecture model, comprising all files and
+directories except for the third party dependencies in the
+'dependencies' directory (which include copies of their licences), is
+subject to the BSD two-clause licence below.
+
+Copyright (c) 2017-2025
+   ahadali5000
+   Alasdair Armstrong
+   Alexander Richardson
+   Aril Computer Corp., for contributions by Scott Johnson
+   Ben Marshall
+   Bicheng Yang
+   Bilal Sakhawat
+   Brian Campbell
+   Chris Casinghino
+   Christopher Pulte
+   Codasip, for contributions by Tim Hutt, Martin Berger and Ben Fletcher
+   dylux
+   eroom1966
+   Google LLC, for contributions by its employees
+   Hesham Almatary
+   Jan Henrik Weinstock
+   Jessica Clarke
+   Jon French
+   Jordan Carlin
+   Martin Berger
+   Michael Sammler
+   Microsoft, for contributions by Robert Norton-Wright and Nathaniel Wesley Filardo
+   Muhammad Bilal Sakhawat
+   Nathaniel Wesley Filardo
+   Paul A. Clarke
+   Peter Rugg
+   Peter Sewell
+   Philipp Tomsich
+   Prashanth Mundkur
+   Rafael Sene
+   Rishiyur S. Nikhil (Bluespec, Inc.)
+   Robert Norton-Wright
+   Scott Johnson (Aril Inc.)
+   Shaked Flur
+   Thibaut Pérami
+   Thomas Bauereiss
+   VRULL GmbH, for contributions by its employees
+   William McSpaddden
+   Xinlai Wan
+
+For a complete list of authors run this command:
+
+    git shortlog --summary --numbered --email
+
+All rights reserved.
+
+This software was developed by the above within the Rigorous
+Engineering of Mainstream Systems (REMS) project, partly funded by
+EPSRC grant EP/K008528/1, at the Universities of Cambridge and
+Edinburgh.
+
+This software was developed by SRI International and the University of
+Cambridge Computer Laboratory (Department of Computer Science and
+Technology) under DARPA/AFRL contract FA8650-18-C-7809 ("CIFV"), and
+under DARPA contract HR0011-18-C-0016 ("ECATS") as part of the DARPA
+SSITH research programme.
+
+This project has received funding from the European Research Council
+(ERC) under the European Union’s Horizon 2020 research and innovation
+programme (grant agreement 789108, ELVER).
+
+------------------------------------------------------------------
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in
+   the documentation and/or other materials provided with the
+   distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS''
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
+USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+
+Sail compiler and library licence:
+
+Sail and the Sail architecture models here, comprising all files and
+directories except the ASL-derived Sail code in the aarch64 directory,
+the logo in the etc/logo/ directory (by Jean Pichon, under CC0), and
+various exceptions detailed in THIRD_PARTY_FILES.md are subject to the
+BSD two-clause licence below.
+
+The ASL derived parts of the ARMv8.3 specification in
+aarch64/no_vector and aarch64/full are copyright ARM Ltd.
+
+This work was partially supported by EPSRC grant EP/K008528/1
+REMS: Rigorous Engineering for Mainstream Systems, an ARM iCASE award,
+EPSRC IAA KTF funding, and donations from Arm. This project has
+received funding from the European Research Council (ERC) under the
+European Union’s Horizon 2020 research and innovation programme (grant
+agreement No 789108, ELVER).
+
+This software was developed by SRI International and the University of
+Cambridge Computer Laboratory (Department of Computer Science and
+Technology) under DARPA/AFRL contracts FA8650-18-C-7809 ("CIFV")
+and FA8750-10-C-0237 ("CTSRD").
+
+-----
+
+Sail
+
+Copyright (c) 2013-2025
+  Kathyrn Gray
+  Shaked Flur
+  Stephen Kell
+  Gabriel Kerneis
+  Robert Norton-Wright
+  Christopher Pulte
+  Peter Sewell
+  Alasdair Armstrong
+  Brian Campbell
+  Thomas Bauereiss
+  Anthony Fox
+  Jon French
+  Dominic Mulligan
+  Stephen Kell
+  Mark Wassell
+  Alastair Reid (Arm Ltd)
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in
+   the documentation and/or other materials provided with the
+   distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS''
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
+USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+
+Berkeley SoftFloat licence:
+
+
+License for Berkeley SoftFloat Release 3e
+
+John R. Hauser
+2018 January 20
+
+The following applies to the whole of SoftFloat Release 3e as well as to
+each source file individually.
+
+Copyright 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018 The Regents of the
+University of California.  All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+ 1. Redistributions of source code must retain the above copyright notice,
+    this list of conditions, and the following disclaimer.
+
+ 2. Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions, and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+
+ 3. Neither the name of the University nor the names of its contributors
+    may be used to endorse or promote products derived from this software
+    without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS "AS IS", AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, ARE
+DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Crosvm renderer adaptation:
+
 crates/vmlab-hv-devices/src/virtio/gpu/renderer.rs adapts command dispatch,
 resource operations and fence-ring tracking from crosvm's
 devices/src/virtio/gpu/mod.rs and virtio_gpu.rs at revision
@@ -23,6 +240,48 @@ USBDEVFS_CONNECT on detach and claim failure so host drivers rebind, the
 UsbFs seam and its fake — are original.
 
 rutabaga_gfx 0.1.80 and magma-gpu 0.1.80 are dependencies, not copied code.
+
+- `crates/vmlab-hv-devices/src/virtio/fs/fuse/` — the FUSE server stack
+  (Linux FUSE ABI, FileSystem trait, request dispatcher, virtqueue
+  Reader/Writer) lifted from fuse-backend-rs 0.14.0
+  (https://crates.io/crates/fuse-backend-rs), the published successor of
+  crosvm's BSD `fuse` crate, adapted to this workspace's vm-memory and
+  virtio-queue versions and cut down to the virtqueue transport. Licence:
+  BSD-3-Clause (at the user's option also Apache-2.0); the upstream headers
+  and copyright lines are retained in each file. See the crate's
+  LICENSE-BSD-3-Clause for the terms.
+
+---
+
+fuse-backend-rs 0.14.0 — LICENSE-BSD-3-Clause
+
+// Copyright 2017 The Chromium OS Authors. All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+//    * Redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer.
+//    * Redistributions in binary form must reproduce the above
+// copyright notice, this list of conditions and the following disclaimer
+// in the documentation and/or other materials provided with the
+// distribution.
+//    * Neither the name of Google Inc. nor the names of its
+// contributors may be used to endorse or promote products derived from
+// this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 toolchain/sail/ — the Sail toolchain container and its artefacts. No upstream
 source is committed, but the container fetches and the build products derive
