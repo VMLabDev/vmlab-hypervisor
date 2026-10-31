@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`vmlab-hv` is a clean-room, MIT-licensed Rust hypervisor that vmlab
+`vmlab-hv` is an MIT-licensed Rust hypervisor that vmlab
 (`/home/wil/dev/vmlab`) will run one process per machine, in place of QEMU.
 
 ## Before you change anything
@@ -23,16 +23,17 @@ and say so in your report.
 Shared traits and types are the interface between parallel work. If one needs
 to change, make the smallest change that works, and name it in your report.
 
-## Clean room
+## Sources and licence
 
-Implement from specifications: the VIRTIO 1.2 spec, Intel and AMD manuals, the
-ACPI spec, the qcow2 spec (`docs/interop/qcow2.txt` in QEMU's tree is a spec
-document and may be read), the Linux boot protocol, and the rust-vmm crate
-docs. Use QEMU only as a black box: run it, or run `qemu-img`, to observe
-behaviour.
+Implement from specifications first: the VIRTIO 1.2 spec, Intel and AMD
+manuals, the ACPI spec, the qcow2 spec, the Linux boot protocol, and the
+rust-vmm crate docs. Running QEMU or `qemu-img` to observe behaviour is the
+usual way to pin what QEMU presents.
 
-Guardrail: never read QEMU's C source, and never copy or translate it. The
-project's licence depends on it.
+Reading QEMU's C source as a reference is allowed, for example to settle how a
+device behaves. Writing the Rust is still your own work: never copy QEMU code
+or translate it line by line. QEMU is GPLv2 and this project is MIT, so copied
+or mechanically translated code would change the project's licence.
 
 Code lifted from crosvm keeps its BSD-3 header and gets a line in
 `THIRD_PARTY_NOTICES`. Apache-2.0 crates are used as dependencies only.

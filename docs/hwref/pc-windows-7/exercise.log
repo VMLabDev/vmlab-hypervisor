@@ -1,0 +1,151 @@
+["exec", "win7", "--", "cmd.exe", "/c", "ver"]
+win7: no vmlab-agent answered on the agent channel — the guest's vmlab-agent (agent=57fa802) has not answered yet — the guest is likely still booting; retry once `vmlab status` shows it ready
+
+exit=1
+["vm", "screenshot", "win7", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/current.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/current.png
+
+exit=0
+["exec", "win7", "--", "D:\\HWREF.EXE"]
+win7: the guest's vmlab-agent (agent=57fa802) has not answered yet — the guest is likely still booting; retry once `vmlab status` shows it ready
+
+exit=1
+["vm", "screenshot", "win7", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/now.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/now.png
+
+exit=0
+["exec", "win7", "--", "cmd.exe", "/c", "ver"]
+win7: no vmlab-agent answered on the agent channel — the guest's vmlab-agent answered earlier but does not now — the guest may be rebooting or shutting down; retry once it is back
+
+exit=1
+["vm", "screenshot", "win7", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/now2.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/now2.png
+
+exit=0
+["vm", "screenshot", "win7", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/late.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/late.png
+
+exit=0
+["exec", "win7", "--", "cmd.exe", "/c", "ver"]
+
+Microsoft Windows [Version 6.1.7600]
+
+exit=0
+["exec", "win7", "--", "D:\\HWREF.EXE"]
+current_mode=1
+dimensions=1024x768 depth=32
+mode_640x480=-1
+bitblt=0
+screen_copy=0
+mode_800x600=-1
+bitblt=0
+screen_copy=0
+restore_mode=-1
+disk_write=1
+disk_flush=1
+disk_read=1
+disk_content=HWREF DISK CHECK
+cd_D=opened
+cd_content=VMLAB clean-room optical-media capture fixture.
+
+exit=0
+["exec", "win7", "--", "ipconfig.exe", "/all"]
+
+Windows IP Configuration
+
+   Host Name . . . . . . . . . . . . : VMLABVM-UOTKK8J
+   Primary Dns Suffix  . . . . . . . :
+   Node Type . . . . . . . . . . . . : Hybrid
+   IP Routing Enabled. . . . . . . . : No
+   WINS Proxy Enabled. . . . . . . . : No
+   DNS Suffix Search List. . . . . . : hwref-gates.vmlab.internal
+
+Ethernet adapter Local Area Connection:
+
+   Connection-specific DNS Suffix  . : hwref-gates.vmlab.internal
+   Description . . . . . . . . . . . : Intel(R) PRO/1000 MT Network Connection
+   Physical Address. . . . . . . . . : 52-54-00-14-9A-BB
+   DHCP Enabled. . . . . . . . . . . : Yes
+   Autoconfiguration Enabled . . . . : Yes
+   Link-local IPv6 Address . . . . . : fe80::2587:bc1e:ebb8:a643%11(Preferred)
+   IPv4 Address. . . . . . . . . . . : 10.219.87.2(Preferred)
+   Subnet Mask . . . . . . . . . . . : 255.255.255.0
+   Lease Obtained. . . . . . . . . . : Saturday, October 31, 2026 10:30:12 AM
+   Lease Expires . . . . . . . . . . : Saturday, October 31, 2026 11:30:11 AM
+   Default Gateway . . . . . . . . . : 10.219.87.1
+   DHCP Server . . . . . . . . . . . : 10.219.87.1
+   DHCPv6 IAID . . . . . . . . . . . : 240276480
+   DHCPv6 Client DUID. . . . . . . . : 00-01-00-01-32-77-DD-95-52-54-00-14-9A-BB
+   DNS Servers . . . . . . . . . . . : 10.219.87.1
+   NetBIOS over Tcpip. . . . . . . . : Enabled
+
+Tunnel adapter Local Area Connection* 9:
+
+   Media State . . . . . . . . . . . : Media disconnected
+   Connection-specific DNS Suffix  . : hwref-gates.vmlab.internal
+   Description . . . . . . . . . . . : Microsoft ISATAP Adapter
+   Physical Address. . . . . . . . . : 00-00-00-00-00-00-00-E0
+   DHCP Enabled. . . . . . . . . . . : No
+   Autoconfiguration Enabled . . . . : Yes
+
+exit=0
+["exec", "win7", "--", "ping.exe", "-n", "2", "10.219.87.1"]
+
+Pinging 10.219.87.1 with 32 bytes of data:
+Reply from 10.219.87.1: bytes=32 time<1ms TTL=64
+Reply from 10.219.87.1: bytes=32 time<1ms TTL=64
+
+Ping statistics for 10.219.87.1:
+    Packets: Sent = 2, Received = 2, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 0ms, Maximum = 0ms, Average = 0ms
+
+exit=0
+["vm", "sendkeys", "win7", "ctrl-esc"]
+
+exit=0
+["vm", "sendkeys", "win7", "esc"]
+
+exit=0
+["vm", "mouse-move", "win7", "300", "200"]
+
+exit=0
+["vm", "click", "win7", "300", "200"]
+
+exit=0
+["vm", "screenshot", "win7", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/desktop.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/desktop.png
+
+exit=0
+["osinfo", "win7"]
+{"arch":"x86_64","hostname":"VMLABVM-UOTKK8J","id":"windows","kernel":"10.0.7600","name":"Windows 7 Enterprise","version":""}
+
+exit=0
+["script", "win7-mode.ws"]
+
+exit=0
+["exec", "win7", "--", "cmd.exe", "/c", "type", "C:\\hwref-user.txt"]
+
+exit=0
+["vm", "screenshot", "win7", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/mode.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win7/mode.png
+
+exit=0
+["exec", "win7", "--", "cmd.exe", "/c", "type", "C:\\hwref-user.txt"]
+current_mode=1
+dimensions=800x600 depth=32
+mode_640x480=0
+bitblt=1
+screen_copy=1
+mode_800x600=0
+bitblt=1
+screen_copy=1
+restore_mode=0
+disk_write=1
+disk_flush=1
+disk_read=1
+disk_content=HWREF DISK CHECK
+cd_D=opened
+cd_content=VMLAB clean-room optical-media capture fixture.
+
+exit=0

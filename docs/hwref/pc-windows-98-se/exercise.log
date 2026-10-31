@@ -1,0 +1,172 @@
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/login.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/login.png
+
+exit=0
+["exec", "win98", "--", "C:\\WINDOWS\\IPCONFIG.EXE", "/all"]
+
+
+Windows 98 IP Configuration
+
+
+
+	Host Name . . . . . . . . . : VMLAB98
+
+	DNS Servers . . . . . . . . :
+
+	Node Type . . . . . . . . . : Broadcast
+
+	NetBIOS Scope ID. . . . . . :
+
+	IP Routing Enabled. . . . . : No
+
+	WINS Proxy Enabled. . . . . : No
+
+	NetBIOS Resolution Uses DNS : No
+
+
+
+0 Ethernet adapter :
+
+
+
+	Description . . . . . . . . : PPP Adapter.
+
+	Physical Address. . . . . . : 44-45-53-54-00-00
+
+	DHCP Enabled. . . . . . . . : Yes
+
+	IP Address. . . . . . . . . : 0.0.0.0
+
+	Subnet Mask . . . . . . . . : 0.0.0.0
+
+	Default Gateway . . . . . . :
+
+	DHCP Server . . . . . . . . : 255.255.255.255
+
+	Primary WINS Server . . . . :
+
+	Secondary WINS Server . . . :
+
+	Lease Obtained. . . . . . . :
+
+	Lease Expires . . . . . . . :
+
+
+exit=1
+["vm", "click", "win98", "498", "137"]
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/post-login.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/post-login.png
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/current.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/current.png
+
+exit=0
+["vm", "click", "win98", "550", "78"]
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/devices-live.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/devices-live.png
+
+exit=0
+["vm", "click", "win98", "82", "243"]
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/nic-tree.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/nic-tree.png
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/nic-tree2.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/nic-tree2.png
+
+exit=0
+["vm", "sendkeys", "win98", "n"]
+
+exit=0
+["vm", "sendkeys", "win98", "right"]
+
+exit=0
+["vm", "sendkeys", "win98", "alt-f4"]
+
+exit=0
+["exec", "win98", "--", "C:\\WINDOWS\\RUNDLL32.EXE", "shell32.dll,Control_RunDLL", "sysdm.cpl,,1"]
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/devices.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/devices.png
+
+exit=0
+["exec", "win98", "--", "C:\\WINDOWS\\REGEDIT.EXE", "/E", "C:\\PCI.REG", "HKEY_LOCAL_MACHINE\\Enum\\PCI"]
+
+exit=0
+["exec", "win98", "--", "C:\\COMMAND.COM", "/c", "type", "C:\\PCI.REG"]
+File not found - C:\PCI.REG
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/after-qmp.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/after-qmp.png
+
+exit=0
+["exec", "win98", "--", "D:\\HWREF.EXE"]
+current_mode=1
+dimensions=640x480 depth=8
+mode_640x480=0
+bitblt=1
+screen_copy=1
+mode_800x600=0
+bitblt=1
+screen_copy=1
+restore_mode=0
+disk_write=1
+disk_flush=1
+disk_read=1
+disk_content=HWREF DISK CHECK
+cd_D=opened
+cd_content=VMLAB clean-room optical-media capture fixture.
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/properties.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/properties.png
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/desktop.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/desktop.png
+
+exit=0
+["exec", "win98", "--", "C:\\WINDOWS\\PING.EXE", "-n", "2", "10.219.87.1"]
+
+
+Pinging 10.219.87.1 with 32 bytes of data:
+
+
+
+Destination host unreachable.
+
+Destination host unreachable.
+
+
+
+Ping statistics for 10.219.87.1:
+
+    Packets: Sent = 2, Received = 0, Lost = 2 (100% loss),
+
+Approximate round trip times in milli-seconds:
+
+    Minimum = 0ms, Maximum =  0ms, Average =  0ms
+
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/nic-keyboard.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/nic-keyboard.png
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/nic-cleared.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/nic-cleared.png
+
+exit=0
+["vm", "screenshot", "win98", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/shutdown-dialog.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/win98-r2/shutdown-dialog.png
+
+exit=0

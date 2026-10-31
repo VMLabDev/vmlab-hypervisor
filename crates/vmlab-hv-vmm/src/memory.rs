@@ -19,6 +19,7 @@ pub struct GuestRam {
     /// The memfd backing RAM, when shared; kept open so the mapping lives.
     _file: Option<File>,
     pub(crate) firmware_rom: Option<GuestMemoryMmap>,
+    pub(crate) a20: Option<Arc<parking_lot::Mutex<crate::a20::A20>>>,
 }
 
 impl GuestRam {
@@ -31,6 +32,7 @@ impl GuestRam {
             layout,
             _file: None,
             firmware_rom: None,
+            a20: None,
         })
     }
 
@@ -55,11 +57,28 @@ impl GuestRam {
             layout,
             _file: Some(file),
             firmware_rom: None,
+            a20: None,
         })
     }
 
     pub fn layout(&self) -> &MemLayout {
         &self.layout
+    }
+
+    pub fn pc(layout: MemLayout, vm: Arc<VmFd>) -> Result<Self, VmmError> {
+        let mut ram = Self::shared_memfd(layout)?;
+        let file = ram
+            ._file
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .map_err(|e| VmmError::Memory(e.to_string()))?;
+        ram.a20 = Some(Arc::new(parking_lot::Mutex::new(crate::a20::A20::new(
+            file,
+            vm,
+            &ram.layout.regions,
+        )?)));
+        Ok(ram)
     }
 }
 
@@ -95,6 +114,9 @@ pub(crate) fn create_memfd() -> Result<File, String> {
 
 /// Register every RAM region as a KVM memslot.
 pub fn register_memslots(vm: &Arc<VmFd>, ram: &GuestRam) -> Result<(), VmmError> {
+    if let Some(a20) = &ram.a20 {
+        return a20.lock().register();
+    }
     register_address_space(vm, ram, 0)
 }
 

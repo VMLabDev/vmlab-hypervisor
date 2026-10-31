@@ -74,6 +74,29 @@ impl FwCfg {
         Ok(device)
     }
 
+    /// Generate and register pc-i440fx firmware inputs without q35 devices.
+    pub fn for_pc(
+        memory: GuestMemory,
+        platform: &crate::pc::Platform,
+        options: &crate::FirmwareOptions,
+    ) -> Result<Self, String> {
+        let mut device = Self::new(memory);
+        for (key, data) in crate::pc::numeric_items(platform, options)? {
+            device.add_numeric(key, data)?;
+        }
+        let acpi = crate::pc::generate(platform)?;
+        let mut files: BTreeMap<_, _> = crate::pc::ancillary_files(platform, options)?
+            .into_iter()
+            .collect();
+        files.insert("etc/acpi/rsdp".into(), acpi.rsdp);
+        files.insert("etc/acpi/tables".into(), acpi.tables);
+        files.insert("etc/table-loader".into(), acpi.loader);
+        for (name, data) in files {
+            device.add_file(&name, data, false)?;
+        }
+        Ok(device)
+    }
+
     fn insert(&mut self, key: u16, data: Vec<u8>, writable: bool, name: Option<String>) {
         self.state.entries.insert(
             key,

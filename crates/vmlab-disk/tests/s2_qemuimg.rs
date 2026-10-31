@@ -16,6 +16,16 @@ use vmlab_disk::{Format, SnapshotInfo};
 const QEMU_IMG: &str = "/usr/bin/qemu-img";
 const QEMU_IO: &str = "qemu-io";
 
+#[derive(Default)]
+struct ReadTarget(Vec<u8>);
+
+impl vmlab_disk::ReadTarget for ReadTarget {
+    fn write_all(&mut self, bytes: &[u8]) -> vmlab_disk::Result<()> {
+        self.0.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
 fn qemu_img_available() -> bool {
     Path::new(QEMU_IMG).exists() || which(QEMU_IMG.split('/').next_back().unwrap())
 }
@@ -163,6 +173,9 @@ fn read_all(path: &Path, format: Format) -> Vec<u8> {
     let mut img = vmlab_disk::open(path, format, true).unwrap();
     let mut buf = vec![0u8; img.size() as usize];
     img.read_at(0, &mut buf).unwrap();
+    let mut target = ReadTarget::default();
+    img.read_into(0, buf.len(), &mut target).unwrap();
+    assert_eq!(target.0, buf, "read target differs from buffered read");
     buf
 }
 
@@ -382,6 +395,85 @@ fn s2_backing_chains() {
             .all(|&b| b == 0x33)
     ); // top
     qemu_check(&top);
+}
+
+#[test]
+fn s2_bulk_reads_match_qemu_across_mapping_and_backing_boundaries() {
+    require_qemu_img!();
+    let temp = tmpdir("bulk-reads");
+    let raw = temp.path().join("base.raw");
+    std::fs::write(&raw, pattern(3 << 20, 29)).unwrap();
+    let compressed = temp.path().join("compressed.qcow2");
+    qemu_img(&[
+        "convert",
+        "-c",
+        "-O",
+        "qcow2",
+        &raw.to_string_lossy(),
+        &compressed.to_string_lossy(),
+    ]);
+    for (base, format) in [(&raw, "raw"), (&compressed, "qcow2")] {
+        for cluster in [512, 65536] {
+            let overlay = temp.path().join(format!("{format}-{cluster}.qcow2"));
+            qemu_img(&[
+                "create",
+                "-f",
+                "qcow2",
+                "-o",
+                &format!("cluster_size={cluster}"),
+                "-b",
+                &base.to_string_lossy(),
+                "-F",
+                format,
+                &overlay.to_string_lossy(),
+                "4M",
+            ]);
+            qemu_io(&[
+                "-c",
+                "write -P 0xa5 2M 256k",
+                "-c",
+                "write -P 0x7e 64k 128k",
+                "-c",
+                "write -z 512k 128k",
+                &overlay.to_string_lossy(),
+            ]);
+            let oracle = temp.path().join(format!("{format}-{cluster}.raw"));
+            qemu_img(&[
+                "convert",
+                "-O",
+                "raw",
+                &overlay.to_string_lossy(),
+                &oracle.to_string_lossy(),
+            ]);
+            let expected = std::fs::read(&oracle).unwrap();
+            let mut image = vmlab_disk::open(&overlay, Format::Qcow2, true).unwrap();
+            for (offset, len) in [
+                (0, 4 << 20),
+                (1, (4 << 20) - 1),
+                (65535, (2 << 20) + 3),
+                ((3 << 20) - 17, (1 << 20) + 17),
+            ] {
+                let mut received = vec![0; len];
+                image.read_at(offset as u64, &mut received).unwrap();
+                assert_eq!(
+                    received,
+                    expected[offset..offset + len],
+                    "{format}, cluster {cluster}, offset {offset}, length {len}"
+                );
+                let mut target = ReadTarget::default();
+                image.read_into(offset as u64, len, &mut target).unwrap();
+                assert_eq!(
+                    target.0, received,
+                    "target read, {format}, cluster {cluster}, offset {offset}"
+                );
+            }
+            let mut target = ReadTarget::default();
+            assert!(image.read_into(image.size() - 1, 2, &mut target).is_err());
+            assert!(image.read_into(u64::MAX, 2, &mut target).is_err());
+            assert!(target.0.is_empty());
+            qemu_check(&overlay);
+        }
+    }
 }
 
 /// Images and snapshots created by qemu-img read back identically through

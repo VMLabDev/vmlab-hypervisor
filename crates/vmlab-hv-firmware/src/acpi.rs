@@ -101,7 +101,7 @@ pub fn generate(platform: &Platform) -> Result<AcpiTables, String> {
         loader.add_pointer(TABLES_FILE, TABLES_FILE, (fadt + offset) as u32, width);
     }
     checksum(&mut tables, &mut loader, fadt);
-    let madt = append(&mut tables, &madt(platform));
+    let madt = append(&mut tables, &madt(platform.vcpus, platform.max_cpus));
     checksum(&mut tables, &mut loader, madt);
     let hpet = append(&mut tables, HPET);
     checksum(&mut tables, &mut loader, hpet);
@@ -191,19 +191,19 @@ fn validate(p: &Platform) -> Result<(), String> {
     Ok(())
 }
 
-fn append(blob: &mut Vec<u8>, bytes: &[u8]) -> usize {
+pub(crate) fn append(blob: &mut Vec<u8>, bytes: &[u8]) -> usize {
     let start = blob.len();
     blob.extend_from_slice(bytes);
     start
 }
 
-fn checksum(tables: &mut [u8], loader: &mut TableLoader, start: usize) {
+pub(crate) fn checksum(tables: &mut [u8], loader: &mut TableLoader, start: usize) {
     tables[start + 9] = 0;
     let length = u32::from_le_bytes(tables[start + 4..start + 8].try_into().unwrap());
     loader.add_checksum(TABLES_FILE, (start + 9) as u32, start as u32, length);
 }
 
-fn table(signature: [u8; 4], revision: u8, body_len: usize) -> Vec<u8> {
+pub(crate) fn table(signature: [u8; 4], revision: u8, body_len: usize) -> Vec<u8> {
     let mut bytes = vec![0; 36 + body_len];
     bytes[..4].copy_from_slice(&signature);
     let length = bytes.len() as u32;
@@ -217,12 +217,12 @@ fn table(signature: [u8; 4], revision: u8, body_len: usize) -> Vec<u8> {
     bytes
 }
 
-fn madt(p: &Platform) -> Vec<u8> {
+pub(crate) fn madt(vcpus: u16, max_cpus: u16) -> Vec<u8> {
     let mut b = table(*b"APIC", 3, 8);
     put(&mut b, 36, 0xfee0_0000, 4);
     b[40] = 1;
-    for id in 0..p.max_cpus {
-        b.extend_from_slice(&[0, 8, id as u8, id as u8, u8::from(id < p.vcpus), 0, 0, 0]);
+    for id in 0..max_cpus {
+        b.extend_from_slice(&[0, 8, id as u8, id as u8, u8::from(id < vcpus), 0, 0, 0]);
     }
     b.extend_from_slice(&[1, 12, 0, 0, 0, 0, 0xc0, 0xfe, 0, 0, 0, 0]);
     for irq in [0, 5, 9, 10, 11] {
@@ -245,12 +245,12 @@ fn madt(p: &Platform) -> Vec<u8> {
     b
 }
 
-fn put(bytes: &mut [u8], offset: usize, value: u64, width: usize) {
+pub(crate) fn put(bytes: &mut [u8], offset: usize, value: u64, width: usize) {
     bytes[offset..offset + width].copy_from_slice(&value.to_le_bytes()[..width]);
 }
 
 /// Encode an AML package including the length field itself (ACPI 6.5 §20.2.4).
-fn package(op: &[u8], body: &[u8]) -> Vec<u8> {
+pub(crate) fn package(op: &[u8], body: &[u8]) -> Vec<u8> {
     let width = (1..=4)
         .find(|n| body.len() + n < (if *n == 1 { 64 } else { 1 << (4 + 8 * (n - 1)) }))
         .unwrap();
@@ -268,7 +268,7 @@ fn package(op: &[u8], body: &[u8]) -> Vec<u8> {
     b
 }
 
-fn integer(value: u8) -> Vec<u8> {
+pub(crate) fn integer(value: u8) -> Vec<u8> {
     if value <= 1 {
         vec![value]
     } else {
@@ -276,7 +276,7 @@ fn integer(value: u8) -> Vec<u8> {
     }
 }
 
-fn method(name: &[u8; 4], flags: u8, body: &[u8]) -> Vec<u8> {
+pub(crate) fn method(name: &[u8; 4], flags: u8, body: &[u8]) -> Vec<u8> {
     let mut b = name.to_vec();
     b.push(flags);
     b.extend_from_slice(body);
@@ -337,36 +337,7 @@ fn dsdt(p: &Platform) -> Vec<u8> {
     control[position + 3] = p.max_cpus as u8;
     cpus.extend(control);
     for id in 0..p.max_cpus {
-        let mut cpu = format!("C{id:03X}").into_bytes();
-        cpu.extend_from_slice(&[id as u8, 0, 0, 0, 0, 0]);
-        let mut status = vec![0xa4];
-        status.extend_from_slice(b"CSTA");
-        status.extend(integer(id as u8));
-        cpu.extend(method(b"_STA", 8, &status));
-        cpu.extend_from_slice(b"\x08_MAT");
-        let mut mat = vec![
-            0x0a,
-            8,
-            0,
-            8,
-            id as u8,
-            id as u8,
-            u8::from(id < p.vcpus),
-            0,
-            0,
-            0,
-        ];
-        cpu.extend(package(&[0x11], &mat));
-        if id > 0 {
-            mat = b"CEJ0".to_vec();
-            mat.extend(integer(id as u8));
-            cpu.extend(method(b"_EJ0", 1, &mat));
-        }
-        let mut ost = b"COST".to_vec();
-        ost.extend(integer(id as u8));
-        ost.extend_from_slice(&[0x68, 0x69, 0x6a]);
-        cpu.extend(method(b"_OST", 11, &ost));
-        cpus.extend(package(&[0x5b, 0x83], &cpu));
+        cpus.extend(processor(id as u8, id < p.vcpus));
     }
     let mut scope = b"_SB_".to_vec();
     scope.extend_from_slice(&source[0x1929..0x19c6]);
@@ -433,4 +404,25 @@ fn dsdt(p: &Platform) -> Vec<u8> {
 fn tpm_device() -> Vec<u8> {
     // Complete TIS and physical-presence namespace observed under OVMF.
     TPM_DSDT[0x2138..0x23a4].to_vec()
+}
+
+pub(crate) fn processor(id: u8, present: bool) -> Vec<u8> {
+    let mut cpu = format!("C{id:03X}").into_bytes();
+    cpu.extend_from_slice(&[id, 0, 0, 0, 0, 0]);
+    let mut status = b"\xa4CSTA".to_vec();
+    status.extend(integer(id));
+    cpu.extend(method(b"_STA", 8, &status));
+    cpu.extend_from_slice(b"\x08_MAT");
+    let mat = [0x0a, 8, 0, 8, id, id, u8::from(present), 0, 0, 0];
+    cpu.extend(package(&[0x11], &mat));
+    if id > 0 {
+        let mut eject = b"CEJ0".to_vec();
+        eject.extend(integer(id));
+        cpu.extend(method(b"_EJ0", 1, &eject));
+    }
+    let mut ost = b"COST".to_vec();
+    ost.extend(integer(id));
+    ost.extend_from_slice(&[0x68, 0x69, 0x6a]);
+    cpu.extend(method(b"_OST", 11, &ost));
+    package(&[0x5b, 0x83], &cpu)
 }

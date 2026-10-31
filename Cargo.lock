@@ -1202,6 +1202,7 @@ dependencies = [
  "vmlab-disk",
  "vmlab-hv-devices",
  "vmlab-hv-display",
+ "vmlab-hv-firmware",
  "vmlab-hv-proto",
  "vmlab-hv-tests",
  "vmlab-hv-vmm",

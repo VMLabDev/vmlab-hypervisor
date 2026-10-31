@@ -11,6 +11,7 @@ The QEMU argv below is vmlab's own argv for a linux-modern profile VM on the
 `target/p3-research/g3/bench.py`). Do not drift it without re-baselining.
 """
 
+import itertools
 import json
 import fcntl
 import os
@@ -47,21 +48,7 @@ MEMORY_MAX = "24G"
 
 
 def project_vm_count(processes="/proc"):
-    count = 0
-    for process in Path(processes).iterdir():
-        if not process.name.isdigit():
-            continue
-        try:
-            args = (process / "cmdline").read_bytes().split(b"\0")
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        executable = os.path.basename(args[0])
-        if b"-avd" not in args and (
-            executable.startswith(b"qemu-system-")
-            or executable.startswith(b"vmlab-hv")
-        ):
-            count += 1
-    return count
+    return len(project_vm_pids(processes))
 
 
 class VmSlot:
@@ -72,9 +59,7 @@ class VmSlot:
 
     @classmethod
     def acquire(cls, timeout=600, processes="/proc", directory=None):
-        directory = Path(directory or os.path.join(
-            tempfile.gettempdir(), f"vmlab-hv-vm-slots-{os.geteuid()}"
-        ))
+        directory = Path(directory or f"/tmp/vmlab-hv-vm-slots-{os.geteuid()}")
         directory.mkdir(exist_ok=True)
         deadline = time.monotonic() + timeout
         while True:
@@ -100,6 +85,34 @@ class VmSlot:
 
     def close(self):
         self.file.close()
+
+
+def project_vm_pids(proc_root="/proc"):
+    """Count VMs across worktrees, excluding the owner's Android emulator."""
+    pids = []
+    for pid in os.listdir(proc_root):
+        if not pid.isdecimal():
+            continue
+        try:
+            with open(os.path.join(proc_root, pid, "cmdline"), "rb") as f:
+                argv = f.read().split(b"\0")
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if not argv or not argv[0]:
+            continue
+        executable = os.path.basename(os.fsdecode(argv[0]))
+        if executable == "vmlab-hv" or executable.startswith("vmlab-hv-test-") or (
+            executable.startswith("qemu-system-") and b"-avd" not in argv
+        ):
+            pids.append(int(pid))
+    return sorted(pids)
+
+
+def require_vm_slots(count=1):
+    """Check the host-wide two-VM cap immediately before every launch."""
+    pids = project_vm_pids()
+    if len(pids) + count > 2:
+        raise BenchError(f"need {count} VM slots; running project VM PIDs: {pids}")
 
 # ---------------------------------------------------------------------------
 # x86_64 KVM (phase 2, HV-D28): templates, firmware, workloads
@@ -295,6 +308,8 @@ class AgentClient:
     eaten before the guest opens the port and never answered (notes/03 §1).
     """
 
+    _channel_ids = itertools.count(1)
+
     def __init__(self, path):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.connect(path)
@@ -331,7 +346,9 @@ class AgentClient:
         return json.loads(payload)
 
     def exec(self, argv, timeout, idle_timeout=None, stdin_data=None):
-        cid = 1
+        cid = next(self._channel_ids)
+        if cid > 0xffffffff:
+            raise BenchError("agent channel ID space exhausted")
         self.channels[cid] = {"data": b"", "stderr": b"", "code": None, "eof": False}
         msg = json.dumps({"cmd": "open_exec", "id": cid, "argv": argv}).encode()
         self.sock.sendall(agent_frame(0, 0, msg))
@@ -371,7 +388,7 @@ class AgentClient:
                     raise BenchError(f"agent error: {m}")
                 chan = self.channels[cid]
                 if chan["code"] is not None and chan["eof"]:
-                    return chan
+                    return self.channels.pop(cid)
             elif kind == 1 and ch == cid:
                 self.channels[cid]["data"] += payload
             elif kind == 2 and ch == cid:
@@ -431,24 +448,41 @@ def wait_for_agent(path, deadline_seconds, vm_exited=None):
 def qmp_cont(path, timeout=60):
     """Release the vCPUs: greeting, capabilities, cont (vmlab's sequence)."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(path)
-    s.settimeout(timeout)
+    stream = None
+    try:
+        s.connect(path)
+        s.settimeout(timeout)
+        stream = s.makefile("rwb")
 
-    def rd():
-        buf = b""
-        while True:
-            buf += s.recv(65536)
-            try:
-                return json.loads(buf.decode())
-            except Exception:
-                continue
+        def rd():
+            line = stream.readline()
+            if not line:
+                raise BenchError("QMP connection closed before its reply")
+            return json.loads(line)
 
-    rd()  # greeting
-    s.sendall(b'{"execute":"qmp_capabilities"}')
-    rd()
-    s.sendall(b'{"execute":"cont"}')
-    rd()
-    s.close()
+        if "QMP" not in rd():
+            raise BenchError("QMP greeting is missing")
+        for request_id, command in enumerate(
+            ("qmp_capabilities", "cont", "query-status"), start=1
+        ):
+            request = {"execute": command, "id": request_id}
+            stream.write((json.dumps(request) + "\n").encode())
+            stream.flush()
+            while True:
+                reply = rd()
+                if reply.get("id") != request_id:
+                    continue
+                if "error" in reply:
+                    raise BenchError(f"QMP {command}: {reply['error']}")
+                if "return" not in reply:
+                    raise BenchError(f"QMP {command}: reply has no result")
+                if command == "query-status" and not reply["return"].get("running"):
+                    raise BenchError(f"QMP guest is not running: {reply['return']}")
+                break
+    finally:
+        if stream is not None:
+            stream.close()
+        s.close()
 
 
 # ---------------------------------------------------------------------------

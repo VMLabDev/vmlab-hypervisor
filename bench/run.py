@@ -312,8 +312,14 @@ def respawn_hv(backend, run_dir):
         path = os.path.join(run_dir, name)
         if os.path.exists(path):
             os.remove(path)
-    backend.launch()
-    backend.release_cpus()
+    try:
+        backend.launch()
+        backend.release_cpus()
+    except Exception:
+        session = getattr(backend, "session", None)
+        if session is not None:
+            session.kill()
+        raise
 
 WINDOWS_MARKER = "C:\\\\Windows\\\\Temp\\\\vmlab-firstboot.done"
 
@@ -555,9 +561,9 @@ def wait_x86_ready(backend, args, guest, run_dir, t0):
     template's whole first-boot sequence — the specialize marker, the user
     OOBE gate, the AppX settle, and one in-guest reboot watched by boot id —
     because the agent answers long before the machine is usable and the
-    reboot must not land mid-Oobe. vmlab-hv exits 0 on a guest reset and is
-    respawned; QEMU reboots in-process. The clock starts at the first spawn
-    and never resets.
+    reboot must not land mid-Oobe. Both current backends reboot in-process;
+    the respawn path supports older vmlab-hv binaries. The clock starts at
+    the first spawn and never resets.
     """
     if guest == "windows-10":
         return WindowsReady(backend, args, run_dir, t0).run()
@@ -625,6 +631,8 @@ def allocated_span(template_disk):
 
 def x86_one_repeat(args, guest, smp, pin, version, index):
     """One x86_64 VM through the full workload set for its guest."""
+    lib.require_vm_slots()
+    loadavg_start = lib.read_loadavg()
     run_dir = os.path.join(
         lib.RUN_DIR, lib.run_dir_name(args.backend, "x86_64", guest, smp, index)
     )
@@ -652,7 +660,8 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             args.hv_bin, lib.IPXE_ROM,
         )
     result = {"run": run_dir, "arch": "x86_64", "guest": guest,
-              "vcpus": smp, "backend": args.backend}
+              "vcpus": smp, "backend": args.backend,
+              "loadavg_start": loadavg_start}
     agent = None
     try:
         session = backend.launch()
@@ -710,8 +719,10 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             seq_mib = min(BLK_SEQ_MIB, span_mib)
 
             def randblke(args_str, what):
+                log(f"starting {what}")
                 out = must_sh(agent, f"/tmp/randblke {args_str}", what,
                               timeout=1800)
+                log(f"finished {what}: {out.strip()}")
                 return json.loads(out.strip().splitlines()[-1])
 
 
@@ -746,6 +757,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             # netdev, framing socket). A delivery below 90% of what the
             # guest sent means the measurement is broken, not slow.
             peer.report()  # reset counters
+            log("starting net tx")
             out = must_sh(
                 agent,
                 f"python3 /tmp/vmlab-nettool.py udp-blast {net['peer_ip']} {net['port']} "
@@ -765,6 +777,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
                 )
             samples["net_tx_udp_mbps"] = round(
                 rx["rx_bytes"] * 8 / NET_WINDOW / 1e6, 2)
+            log(f"finished net tx: {samples['net_tx_udp_mbps']} Mbit/s")
 
             # RX: the peer blasts; the rate is read from the guest's own
             # interface counter (kernel-counted, immune to userspace sink
@@ -782,6 +795,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
                 "net rx sink start",
             )
             time.sleep(NET_SETTLE)
+            log("starting net rx")
             rx0 = nic_rx_bytes()
             peer.blast(NET_WINDOW, net["udp_payload"])
             # The ack returns at the blast's start; the window is timed
@@ -800,6 +814,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             # drain), so the rate is the whole delta over the window.
             samples["net_rx_udp_mbps"] = round(
                 (rx1 - rx0) * 8 / NET_WINDOW / 1e6, 2)
+            log(f"finished net rx: {samples['net_rx_udp_mbps']} Mbit/s")
             sh(agent, "pkill -f vmlab-nettool || true")
 
             # --- idle host CPU ---------------------------------------------
@@ -820,21 +835,24 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             result["peer"] = peer.report()
         return result, backend, agent
     finally:
+        session = getattr(backend, "session", None)
         try:
             if agent is not None:
                 agent.shutdown()
                 agent.close()
             if args.backend == "vmlab-hv":
                 backend.quit()
-            code = backend.session.wait_exit(X86_SHUTDOWN_TIMEOUT)
-            if code is None:
-                log(f"VM did not exit within {X86_SHUTDOWN_TIMEOUT}s")
+            if session is not None:
+                code = session.wait_exit(X86_SHUTDOWN_TIMEOUT)
+                if code is None:
+                    log(f"VM did not exit within {X86_SHUTDOWN_TIMEOUT}s")
         except Exception as e:  # noqa: BLE001 - cleanup must reach the kills
             log(f"note: graceful shutdown failed ({e}); killing")
-        backend.session.kill()
-        result["vm_exit"] = backend.session.exit_code()
-        if result["vm_exit"] != 0:
-            log(f"warning: VM exit code {result['vm_exit']}")
+        if session is not None:
+            session.kill()
+            result["vm_exit"] = session.exit_code()
+            if result["vm_exit"] != 0:
+                log(f"warning: VM exit code {result['vm_exit']}")
         if peer is not None:
             peer.kill()
         for name in ("overlay.qcow2", "vars.fd"):
@@ -842,6 +860,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
             if os.path.exists(path) and not args.keep:
                 os.remove(path)
         with open(os.path.join(run_dir, "result.json"), "w") as f:
+            result["loadavg_end"] = lib.read_loadavg()
             json.dump(result, f, indent=1)
 
 
@@ -858,12 +877,15 @@ def x86_run_config(args, guest, smp, pin, version, commit, dirty, host):
         "nic_mtu": lib.BENCH_NET["mtu"],
         "net_peer": "bench/netpeer.c framing peer",
         "tools": {},
+        "repeat_loadavg": [],
     }
     for i in range(1, args.repeats + 1):
         log(f"=== {args.backend} x86_64 {guest} smp={smp} repeat {i}/{args.repeats}")
         result, backend, agent = x86_one_repeat(args, guest, smp, pin, version, i)
         env["backend_version"] = backend.backend_version()
         env["tools"] = result.get("tools", {})
+        env["repeat_loadavg"].append({
+            "start": result["loadavg_start"], "end": lib.read_loadavg()})
         for w, value in result["samples"].items():
             all_samples.setdefault(w, []).append(value)
         log(f"repeat {i}: {result['samples']}")
@@ -903,6 +925,8 @@ def g2g_teardown(backends, agents):
         except Exception:
             pass
     for backend in backends:
+        if backend is None:
+            continue
         try:
             if args_backend_quit(backend):
                 backend.quit()
@@ -949,6 +973,7 @@ def g2g_direction(sender, receiver, receiver_ip, port, window):
 
 
 def g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, index):
+    lib.require_vm_slots(2)
     root = os.path.join(
         lib.RUN_DIR, lib.run_dir_name(args.backend, "x86_64", guest, smp, index, "g2g")
     )
@@ -973,15 +998,14 @@ def g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, index):
         g2g_setup_guest(agent_b, net["g2g_b_ip"])
 
         port = 5903
-        a2b, blast, sink = g2g_direction(agent_b, agent_a, net["g2g_a_ip"], port, NET_WINDOW)
-        log(f"g2g b->a: {a2b} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
-        b2a, blast, sink = g2g_direction(agent_a, agent_b, net["g2g_b_ip"], port, NET_WINDOW)
-        log(f"g2g a->b: {b2a} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
+        b2a, blast, sink = g2g_direction(agent_b, agent_a, net["g2g_a_ip"], port, NET_WINDOW)
+        log(f"g2g b->a: {b2a} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
+        a2b, blast, sink = g2g_direction(agent_a, agent_b, net["g2g_b_ip"], port, NET_WINDOW)
+        log(f"g2g a->b: {a2b} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
         result["samples"] = {
             "net_g2g_a2b_tcp_mbps": a2b,
             "net_g2g_b2a_tcp_mbps": b2a,
         }
-        # b sent to a first: a2b is the a-side sink rate.
         return result, a
     finally:
         g2g_teardown([a, b], [agent_a, agent_b])
@@ -1001,10 +1025,14 @@ def g2g_run_config(args, guest, smp, pin_a, pin_b, version, commit, dirty, host)
         "host_cpus": os.cpu_count(),
         "nic_mtu": lib.BENCH_NET["mtu"],
         "net_peer": "bench/netpeer.c hub (2 ports)",
+        "repeat_loadavg": [],
     }
     for i in range(1, args.repeats + 1):
         log(f"=== {args.backend} x86_64 g2g {guest} repeat {i}/{args.repeats}")
+        loadavg_start = lib.read_loadavg()
         result, a = g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, i)
+        env["repeat_loadavg"].append({
+            "start": loadavg_start, "end": lib.read_loadavg()})
         env["backend_version"] = a.backend_version()
         for w, value in result["samples"].items():
             all_samples[w].append(value)
@@ -1032,7 +1060,8 @@ def sweep_stale_vms():
 
 def main(argv=None):
     args = parse_args(argv)
-    if args.backend in ("interpreter", "interpreter-reference", "interpreter-specialized"):
+    if args.backend in ("interpreter", "interpreter-reference", "interpreter-specialized") or (
+            args.backend == "qemu" and args.guest == "flat-rv64gc"):
         import micro
         commit, dirty = git_commit()
         return micro.run(args, commit, dirty, os.uname().nodename, log)

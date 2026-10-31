@@ -57,6 +57,7 @@ pub fn open_image(disk: &Disk) -> Result<SharedImage, DeviceUnavailable> {
 /// A built serial console: the bus device plus its snapshot handle (the
 /// same object), when the model carries guest-visible state.
 pub struct BuiltSerial {
+    pub clock: Option<Arc<Mutex<vmlab_hv_devices::serial::Serial>>>,
     pub device: Arc<Mutex<dyn BusDevice>>,
     pub snapshot: Option<Arc<Mutex<dyn Snapshot>>>,
 }
@@ -229,6 +230,15 @@ impl DiskImage for SharedDisk {
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> vmlab_disk::Result<()> {
         self.0.lock().read_at(offset, buf)
+    }
+
+    fn read_into(
+        &mut self,
+        offset: u64,
+        len: usize,
+        target: &mut dyn vmlab_disk::ReadTarget,
+    ) -> vmlab_disk::Result<()> {
+        self.0.lock().read_into(offset, len, target)
     }
 
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> vmlab_disk::Result<()> {

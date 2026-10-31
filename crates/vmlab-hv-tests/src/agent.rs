@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use vmlab_agent_proto::{
     AgentMsg, Frame, FrameDecoder, FrameKind, HostMsg, INITIAL_WINDOW, MAX_PAYLOAD, PROTO_VERSION,
-    RecvWindow, SendWindow, encode_ctrl, encode_frame,
+    RecvWindow, SendWindow, ShutdownMode, encode_ctrl, encode_frame,
 };
 
 /// What the agent said about itself in the handshake.
@@ -100,8 +100,19 @@ impl AgentClient {
             send_windows: HashMap::new(),
             recv_windows: HashMap::new(),
         };
+        client.resync(timeout)?;
+        Ok(client)
+    }
+
+    /// Re-handshake on the existing connection after reset or snapshot load.
+    /// Old frames and channels are discarded until the fresh token is echoed.
+    pub fn resync(&mut self, timeout: Duration) -> Result<(), Error> {
+        self.decoder = FrameDecoder::new();
+        self.send_windows.clear();
+        self.recv_windows.clear();
+        self.next_channel = 1;
         let token = token();
-        client.write_ctrl(&HostMsg::Hello {
+        self.write_ctrl(&HostMsg::Hello {
             proto_version: PROTO_VERSION,
             token: token.clone(),
         })?;
@@ -111,7 +122,7 @@ impl AgentClient {
             if remaining.is_zero() {
                 return Err("agent did not answer the handshake".to_string());
             }
-            let Some(frame) = client.read_frame(remaining)? else {
+            let Some(frame) = self.read_frame(remaining)? else {
                 continue;
             };
             if frame.kind != FrameKind::Ctrl {
@@ -129,22 +140,47 @@ impl AgentClient {
                 continue;
             };
             if echoed != token {
-                return Err(format!(
-                    "agent echoed the wrong token ({echoed}); stale replay?"
-                ));
+                continue;
             }
             if proto_version != PROTO_VERSION {
                 return Err(format!(
                     "agent speaks proto v{proto_version}, harness speaks v{PROTO_VERSION}"
                 ));
             }
-            client.info = AgentInfo {
+            self.info = AgentInfo {
                 proto_version,
                 agent_version,
                 os,
                 features,
             };
-            return Ok(client);
+            return Ok(());
+        }
+    }
+
+    /// Request a reboot or power-off and wait for the agent's acknowledgement.
+    /// Completion of the actual reset or shutdown is observed on control.
+    pub fn shutdown(&mut self, mode: &str, timeout: Duration) -> Result<(), Error> {
+        let mode = match mode {
+            "reboot" => ShutdownMode::Reboot,
+            "powerdown" => ShutdownMode::Powerdown,
+            "halt" => ShutdownMode::Halt,
+            _ => return Err(format!("unknown shutdown mode {mode}")),
+        };
+        self.write_ctrl(&HostMsg::Shutdown { mode })?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Some(frame) = self.read_frame(remaining)? else {
+                return Err("agent did not acknowledge shutdown".into());
+            };
+            if frame.kind != FrameKind::Ctrl {
+                continue;
+            }
+            match serde_json::from_slice::<AgentMsg>(&frame.payload) {
+                Ok(AgentMsg::ShuttingDown { mode: actual }) if actual == mode => return Ok(()),
+                Ok(AgentMsg::Error { msg, .. }) => return Err(format!("shutdown: {msg}")),
+                _ => {}
+            }
         }
     }
 
@@ -297,5 +333,113 @@ impl AgentClient {
             self.write_ctrl(&HostMsg::WindowAdjust { id: channel, bytes })?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    fn receive(stream: &mut UnixStream, decoder: &mut FrameDecoder) -> HostMsg {
+        let mut bytes = [0; 4096];
+        loop {
+            if let Some(frame) = decoder.next_frame() {
+                assert_eq!(frame.kind, FrameKind::Ctrl);
+                return serde_json::from_slice(&frame.payload).unwrap();
+            }
+            let count = stream.read(&mut bytes).unwrap();
+            assert_ne!(count, 0);
+            decoder.push(&bytes[..count]);
+        }
+    }
+
+    fn hello(stream: &mut UnixStream, token: String, version: &str) {
+        stream
+            .write_all(&encode_ctrl(&AgentMsg::Hello {
+                proto_version: PROTO_VERSION,
+                agent_version: version.into(),
+                os: "test".into(),
+                features: vec!["exec".into()],
+                token,
+                instance: None,
+            }))
+            .unwrap();
+    }
+
+    #[test]
+    fn resync_uses_the_same_connection_and_discards_stale_hello_tokens() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut decoder = FrameDecoder::new();
+            let HostMsg::Hello { token, .. } = receive(&mut stream, &mut decoder) else {
+                panic!("expected handshake");
+            };
+            hello(&mut stream, token.clone(), "before");
+            let HostMsg::Hello { token: fresh, .. } = receive(&mut stream, &mut decoder) else {
+                panic!("expected re-handshake on the same connection");
+            };
+            assert_ne!(fresh, token);
+            hello(&mut stream, token, "stale");
+            hello(&mut stream, fresh, "restored");
+            let HostMsg::Shutdown { mode } = receive(&mut stream, &mut decoder) else {
+                panic!("expected shutdown");
+            };
+            assert_eq!(mode, ShutdownMode::Reboot);
+            stream
+                .write_all(&encode_ctrl(&AgentMsg::ShuttingDown { mode }))
+                .unwrap();
+        });
+        let mut client = AgentClient::connect(&path, Duration::from_secs(3)).unwrap();
+        assert_eq!(client.info().agent_version, "before");
+        client.resync(Duration::from_secs(3)).unwrap();
+        assert_eq!(client.info().agent_version, "restored");
+        client.shutdown("reboot", Duration::from_secs(3)).unwrap();
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn shutdown_rejects_unknown_modes_and_reports_agent_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut decoder = FrameDecoder::new();
+            let HostMsg::Hello { token, .. } = receive(&mut stream, &mut decoder) else {
+                panic!("expected handshake");
+            };
+            hello(&mut stream, token, "test");
+            assert!(matches!(
+                receive(&mut stream, &mut decoder),
+                HostMsg::Shutdown {
+                    mode: ShutdownMode::Powerdown
+                }
+            ));
+            stream
+                .write_all(&encode_ctrl(&AgentMsg::Error {
+                    id: None,
+                    msg: "not supported".into(),
+                }))
+                .unwrap();
+        });
+        let mut client = AgentClient::connect(&path, Duration::from_secs(3)).unwrap();
+        assert!(client.shutdown("unknown", Duration::from_secs(3)).is_err());
+        assert!(
+            client
+                .shutdown("powerdown", Duration::from_secs(3))
+                .unwrap_err()
+                .contains("not supported")
+        );
+        peer.join().unwrap();
     }
 }

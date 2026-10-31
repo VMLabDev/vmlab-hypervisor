@@ -70,6 +70,16 @@ impl DiskImage for RawImage {
         Ok(())
     }
 
+    fn read_into(
+        &mut self,
+        offset: u64,
+        len: usize,
+        target: &mut dyn crate::ReadTarget,
+    ) -> Result<()> {
+        crate::check_read(offset, len, self.size)?;
+        target.read_file(&self.file, offset, len)
+    }
+
     fn flush(&mut self) -> Result<()> {
         if !self.read_only {
             self.file.flush()?;

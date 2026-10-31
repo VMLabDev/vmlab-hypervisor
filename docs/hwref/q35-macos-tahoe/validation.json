@@ -1,0 +1,29 @@
+{
+  "acpi_checksums": true,
+  "fifo_all_zero": true,
+  "guest_shutdown": true,
+  "limitations": [
+    "MSR list deferred by owner",
+    "no independent guest pointer-coordinate check",
+    "no alternate runtime display mode requested",
+    "observer qtest I/O included in generic cpu -1 events",
+    "full CPUID leaf inventory and ACPI disassembly not captured"
+  ],
+  "overlay_check": {
+    "allocated-clusters": 3697,
+    "check-errors": 0,
+    "filename": "/tmp/maccap.8E3Qjc/.vmlab/vms/mac/disk0.qcow2",
+    "format": "qcow2",
+    "fragmented-clusters": 514,
+    "image-end-offset": 244121600,
+    "total-clusters": 1310720
+  },
+  "raw_prefix_lines": 827376,
+  "raw_prefix_within_64_mib": true,
+  "register_totals_reconcile": true,
+  "smbios_checksums": true,
+  "smc_accesses_excluded": 704,
+  "trace_totals_reconcile": true,
+  "vbe_indexed_totals_reconcile": true,
+  "vmware_events_all_zero": true
+}

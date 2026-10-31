@@ -84,6 +84,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
             irq,
         )));
         Ok(BuiltSerial {
+            clock: Some(dev.clone()),
             device: dev.clone(),
             snapshot: Some(dev),
         })

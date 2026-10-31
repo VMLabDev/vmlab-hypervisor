@@ -15,6 +15,19 @@ pub(crate) fn rtc_base(base: Option<&str>) -> Result<i64, VmmError> {
             .duration_since(UNIX_EPOCH)
             .map_err(|e| VmmError::Other(format!("host clock: {e}")))?
             .as_secs() as i64),
+        Some("localtime") => {
+            let seconds = rtc_base(None)?;
+            let host = seconds as libc::time_t;
+            let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+            // SAFETY: host and local are valid input/output objects. The
+            // result is inspected before reading the initialized tm.
+            if unsafe { libc::localtime_r(&host, local.as_mut_ptr()) }.is_null() {
+                return Err(VmmError::Other("host localtime conversion failed".into()));
+            }
+            // SAFETY: localtime_r succeeded and initialized local.
+            let local = unsafe { local.assume_init() };
+            Ok(seconds + local.tm_gmtoff)
+        }
         Some(base) => chrono::DateTime::parse_from_rfc3339(base)
             .map(|date| date.timestamp())
             .map_err(|e| VmmError::InvalidMachine(format!("invalid rtc_base {base:?}: {e}"))),

@@ -1,0 +1,9 @@
+{
+    "image-end-offset": 244121600,
+    "total-clusters": 1310720,
+    "check-errors": 0,
+    "allocated-clusters": 3697,
+    "filename": "/tmp/maccap.8E3Qjc/.vmlab/vms/mac/disk0.qcow2",
+    "format": "qcow2",
+    "fragmented-clusters": 514
+}

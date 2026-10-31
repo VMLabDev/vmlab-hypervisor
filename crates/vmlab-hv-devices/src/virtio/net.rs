@@ -417,17 +417,20 @@ fn read_frames(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(
     };
     let mut sh = lock(shared);
     let mut complete = Vec::new();
-    for &byte in &chunk[..n] {
+    let mut bytes = &chunk[..n];
+    while !bytes.is_empty() {
         match &mut sh.rx {
             RxRead::Idle => {
                 sh.rx = RxRead::Prefix {
-                    buf: [byte, 0, 0, 0],
-                    got: 1,
+                    buf: [0; 4],
+                    got: 0,
                 };
             }
             RxRead::Prefix { buf, got } => {
-                buf[*got] = byte;
-                *got += 1;
+                let take = (buf.len() - *got).min(bytes.len());
+                buf[*got..*got + take].copy_from_slice(&bytes[..take]);
+                *got += take;
+                bytes = &bytes[take..];
                 if *got == 4 {
                     let len = u32::from_be_bytes(*buf) as usize;
                     if len > MAX_FRAME {
@@ -437,15 +440,22 @@ fn read_frames(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(
                         sh.rx_pending.clear();
                         return Err(());
                     }
-                    sh.rx = RxRead::Body {
-                        buf: vec![0u8; len],
-                        got: 0,
-                    };
+                    if len == 0 {
+                        complete.push(Vec::new());
+                        sh.rx = RxRead::Idle;
+                    } else {
+                        sh.rx = RxRead::Body {
+                            buf: vec![0u8; len],
+                            got: 0,
+                        };
+                    }
                 }
             }
             RxRead::Body { buf, got } => {
-                buf[*got] = byte;
-                *got += 1;
+                let take = (buf.len() - *got).min(bytes.len());
+                buf[*got..*got + take].copy_from_slice(&bytes[..take]);
+                *got += take;
+                bytes = &bytes[take..];
                 if *got == buf.len() {
                     let frame = std::mem::take(buf);
                     complete.push(frame);
@@ -483,7 +493,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
         let mut hdr = vec![0u8; hdr_len];
         let num_buffers_at = hdr.len().saturating_sub(2);
         hdr[num_buffers_at..].copy_from_slice(&1u16.to_le_bytes());
-        while let Some(frame) = sh.rx_pending.front().cloned() {
+        while let Some(frame) = sh.rx_pending.front() {
             let Some(chain) = q.pop_descriptor_chain(mem) else {
                 break;
             };
@@ -493,7 +503,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
             if let Ok(mut writer) = chain.writer(mem)
                 && writer.available_bytes() >= need
                 && writer.write_all(&hdr).is_ok()
-                && writer.write_all(&frame).is_ok()
+                && writer.write_all(frame).is_ok()
             {
                 written = need as u32;
             }
@@ -546,18 +556,20 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
                 let head = chain.head_index();
                 let mut consumed = 0;
                 if let Ok(mut reader) = chain.reader(mem) {
-                    let mut hdr = vec![0u8; hdr_len.min(reader.available_bytes())];
-                    if reader.read_exact(&mut hdr).is_ok() {
+                    let mut hdr = [0u8; 12];
+                    let header_len = hdr_len.min(reader.available_bytes());
+                    if reader.read_exact(&mut hdr[..header_len]).is_ok() {
                         if reader.available_bytes() > MAX_FRAME || stream.is_none() {
-                            consumed = (hdr.len() + reader.available_bytes()) as u32;
+                            consumed = (header_len + reader.available_bytes()) as u32;
                         } else {
-                            let mut frame = vec![0u8; reader.available_bytes()];
-                            if reader.read_exact(&mut frame).is_ok() {
-                                consumed = (hdr.len() + frame.len()) as u32;
-                                if frame.len() <= MAX_FRAME {
-                                    out.extend_from_slice(&(frame.len() as u32).to_be_bytes());
-                                    out.extend_from_slice(&frame);
-                                }
+                            let len = reader.available_bytes();
+                            let start = out.len();
+                            out.extend_from_slice(&(len as u32).to_be_bytes());
+                            out.resize(start + 4 + len, 0);
+                            if reader.read_exact(&mut out[start + 4..]).is_ok() {
+                                consumed = (header_len + len) as u32;
+                            } else {
+                                out.truncate(start);
                             }
                         }
                     }
@@ -591,20 +603,18 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
 /// socket would block. `Err(())` means the connection is gone.
 fn flush_tx(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(), ()> {
     loop {
-        let chunk = {
-            let sh = lock(shared);
-            if sh.tx_out.is_empty() {
-                return Ok(());
-            }
-            let take = sh.tx_out.len().min(READ_CHUNK);
-            sh.tx_out[..take].to_vec()
-        };
-        match stream.write(&chunk) {
+        let mut sh = lock(shared);
+        if sh.tx_out.is_empty() {
+            return Ok(());
+        }
+        let take = sh.tx_out.len().min(READ_CHUNK);
+        match stream.write(&sh.tx_out[..take]) {
+            Ok(0) => return Err(()),
             Ok(n) => {
-                let mut sh = lock(shared);
                 sh.tx_out.drain(..n);
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => return Err(()),
         }
     }
@@ -1298,6 +1308,40 @@ mod tests {
                 "iteration {iteration}: staged {bytes} bytes"
             );
         }
+    }
+
+    #[test]
+    fn frame_decoder_handles_fragmentation_jumbo_and_empty_frames() {
+        let shared = Arc::new(Mutex::new(Shared {
+            snapshot_paused: false,
+            config_pending: false,
+            mem: None,
+            interrupt: None,
+            queues: vec![None, None],
+            link_up: true,
+            rx: RxRead::Idle,
+            rx_pending: VecDeque::new(),
+            tx_out: vec![],
+        }));
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let jumbo: Vec<u8> = (0..MAX_FRAME).map(|i| (i % 251) as u8).collect();
+        let frames = [Vec::new(), jumbo, b"following frame".to_vec()];
+        let mut bytes = Vec::new();
+        for frame in &frames {
+            bytes.extend_from_slice(&(frame.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(frame);
+        }
+        for chunk in bytes.chunks(1023) {
+            sender.write_all(chunk).unwrap();
+            read_frames(&shared, &mut receiver).unwrap();
+        }
+        let state = lock(&shared);
+        assert!(matches!(state.rx, RxRead::Idle));
+        assert_eq!(
+            state.rx_pending.iter().collect::<Vec<_>>(),
+            frames.iter().collect::<Vec<_>>()
+        );
     }
 
     #[test]

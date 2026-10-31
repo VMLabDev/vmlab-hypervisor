@@ -214,6 +214,7 @@ impl DeviceFactory for TestFactory {
             irq,
         )));
         Ok(BuiltSerial {
+            clock: Some(dev.clone()),
             device: dev.clone(),
             snapshot: Some(dev),
         })
@@ -403,6 +404,9 @@ fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
         vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
+        cpu_model: None,
+        floppy: None,
+        serial_log_port: Default::default(),
         hyperv: vec![],
         display: None,
         tablet: None,

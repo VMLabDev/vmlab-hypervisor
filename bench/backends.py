@@ -210,15 +210,17 @@ class QemuBackend:
     def release_cpus(self):
         """QMP cont, like vmlab releases the paused VM right after connect."""
         _wait_socket(self.qmp_sock, self.session, 120, "qmp")
+        last_error = None
         for _ in range(20):
             try:
                 lib.qmp_cont(self.qmp_sock)
                 return
-            except Exception:
+            except Exception as error:
+                last_error = error
                 if self.session.exited():
                     _raise_launch_failure(self.session, "qmp")
                 time.sleep(0.5)
-        raise lib.BenchError(f"QMP cont never succeeded: {self.qmp_sock}")
+        raise lib.BenchError(f"QMP cont never succeeded: {self.qmp_sock}: {last_error}")
 
     def agent_socket(self):
         return self.agent_sock

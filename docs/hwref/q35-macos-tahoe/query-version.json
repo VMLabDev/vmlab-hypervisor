@@ -1,0 +1,8 @@
+{
+  "package": "",
+  "qemu": {
+    "major": 11,
+    "micro": 2,
+    "minor": 1
+  }
+}

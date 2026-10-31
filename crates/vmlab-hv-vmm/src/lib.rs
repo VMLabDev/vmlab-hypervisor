@@ -1,6 +1,7 @@
 //! The KVM virtual machine: guest memory, vCPU threads, the I/O buses, the
 //! machine model, the control server and snapshot orchestration.
 
+pub mod a20;
 pub mod acpi;
 pub mod audio;
 pub mod builder;
@@ -19,6 +20,7 @@ pub mod kvm;
 pub mod layout;
 pub mod loader;
 pub mod memory;
+pub mod pc;
 pub mod pci;
 pub mod pm;
 pub mod q35;

@@ -1,0 +1,204 @@
+["exec", "dos", "--", "echo capture-ready"]
+Bad command or filename - "echo capture-ready".
+
+exit=0
+["vm", "screenshot", "dos", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/dos-r2/desktop.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/dos-r2/desktop.png
+
+exit=0
+["vm", "sendkeys", "dos", "a"]
+
+exit=0
+["vm", "sendkeys", "dos", "backspace"]
+
+exit=0
+["vm", "mouse-move", "dos", "300", "200"]
+
+exit=0
+["exec", "dos", "--", "D:\\DOSTEST.EXE"]
+Bad command or filename - "D:\DOSTEST.EXE".
+
+exit=0
+["exec", "dos", "--", "echo", "capture-ready"]
+capture-ready
+
+exit=0
+["exec", "dos", "--", "dir", "C:\\"]
+ Volume in drive C is FREEDOS2022
+ Volume Serial Number is 380B-0F1E
+ Directory of C:\
+
+APPS                 <DIR>  10-06-2026  8:02a
+FREEDOS              <DIR>  10-06-2026  7:53a
+GAMES                <DIR>  10-06-2026  7:55a
+NET                  <DIR>  10-06-2026  7:55a
+PGME                 <DIR>  10-06-2026  8:05a
+UTIL                 <DIR>  10-06-2026  8:02a
+VMLAB                <DIR>  10-06-2026  8:07a
+COMMAND  COM        85,480  07-10-2021  7:28p
+FDAUTO   BAT         1,965  10-06-2026  8:07a
+FDCONFIG SYS           872  10-06-2026  8:06a
+KERNEL   SYS        46,256  02-20-2022  7:16a
+         4 file(s)        134,573 bytes
+         7 dir(s)   1,888,157,696 bytes free
+
+exit=0
+["exec", "dos", "--", "dir", "C:\\FDOS\\BIN\\*NET*"]
+ Volume in drive C is FREEDOS2022
+ Volume Serial Number is 380B-0F1E
+File not found.
+
+exit=2
+["exec", "dos", "--", "dir", "D:\\"]
+ Volume in drive D is HWREF
+ Directory of D:\
+
+HWREF    EXE        33,792  10-31-2026 10:21a
+HWREF    TXT            48  10-31-2026 10:20a
+         2 file(s)         33,840 bytes
+         0 dir(s)               0 bytes free
+
+exit=0
+["exec", "dos", "--", "dir", "E:\\"]
+Invalid drive E:.
+
+exit=1
+["exec", "dos", "--", "type", "C:\\FDAUTO.BAT"]
+@ECHO OFF
+REM Standard AutoExec Batch File
+
+set DOSDRV=C:
+set DOSDIR=C:\FreeDOS
+set LANG=EN
+set TZ=EST
+set PATH=%dosdir%\BIN
+if exist %dosdir%\LINKS\NUL set PATH=%path%;%dosdir%\LINKS
+set NLSPATH=%dosdir%\NLS
+set HELPPATH=%dosdir%\HELP
+set TEMP=%dosdir%\TEMP
+set TMP=%TEMP%
+set BLASTER=A220 I5 D1 H5 P330
+set DIRCMD=/P /OGN /Y
+set COPYCMD=/-Y
+set OS_NAME=FreeDOS
+set OS_VERSION=1.3
+set autofile=C:\FDAUTO.BAT
+set cfgfile=C:\FDCONFIG.SYS
+alias cfg=edit %cfgfile%
+alias auto=edit %autofile%
+alias reboot=fdapm warmboot
+alias reset=fdisk /reboot
+alias halt=fdapm poweroff
+alias shutdown=fdapm poweroff
+
+if "%config%"=="5" goto END
+
+if not exist %dosdir%\bin\vinfo.com goto Only8086
+vinfo /m
+if errorlevel 3 goto Support386
+if errorlevel 2 goto Support286
+
+:Only8086
+MEM /C /N
+goto FINAL
+
+:Support286
+FDAPM APMDOS
+CTMOUSE
+MEM /C /N
+goto FINAL
+
+:Support386
+
+rem codepage settings
+REM NLSFUNC %dosdir%\BIN\COUNTRY.SYS
+REM DISPLAY CON=(EGA),858,2)
+REM MODE CON CP PREP=((858) %dosdir%\CPI\EGA.CPX)
+REM KEYB US,858,%dosdir%\bin\keyboard.sys
+REM CHCP 858
+REM MKEYB UK
+rem keyboard settings
+
+
+if "%config%"=="4" goto Support386Low
+
+LH FDAPM APMDOS
+rem LH SHARE
+
+rem if EXIST %DOSDIR%\BIN\DOSLFN.COM goto UseLFN
+goto NoLFN
+:UseLFN
+LH %DOSDIR%\BIN\DOSLFN.COM
+set DIRCMD=%DIRCMD% /LFN
+:NoLFN
+
+CTMOUSE
+goto InitCDROM
+
+:Support386Low
+FDAPM APMDOS
+CTMOUSE
+
+:InitCDROM
+if not exist %dosdir%\bin\cdrom.bat FINAL
+echo.
+call %dosdir%\bin\cdrom.bat
+
+:FINAL
+MEM /C /N
+echo.
+if not exist %dosdir%\bin\fdnet.bat goto NoNetwork
+call %dosdir%\bin\fdnet.bat start
+if errorlevel 1 goto NoNetwork
+REM Custom networking stuff once packet driver has loaded
+
+:NoNetwork
+
+if exist %dosdir%\bin\fdassist.bat call %dosdir%\bin\fdassist.bat
+if exist %dosdir%\bin\cdrom.bat call %dosdir%\bin\cdrom.bat display
+if exist %dosdir%\bin\welcome.bat call %dosdir%\bin\welcome.bat
+
+:END
+
+C:\VMLAB\VMLABAGT.EXE
+
+exit=0
+["exec", "dos", "--", "dir", "D:\\"]
+ Volume in drive D is HWREF
+ Directory of D:\
+
+HWREF    EXE        33,792  10-31-2026 10:21a
+HWREF    TXT            48  10-31-2026 10:20a
+         2 file(s)         33,840 bytes
+         0 dir(s)               0 bytes free
+
+exit=0
+["exec", "dos", "--", "dir", "C:\\NET\\*PC*", "/s", "/b"]
+C:\NET\FDNET
+C:\NET\MTCP
+C:\NET\TERMINAL
+C:\NET\FDNET\CHANGES
+C:\NET\FDNET\LICENSE
+C:\NET\MTCP\MANUAL
+C:\NET\MTCP\SAMPLES
+
+exit=0
+["exec", "dos", "--", "dir", "D:\\"]
+dos: agent did not open the channel in time
+
+exit=1
+["exec", "dos", "--", "D:\\DOSTEST.EXE"]
+dos: no vmlab-agent answered on the agent channel — the guest's vmlab-agent answered earlier but does not now — the guest may be rebooting or shutting down; retry once it is back
+
+exit=1
+["exec", "dos", "--", "dir", "C:\\NET\\FDNET", "/s", "/b"]
+dos: the guest's vmlab-agent answered earlier but does not now — the guest may be rebooting or shutting down; retry once it is back
+
+exit=1
+["vm", "screenshot", "dos", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/dos-r2/media-change.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/dos-r2/media-change.png
+
+exit=0
+["vm", "sendkeys", "dos", "ctrl-c"]
+
+exit=0

@@ -10,7 +10,8 @@ mod snapshot;
 use self::refcount::FreeClusters;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use crate::{DiskImage, Error, Format, Result, SnapshotInfo};
@@ -28,6 +29,28 @@ const EXT_BACKING_FORMAT: u32 = 0xe279_2aca;
 const EXT_END: u32 = 0;
 
 const MAX_BACKING_DEPTH: usize = 8;
+
+#[derive(Clone, Copy, PartialEq)]
+enum ReadSource {
+    Backing,
+    Zero,
+    File(u64),
+    Compressed(u64),
+}
+
+impl ReadSource {
+    fn from_entry(entry: u64, in_cluster: u64) -> Self {
+        if entry & COMPRESSED_BIT != 0 {
+            Self::Compressed(entry)
+        } else if entry & ZERO_BIT != 0 {
+            Self::Zero
+        } else if entry & OFFSET_MASK == 0 {
+            Self::Backing
+        } else {
+            Self::File((entry & OFFSET_MASK) + in_cluster)
+        }
+    }
+}
 
 /// Cluster-keyed write-back cache (L2 tables, refcount blocks) with a
 /// simple LRU eviction. `key` is the host offset for L2 tables and the
@@ -470,8 +493,7 @@ impl Qcow2Image {
     // ----- low-level file IO -----
 
     fn read_file(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_exact(buf)?;
+        self.file.read_exact_at(buf, offset)?;
         Ok(())
     }
 
@@ -479,8 +501,7 @@ impl Qcow2Image {
         if self.read_only {
             return Err(Error::ReadOnly);
         }
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(buf)?;
+        self.file.write_all_at(buf, offset)?;
         Ok(())
     }
 
@@ -599,53 +620,102 @@ impl Qcow2Image {
         Ok(())
     }
 
+    /// Coalesce mappings within one L2 table without crossing a source change.
+    fn read_extent(&mut self, offset: u64, max_len: usize) -> Result<(ReadSource, usize)> {
+        let l1 = self
+            .l1
+            .get(self.l1_index_of(offset) as usize)
+            .copied()
+            .unwrap_or(0);
+        let l2_host = l1 & OFFSET_MASK;
+        if l2_host == 0 {
+            let len = max_len.min((self.l2_span() - offset % self.l2_span()) as usize);
+            return Ok((ReadSource::Backing, len));
+        }
+        let cluster_size = self.cluster_size;
+        let in_cluster = offset % cluster_size;
+        let index = self.l2_index_of(offset) as usize;
+        self.load_l2(l2_host)?;
+        let (table, _) = self.l2_cache.get(l2_host).expect("just cached");
+        let entries = table.as_chunks::<8>().0;
+        let source = ReadSource::from_entry(u64::from_be_bytes(entries[index]), in_cluster);
+        let mut len = max_len.min((cluster_size - in_cluster) as usize);
+        if !matches!(source, ReadSource::Compressed(_)) {
+            for entry in &entries[index + 1..] {
+                if len == max_len {
+                    break;
+                }
+                let next = ReadSource::from_entry(u64::from_be_bytes(*entry), 0);
+                let adjacent = match (source, next) {
+                    (ReadSource::File(start), ReadSource::File(next)) => next == start + len as u64,
+                    (ReadSource::Backing, ReadSource::Backing)
+                    | (ReadSource::Zero, ReadSource::Zero) => true,
+                    _ => false,
+                };
+                if !adjacent {
+                    break;
+                }
+                len += (max_len - len).min(cluster_size as usize);
+            }
+        }
+        Ok((source, len))
+    }
+
     fn read_bytes(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        let mut done = 0usize;
+        let mut done = 0;
         while done < buf.len() {
             let abs = offset + done as u64;
-            let cluster_off = abs & !(self.cluster_size - 1);
-            let in_off = abs % self.cluster_size;
-            let take = ((self.cluster_size - in_off) as usize).min(buf.len() - done);
-            let l1_index = self.l1_index_of(cluster_off) as usize;
-            let l2_index = self.l2_index_of(cluster_off);
-            let l1e = match self.l1.get(l1_index) {
-                Some(e) => *e,
-                None => {
-                    // Beyond L1 coverage: unallocated semantics.
-                    self.read_unallocated(abs, &mut buf[done..done + take])?;
-                    done += take;
-                    continue;
+            let (source, len) = self.read_extent(abs, buf.len() - done)?;
+            let out = &mut buf[done..done + len];
+            match source {
+                ReadSource::Backing => self.read_unallocated(abs, out)?,
+                ReadSource::Zero => out.fill(0),
+                ReadSource::File(host) => self.read_file(host, out)?,
+                ReadSource::Compressed(entry) => {
+                    let mut cluster = vec![0; self.cluster_size as usize];
+                    self.read_compressed_cluster(entry, &mut cluster)?;
+                    let start = (abs % self.cluster_size) as usize;
+                    out.copy_from_slice(&cluster[start..start + len]);
                 }
-            };
-            let l2_host = l1e & OFFSET_MASK;
-            if l2_host == 0 {
-                self.read_unallocated(abs, &mut buf[done..done + take])?;
-                done += take;
-                continue;
             }
-            let entry = self.l2_entry(l2_host, l2_index)?;
-            if entry & COMPRESSED_BIT != 0 {
-                let mut cluster = vec![0u8; self.cluster_size as usize];
-                self.read_compressed_cluster(entry, &mut cluster)?;
-                buf[done..done + take]
-                    .copy_from_slice(&cluster[in_off as usize..in_off as usize + take]);
-                done += take;
-                continue;
+            done += len;
+        }
+        Ok(())
+    }
+
+    fn read_target(
+        &mut self,
+        offset: u64,
+        len: usize,
+        target: &mut dyn crate::ReadTarget,
+    ) -> Result<()> {
+        let mut done = 0;
+        while done < len {
+            let abs = offset + done as u64;
+            let (source, count) = self.read_extent(abs, len - done)?;
+            match source {
+                ReadSource::File(host) => target.read_file(&self.file, host, count)?,
+                ReadSource::Zero => target.zero(count)?,
+                ReadSource::Backing => {
+                    let backed = self.backing_image.as_ref().map_or(0, |image| {
+                        image.size().saturating_sub(abs).min(count as u64) as usize
+                    });
+                    if backed != 0 {
+                        self.backing_image
+                            .as_mut()
+                            .unwrap()
+                            .read_into(abs, backed, target)?;
+                    }
+                    target.zero(count - backed)?;
+                }
+                ReadSource::Compressed(entry) => {
+                    let mut cluster = vec![0; self.cluster_size as usize];
+                    self.read_compressed_cluster(entry, &mut cluster)?;
+                    let start = (abs % self.cluster_size) as usize;
+                    target.write_all(&cluster[start..start + count])?;
+                }
             }
-            let host = entry & OFFSET_MASK;
-            if entry & ZERO_BIT != 0 {
-                // Zero-flagged cluster: reads as zeros even with a backing
-                // file (preallocated-zero descriptors included).
-                buf[done..done + take].fill(0);
-                done += take;
-            } else if host == 0 {
-                // Unallocated: read through the backing chain.
-                self.read_unallocated(abs, &mut buf[done..done + take])?;
-                done += take;
-            } else {
-                self.read_file(host + in_off, &mut buf[done..done + take])?;
-                done += take;
-            }
+            done += count;
         }
         Ok(())
     }
@@ -1101,6 +1171,16 @@ impl DiskImage for Qcow2Image {
         self.read_bytes(offset, buf)
     }
 
+    fn read_into(
+        &mut self,
+        offset: u64,
+        len: usize,
+        target: &mut dyn crate::ReadTarget,
+    ) -> Result<()> {
+        crate::check_read(offset, len, self.size)?;
+        self.read_target(offset, len, target)
+    }
+
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<()> {
         self.check_writable()?;
         let end = offset
@@ -1250,6 +1330,22 @@ pub(crate) fn probe_format(path: &Path) -> Result<Format> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_extents_coalesce_adjacent_clusters_and_stop_at_holes() {
+        let (_dir, mut img) = testsupport::blank(4 << 20);
+        let (source, len) = img.read_extent(512, 1 << 20).unwrap();
+        assert!(matches!(source, ReadSource::Backing));
+        assert_eq!(len, 1 << 20);
+        let cluster = img.cluster_size as usize;
+        img.write_at(0, &vec![0x37; cluster * 2]).unwrap();
+        let (source, len) = img.read_extent(512, cluster * 3).unwrap();
+        assert!(matches!(source, ReadSource::File(_)));
+        assert_eq!(len, cluster * 2 - 512);
+        let (source, len) = img.read_extent((cluster * 2) as u64, cluster * 2).unwrap();
+        assert!(matches!(source, ReadSource::Backing));
+        assert_eq!(len, cluster * 2);
+    }
 
     #[test]
     fn resolve_backing_relative_and_absolute() {

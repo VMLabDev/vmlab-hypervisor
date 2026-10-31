@@ -1,0 +1,14 @@
+{
+  "standalone_wcl_check": {
+    "command": "wcl check /tmp/maccap.8E3Qjc/vmlab.wcl --json",
+    "exit_code": 1,
+    "reason": "Standalone wcl has no registered system import for vmlab.wcl"
+  },
+  "vmlab_validate": {
+    "binary": "/home/wil/dev/vmlab/target/debug/vmlab",
+    "directory": "/tmp/maccap.8E3Qjc",
+    "exit_code": 0,
+    "stdout": "ok: lab \"hwref-macos-capture\" \u2014 1 vm(s), 0 container(s), 1 segment(s)\n",
+    "notes": "vmlab supplies its embedded schema and validates template and network semantics"
+  }
+}

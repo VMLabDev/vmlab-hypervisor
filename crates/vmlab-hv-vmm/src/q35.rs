@@ -51,6 +51,7 @@ pub struct Pam {
     smram: GuestMemoryMmap,
     smram_open: bool,
     isolated_smram: bool,
+    a20_enabled: bool,
 }
 
 impl Pam {
@@ -110,6 +111,7 @@ impl Pam {
             smram,
             smram_open: false,
             isolated_smram,
+            a20_enabled: true,
         };
         for bank in 0..13 {
             pam.map_bank(bank, false)?;
@@ -175,6 +177,55 @@ impl Pam {
             // page aligned, disjoint from RAM and the other PAM banks.
             unsafe { vm.set_user_memory_region(region) }
                 .map_err(|e| VmmError::ioctl("KVM_SET_USER_MEMORY_REGION(PAM)", e))?;
+        }
+        if !self.a20_enabled {
+            let alias = kvm_userspace_memory_region {
+                slot: self.first_slot + 40 + index as u32,
+                guest_phys_addr: base + (1 << 20),
+                ..region
+            };
+            if replace {
+                // SAFETY: removing the alias preserves both retained backings.
+                unsafe {
+                    vm.set_user_memory_region(kvm_userspace_memory_region {
+                        memory_size: 0,
+                        ..alias
+                    })
+                }
+                .map_err(|e| VmmError::ioctl("KVM_SET_USER_MEMORY_REGION(remove A20 PAM)", e))?;
+            }
+            // SAFETY: the alias has identical lifetime and permissions to PAM.
+            unsafe { vm.set_user_memory_region(alias) }
+                .map_err(|e| VmmError::ioctl("KVM_SET_USER_MEMORY_REGION(A20 PAM)", e))?;
+        }
+        Ok(())
+    }
+
+    pub fn set_a20(&mut self, enabled: bool) -> Result<(), VmmError> {
+        if enabled == self.a20_enabled {
+            return Ok(());
+        }
+        self.a20_enabled = enabled;
+        if enabled {
+            if let Some(vm) = &self.vm {
+                for index in 0..13 {
+                    // SAFETY: removing slots leaves their backing owned by Pam.
+                    unsafe {
+                        vm.set_user_memory_region(kvm_userspace_memory_region {
+                            slot: self.first_slot + 40 + index,
+                            memory_size: 0,
+                            ..Default::default()
+                        })
+                    }
+                    .map_err(|e| {
+                        VmmError::ioctl("KVM_SET_USER_MEMORY_REGION(remove A20 PAM)", e)
+                    })?;
+                }
+            }
+        } else {
+            for index in 0..13 {
+                self.map_bank(index, false)?;
+            }
         }
         Ok(())
     }
@@ -266,6 +317,7 @@ pub struct Mch {
     /// this latch immediately after configuration writes.
     pub error: Option<String>,
     smm: Option<SmmWiring>,
+    pc: bool,
 }
 
 impl Mch {
@@ -282,6 +334,31 @@ impl Mch {
             pam,
             error: None,
             smm: None,
+            pc: false,
+        }
+    }
+
+    pub fn i440fx(pam: Arc<Mutex<Pam>>, ram_bytes: u64) -> Self {
+        let mut bridge = Self::new(pam);
+        bridge.config.fill(0);
+        bridge.config[..4].copy_from_slice(&0x1237_8086u32.to_le_bytes());
+        bridge.config[8] = 2;
+        bridge.config[0xb] = 6;
+        bridge.config[0x2c..0x30].copy_from_slice(&0x1100_1af4u32.to_le_bytes());
+        bridge.config[0x72] = 2;
+        bridge.config[0x57] = (ram_bytes / (8 << 20)).min(255) as u8;
+        bridge.pc = true;
+        bridge
+    }
+
+    fn update_pam(&mut self) -> Result<(), VmmError> {
+        if self.pc {
+            let mut config = [0; 4096];
+            config[0x90..0x97].copy_from_slice(&self.config[0x59..0x60]);
+            config[0x9d] = self.config[0x72];
+            self.pam.lock().update(&config)
+        } else {
+            self.pam.lock().update(&self.config)
         }
     }
 
@@ -296,6 +373,9 @@ impl Mch {
 
     /// PCIEXBAR enable, base and length (256/128/64 MiB encodings).
     pub fn ecam_window(&self) -> Option<(u64, u64)> {
+        if self.pc {
+            return None;
+        }
         let value = u64::from_le_bytes(self.config[0x60..0x68].try_into().unwrap());
         if value & 1 == 0 {
             return None;
@@ -347,26 +427,35 @@ impl PciDevice for Mch {
                     continue;
                 }
             }
-            let mask = match pos {
-                4 => 0x07,
-                5 => 0x05,
-                0x3c => 0xff,
-                0x52 => 0xff,
-                0x60 => 0x07,
-                0x63 => 0xfc,
-                0x64 => 0x0f,
-                0x90 => 0x30,
-                0x91..=0x96 => 0x33,
-                0x9d => 0x7f,
-                0x9e => 0x07,
-                0xa0..=0xb1 => 0xff,
-                _ => 0,
+            let mask = if self.pc {
+                match pos {
+                    4 => 0x07,
+                    5 => 0x05,
+                    0x0c | 0x3c | 0x40..=0xff => 0xff,
+                    _ => 0,
+                }
+            } else {
+                match pos {
+                    4 => 0x07,
+                    5 => 0x05,
+                    0x3c => 0xff,
+                    0x52 => 0xff,
+                    0x60 => 0x07,
+                    0x63 => 0xfc,
+                    0x64 => 0x0f,
+                    0x90 => 0x30,
+                    0x91..=0x96 => 0x33,
+                    0x9d => 0x7f,
+                    0x9e => 0x07,
+                    0xa0..=0xb1 => 0xff,
+                    _ => 0,
+                }
             };
             if pos < self.config.len() {
                 self.config[pos] = (self.config[pos] & !mask) | (byte & mask);
             }
         }
-        if let Err(e) = self.pam.lock().update(&self.config) {
+        if let Err(e) = self.update_pam() {
             self.error = Some(e.to_string());
         }
     }
@@ -381,7 +470,7 @@ impl PciDevice for Mch {
 
 impl Snapshot for Mch {
     fn state_id(&self) -> String {
-        "q35-mch".into()
+        if self.pc { "i440fx" } else { "q35-mch" }.into()
     }
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
         let mut bytes = self.config.to_vec();
@@ -398,11 +487,12 @@ impl Snapshot for Mch {
             return Err(DeviceError::State("invalid MCH state length".into()));
         }
         self.config.copy_from_slice(&bytes[..4096]);
-        let mut pam = self.pam.lock();
+        let pam = self.pam.lock();
         pam.shadow
             .write_slice(&bytes[4096..], GuestAddress(ALIAS))
             .map_err(|e| DeviceError::Memory(e.to_string()))?;
-        pam.update(&self.config)
+        drop(pam);
+        self.update_pam()
             .map_err(|e| DeviceError::State(e.to_string()))
     }
 }
@@ -475,6 +565,7 @@ pub fn intx_gsi(slot: u8, pin: u8) -> Option<u32> {
 /// Level aggregation for shared PIRQ inputs. IOAPIC routing is fixed at
 /// 16..23; LPC routing bytes independently select the legacy PIC input.
 pub struct PirqRouter {
+    pc: bool,
     outputs: [Arc<dyn vmlab_hv_devices::IrqLine>; 24],
     routes: [u8; 8],
     sources: std::collections::BTreeMap<(u8, u8, u8), bool>,
@@ -484,11 +575,18 @@ pub struct PirqRouter {
 impl PirqRouter {
     pub fn new(outputs: [Arc<dyn vmlab_hv_devices::IrqLine>; 24]) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
+            pc: false,
             outputs,
             routes: [0x80; 8],
             sources: Default::default(),
             levels: [false; 24],
         }))
+    }
+
+    pub fn pc(outputs: [Arc<dyn vmlab_hv_devices::IrqLine>; 24]) -> Arc<Mutex<Self>> {
+        let router = Self::new(outputs);
+        router.lock().pc = true;
+        router
     }
 
     /// Called by the LPC when PIRQ A-D (0x60..63) or E-H (0x68..6b) change.
@@ -519,8 +617,14 @@ impl PirqRouter {
             if !active {
                 continue;
             }
-            let p = pirq(slot, pin).unwrap() as usize;
-            levels[16 + p] = true;
+            let p = if self.pc {
+                ((slot.wrapping_add(pin).wrapping_sub(2)) & 3) as usize
+            } else {
+                pirq(slot, pin).unwrap() as usize
+            };
+            if !self.pc {
+                levels[16 + p] = true;
+            }
             let route = self.routes[p];
             if route & 0x80 == 0 && matches!(route & 15, 3..=7 | 9..=12 | 14..=15) {
                 levels[(route & 15) as usize] = true;
@@ -555,6 +659,115 @@ mod tests {
     fn mch() -> Mch {
         let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
         Mch::new(Arc::new(Mutex::new(pam)))
+    }
+
+    fn captured_i440fx_config() -> Vec<u8> {
+        let capture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/hwref/pc-chipset-reset.json"))
+                .unwrap();
+        let hex = capture["chipset_reset_config_hex"]["00.0"]
+            .as_str()
+            .unwrap();
+        decode_config(hex)
+    }
+
+    fn decode_config(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len(), 512);
+        hex.as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|byte| u8::from_str_radix(std::str::from_utf8(byte).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn assert_i440fx_config(bridge: &mut Mch, expected: &[u8]) {
+        for (reg, bytes) in expected.as_chunks::<4>().0.iter().enumerate() {
+            assert_eq!(
+                bridge.config_read(reg),
+                u32::from_le_bytes(*bytes),
+                "i440fx configuration offset {:#04x}",
+                reg * 4
+            );
+        }
+    }
+
+    #[test]
+    fn i440fx_complete_reset_config_matches_qtest_and_restores() {
+        let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
+        let mut bridge = Mch::i440fx(Arc::new(Mutex::new(pam)), 128 << 20);
+        let expected = captured_i440fx_config();
+        assert_i440fx_config(&mut bridge, &expected);
+        let reset_state = bridge.save_state().unwrap();
+        for reg in 0..64 {
+            bridge.config_write(reg, 0, &[0xff; 4]);
+        }
+        assert_ne!(bridge.config[..256], expected);
+        assert!(bridge.error.is_none());
+        bridge.restore_state(&reset_state).unwrap();
+        assert_i440fx_config(&mut bridge, &expected);
+        assert!(bridge.error.is_none());
+        assert_eq!(bridge.ecam_window(), None);
+    }
+
+    #[test]
+    fn i440fx_complete_config_write_replay_matches_qtest() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/hwref/pc-chipset-write-masks.json"
+        ))
+        .unwrap();
+        let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
+        let mut bridge = Mch::i440fx(Arc::new(Mutex::new(pam)), 128 << 20);
+        let mut phases = 0;
+        let mut differences = Vec::new();
+        for phase in capture["chipset_config_write_replay"].as_array().unwrap() {
+            if phase["bdf"] != "00.0" {
+                continue;
+            }
+            let value = u32::try_from(phase["written_dword"].as_u64().unwrap()).unwrap();
+            for reg in 0..64 {
+                bridge.config_write(reg, 0, &value.to_le_bytes());
+            }
+            let expected = decode_config(phase["config_hex"].as_str().unwrap());
+            for (offset, expected) in expected.iter().enumerate() {
+                let actual = (bridge.config_read(offset / 4) >> (offset % 4 * 8)) as u8;
+                if actual != *expected {
+                    differences.push(format!(
+                        "written {value:08x}, offset {offset:02x}: {actual:02x} != {expected:02x}"
+                    ));
+                }
+            }
+            assert!(bridge.error.is_none());
+            phases += 1;
+        }
+        assert_eq!(phases, 2);
+        assert!(differences.is_empty(), "{}", differences.join("\n"));
+    }
+
+    #[test]
+    fn i440fx_has_legacy_pam_offsets_and_writable_smram() {
+        let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
+        let mut bridge = Mch::i440fx(Arc::new(Mutex::new(pam)), 256 << 20);
+        assert_eq!(bridge.config_read(0), 0x1237_8086);
+        assert_eq!(bridge.config_read(1), 0);
+        assert_eq!(bridge.config_read(2), 0x0600_0002);
+        assert_eq!(bridge.config[0x57], 0x20);
+        bridge.config_write(0x58 / 4, 1, &[0x30]);
+        bridge.pam.lock().write(0x30000, &[0x42]);
+        let mut byte = [0];
+        bridge.pam.lock().read(0x30000, &mut byte);
+        assert_eq!(byte, [0x42]);
+        let state = bridge.save_state().unwrap();
+        bridge.config_write(0x70 / 4, 2, &[0x58]);
+        assert_eq!(bridge.config[0x72], 0x58);
+        assert!(bridge.pam.lock().smram_open);
+        bridge.config_write(0x70 / 4, 2, &[0x40]);
+        assert_eq!(bridge.config[0x72], 0x40);
+        assert!(bridge.pam.lock().smram_open);
+        bridge.restore_state(&state).unwrap();
+        assert_eq!(bridge.config[0x72], 2);
+        assert!(!bridge.pam.lock().smram_open);
+        assert_eq!(bridge.ecam_window(), None);
     }
 
     #[test]

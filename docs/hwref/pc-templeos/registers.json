@@ -1,0 +1,5810 @@
+{
+  "rtc-index|0x70|write|1": {
+    "count": 1375,
+    "values": [
+      "0x8f",
+      "0xb8",
+      "0xbd",
+      "0x88",
+      "0xdf",
+      "0x0",
+      "0x8a",
+      "0x8b",
+      "0x8c",
+      "0x8d",
+      "0x80",
+      "0x82",
+      "0x84",
+      "0xb2",
+      "0x90",
+      "0xb9",
+      "0xa",
+      "0x2",
+      "0x4",
+      "0x6",
+      "0x7",
+      "0x8",
+      "0x9",
+      "0xb"
+    ],
+    "values_truncated": false,
+    "first_line": 15
+  },
+  "rtc|0x71|read|1": {
+    "count": 1373,
+    "values": [
+      "0x0",
+      "0x30",
+      "0x12",
+      "0x10",
+      "0x1",
+      "0x2",
+      "0x80",
+      "0x26",
+      "0x32",
+      "0x20",
+      "0x50",
+      "0x7",
+      "0x31",
+      "0x40",
+      "0x43",
+      "0x47",
+      "0x51",
+      "0x55",
+      "0x59",
+      "0x33",
+      "0x5",
+      "0x8",
+      "0x14",
+      "0x18",
+      "0x22",
+      "0x35",
+      "0x37",
+      "0x39",
+      "0x42",
+      "0x44",
+      "0x46",
+      "0x48",
+      "0x49",
+      "0x52",
+      "0x53",
+      "0x54",
+      "0x56",
+      "0x57",
+      "0x58",
+      "0x34",
+      "0x3",
+      "0x4",
+      "0x6",
+      "0x9",
+      "0x11",
+      "0x13",
+      "0x15",
+      "0x16",
+      "0x19",
+      "0x21",
+      "0x23",
+      "0x24",
+      "0x25",
+      "0x27",
+      "0x28",
+      "0x29",
+      "0x36",
+      "0x38",
+      "0x41",
+      "0x45",
+      "0x17"
+    ],
+    "values_truncated": false,
+    "first_line": 17
+  },
+  "port92|0x92|read|1": {
+    "count": 6033,
+    "values": [
+      "0x0",
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 18
+  },
+  "port92|0x92|write|1": {
+    "count": 3,
+    "values": [
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 19
+  },
+  "pci-conf-idx|0xcf8|write|4": {
+    "count": 430,
+    "values": [
+      "0x80000000",
+      "0x80000058",
+      "0x8000005c",
+      "0x8000002c",
+      "0x80000008",
+      "0x8000000c",
+      "0x80000800",
+      "0x80000808",
+      "0x8000080c",
+      "0x80000900",
+      "0x80000908",
+      "0x80000a00",
+      "0x80000a08",
+      "0x80000b00",
+      "0x80000b08",
+      "0x80000c00",
+      "0x80000d00",
+      "0x80000e00",
+      "0x80000f00",
+      "0x80001000",
+      "0x80001008",
+      "0x8000100c",
+      "0x80001800",
+      "0x80002000",
+      "0x80002800",
+      "0x80003000",
+      "0x80003800",
+      "0x80004000",
+      "0x80004800",
+      "0x80005000",
+      "0x80005800",
+      "0x80006000",
+      "0x80006800",
+      "0x80007000",
+      "0x80007800",
+      "0x80008000",
+      "0x80008800",
+      "0x80009000",
+      "0x80009800",
+      "0x8000a000",
+      "0x8000a800",
+      "0x8000b000",
+      "0x8000b800",
+      "0x8000c000",
+      "0x8000c800",
+      "0x8000d000",
+      "0x8000d800",
+      "0x8000e000",
+      "0x8000e800",
+      "0x8000f000",
+      "0x8000f800",
+      "0x8000090c",
+      "0x80000a0c",
+      "0x80000b0c",
+      "0x80000010",
+      "0x80000014",
+      "0x80000018",
+      "0x8000001c",
+      "0x80000020",
+      "0x80000024",
+      "0x80000030",
+      "0x80000810",
+      "0x80000814",
+      "0x80000818",
+      "0x8000081c",
+      "0x80000820",
+      "0x80000824",
+      "0x80000830",
+      "0x80000910",
+      "0x80000914",
+      "0x80000918",
+      "0x8000091c",
+      "0x80000920",
+      "0x80000924",
+      "0x80000930",
+      "0x80000a10",
+      "0x80000a14",
+      "0x80000a18",
+      "0x80000a1c",
+      "0x80000a20",
+      "0x80000a24",
+      "0x80000a30",
+      "0x80000b10",
+      "0x80000b14",
+      "0x80000b18",
+      "0x80000b1c",
+      "0x80000b20",
+      "0x80000b24",
+      "0x80000b30",
+      "0x80001010",
+      "0x80001014",
+      "0x80001018",
+      "0x8000101c",
+      "0x80001020",
+      "0x80001024",
+      "0x80001030",
+      "0x8000003c",
+      "0x80000004",
+      "0x8000083c",
+      "0x80000860",
+      "0x80000804",
+      "0x8000093c",
+      "0x80000940",
+      "0x80000904",
+      "0x80000a3c",
+      "0x80000a04",
+      "0x80000b3c",
+      "0x80000b40",
+      "0x80000b80",
+      "0x80000b90",
+      "0x80000bd0",
+      "0x80000b04",
+      "0x8000103c",
+      "0x80001004",
+      "0x80000b58",
+      "0x80000070",
+      "0x80000ac0"
+    ],
+    "values_truncated": false,
+    "first_line": 20
+  },
+  "pci-conf-data|0xcfc|read|2": {
+    "count": 133,
+    "values": [
+      "0x8086",
+      "0x1af4",
+      "0xffffffff",
+      "0x1234",
+      "0x0",
+      "0x103"
+    ],
+    "values_truncated": false,
+    "first_line": 21
+  },
+  "pci-conf-data|0xcfc|read|4": {
+    "count": 115,
+    "values": [
+      "0x12378086",
+      "0x0",
+      "0x6000002",
+      "0x70008086",
+      "0x6010000",
+      "0x70108086",
+      "0x1018000",
+      "0x70208086",
+      "0xc030001",
+      "0x71138086",
+      "0x6800003",
+      "0x11111234",
+      "0x3000002",
+      "0x1",
+      "0xfffffff1",
+      "0xffffffe1",
+      "0x8",
+      "0xff000008",
+      "0xfffff000",
+      "0xffff0000",
+      "0xfebe0000",
+      "0xfebf0000",
+      "0xfd000008",
+      "0xc001",
+      "0x33333000",
+      "0x33333333"
+    ],
+    "values_truncated": false,
+    "first_line": 23
+  },
+  "pci-conf-data|0xcfd|read|1": {
+    "count": 13,
+    "values": [
+      "0x0",
+      "0x4",
+      "0x1"
+    ],
+    "values_truncated": false,
+    "first_line": 25
+  },
+  "pci-conf-data|0xcfc|write|4": {
+    "count": 107,
+    "values": [
+      "0x33333000",
+      "0x33333333",
+      "0xffffffff",
+      "0x0",
+      "0xfffff800",
+      "0x1",
+      "0x8",
+      "0xc000",
+      "0xc020",
+      "0xfebe0000",
+      "0xfebf0000",
+      "0xfd000000",
+      "0x601",
+      "0x701",
+      "0x2000000",
+      "0xfffffffe",
+      "0xfebe0001",
+      "0x11111000",
+      "0x31111111"
+    ],
+    "values_truncated": false,
+    "first_line": 31
+  },
+  "rtc|0x71|write|1": {
+    "count": 3,
+    "values": [
+      "0x0",
+      "0x26",
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 35
+  },
+  "pci-conf-data|0xcfe|read|2": {
+    "count": 17,
+    "values": [
+      "0x1237",
+      "0x1100",
+      "0x600",
+      "0x601",
+      "0x101",
+      "0xc03",
+      "0x680",
+      "0x300",
+      "0x7113",
+      "0x1111"
+    ],
+    "values_truncated": false,
+    "first_line": 40
+  },
+  "fwcfg|0x510|write|2": {
+    "count": 3,
+    "values": [
+      "0x0",
+      "0x1",
+      "0x25"
+    ],
+    "values_truncated": false,
+    "first_line": 45
+  },
+  "fwcfg|0x511|read|1": {
+    "count": 8,
+    "values": [
+      "0x51",
+      "0x45",
+      "0x4d",
+      "0x55",
+      "0x3",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 46
+  },
+  "fwcfg.dma|0x518|write|4": {
+    "count": 41,
+    "values": [
+      "0x6f3c",
+      "0x6d50",
+      "0x6d2c",
+      "0x6d48",
+      "0x6d5c",
+      "0x6d38",
+      "0x6d3c",
+      "0x6d34",
+      "0x6d4c",
+      "0x6d24",
+      "0x6a9c",
+      "0x6ddc"
+    ],
+    "values_truncated": false,
+    "first_line": 55
+  },
+  "dma-cont|0xd|write|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 95
+  },
+  "dma-cont|0xda|write|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 96
+  },
+  "dma-cont|0xd6|write|1": {
+    "count": 1,
+    "values": [
+      "0xc0"
+    ],
+    "values_truncated": false,
+    "first_line": 97
+  },
+  "dma-cont|0xd4|write|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 98
+  },
+  "pci-conf-idx|0xcf8|read|4": {
+    "count": 1,
+    "values": [
+      "0x80000000"
+    ],
+    "values_truncated": false,
+    "first_line": 100
+  },
+  "pci-conf-data|0xcfe|read|1": {
+    "count": 15,
+    "values": [
+      "0x0",
+      "0x80"
+    ],
+    "values_truncated": false,
+    "first_line": 106
+  },
+  "pci-conf-data|0xcfc|write|2": {
+    "count": 10,
+    "values": [
+      "0x103",
+      "0x8000",
+      "0x107",
+      "0x8f00"
+    ],
+    "values_truncated": false,
+    "first_line": 764
+  },
+  "pci-conf-data|0xcfc|write|1": {
+    "count": 5,
+    "values": [
+      "0xa",
+      "0xb",
+      "0x9",
+      "0x1"
+    ],
+    "values_truncated": false,
+    "first_line": 768
+  },
+  "pci-conf-data|0xcfd|write|1": {
+    "count": 1,
+    "values": [
+      "0xa"
+    ],
+    "values_truncated": false,
+    "first_line": 770
+  },
+  "pci-conf-data|0xcfe|write|1": {
+    "count": 4,
+    "values": [
+      "0xb",
+      "0x9",
+      "0x4a",
+      "0xa"
+    ],
+    "values_truncated": false,
+    "first_line": 772
+  },
+  "pci-conf-data|0xcff|write|1": {
+    "count": 1,
+    "values": [
+      "0xb"
+    ],
+    "values_truncated": false,
+    "first_line": 774
+  },
+  "pci-conf-data|0xcfe|write|2": {
+    "count": 1,
+    "values": [
+      "0x8000"
+    ],
+    "values_truncated": false,
+    "first_line": 784
+  },
+  "io|0x628|read|4": {
+    "count": 1,
+    "values": [
+      "0xffffffffffffffff"
+    ],
+    "values_truncated": false,
+    "first_line": 831
+  },
+  "io|0x628|write|4": {
+    "count": 1,
+    "values": [
+      "0xffffffff"
+    ],
+    "values_truncated": false,
+    "first_line": 832
+  },
+  "apm-io|0xb3|write|1": {
+    "count": 2,
+    "values": [
+      "0x1",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 833
+  },
+  "apm-io|0xb2|write|1": {
+    "count": 3,
+    "values": [
+      "0x0",
+      "0xb5"
+    ],
+    "values_truncated": false,
+    "first_line": 834
+  },
+  "apm-io|0xb2|read|1": {
+    "count": 3,
+    "values": [
+      "0x0",
+      "0xb5"
+    ],
+    "values_truncated": false,
+    "first_line": 835
+  },
+  "apm-io|0xb3|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 837
+  },
+  "rtc-index|0x70|read|1": {
+    "count": 6030,
+    "values": [
+      "0xff"
+    ],
+    "values_truncated": false,
+    "first_line": 859
+  },
+  "pci-conf-data|0xcfc|read|1": {
+    "count": 7,
+    "values": [
+      "0x0",
+      "0xb",
+      "0x9"
+    ],
+    "values_truncated": false,
+    "first_line": 863
+  },
+  "vga|0x3c2|write|1": {
+    "count": 3,
+    "values": [
+      "0xc3",
+      "0x67",
+      "0xe3"
+    ],
+    "values_truncated": false,
+    "first_line": 976
+  },
+  "vga|0x3c4|write|2": {
+    "count": 19,
+    "values": [
+      "0x204",
+      "0x300",
+      "0x1",
+      "0x302",
+      "0x3",
+      "0x100",
+      "0x402",
+      "0x704",
+      "0x304",
+      "0x101",
+      "0xf02",
+      "0x604"
+    ],
+    "values_truncated": false,
+    "first_line": 978
+  },
+  "vbe|0x1ce|write|2": {
+    "count": 11,
+    "values": [
+      "0x0",
+      "0xa",
+      "0x4",
+      "0x1",
+      "0x3"
+    ],
+    "values_truncated": false,
+    "first_line": 981
+  },
+  "vbe|0x1cf|write|2": {
+    "count": 6,
+    "values": [
+      "0xb0c0",
+      "0xb0c5",
+      "0x2",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 982
+  },
+  "vbe|0x1cf|read|2": {
+    "count": 5,
+    "values": [
+      "0xb0c0",
+      "0x100",
+      "0x0",
+      "0x3e80",
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 986
+  },
+  "edid|0xfebf0000|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1014
+  },
+  "edid|0xfebf0001|read|1": {
+    "count": 1,
+    "values": [
+      "0xff"
+    ],
+    "values_truncated": false,
+    "first_line": 1015
+  },
+  "edid|0xfebf0002|read|1": {
+    "count": 1,
+    "values": [
+      "0xff"
+    ],
+    "values_truncated": false,
+    "first_line": 1016
+  },
+  "edid|0xfebf0003|read|1": {
+    "count": 1,
+    "values": [
+      "0xff"
+    ],
+    "values_truncated": false,
+    "first_line": 1017
+  },
+  "edid|0xfebf0004|read|1": {
+    "count": 1,
+    "values": [
+      "0xff"
+    ],
+    "values_truncated": false,
+    "first_line": 1018
+  },
+  "edid|0xfebf0005|read|1": {
+    "count": 1,
+    "values": [
+      "0xff"
+    ],
+    "values_truncated": false,
+    "first_line": 1019
+  },
+  "edid|0xfebf0006|read|1": {
+    "count": 1,
+    "values": [
+      "0xff"
+    ],
+    "values_truncated": false,
+    "first_line": 1020
+  },
+  "edid|0xfebf0007|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1021
+  },
+  "edid|0xfebf0008|read|1": {
+    "count": 1,
+    "values": [
+      "0x49"
+    ],
+    "values_truncated": false,
+    "first_line": 1022
+  },
+  "edid|0xfebf0009|read|1": {
+    "count": 1,
+    "values": [
+      "0x14"
+    ],
+    "values_truncated": false,
+    "first_line": 1023
+  },
+  "edid|0xfebf000a|read|1": {
+    "count": 1,
+    "values": [
+      "0x34"
+    ],
+    "values_truncated": false,
+    "first_line": 1024
+  },
+  "edid|0xfebf000b|read|1": {
+    "count": 1,
+    "values": [
+      "0x12"
+    ],
+    "values_truncated": false,
+    "first_line": 1025
+  },
+  "edid|0xfebf000c|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1026
+  },
+  "edid|0xfebf000d|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1027
+  },
+  "edid|0xfebf000e|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1028
+  },
+  "edid|0xfebf000f|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1029
+  },
+  "edid|0xfebf0010|read|1": {
+    "count": 1,
+    "values": [
+      "0x2a"
+    ],
+    "values_truncated": false,
+    "first_line": 1030
+  },
+  "edid|0xfebf0011|read|1": {
+    "count": 1,
+    "values": [
+      "0x18"
+    ],
+    "values_truncated": false,
+    "first_line": 1031
+  },
+  "edid|0xfebf0012|read|1": {
+    "count": 1,
+    "values": [
+      "0x1"
+    ],
+    "values_truncated": false,
+    "first_line": 1032
+  },
+  "edid|0xfebf0013|read|1": {
+    "count": 1,
+    "values": [
+      "0x4"
+    ],
+    "values_truncated": false,
+    "first_line": 1033
+  },
+  "edid|0xfebf0014|read|1": {
+    "count": 1,
+    "values": [
+      "0xa5"
+    ],
+    "values_truncated": false,
+    "first_line": 1034
+  },
+  "edid|0xfebf0015|read|1": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 1035
+  },
+  "edid|0xfebf0016|read|1": {
+    "count": 1,
+    "values": [
+      "0x14"
+    ],
+    "values_truncated": false,
+    "first_line": 1036
+  },
+  "edid|0xfebf0017|read|1": {
+    "count": 1,
+    "values": [
+      "0x78"
+    ],
+    "values_truncated": false,
+    "first_line": 1037
+  },
+  "edid|0xfebf0018|read|1": {
+    "count": 1,
+    "values": [
+      "0x6"
+    ],
+    "values_truncated": false,
+    "first_line": 1038
+  },
+  "edid|0xfebf0019|read|1": {
+    "count": 1,
+    "values": [
+      "0xee"
+    ],
+    "values_truncated": false,
+    "first_line": 1039
+  },
+  "edid|0xfebf001a|read|1": {
+    "count": 1,
+    "values": [
+      "0x91"
+    ],
+    "values_truncated": false,
+    "first_line": 1040
+  },
+  "edid|0xfebf001b|read|1": {
+    "count": 1,
+    "values": [
+      "0xa3"
+    ],
+    "values_truncated": false,
+    "first_line": 1041
+  },
+  "edid|0xfebf001c|read|1": {
+    "count": 1,
+    "values": [
+      "0x54"
+    ],
+    "values_truncated": false,
+    "first_line": 1042
+  },
+  "edid|0xfebf001d|read|1": {
+    "count": 1,
+    "values": [
+      "0x4c"
+    ],
+    "values_truncated": false,
+    "first_line": 1043
+  },
+  "edid|0xfebf001e|read|1": {
+    "count": 1,
+    "values": [
+      "0x99"
+    ],
+    "values_truncated": false,
+    "first_line": 1044
+  },
+  "edid|0xfebf001f|read|1": {
+    "count": 1,
+    "values": [
+      "0x26"
+    ],
+    "values_truncated": false,
+    "first_line": 1045
+  },
+  "edid|0xfebf0020|read|1": {
+    "count": 1,
+    "values": [
+      "0xf"
+    ],
+    "values_truncated": false,
+    "first_line": 1046
+  },
+  "edid|0xfebf0021|read|1": {
+    "count": 1,
+    "values": [
+      "0x50"
+    ],
+    "values_truncated": false,
+    "first_line": 1047
+  },
+  "edid|0xfebf0022|read|1": {
+    "count": 1,
+    "values": [
+      "0x54"
+    ],
+    "values_truncated": false,
+    "first_line": 1048
+  },
+  "edid|0xfebf0023|read|1": {
+    "count": 1,
+    "values": [
+      "0x21"
+    ],
+    "values_truncated": false,
+    "first_line": 1049
+  },
+  "edid|0xfebf0024|read|1": {
+    "count": 1,
+    "values": [
+      "0x8"
+    ],
+    "values_truncated": false,
+    "first_line": 1050
+  },
+  "edid|0xfebf0025|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1051
+  },
+  "edid|0xfebf0026|read|1": {
+    "count": 1,
+    "values": [
+      "0xe1"
+    ],
+    "values_truncated": false,
+    "first_line": 1052
+  },
+  "edid|0xfebf0027|read|1": {
+    "count": 1,
+    "values": [
+      "0xc0"
+    ],
+    "values_truncated": false,
+    "first_line": 1053
+  },
+  "edid|0xfebf0028|read|1": {
+    "count": 1,
+    "values": [
+      "0xd1"
+    ],
+    "values_truncated": false,
+    "first_line": 1054
+  },
+  "edid|0xfebf0029|read|1": {
+    "count": 1,
+    "values": [
+      "0xc0"
+    ],
+    "values_truncated": false,
+    "first_line": 1055
+  },
+  "edid|0xfebf002a|read|1": {
+    "count": 1,
+    "values": [
+      "0xd1"
+    ],
+    "values_truncated": false,
+    "first_line": 1056
+  },
+  "edid|0xfebf002b|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1057
+  },
+  "edid|0xfebf002c|read|1": {
+    "count": 1,
+    "values": [
+      "0xa9"
+    ],
+    "values_truncated": false,
+    "first_line": 1058
+  },
+  "edid|0xfebf002d|read|1": {
+    "count": 1,
+    "values": [
+      "0x40"
+    ],
+    "values_truncated": false,
+    "first_line": 1059
+  },
+  "edid|0xfebf002e|read|1": {
+    "count": 1,
+    "values": [
+      "0xb3"
+    ],
+    "values_truncated": false,
+    "first_line": 1060
+  },
+  "edid|0xfebf002f|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1061
+  },
+  "edid|0xfebf0030|read|1": {
+    "count": 1,
+    "values": [
+      "0x95"
+    ],
+    "values_truncated": false,
+    "first_line": 1062
+  },
+  "edid|0xfebf0031|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1063
+  },
+  "edid|0xfebf0032|read|1": {
+    "count": 1,
+    "values": [
+      "0x81"
+    ],
+    "values_truncated": false,
+    "first_line": 1064
+  },
+  "edid|0xfebf0033|read|1": {
+    "count": 1,
+    "values": [
+      "0x80"
+    ],
+    "values_truncated": false,
+    "first_line": 1065
+  },
+  "edid|0xfebf0034|read|1": {
+    "count": 1,
+    "values": [
+      "0x81"
+    ],
+    "values_truncated": false,
+    "first_line": 1066
+  },
+  "edid|0xfebf0035|read|1": {
+    "count": 1,
+    "values": [
+      "0x40"
+    ],
+    "values_truncated": false,
+    "first_line": 1067
+  },
+  "edid|0xfebf0036|read|1": {
+    "count": 1,
+    "values": [
+      "0xea"
+    ],
+    "values_truncated": false,
+    "first_line": 1068
+  },
+  "edid|0xfebf0037|read|1": {
+    "count": 1,
+    "values": [
+      "0x29"
+    ],
+    "values_truncated": false,
+    "first_line": 1069
+  },
+  "edid|0xfebf0038|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1070
+  },
+  "edid|0xfebf0039|read|1": {
+    "count": 1,
+    "values": [
+      "0xc0"
+    ],
+    "values_truncated": false,
+    "first_line": 1071
+  },
+  "edid|0xfebf003a|read|1": {
+    "count": 1,
+    "values": [
+      "0x51"
+    ],
+    "values_truncated": false,
+    "first_line": 1072
+  },
+  "edid|0xfebf003b|read|1": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 1073
+  },
+  "edid|0xfebf003c|read|1": {
+    "count": 1,
+    "values": [
+      "0x1c"
+    ],
+    "values_truncated": false,
+    "first_line": 1074
+  },
+  "edid|0xfebf003d|read|1": {
+    "count": 1,
+    "values": [
+      "0x30"
+    ],
+    "values_truncated": false,
+    "first_line": 1075
+  },
+  "edid|0xfebf003e|read|1": {
+    "count": 1,
+    "values": [
+      "0x40"
+    ],
+    "values_truncated": false,
+    "first_line": 1076
+  },
+  "edid|0xfebf003f|read|1": {
+    "count": 1,
+    "values": [
+      "0x26"
+    ],
+    "values_truncated": false,
+    "first_line": 1077
+  },
+  "edid|0xfebf0040|read|1": {
+    "count": 1,
+    "values": [
+      "0x44"
+    ],
+    "values_truncated": false,
+    "first_line": 1078
+  },
+  "edid|0xfebf0041|read|1": {
+    "count": 1,
+    "values": [
+      "0x40"
+    ],
+    "values_truncated": false,
+    "first_line": 1079
+  },
+  "edid|0xfebf0042|read|1": {
+    "count": 1,
+    "values": [
+      "0x45"
+    ],
+    "values_truncated": false,
+    "first_line": 1080
+  },
+  "edid|0xfebf0043|read|1": {
+    "count": 1,
+    "values": [
+      "0xcb"
+    ],
+    "values_truncated": false,
+    "first_line": 1081
+  },
+  "edid|0xfebf0044|read|1": {
+    "count": 1,
+    "values": [
+      "0x10"
+    ],
+    "values_truncated": false,
+    "first_line": 1082
+  },
+  "edid|0xfebf0045|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1083
+  },
+  "edid|0xfebf0046|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1084
+  },
+  "edid|0xfebf0047|read|1": {
+    "count": 1,
+    "values": [
+      "0x18"
+    ],
+    "values_truncated": false,
+    "first_line": 1085
+  },
+  "edid|0xfebf0048|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1086
+  },
+  "edid|0xfebf0049|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1087
+  },
+  "edid|0xfebf004a|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1088
+  },
+  "edid|0xfebf004b|read|1": {
+    "count": 1,
+    "values": [
+      "0xf7"
+    ],
+    "values_truncated": false,
+    "first_line": 1089
+  },
+  "edid|0xfebf004c|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1090
+  },
+  "edid|0xfebf004d|read|1": {
+    "count": 1,
+    "values": [
+      "0xa"
+    ],
+    "values_truncated": false,
+    "first_line": 1091
+  },
+  "edid|0xfebf004e|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1092
+  },
+  "edid|0xfebf004f|read|1": {
+    "count": 1,
+    "values": [
+      "0x40"
+    ],
+    "values_truncated": false,
+    "first_line": 1093
+  },
+  "edid|0xfebf0050|read|1": {
+    "count": 1,
+    "values": [
+      "0x82"
+    ],
+    "values_truncated": false,
+    "first_line": 1094
+  },
+  "edid|0xfebf0051|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1095
+  },
+  "edid|0xfebf0052|read|1": {
+    "count": 1,
+    "values": [
+      "0x28"
+    ],
+    "values_truncated": false,
+    "first_line": 1096
+  },
+  "edid|0xfebf0053|read|1": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 1097
+  },
+  "edid|0xfebf0054|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1098
+  },
+  "edid|0xfebf0055|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1099
+  },
+  "edid|0xfebf0056|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1100
+  },
+  "edid|0xfebf0057|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1101
+  },
+  "edid|0xfebf0058|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1102
+  },
+  "edid|0xfebf0059|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1103
+  },
+  "edid|0xfebf005a|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1104
+  },
+  "edid|0xfebf005b|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1105
+  },
+  "edid|0xfebf005c|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1106
+  },
+  "edid|0xfebf005d|read|1": {
+    "count": 1,
+    "values": [
+      "0xfd"
+    ],
+    "values_truncated": false,
+    "first_line": 1107
+  },
+  "edid|0xfebf005e|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1108
+  },
+  "edid|0xfebf005f|read|1": {
+    "count": 1,
+    "values": [
+      "0x32"
+    ],
+    "values_truncated": false,
+    "first_line": 1109
+  },
+  "edid|0xfebf0060|read|1": {
+    "count": 1,
+    "values": [
+      "0x7d"
+    ],
+    "values_truncated": false,
+    "first_line": 1110
+  },
+  "edid|0xfebf0061|read|1": {
+    "count": 1,
+    "values": [
+      "0x1e"
+    ],
+    "values_truncated": false,
+    "first_line": 1111
+  },
+  "edid|0xfebf0062|read|1": {
+    "count": 1,
+    "values": [
+      "0xa0"
+    ],
+    "values_truncated": false,
+    "first_line": 1112
+  },
+  "edid|0xfebf0063|read|1": {
+    "count": 1,
+    "values": [
+      "0xff"
+    ],
+    "values_truncated": false,
+    "first_line": 1113
+  },
+  "edid|0xfebf0064|read|1": {
+    "count": 1,
+    "values": [
+      "0x1"
+    ],
+    "values_truncated": false,
+    "first_line": 1114
+  },
+  "edid|0xfebf0065|read|1": {
+    "count": 1,
+    "values": [
+      "0xa"
+    ],
+    "values_truncated": false,
+    "first_line": 1115
+  },
+  "edid|0xfebf0066|read|1": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 1116
+  },
+  "edid|0xfebf0067|read|1": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 1117
+  },
+  "edid|0xfebf0068|read|1": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 1118
+  },
+  "edid|0xfebf0069|read|1": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 1119
+  },
+  "edid|0xfebf006a|read|1": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 1120
+  },
+  "edid|0xfebf006b|read|1": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 1121
+  },
+  "edid|0xfebf006c|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1122
+  },
+  "edid|0xfebf006d|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1123
+  },
+  "edid|0xfebf006e|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1124
+  },
+  "edid|0xfebf006f|read|1": {
+    "count": 1,
+    "values": [
+      "0xfc"
+    ],
+    "values_truncated": false,
+    "first_line": 1125
+  },
+  "edid|0xfebf0070|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1126
+  },
+  "edid|0xfebf0071|read|1": {
+    "count": 1,
+    "values": [
+      "0x51"
+    ],
+    "values_truncated": false,
+    "first_line": 1127
+  },
+  "edid|0xfebf0072|read|1": {
+    "count": 1,
+    "values": [
+      "0x45"
+    ],
+    "values_truncated": false,
+    "first_line": 1128
+  },
+  "edid|0xfebf0073|read|1": {
+    "count": 1,
+    "values": [
+      "0x4d"
+    ],
+    "values_truncated": false,
+    "first_line": 1129
+  },
+  "edid|0xfebf0074|read|1": {
+    "count": 1,
+    "values": [
+      "0x55"
+    ],
+    "values_truncated": false,
+    "first_line": 1130
+  },
+  "edid|0xfebf0075|read|1": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 1131
+  },
+  "edid|0xfebf0076|read|1": {
+    "count": 1,
+    "values": [
+      "0x4d"
+    ],
+    "values_truncated": false,
+    "first_line": 1132
+  },
+  "edid|0xfebf0077|read|1": {
+    "count": 1,
+    "values": [
+      "0x6f"
+    ],
+    "values_truncated": false,
+    "first_line": 1133
+  },
+  "edid|0xfebf0078|read|1": {
+    "count": 1,
+    "values": [
+      "0x6e"
+    ],
+    "values_truncated": false,
+    "first_line": 1134
+  },
+  "edid|0xfebf0079|read|1": {
+    "count": 1,
+    "values": [
+      "0x69"
+    ],
+    "values_truncated": false,
+    "first_line": 1135
+  },
+  "edid|0xfebf007a|read|1": {
+    "count": 1,
+    "values": [
+      "0x74"
+    ],
+    "values_truncated": false,
+    "first_line": 1136
+  },
+  "edid|0xfebf007b|read|1": {
+    "count": 1,
+    "values": [
+      "0x6f"
+    ],
+    "values_truncated": false,
+    "first_line": 1137
+  },
+  "edid|0xfebf007c|read|1": {
+    "count": 1,
+    "values": [
+      "0x72"
+    ],
+    "values_truncated": false,
+    "first_line": 1138
+  },
+  "edid|0xfebf007d|read|1": {
+    "count": 1,
+    "values": [
+      "0xa"
+    ],
+    "values_truncated": false,
+    "first_line": 1139
+  },
+  "edid|0xfebf007e|read|1": {
+    "count": 1,
+    "values": [
+      "0x1"
+    ],
+    "values_truncated": false,
+    "first_line": 1140
+  },
+  "edid|0xfebf007f|read|1": {
+    "count": 1,
+    "values": [
+      "0x3a"
+    ],
+    "values_truncated": false,
+    "first_line": 1141
+  },
+  "edid|0xfebf0080|read|1": {
+    "count": 1,
+    "values": [
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 1142
+  },
+  "edid|0xfebf0081|read|1": {
+    "count": 1,
+    "values": [
+      "0x3"
+    ],
+    "values_truncated": false,
+    "first_line": 1143
+  },
+  "edid|0xfebf0082|read|1": {
+    "count": 1,
+    "values": [
+      "0xb"
+    ],
+    "values_truncated": false,
+    "first_line": 1144
+  },
+  "edid|0xfebf0083|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1145
+  },
+  "edid|0xfebf0084|read|1": {
+    "count": 1,
+    "values": [
+      "0x46"
+    ],
+    "values_truncated": false,
+    "first_line": 1146
+  },
+  "edid|0xfebf0085|read|1": {
+    "count": 1,
+    "values": [
+      "0x7d"
+    ],
+    "values_truncated": false,
+    "first_line": 1147
+  },
+  "edid|0xfebf0086|read|1": {
+    "count": 1,
+    "values": [
+      "0x65"
+    ],
+    "values_truncated": false,
+    "first_line": 1148
+  },
+  "edid|0xfebf0087|read|1": {
+    "count": 1,
+    "values": [
+      "0x60"
+    ],
+    "values_truncated": false,
+    "first_line": 1149
+  },
+  "edid|0xfebf0088|read|1": {
+    "count": 1,
+    "values": [
+      "0x59"
+    ],
+    "values_truncated": false,
+    "first_line": 1150
+  },
+  "edid|0xfebf0089|read|1": {
+    "count": 1,
+    "values": [
+      "0x1f"
+    ],
+    "values_truncated": false,
+    "first_line": 1151
+  },
+  "edid|0xfebf008a|read|1": {
+    "count": 1,
+    "values": [
+      "0x61"
+    ],
+    "values_truncated": false,
+    "first_line": 1152
+  },
+  "edid|0xfebf008b|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1153
+  },
+  "edid|0xfebf008c|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1154
+  },
+  "edid|0xfebf008d|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1155
+  },
+  "edid|0xfebf008e|read|1": {
+    "count": 1,
+    "values": [
+      "0x10"
+    ],
+    "values_truncated": false,
+    "first_line": 1156
+  },
+  "edid|0xfebf008f|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1157
+  },
+  "edid|0xfebf0090|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1158
+  },
+  "edid|0xfebf0091|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1159
+  },
+  "edid|0xfebf0092|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1160
+  },
+  "edid|0xfebf0093|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1161
+  },
+  "edid|0xfebf0094|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1162
+  },
+  "edid|0xfebf0095|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1163
+  },
+  "edid|0xfebf0096|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1164
+  },
+  "edid|0xfebf0097|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1165
+  },
+  "edid|0xfebf0098|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1166
+  },
+  "edid|0xfebf0099|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1167
+  },
+  "edid|0xfebf009a|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1168
+  },
+  "edid|0xfebf009b|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1169
+  },
+  "edid|0xfebf009c|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1170
+  },
+  "edid|0xfebf009d|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1171
+  },
+  "edid|0xfebf009e|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1172
+  },
+  "edid|0xfebf009f|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1173
+  },
+  "edid|0xfebf00a0|read|1": {
+    "count": 1,
+    "values": [
+      "0x10"
+    ],
+    "values_truncated": false,
+    "first_line": 1174
+  },
+  "edid|0xfebf00a1|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1175
+  },
+  "edid|0xfebf00a2|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1176
+  },
+  "edid|0xfebf00a3|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1177
+  },
+  "edid|0xfebf00a4|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1178
+  },
+  "edid|0xfebf00a5|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1179
+  },
+  "edid|0xfebf00a6|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1180
+  },
+  "edid|0xfebf00a7|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1181
+  },
+  "edid|0xfebf00a8|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1182
+  },
+  "edid|0xfebf00a9|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1183
+  },
+  "edid|0xfebf00aa|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1184
+  },
+  "edid|0xfebf00ab|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1185
+  },
+  "edid|0xfebf00ac|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1186
+  },
+  "edid|0xfebf00ad|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1187
+  },
+  "edid|0xfebf00ae|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1188
+  },
+  "edid|0xfebf00af|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1189
+  },
+  "edid|0xfebf00b0|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1190
+  },
+  "edid|0xfebf00b1|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1191
+  },
+  "edid|0xfebf00b2|read|1": {
+    "count": 1,
+    "values": [
+      "0x10"
+    ],
+    "values_truncated": false,
+    "first_line": 1192
+  },
+  "edid|0xfebf00b3|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1193
+  },
+  "edid|0xfebf00b4|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1194
+  },
+  "edid|0xfebf00b5|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1195
+  },
+  "edid|0xfebf00b6|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1196
+  },
+  "edid|0xfebf00b7|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1197
+  },
+  "edid|0xfebf00b8|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1198
+  },
+  "edid|0xfebf00b9|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1199
+  },
+  "edid|0xfebf00ba|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1200
+  },
+  "edid|0xfebf00bb|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1201
+  },
+  "edid|0xfebf00bc|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1202
+  },
+  "edid|0xfebf00bd|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1203
+  },
+  "edid|0xfebf00be|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1204
+  },
+  "edid|0xfebf00bf|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1205
+  },
+  "edid|0xfebf00c0|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1206
+  },
+  "edid|0xfebf00c1|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1207
+  },
+  "edid|0xfebf00c2|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1208
+  },
+  "edid|0xfebf00c3|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1209
+  },
+  "edid|0xfebf00c4|read|1": {
+    "count": 1,
+    "values": [
+      "0x10"
+    ],
+    "values_truncated": false,
+    "first_line": 1210
+  },
+  "edid|0xfebf00c5|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1211
+  },
+  "edid|0xfebf00c6|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1212
+  },
+  "edid|0xfebf00c7|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1213
+  },
+  "edid|0xfebf00c8|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1214
+  },
+  "edid|0xfebf00c9|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1215
+  },
+  "edid|0xfebf00ca|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1216
+  },
+  "edid|0xfebf00cb|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1217
+  },
+  "edid|0xfebf00cc|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1218
+  },
+  "edid|0xfebf00cd|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1219
+  },
+  "edid|0xfebf00ce|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1220
+  },
+  "edid|0xfebf00cf|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1221
+  },
+  "edid|0xfebf00d0|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1222
+  },
+  "edid|0xfebf00d1|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1223
+  },
+  "edid|0xfebf00d2|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1224
+  },
+  "edid|0xfebf00d3|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1225
+  },
+  "edid|0xfebf00d4|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1226
+  },
+  "edid|0xfebf00d5|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1227
+  },
+  "edid|0xfebf00d6|read|1": {
+    "count": 1,
+    "values": [
+      "0x10"
+    ],
+    "values_truncated": false,
+    "first_line": 1228
+  },
+  "edid|0xfebf00d7|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1229
+  },
+  "edid|0xfebf00d8|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1230
+  },
+  "edid|0xfebf00d9|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1231
+  },
+  "edid|0xfebf00da|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1232
+  },
+  "edid|0xfebf00db|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1233
+  },
+  "edid|0xfebf00dc|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1234
+  },
+  "edid|0xfebf00dd|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1235
+  },
+  "edid|0xfebf00de|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1236
+  },
+  "edid|0xfebf00df|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1237
+  },
+  "edid|0xfebf00e0|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1238
+  },
+  "edid|0xfebf00e1|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1239
+  },
+  "edid|0xfebf00e2|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1240
+  },
+  "edid|0xfebf00e3|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1241
+  },
+  "edid|0xfebf00e4|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1242
+  },
+  "edid|0xfebf00e5|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1243
+  },
+  "edid|0xfebf00e6|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1244
+  },
+  "edid|0xfebf00e7|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1245
+  },
+  "edid|0xfebf00e8|read|1": {
+    "count": 1,
+    "values": [
+      "0x10"
+    ],
+    "values_truncated": false,
+    "first_line": 1246
+  },
+  "edid|0xfebf00e9|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1247
+  },
+  "edid|0xfebf00ea|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1248
+  },
+  "edid|0xfebf00eb|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1249
+  },
+  "edid|0xfebf00ec|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1250
+  },
+  "edid|0xfebf00ed|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1251
+  },
+  "edid|0xfebf00ee|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1252
+  },
+  "edid|0xfebf00ef|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1253
+  },
+  "edid|0xfebf00f0|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1254
+  },
+  "edid|0xfebf00f1|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1255
+  },
+  "edid|0xfebf00f2|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1256
+  },
+  "edid|0xfebf00f3|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1257
+  },
+  "edid|0xfebf00f4|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1258
+  },
+  "edid|0xfebf00f5|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1259
+  },
+  "edid|0xfebf00f6|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1260
+  },
+  "edid|0xfebf00f7|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1261
+  },
+  "edid|0xfebf00f8|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1262
+  },
+  "edid|0xfebf00f9|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1263
+  },
+  "edid|0xfebf00fa|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1264
+  },
+  "edid|0xfebf00fb|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1265
+  },
+  "edid|0xfebf00fc|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1266
+  },
+  "edid|0xfebf00fd|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1267
+  },
+  "edid|0xfebf00fe|read|1": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 1268
+  },
+  "edid|0xfebf00ff|read|1": {
+    "count": 1,
+    "values": [
+      "0x2f"
+    ],
+    "values_truncated": false,
+    "first_line": 1269
+  },
+  "vga|0x3c6|write|1": {
+    "count": 18,
+    "values": [
+      "0xff"
+    ],
+    "values_truncated": false,
+    "first_line": 1283
+  },
+  "vga|0x3c8|write|1": {
+    "count": 528,
+    "values": [
+      "0x0",
+      "0x1",
+      "0x2",
+      "0x3",
+      "0x4",
+      "0x5",
+      "0x6",
+      "0x7",
+      "0x8",
+      "0x9",
+      "0xa",
+      "0xb",
+      "0xc",
+      "0xd",
+      "0xe",
+      "0xf",
+      "0x10",
+      "0x11",
+      "0x12",
+      "0x13",
+      "0x14",
+      "0x15",
+      "0x16",
+      "0x17",
+      "0x18",
+      "0x19",
+      "0x1a",
+      "0x1b",
+      "0x1c",
+      "0x1d",
+      "0x1e",
+      "0x1f",
+      "0x20",
+      "0x21",
+      "0x22",
+      "0x23",
+      "0x24",
+      "0x25",
+      "0x26",
+      "0x27",
+      "0x28",
+      "0x29",
+      "0x2a",
+      "0x2b",
+      "0x2c",
+      "0x2d",
+      "0x2e",
+      "0x2f",
+      "0x30",
+      "0x31",
+      "0x32",
+      "0x33",
+      "0x34",
+      "0x35",
+      "0x36",
+      "0x37",
+      "0x38",
+      "0x39",
+      "0x3a",
+      "0x3b",
+      "0x3c",
+      "0x3d",
+      "0x3e",
+      "0x3f",
+      "0x40",
+      "0x41",
+      "0x42",
+      "0x43",
+      "0x44",
+      "0x45",
+      "0x46",
+      "0x47",
+      "0x48",
+      "0x49",
+      "0x4a",
+      "0x4b",
+      "0x4c",
+      "0x4d",
+      "0x4e",
+      "0x4f",
+      "0x50",
+      "0x51",
+      "0x52",
+      "0x53",
+      "0x54",
+      "0x55",
+      "0x56",
+      "0x57",
+      "0x58",
+      "0x59",
+      "0x5a",
+      "0x5b",
+      "0x5c",
+      "0x5d",
+      "0x5e",
+      "0x5f",
+      "0x60",
+      "0x61",
+      "0x62",
+      "0x63",
+      "0x64",
+      "0x65",
+      "0x66",
+      "0x67",
+      "0x68",
+      "0x69",
+      "0x6a",
+      "0x6b",
+      "0x6c",
+      "0x6d",
+      "0x6e",
+      "0x6f",
+      "0x70",
+      "0x71",
+      "0x72",
+      "0x73",
+      "0x74",
+      "0x75",
+      "0x76",
+      "0x77",
+      "0x78",
+      "0x79",
+      "0x7a",
+      "0x7b",
+      "0x7c",
+      "0x7d",
+      "0x7e",
+      "0x7f",
+      "0x80",
+      "0x81",
+      "0x82",
+      "0x83",
+      "0x84",
+      "0x85",
+      "0x86",
+      "0x87",
+      "0x88",
+      "0x89",
+      "0x8a",
+      "0x8b",
+      "0x8c",
+      "0x8d",
+      "0x8e",
+      "0x8f",
+      "0x90",
+      "0x91",
+      "0x92",
+      "0x93",
+      "0x94",
+      "0x95",
+      "0x96",
+      "0x97",
+      "0x98",
+      "0x99",
+      "0x9a",
+      "0x9b",
+      "0x9c",
+      "0x9d",
+      "0x9e",
+      "0x9f",
+      "0xa0",
+      "0xa1",
+      "0xa2",
+      "0xa3",
+      "0xa4",
+      "0xa5",
+      "0xa6",
+      "0xa7",
+      "0xa8",
+      "0xa9",
+      "0xaa",
+      "0xab",
+      "0xac",
+      "0xad",
+      "0xae",
+      "0xaf",
+      "0xb0",
+      "0xb1",
+      "0xb2",
+      "0xb3",
+      "0xb4",
+      "0xb5",
+      "0xb6",
+      "0xb7",
+      "0xb8",
+      "0xb9",
+      "0xba",
+      "0xbb",
+      "0xbc",
+      "0xbd",
+      "0xbe",
+      "0xbf",
+      "0xc0",
+      "0xc1",
+      "0xc2",
+      "0xc3",
+      "0xc4",
+      "0xc5",
+      "0xc6",
+      "0xc7",
+      "0xc8",
+      "0xc9",
+      "0xca",
+      "0xcb",
+      "0xcc",
+      "0xcd",
+      "0xce",
+      "0xcf",
+      "0xd0",
+      "0xd1",
+      "0xd2",
+      "0xd3",
+      "0xd4",
+      "0xd5",
+      "0xd6",
+      "0xd7",
+      "0xd8",
+      "0xd9",
+      "0xda",
+      "0xdb",
+      "0xdc",
+      "0xdd",
+      "0xde",
+      "0xdf",
+      "0xe0",
+      "0xe1",
+      "0xe2",
+      "0xe3",
+      "0xe4",
+      "0xe5",
+      "0xe6",
+      "0xe7",
+      "0xe8",
+      "0xe9",
+      "0xea",
+      "0xeb",
+      "0xec",
+      "0xed",
+      "0xee",
+      "0xef",
+      "0xf0",
+      "0xf1",
+      "0xf2",
+      "0xf3",
+      "0xf4",
+      "0xf5",
+      "0xf6",
+      "0xf7",
+      "0xf8",
+      "0xf9",
+      "0xfa",
+      "0xfb",
+      "0xfc",
+      "0xfd",
+      "0xfe",
+      "0xff"
+    ],
+    "values_truncated": false,
+    "first_line": 1285
+  },
+  "vga|0x3c9|write|1": {
+    "count": 1584,
+    "values": [
+      "0x0",
+      "0x2a",
+      "0x15",
+      "0x3f"
+    ],
+    "values_truncated": false,
+    "first_line": 1287
+  },
+  "vga|0x3da|read|1": {
+    "count": 46,
+    "values": [
+      "0x9",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 3334
+  },
+  "vga|0x3c0|read|1": {
+    "count": 42,
+    "values": [
+      "0x0",
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 3336
+  },
+  "vga|0x3c0|write|1": {
+    "count": 162,
+    "values": [
+      "0x0",
+      "0x1",
+      "0x2",
+      "0x3",
+      "0x4",
+      "0x5",
+      "0x6",
+      "0x14",
+      "0x7",
+      "0x8",
+      "0x38",
+      "0x9",
+      "0x39",
+      "0xa",
+      "0x3a",
+      "0xb",
+      "0x3b",
+      "0xc",
+      "0x3c",
+      "0xd",
+      "0x3d",
+      "0xe",
+      "0x3e",
+      "0xf",
+      "0x3f",
+      "0x10",
+      "0x11",
+      "0x12",
+      "0x13",
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 3337
+  },
+  "vga|0x3ce|write|2": {
+    "count": 24,
+    "values": [
+      "0x0",
+      "0x1",
+      "0x2",
+      "0x3",
+      "0x4",
+      "0x1005",
+      "0xe06",
+      "0xf07",
+      "0xff08",
+      "0x204",
+      "0x5",
+      "0x406",
+      "0x506"
+    ],
+    "values_truncated": false,
+    "first_line": 3558
+  },
+  "vga|0x3d4|write|2": {
+    "count": 358,
+    "values": [
+      "0x11",
+      "0x5f00",
+      "0x4f01",
+      "0x5002",
+      "0x8203",
+      "0x5504",
+      "0x8105",
+      "0xbf06",
+      "0x1f07",
+      "0x8",
+      "0x4f09",
+      "0xd0a",
+      "0xe0b",
+      "0xc",
+      "0xd",
+      "0xe",
+      "0xf",
+      "0x9c10",
+      "0x8e11",
+      "0x8f12",
+      "0x2813",
+      "0x1f14",
+      "0x9615",
+      "0xb916",
+      "0xa317",
+      "0xff18",
+      "0x10f",
+      "0x20f",
+      "0x30f",
+      "0x40f",
+      "0x50f",
+      "0x60f",
+      "0x70f",
+      "0x80f",
+      "0x90f",
+      "0xa0f",
+      "0xb0f",
+      "0xc0f",
+      "0xd0f",
+      "0xe0f",
+      "0xf0f",
+      "0x100f",
+      "0x110f",
+      "0x120f",
+      "0x130f",
+      "0x140f",
+      "0x150f",
+      "0x160f",
+      "0x170f",
+      "0x180f",
+      "0x190f",
+      "0x1a0f",
+      "0x1b0f",
+      "0x1c0f",
+      "0x1d0f",
+      "0x1e0f",
+      "0x1f0f",
+      "0x200f",
+      "0x210f",
+      "0x220f",
+      "0x230f",
+      "0x240f",
+      "0x250f",
+      "0x260f",
+      "0x270f",
+      "0x500f",
+      "0x510f",
+      "0x520f",
+      "0x530f",
+      "0x540f",
+      "0x550f",
+      "0x560f",
+      "0x570f",
+      "0x580f",
+      "0x590f",
+      "0x5a0f",
+      "0x5b0f",
+      "0x5c0f",
+      "0x5d0f",
+      "0x5e0f",
+      "0x5f0f",
+      "0x600f",
+      "0x610f",
+      "0x620f",
+      "0x630f",
+      "0x640f",
+      "0x650f",
+      "0x660f",
+      "0x670f",
+      "0x680f",
+      "0x690f",
+      "0xa00f",
+      "0xf00f",
+      "0x10e",
+      "0x400f",
+      "0x410f",
+      "0x420f",
+      "0x430f",
+      "0x440f",
+      "0x450f",
+      "0x460f",
+      "0x470f",
+      "0x480f",
+      "0x490f",
+      "0x4a0f",
+      "0x4b0f",
+      "0x4c0f",
+      "0x4d0f",
+      "0x4e0f",
+      "0x4f0f",
+      "0xa40f",
+      "0x900f",
+      "0xe00f",
+      "0xe10f",
+      "0xe20f",
+      "0xe30f",
+      "0xe40f",
+      "0xe50f",
+      "0xe60f",
+      "0xe70f",
+      "0xe80f",
+      "0xe90f",
+      "0xea0f",
+      "0xeb0f",
+      "0xec0f",
+      "0xed0f",
+      "0xee0f",
+      "0xef0f",
+      "0xf10f",
+      "0xf20f",
+      "0x20e",
+      "0x300f",
+      "0x310f",
+      "0x320f",
+      "0x330f",
+      "0x340f",
+      "0x350f",
+      "0x360f",
+      "0x370f",
+      "0x380f",
+      "0x390f",
+      "0x3a0f",
+      "0x8a0f",
+      "0x800f",
+      "0x810f",
+      "0x820f",
+      "0x830f",
+      "0x840f",
+      "0x850f",
+      "0x860f",
+      "0x870f",
+      "0x880f",
+      "0x890f",
+      "0xda0f",
+      "0xd00f",
+      "0x30e",
+      "0x280f",
+      "0x290f",
+      "0x2a0f",
+      "0x2b0f",
+      "0x5404",
+      "0x8005",
+      "0xb06",
+      "0x3e07",
+      "0x4009",
+      "0xa",
+      "0xb",
+      "0xea10",
+      "0x8c11",
+      "0xdf12",
+      "0x14",
+      "0xe715",
+      "0x416",
+      "0xe317"
+    ],
+    "values_truncated": false,
+    "first_line": 3585
+  },
+  "vga|0x3cc|read|1": {
+    "count": 156,
+    "values": [
+      "0x67",
+      "0xe3"
+    ],
+    "values_truncated": false,
+    "first_line": 40567
+  },
+  "uhci|0xc000|write|2": {
+    "count": 4,
+    "values": [
+      "0x2",
+      "0x0",
+      "0xc1"
+    ],
+    "values_truncated": false,
+    "first_line": 41044
+  },
+  "uhci|0xc004|write|2": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 41047
+  },
+  "uhci|0xc00c|write|2": {
+    "count": 1,
+    "values": [
+      "0x40"
+    ],
+    "values_truncated": false,
+    "first_line": 41051
+  },
+  "uhci|0xc008|write|2": {
+    "count": 1,
+    "values": [
+      "0xe000"
+    ],
+    "values_truncated": false,
+    "first_line": 41053
+  },
+  "uhci|0xc00a|write|2": {
+    "count": 1,
+    "values": [
+      "0x1ffd"
+    ],
+    "values_truncated": false,
+    "first_line": 41055
+  },
+  "uhci|0xc006|write|2": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 41057
+  },
+  "uhci|0xc010|read|2": {
+    "count": 2,
+    "values": [
+      "0x83"
+    ],
+    "values_truncated": false,
+    "first_line": 41063
+  },
+  "uhci|0xc010|write|2": {
+    "count": 4,
+    "values": [
+      "0x200",
+      "0x0",
+      "0x4"
+    ],
+    "values_truncated": false,
+    "first_line": 41064
+  },
+  "i8042-cmd|0x64|read|1": {
+    "count": 3392,
+    "values": [
+      "0x18",
+      "0x1d",
+      "0x1c",
+      "0x3d"
+    ],
+    "values_truncated": false,
+    "first_line": 41069
+  },
+  "i8042-cmd|0x64|write|1": {
+    "count": 43,
+    "values": [
+      "0xad",
+      "0xa7",
+      "0xaa",
+      "0xab",
+      "0x60",
+      "0xae",
+      "0xa8",
+      "0xd4",
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 41072
+  },
+  "i8042-data|0x60|read|1": {
+    "count": 6340,
+    "values": [
+      "0x55",
+      "0x0",
+      "0xfa",
+      "0xaa",
+      "0x3",
+      "0x51",
+      "0x9",
+      "0x8",
+      "0x1e",
+      "0x9e",
+      "0xe",
+      "0x8e",
+      "0x28",
+      "0x14",
+      "0xf1"
+    ],
+    "values_truncated": false,
+    "first_line": 41087
+  },
+  "i8042-data|0x60|write|1": {
+    "count": 41,
+    "values": [
+      "0x30",
+      "0x20",
+      "0xff",
+      "0xf5",
+      "0xf0",
+      "0x2",
+      "0x70",
+      "0x60",
+      "0xf4",
+      "0x61",
+      "0xed",
+      "0x0",
+      "0xf3",
+      "0xc8",
+      "0x64",
+      "0x50",
+      "0xf2",
+      "0xa",
+      "0xe8",
+      "0x3",
+      "0xe6",
+      "0x53"
+    ],
+    "values_truncated": false,
+    "first_line": 41102
+  },
+  "uhci|0xc012|read|2": {
+    "count": 21,
+    "values": [
+      "0x80"
+    ],
+    "values_truncated": false,
+    "first_line": 41106
+  },
+  "ide|0x1f7|read|1": {
+    "count": 196715,
+    "values": [
+      "0x50",
+      "0x41",
+      "0x58",
+      "0x0",
+      "0xd0"
+    ],
+    "values_truncated": false,
+    "first_line": 41115
+  },
+  "ide|0x1f6|write|1": {
+    "count": 60238,
+    "values": [
+      "0xa0",
+      "0xb0",
+      "0xe0",
+      "0xef"
+    ],
+    "values_truncated": false,
+    "first_line": 41116
+  },
+  "ide|0x1f6|read|1": {
+    "count": 380,
+    "values": [
+      "0xa0",
+      "0xb0",
+      "0xe0"
+    ],
+    "values_truncated": false,
+    "first_line": 41123
+  },
+  "ide|0x1f2|write|1": {
+    "count": 120086,
+    "values": [
+      "0x55",
+      "0x0",
+      "0x1",
+      "0x4",
+      "0x3",
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 41124
+  },
+  "ide|0x1f3|write|1": {
+    "count": 120086,
+    "values": [
+      "0xaa",
+      "0x0",
+      "0x2d",
+      "0x2e",
+      "0x3f",
+      "0x9d",
+      "0x9e",
+      "0x9f",
+      "0xa0",
+      "0xa1",
+      "0xa2",
+      "0xa3",
+      "0xa4",
+      "0xa5",
+      "0xa6",
+      "0xa7",
+      "0xa8",
+      "0xa9",
+      "0xab",
+      "0xac",
+      "0xad",
+      "0xae",
+      "0xaf",
+      "0xb0",
+      "0xb1",
+      "0xb2",
+      "0xb3",
+      "0xb4",
+      "0xb5",
+      "0xb6",
+      "0xb7",
+      "0xb8",
+      "0xb9",
+      "0xba",
+      "0xbb",
+      "0xbc",
+      "0xbd",
+      "0xbe",
+      "0xbf",
+      "0xc0",
+      "0xc1",
+      "0xc2",
+      "0xc3",
+      "0xc4",
+      "0xc5",
+      "0xc6",
+      "0xc7",
+      "0xc8",
+      "0xc9",
+      "0xca",
+      "0xcb",
+      "0xcc",
+      "0xcd",
+      "0xce",
+      "0xcf",
+      "0xd0",
+      "0xd1",
+      "0xd2",
+      "0xd3",
+      "0xd4",
+      "0xd5",
+      "0xd6",
+      "0xd7",
+      "0xd8",
+      "0xd9",
+      "0xda",
+      "0xdb",
+      "0xdc",
+      "0xdd",
+      "0xde",
+      "0xdf",
+      "0xe0",
+      "0xe1",
+      "0xe2",
+      "0xe3",
+      "0xe4",
+      "0xe5",
+      "0xe6",
+      "0xe7",
+      "0xe8",
+      "0xe9",
+      "0xea",
+      "0xeb",
+      "0xec",
+      "0xed",
+      "0xee",
+      "0xef",
+      "0xf0",
+      "0xf1",
+      "0xf2",
+      "0xf3",
+      "0xf4",
+      "0xf5",
+      "0xf6",
+      "0xf7",
+      "0xf8",
+      "0xf9",
+      "0xfa",
+      "0xfb",
+      "0xfc",
+      "0xfd",
+      "0xfe",
+      "0xff",
+      "0x1",
+      "0x2",
+      "0x3",
+      "0x4",
+      "0x5",
+      "0x6",
+      "0x7",
+      "0x8",
+      "0x9",
+      "0xa",
+      "0xb",
+      "0xc",
+      "0xd",
+      "0xe",
+      "0xf",
+      "0x10",
+      "0x11",
+      "0x12",
+      "0x13",
+      "0x14",
+      "0x15",
+      "0x16",
+      "0x17",
+      "0x18",
+      "0x19",
+      "0x1a",
+      "0x1b",
+      "0x1c",
+      "0x1d",
+      "0x1e",
+      "0x1f",
+      "0x20",
+      "0x21",
+      "0x22",
+      "0x23",
+      "0x24",
+      "0x25",
+      "0x26",
+      "0x27",
+      "0x28",
+      "0x29",
+      "0x2a",
+      "0x2b",
+      "0x2c",
+      "0x2f",
+      "0x30",
+      "0x31",
+      "0x32",
+      "0x33",
+      "0x34",
+      "0x35",
+      "0x36",
+      "0x37",
+      "0x38",
+      "0x39",
+      "0x3a",
+      "0x3b",
+      "0x3c",
+      "0x3d",
+      "0x3e",
+      "0x40",
+      "0x41",
+      "0x42",
+      "0x43",
+      "0x44",
+      "0x45",
+      "0x46",
+      "0x47",
+      "0x48",
+      "0x49",
+      "0x4a",
+      "0x4b",
+      "0x4c",
+      "0x4d",
+      "0x4e",
+      "0x4f",
+      "0x50",
+      "0x51",
+      "0x52",
+      "0x53",
+      "0x54",
+      "0x55",
+      "0x56",
+      "0x57",
+      "0x58",
+      "0x59",
+      "0x5a",
+      "0x5b",
+      "0x5c",
+      "0x5d",
+      "0x5e",
+      "0x5f",
+      "0x60",
+      "0x61",
+      "0x62",
+      "0x63",
+      "0x64",
+      "0x65",
+      "0x66",
+      "0x67",
+      "0x68",
+      "0x69",
+      "0x6a",
+      "0x6b",
+      "0x6c",
+      "0x6d",
+      "0x6e",
+      "0x6f",
+      "0x70",
+      "0x71",
+      "0x72",
+      "0x73",
+      "0x74",
+      "0x75",
+      "0x76",
+      "0x77",
+      "0x78",
+      "0x79",
+      "0x7a",
+      "0x7b",
+      "0x7c",
+      "0x7d",
+      "0x7e",
+      "0x7f",
+      "0x80",
+      "0x81",
+      "0x82",
+      "0x83",
+      "0x84",
+      "0x85",
+      "0x86",
+      "0x87",
+      "0x88",
+      "0x89",
+      "0x8a",
+      "0x8b",
+      "0x8c",
+      "0x8d",
+      "0x8e",
+      "0x8f",
+      "0x90",
+      "0x91",
+      "0x92",
+      "0x93",
+      "0x94",
+      "0x95",
+      "0x96",
+      "0x97",
+      "0x98",
+      "0x99",
+      "0x9a",
+      "0x9b",
+      "0x9c"
+    ],
+    "values_truncated": false,
+    "first_line": 41126
+  },
+  "ide|0x1f2|read|1": {
+    "count": 2,
+    "values": [
+      "0x55"
+    ],
+    "values_truncated": false,
+    "first_line": 41129
+  },
+  "ide|0x1f3|read|1": {
+    "count": 4,
+    "values": [
+      "0xaa",
+      "0xff",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 41131
+  },
+  "ide|0x3f6|write|1": {
+    "count": 60615,
+    "values": [
+      "0xe",
+      "0xa",
+      "0x8",
+      "0x80"
+    ],
+    "values_truncated": false,
+    "first_line": 41132
+  },
+  "ide|0x177|read|1": {
+    "count": 4,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 41185
+  },
+  "ide|0x176|write|1": {
+    "count": 4,
+    "values": [
+      "0xa0",
+      "0xb0"
+    ],
+    "values_truncated": false,
+    "first_line": 41186
+  },
+  "ide|0x176|read|1": {
+    "count": 2,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 41193
+  },
+  "ide|0x172|write|1": {
+    "count": 2,
+    "values": [
+      "0x55"
+    ],
+    "values_truncated": false,
+    "first_line": 41194
+  },
+  "ide|0x173|write|1": {
+    "count": 2,
+    "values": [
+      "0xaa"
+    ],
+    "values_truncated": false,
+    "first_line": 41196
+  },
+  "ide|0x172|read|1": {
+    "count": 2,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 41199
+  },
+  "ide|0x173|read|1": {
+    "count": 2,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 41201
+  },
+  "parallel|0x37a|read|1": {
+    "count": 1,
+    "values": [
+      "0xcc"
+    ],
+    "values_truncated": false,
+    "first_line": 41261
+  },
+  "parallel|0x37a|write|1": {
+    "count": 1,
+    "values": [
+      "0xcc"
+    ],
+    "values_truncated": false,
+    "first_line": 41262
+  },
+  "parallel|0x378|write|1": {
+    "count": 1,
+    "values": [
+      "0xaa"
+    ],
+    "values_truncated": false,
+    "first_line": 41263
+  },
+  "parallel|0x378|read|1": {
+    "count": 1,
+    "values": [
+      "0xaa"
+    ],
+    "values_truncated": false,
+    "first_line": 41264
+  },
+  "io|0x27a|read|1": {
+    "count": 1,
+    "values": [
+      "0xffffffffffffffff"
+    ],
+    "values_truncated": false,
+    "first_line": 41265
+  },
+  "io|0x27a|write|1": {
+    "count": 1,
+    "values": [
+      "0xdf"
+    ],
+    "values_truncated": false,
+    "first_line": 41266
+  },
+  "io|0x278|write|1": {
+    "count": 1,
+    "values": [
+      "0xaa"
+    ],
+    "values_truncated": false,
+    "first_line": 41267
+  },
+  "io|0x278|read|1": {
+    "count": 1,
+    "values": [
+      "0xffffffffffffffff"
+    ],
+    "values_truncated": false,
+    "first_line": 41268
+  },
+  "serial|0x3f9|write|1": {
+    "count": 4,
+    "values": [
+      "0x2",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 41269
+  },
+  "serial|0x3f9|read|1": {
+    "count": 1,
+    "values": [
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 41272
+  },
+  "serial|0x3fa|read|1": {
+    "count": 1,
+    "values": [
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 41274
+  },
+  "serial|0x2f9|write|1": {
+    "count": 2,
+    "values": [
+      "0x2",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 41277
+  },
+  "serial|0x2f9|read|1": {
+    "count": 1,
+    "values": [
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 41280
+  },
+  "serial|0x2fa|read|1": {
+    "count": 1,
+    "values": [
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 41282
+  },
+  "io|0x3e9|write|1": {
+    "count": 1,
+    "values": [
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 41285
+  },
+  "io|0x3e9|read|1": {
+    "count": 1,
+    "values": [
+      "0xffffffffffffffff"
+    ],
+    "values_truncated": false,
+    "first_line": 41286
+  },
+  "io|0x2e9|write|1": {
+    "count": 1,
+    "values": [
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 41287
+  },
+  "io|0x2e9|read|1": {
+    "count": 1,
+    "values": [
+      "0xffffffffffffffff"
+    ],
+    "values_truncated": false,
+    "first_line": 41288
+  },
+  "ide|0x1f1|write|1": {
+    "count": 60233,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 41528
+  },
+  "ide|0x1f4|write|1": {
+    "count": 120084,
+    "values": [
+      "0x0",
+      "0x87",
+      "0xac",
+      "0xad",
+      "0xae",
+      "0xff",
+      "0x1d",
+      "0x20",
+      "0xaa",
+      "0xab",
+      "0x89",
+      "0x88",
+      "0xa9",
+      "0x96",
+      "0x98",
+      "0x99",
+      "0x21",
+      "0x84",
+      "0x82",
+      "0x83",
+      "0x22",
+      "0x81",
+      "0x80",
+      "0x94",
+      "0x95",
+      "0x10",
+      "0x23",
+      "0x24",
+      "0x25",
+      "0x26",
+      "0x27",
+      "0x28",
+      "0x29",
+      "0x2a",
+      "0x2b",
+      "0x2c",
+      "0x2d",
+      "0x2e",
+      "0x2f",
+      "0x30",
+      "0x31",
+      "0x32",
+      "0x33",
+      "0x34",
+      "0x35",
+      "0x36",
+      "0x37",
+      "0x38",
+      "0x39",
+      "0x3a",
+      "0x3b",
+      "0x3c",
+      "0x3d",
+      "0x3e",
+      "0x3f",
+      "0x40",
+      "0x41",
+      "0x42",
+      "0x43",
+      "0x44",
+      "0x45",
+      "0x46",
+      "0x47",
+      "0x48",
+      "0x49",
+      "0x4a",
+      "0x4b",
+      "0x4c",
+      "0x4d",
+      "0x4e",
+      "0x4f",
+      "0x50",
+      "0x51",
+      "0x52",
+      "0x53",
+      "0x54",
+      "0x55",
+      "0x56",
+      "0x57",
+      "0x58",
+      "0x59",
+      "0x5a",
+      "0x5b",
+      "0x5c",
+      "0x5d",
+      "0x5e",
+      "0x5f",
+      "0x60",
+      "0x61",
+      "0x62",
+      "0x63",
+      "0x64",
+      "0x65",
+      "0x66",
+      "0x67",
+      "0x68",
+      "0x69",
+      "0x6a",
+      "0x6b",
+      "0x6c",
+      "0x6d",
+      "0x6e",
+      "0x6f",
+      "0x70",
+      "0x71",
+      "0x72",
+      "0x73",
+      "0x74",
+      "0x75",
+      "0x76",
+      "0x77",
+      "0x78",
+      "0x79",
+      "0x7a",
+      "0x7b",
+      "0x7c",
+      "0x11",
+      "0x1",
+      "0xaf",
+      "0xb0",
+      "0xb1",
+      "0xb2",
+      "0xb3",
+      "0xb4",
+      "0xb5",
+      "0xb6",
+      "0xb7",
+      "0xb8",
+      "0xb9",
+      "0xba",
+      "0xbb",
+      "0xbc",
+      "0xbd",
+      "0xbe",
+      "0xbf",
+      "0xc0",
+      "0xc1",
+      "0xc2",
+      "0xc3",
+      "0xc4",
+      "0xc5",
+      "0xc6",
+      "0xc7",
+      "0xc8",
+      "0xc9",
+      "0xca",
+      "0xcb",
+      "0xcc",
+      "0xcd",
+      "0xce",
+      "0xcf",
+      "0xd0",
+      "0xd1",
+      "0xd2",
+      "0xd3",
+      "0xd4",
+      "0xd5",
+      "0xd6",
+      "0xd7",
+      "0xd8",
+      "0xd9",
+      "0xda",
+      "0xdb",
+      "0xdc",
+      "0xdd",
+      "0xde",
+      "0xdf",
+      "0xe0",
+      "0xe1",
+      "0xe2",
+      "0xe3",
+      "0xe4",
+      "0xe5",
+      "0xe6",
+      "0xe7",
+      "0xe8",
+      "0xe9",
+      "0xea",
+      "0xeb",
+      "0xec",
+      "0xed",
+      "0xee",
+      "0xef",
+      "0xf0",
+      "0xf1",
+      "0xf2",
+      "0xf3",
+      "0xf4",
+      "0xf5",
+      "0xf6",
+      "0xf7",
+      "0xf8",
+      "0xf9",
+      "0xfa",
+      "0xfb",
+      "0xfc",
+      "0xfd",
+      "0xfe",
+      "0x2",
+      "0x3",
+      "0x4",
+      "0x5",
+      "0x6",
+      "0x7",
+      "0x8",
+      "0x9",
+      "0xa",
+      "0xb",
+      "0xc",
+      "0xd",
+      "0xe",
+      "0xf",
+      "0x12",
+      "0x13",
+      "0x14",
+      "0x15",
+      "0x16",
+      "0x17",
+      "0x18",
+      "0x19",
+      "0x1a",
+      "0x1b",
+      "0x1c",
+      "0x1e",
+      "0x1f",
+      "0x9a",
+      "0x85",
+      "0x86",
+      "0x8a",
+      "0x8b",
+      "0x8c",
+      "0x8d",
+      "0x8e",
+      "0x8f",
+      "0x93",
+      "0x97",
+      "0x9b",
+      "0x9c",
+      "0x7d",
+      "0x7e",
+      "0x7f"
+    ],
+    "values_truncated": false,
+    "first_line": 41534
+  },
+  "ide|0x1f5|write|1": {
+    "count": 120084,
+    "values": [
+      "0x0",
+      "0x3f",
+      "0x20",
+      "0x1"
+    ],
+    "values_truncated": false,
+    "first_line": 41536
+  },
+  "ide|0x1f7|write|1": {
+    "count": 60233,
+    "values": [
+      "0xa1",
+      "0xec",
+      "0x20",
+      "0x27",
+      "0x37",
+      "0x29",
+      "0x39"
+    ],
+    "values_truncated": false,
+    "first_line": 41538
+  },
+  "ide|0x1f0|read|2": {
+    "count": 96256,
+    "values": [
+      "0x40",
+      "0x1041",
+      "0x0",
+      "0x10",
+      "0x7e00",
+      "0x200",
+      "0x3f",
+      "0x514d",
+      "0x3030",
+      "0x3120",
+      "0x2020",
+      "0x3",
+      "0x4",
+      "0x322e",
+      "0x352b",
+      "0x5145",
+      "0x4d55",
+      "0x2048",
+      "0x4152",
+      "0x4444",
+      "0x4953",
+      "0x4b20",
+      "0x8010",
+      "0x1",
+      "0xb00",
+      "0x7",
+      "0xfff0",
+      "0x110",
+      "0x78",
+      "0x4000",
+      "0xf0",
+      "0x16",
+      "0x4021",
+      "0x7400",
+      "0x3400",
+      "0x203f",
+      "0x6001",
+      "0x6000",
+      "0xb8fc",
+      "0x96c0",
+      "0x66fa",
+      "0xd08e",
+      "0xbc",
+      "0xfb04",
+      "0x1e9c",
+      "0xf06",
+      "0xfa0",
+      "0x66a8",
+      "0x6651",
+      "0x6653",
+      "0x6652",
+      "0x6655",
+      "0xc08e",
+      "0xe8",
+      "0x5b00",
+      "0xeb83",
+      "0x8b21",
+      "0xc1cb",
+      "0x4eb",
+      "0x8c66",
+      "0x50c8",
+      "0xc303",
+      "0x8e66",
+      "0x67d8",
+      "0xd89",
+      "0x56",
+      "0x8f67",
+      "0x5805",
+      "0xb900",
+      "0xf633",
+      "0xff33",
+      "0xa4f3",
+      "0xc0b8",
+      "0x6696",
+      "0xd88e",
+      "0x6cea",
+      "0xc000",
+      "0x96",
+      "0x2",
+      "0x872d",
+      "0x8867",
+      "0x5515",
+      "0xb800",
+      "0x7c0",
+      "0x66c0",
+      "0xc933",
+      "0x8b67",
+      "0x5a0d",
+      "0x5100",
+      "0x6606",
+      "0xc08c",
+      "0x62a3",
+      "0xbe00",
+      "0x5c",
+      "0x42b4",
+      "0x8a67",
+      "0xcd00",
+      "0x5813",
+      "0x2005",
+      "0x6600",
+      "0x6766",
+      "0x5ff",
+      "0x64",
+      "0x875",
+      "0x68",
+      "0xe259",
+      "0x67ce",
+      "0x158a",
+      "0x55",
+      "0x1d8b",
+      "0xea",
+      "0x2a9",
+      "0xea3",
+      "0x80",
+      "0x101",
+      "0xfe0b",
+      "0xffff",
+      "0x1c84",
+      "0x20",
+      "0x1d02",
+      "0xddc3",
+      "0x1f",
+      "0xaa55",
+      "0x6664",
+      "0xc767",
+      "0x5",
+      "0x4200",
+      "0x3220",
+      "0xb820",
+      "0x96a0",
+      "0xc88c",
+      "0x66d8",
+      "0x8967",
+      "0x3a1d",
+      "0x6700",
+      "0x1588",
+      "0x13c",
+      "0xb9",
+      "0x3304",
+      "0x33f6",
+      "0xf3ff",
+      "0xb8a4",
+      "0xead8",
+      "0x1b4",
+      "0xd0a",
+      "0x6554",
+      "0x706d",
+      "0x656c",
+      "0x534f",
+      "0x4220",
+      "0x6f6f",
+      "0x2074",
+      "0x6f4c",
+      "0x6461",
+      "0x7265",
+      "0x2e30",
+      "0x4f20",
+      "0x646c",
+      "0x6552",
+      "0x6f63",
+      "0x6472",
+      "0x2e31",
+      "0x4420",
+      "0x6972",
+      "0x6576",
+      "0x4320",
+      "0x2e32",
+      "0x6553",
+      "0x7463",
+      "0x6f69",
+      "0x3a6e",
+      "0x8729",
+      "0xeb4",
+      "0x7b3",
+      "0x3d3d",
+      "0xc310",
+      "0x84ac",
+      "0x74c0",
+      "0xe8fa",
+      "0xffea",
+      "0xf6eb",
+      "0x31b0",
+      "0x9090",
+      "0xb450",
+      "0xbb0e",
+      "0x10cd",
+      "0xc358",
+      "0xfb4",
+      "0x6400",
+      "0x5c7",
+      "0x3cbe",
+      "0xe800",
+      "0xffca",
+      "0xd1e8",
+      "0x3cff",
+      "0x7230",
+      "0x3cf3",
+      "0x7338",
+      "0x66ef",
+      "0xe083",
+      "0x6607",
+      "0xc51c",
+      "0x13e",
+      "0x48b",
+      "0x42c5",
+      "0xdb85",
+      "0x575",
+      "0x8566",
+      "0x66cf",
+      "0x861d",
+      "0x8aa3",
+      "0xa101",
+      "0x23a",
+      "0xe8c1",
+      "0x6704",
+      "0x503",
+      "0x23c",
+      "0x84a3",
+      "0xbe01",
+      "0x17e",
+      "0x3c15",
+      "0xb400",
+      "0xcd42",
+      "0x6613",
+      "0x665d",
+      "0x665a",
+      "0x665b",
+      "0x6659",
+      "0xc033",
+      "0xa90f",
+      "0xa10f",
+      "0x1f07",
+      "0xea9d",
+      "0x1188",
+      "0x38",
+      "0x4c46",
+      "0x543a",
+      "0x2f3a",
+      "0x6441",
+      "0x6d61",
+      "0x4f2f",
+      "0x7470",
+      "0x422f",
+      "0x2f74",
+      "0x6f42",
+      "0x746f",
+      "0x484d",
+      "0x3244",
+      "0x482e",
+      "0x2e43",
+      "0x2c5a",
+      "0x3235",
+      "0x50",
+      "0xa0a0",
+      "0x1692",
+      "0x4708"
+    ],
+    "values_truncated": true,
+    "first_line": 41573
+  },
+  "ide|0x3f6|read|1": {
+    "count": 376,
+    "values": [
+      "0x50"
+    ],
+    "values_truncated": false,
+    "first_line": 42085
+  },
+  "uhci|0xc006|read|2": {
+    "count": 7,
+    "values": [
+      "0x63",
+      "0x64"
+    ],
+    "values_truncated": false,
+    "first_line": 54493
+  },
+  "kvmvapic|0x7e|write|2": {
+    "count": 1,
+    "values": [
+      "0x20"
+    ],
+    "values_truncated": false,
+    "first_line": 54565
+  },
+  "pcspk|0x61|read|1": {
+    "count": 2,
+    "values": [
+      "0x10",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 328794
+  },
+  "pcspk|0x61|write|1": {
+    "count": 2,
+    "values": [
+      "0x10",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 328795
+  },
+  "vga|0x3c4|write|1": {
+    "count": 17534,
+    "values": [
+      "0x2"
+    ],
+    "values_truncated": false,
+    "first_line": 328826
+  },
+  "vga|0x3c5|write|1": {
+    "count": 17534,
+    "values": [
+      "0xf",
+      "0x1",
+      "0x2",
+      "0x4",
+      "0x8"
+    ],
+    "values_truncated": false,
+    "first_line": 328828
+  },
+  "hpet|0xfed00000|read|8": {
+    "count": 1,
+    "values": [
+      "0x9896808086a201"
+    ],
+    "values_truncated": false,
+    "first_line": 369152
+  },
+  "hpet|0xfed00010|read|8": {
+    "count": 1,
+    "values": [
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 369153
+  },
+  "hpet|0xfed00010|write|8": {
+    "count": 1,
+    "values": [
+      "0x1"
+    ],
+    "values_truncated": false,
+    "first_line": 369154
+  },
+  "hpet|0xfed000f0|read|8": {
+    "count": 220142,
+    "values": [
+      "0x325",
+      "0x46668",
+      "0x46945",
+      "0x46c20",
+      "0x46efb",
+      "0x471d7",
+      "0x474b1",
+      "0x4778b",
+      "0x47a64",
+      "0x47d8b",
+      "0x480e1",
+      "0x48641",
+      "0x48913",
+      "0x48bf8",
+      "0x48ed2",
+      "0x491aa",
+      "0x49483",
+      "0x4975e",
+      "0x49a35",
+      "0x49d0e",
+      "0x49fe8",
+      "0x4a2c0",
+      "0x4a599",
+      "0x4a874",
+      "0x4ab4c",
+      "0x4ae23",
+      "0x4b0fd",
+      "0x4b3d7",
+      "0x4b6b0",
+      "0x4b988",
+      "0x4bc5f",
+      "0x4bf39",
+      "0x4c212",
+      "0x4c4ea",
+      "0x4c7c4",
+      "0x4ca9c",
+      "0x4cd75",
+      "0x4d04a",
+      "0x4d324",
+      "0x4d5fb",
+      "0x4d8d2",
+      "0x4dba8",
+      "0x4de82",
+      "0x4e15b",
+      "0x4e437",
+      "0x4e70f",
+      "0x4e9e7",
+      "0x4ecc1",
+      "0x4f158",
+      "0x4f439",
+      "0x4f70b",
+      "0x4f9e5",
+      "0x4fcbf",
+      "0x4ff9a",
+      "0x50272",
+      "0x5054b",
+      "0x50825",
+      "0x50afc",
+      "0x50dd4",
+      "0x510af",
+      "0x51389",
+      "0x51663",
+      "0x5193c",
+      "0x51c14",
+      "0x51eef",
+      "0x521be",
+      "0x5247e",
+      "0x5273e",
+      "0x52a01",
+      "0x52cc2",
+      "0x52f85",
+      "0x5324c",
+      "0x53509",
+      "0x537cd",
+      "0x53a8d",
+      "0x53d4d",
+      "0x5400e",
+      "0x542cd",
+      "0x54591",
+      "0x54853",
+      "0x54b15",
+      "0x54dd6",
+      "0x55096",
+      "0x5535a",
+      "0x5561d",
+      "0x558df",
+      "0x55ba0",
+      "0x55e60",
+      "0x56122",
+      "0x563e3",
+      "0x566a4",
+      "0x56966",
+      "0x56c2f",
+      "0x56ef1",
+      "0x571b0",
+      "0x57471",
+      "0x57733",
+      "0x579f4",
+      "0x57cb5",
+      "0x57f76",
+      "0x58239",
+      "0x584fc",
+      "0x587be",
+      "0x58a7e",
+      "0x58d3e",
+      "0x59000",
+      "0x592c1",
+      "0x59581",
+      "0x5983f",
+      "0x59b00",
+      "0x59dbf",
+      "0x5a07e",
+      "0x5a33f",
+      "0x5a601",
+      "0x5a8c2",
+      "0x5ab84",
+      "0x5ae47",
+      "0x5b107",
+      "0x5b3c7",
+      "0x5b688",
+      "0x5b949",
+      "0x5bc0a",
+      "0x5beca",
+      "0x5c18c",
+      "0x5c454",
+      "0x5c716",
+      "0x5c9d7",
+      "0x5cc99",
+      "0x5cf5a",
+      "0x5d21c",
+      "0x5d4dc",
+      "0x5d79c",
+      "0x5da5c",
+      "0x5dd1d",
+      "0x5dfdf",
+      "0x5e29d",
+      "0x5e55d",
+      "0x5e820",
+      "0x5eae0",
+      "0x5eda1",
+      "0x5f062",
+      "0x5f324",
+      "0x5f5e3",
+      "0x5f8a5",
+      "0x5fb65",
+      "0x5fe25",
+      "0x600e7",
+      "0x603ec",
+      "0x60737",
+      "0x60c9b",
+      "0x60f5d",
+      "0x6121d",
+      "0x614de",
+      "0x6179e",
+      "0x61a5f",
+      "0x61d1f",
+      "0x61fdf",
+      "0x622a2",
+      "0x62563",
+      "0x62826",
+      "0x62ae7",
+      "0x62da7",
+      "0x63067",
+      "0x6332a",
+      "0x635ec",
+      "0x638ae",
+      "0x63b70",
+      "0x63e31",
+      "0x640f1",
+      "0x643b4",
+      "0x6467b",
+      "0x6493d",
+      "0x64bfc",
+      "0x64ebe",
+      "0x6517f",
+      "0x65441",
+      "0x65743",
+      "0x65a04",
+      "0x65cc5",
+      "0x65f85",
+      "0x66249",
+      "0x66512",
+      "0x667d6",
+      "0x66a96",
+      "0x66d58",
+      "0x6701a",
+      "0x672db",
+      "0x676c4",
+      "0x67994",
+      "0x67c5f",
+      "0x67f23",
+      "0x681e5",
+      "0x684a4",
+      "0x68764",
+      "0x68a27",
+      "0x68ce9",
+      "0x68fb2",
+      "0x69273",
+      "0x69534",
+      "0x697f6",
+      "0x69ab9",
+      "0x69d7a",
+      "0x6a03b",
+      "0x6a2fb",
+      "0x6a5be",
+      "0x6a87e",
+      "0x6ab40",
+      "0x6ae00",
+      "0x6b0c3",
+      "0x6b386",
+      "0x6b648",
+      "0x6b908",
+      "0x6bbc9",
+      "0x6be8b",
+      "0x6c14b",
+      "0x6c40c",
+      "0x6c6cc",
+      "0x6c98e",
+      "0x6cc52",
+      "0x6cf12",
+      "0x6d1d0",
+      "0x6d490",
+      "0x6d754",
+      "0x6da16",
+      "0x6dcd7",
+      "0x6df99",
+      "0x6e25e",
+      "0x6e521",
+      "0x6e7e3",
+      "0x6eaa3",
+      "0x6ed64",
+      "0x6f027",
+      "0x6f2e8",
+      "0x6f5a9",
+      "0x6f868",
+      "0x6fb2b",
+      "0x6fdee",
+      "0x700b0",
+      "0x7036f",
+      "0x70632",
+      "0x708f5",
+      "0x70bb6",
+      "0x70e74",
+      "0x71137",
+      "0x713fa",
+      "0x716bd",
+      "0x7197f",
+      "0x71c40",
+      "0x71f01",
+      "0x721c6",
+      "0x72489",
+      "0x7274a",
+      "0x72a0c",
+      "0x72cce",
+      "0x72f91",
+      "0x73254"
+    ],
+    "values_truncated": true,
+    "first_line": 369155
+  },
+  "ide|0x1f0|read|4": {
+    "count": 3745920,
+    "values": [
+      "0x10410040",
+      "0x100000",
+      "0x2007e00",
+      "0x3f",
+      "0x0",
+      "0x3030514d",
+      "0x31203030",
+      "0x20202020",
+      "0x2000003",
+      "0x322e0004",
+      "0x2020352b",
+      "0x51452020",
+      "0x20484d55",
+      "0x44444152",
+      "0x4b204953",
+      "0x80102020",
+      "0xb000001",
+      "0x2000000",
+      "0x70200",
+      "0x101041",
+      "0xfff0003f",
+      "0x110003f",
+      "0x400000",
+      "0x70007",
+      "0x780003",
+      "0x780078",
+      "0x40000078",
+      "0x1600f0",
+      "0x74004021",
+      "0x40214000",
+      "0x40003400",
+      "0x203f",
+      "0x60010000",
+      "0x6000",
+      "0x10000",
+      "0x96c0b8fc",
+      "0xd08e66fa",
+      "0xfb0400bc",
+      "0xf061e9c",
+      "0x66a80fa0",
+      "0x66536651",
+      "0x66556652",
+      "0xe8c08e",
+      "0xeb835b00",
+      "0xc1cb8b21",
+      "0x8c6604eb",
+      "0xc30350c8",
+      "0x67d88e66",
+      "0x560d89",
+      "0x8f670000",
+      "0x5805",
+      "0x200b900",
+      "0xff33f633",
+      "0xc0b8a4f3",
+      "0xd88e6696",
+      "0xc0006cea",
+      "0x96",
+      "0x20000",
+      "0x10010",
+      "0x872d",
+      "0x55158867",
+      "0xb8000000",
+      "0x8e6607c0",
+      "0xc93366c0",
+      "0x5a0d8b67",
+      "0x51000000",
+      "0xc08c6606",
+      "0xbe0062a3",
+      "0x42b4005c",
+      "0x55158a67",
+      "0xcd000000",
+      "0x20055813",
+      "0xc08e6600",
+      "0x5ff6766",
+      "0x64",
+      "0x67660875",
+      "0x6805ff",
+      "0xe2590000",
+      "0x158a67ce",
+      "0x55",
+      "0x1d8b6766",
+      "0x56",
+      "0xc00000ea",
+      "0x7",
+      "0xea302a9",
+      "0x800000",
+      "0xfe0b0101",
+      "0x3fffff",
+      "0x1c840000",
+      "0x800020",
+      "0x1d02ffff",
+      "0xddc30020",
+      "0x1f",
+      "0xaa550000",
+      "0x4d9058eb",
+      "0x4e495753",
+      "0x312e34",
+      "0x200402",
+      "0x2",
+      "0xf800",
+      "0x201c84",
+      "0x100f",
+      "0x1",
+      "0xd8290080",
+      "0x4ecc1487",
+      "0x414e204f",
+      "0x2020454d",
+      "0x41462020",
+      "0x20323354",
+      "0xb8fc2020",
+      "0x8e6696c0",
+      "0x8e66fac0",
+      "0x400bcd0",
+      "0xe8fb",
+      "0x6ceb835b",
+      "0x6604ebc1",
+      "0xc303c88c",
+      "0xb9d88e66",
+      "0xf6330200",
+      "0xa4f3ff33",
+      "0x6696c0b8",
+      "0xa2ead88e",
+      "0x96c000",
+      "0x100173",
+      "0xac9d0000",
+      "0x88670000",
+      "0x8f15",
+      "0x7c0b800",
+      "0x66c08e66",
+      "0x8b67c933",
+      "0x900d",
+      "0x66065100",
+      "0x98a3c08c",
+      "0x92be00",
+      "0x8a6742b4",
+      "0x5813cd00",
+      "0x66002005",
+      "0x6766c08e",
+      "0x9a05ff",
+      "0x8750000",
+      "0x9e",
+      "0x66cee259",
+      "0xb866db33",
+      "0x3",
+      "0xfffffff",
+      "0x5",
+      "0x6",
+      "0x8",
+      "0x9",
+      "0xa",
+      "0xb",
+      "0xc",
+      "0xd",
+      "0xe",
+      "0xf",
+      "0x10",
+      "0x11",
+      "0x12",
+      "0x13",
+      "0x14",
+      "0x15",
+      "0x16",
+      "0x17",
+      "0x18",
+      "0x19",
+      "0x1a",
+      "0x1b",
+      "0x1c",
+      "0x1d",
+      "0x1e",
+      "0x20",
+      "0x21",
+      "0x22",
+      "0x23",
+      "0x24",
+      "0x25",
+      "0x26",
+      "0x27",
+      "0x28",
+      "0x29",
+      "0x2a",
+      "0x2b",
+      "0x2c",
+      "0x2d",
+      "0x2e",
+      "0x2f",
+      "0x30",
+      "0x31",
+      "0x32",
+      "0x33",
+      "0x34",
+      "0x35",
+      "0x36",
+      "0x37",
+      "0x38",
+      "0x39",
+      "0x3a",
+      "0x3b",
+      "0x3c",
+      "0x3d",
+      "0x3e",
+      "0x40",
+      "0x41",
+      "0x42",
+      "0x43",
+      "0x44",
+      "0x45",
+      "0x46",
+      "0x47",
+      "0x48",
+      "0x49",
+      "0x4a",
+      "0x4b",
+      "0x4c",
+      "0x4d",
+      "0x4e",
+      "0x4f",
+      "0x50",
+      "0x51",
+      "0x52",
+      "0x53",
+      "0x54",
+      "0x57",
+      "0x58",
+      "0x59",
+      "0x5a",
+      "0x5b",
+      "0x5c",
+      "0x5d",
+      "0x5e",
+      "0x5f",
+      "0x60",
+      "0x190d",
+      "0x66",
+      "0x68",
+      "0x69",
+      "0x6b",
+      "0x6d",
+      "0x6e",
+      "0x6f",
+      "0x72",
+      "0x75",
+      "0x76",
+      "0x77",
+      "0x78",
+      "0x79",
+      "0x7a",
+      "0x7b",
+      "0x7c",
+      "0x7d",
+      "0x7e",
+      "0x7f",
+      "0x80",
+      "0x41615252",
+      "0x61417272",
+      "0xffffffff"
+    ],
+    "values_truncated": true,
+    "first_line": 370549
+  },
+  "ide|0x1f4|read|1": {
+    "count": 2,
+    "values": [
+      "0xff",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 370821
+  },
+  "ide|0x1f5|read|1": {
+    "count": 2,
+    "values": [
+      "0x3f",
+      "0x0"
+    ],
+    "values_truncated": false,
+    "first_line": 370823
+  },
+  "ide|0x1f0|write|4": {
+    "count": 6665984,
+    "values": [
+      "0x0",
+      "0x230b",
+      "0x230c",
+      "0x230d",
+      "0x230e",
+      "0x230f",
+      "0x2310",
+      "0x2311",
+      "0x2312",
+      "0x2313",
+      "0x2314",
+      "0x2315",
+      "0x2316",
+      "0x2317",
+      "0x2318",
+      "0x2319",
+      "0x231a",
+      "0x231b",
+      "0x231c",
+      "0x231d",
+      "0x231e",
+      "0x231f",
+      "0x2320",
+      "0x2321",
+      "0x2322",
+      "0x2323",
+      "0x2324",
+      "0x2325",
+      "0x2326",
+      "0x2327",
+      "0x2328",
+      "0x2329",
+      "0x232a",
+      "0x232b",
+      "0x232c",
+      "0x232d",
+      "0x232e",
+      "0x232f",
+      "0x2330",
+      "0x2331",
+      "0x2332",
+      "0x2333",
+      "0x2334",
+      "0x2335",
+      "0x2336",
+      "0x2337",
+      "0x2338",
+      "0x2339",
+      "0x233a",
+      "0x233b",
+      "0x233c",
+      "0x233d",
+      "0x233e",
+      "0x233f",
+      "0x2340",
+      "0x2341",
+      "0x2342",
+      "0x2343",
+      "0x2344",
+      "0x2345",
+      "0x2346",
+      "0x2347",
+      "0x2348",
+      "0x2349",
+      "0x234a",
+      "0x234b",
+      "0x234c",
+      "0x234d",
+      "0x234e",
+      "0x234f",
+      "0x2350",
+      "0x2351",
+      "0x2352",
+      "0x2353",
+      "0x2354",
+      "0x2355",
+      "0x2356",
+      "0x2357",
+      "0x2358",
+      "0x2359",
+      "0x235a",
+      "0x235b",
+      "0x235c",
+      "0x235d",
+      "0x235e",
+      "0x235f",
+      "0x2360",
+      "0x2361",
+      "0x2362",
+      "0x2363",
+      "0x2364",
+      "0x2365",
+      "0x2366",
+      "0xfffffff",
+      "0x2368",
+      "0x2369",
+      "0x236a",
+      "0x236b",
+      "0x236c",
+      "0x236d",
+      "0x41615252",
+      "0x61417272",
+      "0xffffffff",
+      "0x236f",
+      "0xaa550000",
+      "0x4d",
+      "0x4e",
+      "0x52542402",
+      "0x6441222c",
+      "0x24226d61",
+      "0x4449240a",
+      "0x8024322c",
+      "0x79532282",
+      "0x67734d73",
+      "0x67616c46",
+      "0x8d8b8973",
+      "0x9673248f",
+      "0x5f996d5f",
+      "0x5b9e9c66",
+      "0x303d5d30",
+      "0x2d8ea13b",
+      "0x90b58c90",
+      "0x5",
+      "0x101188",
+      "0x18",
+      "0x2010000",
+      "0x3",
+      "0x646f47",
+      "0x30",
+      "0x433a4c46",
+      "0x64412f3a",
+      "0x472f6d61",
+      "0x472f646f",
+      "0x6f53646f",
+      "0x482e676e",
+      "0x2c5a2e43",
+      "0x3235",
+      "0x1",
+      "0x36",
+      "0x3035",
+      "0x20",
+      "0x5f525544",
+      "0x315f3631",
+      "0x385f36",
+      "0x656e",
+      "0x35",
+      "0x36315f38",
+      "0x36315f",
+      "0x34",
+      "0x544f4438",
+      "0x33",
+      "0x2020202e",
+      "0x20202020",
+      "0x10202020",
+      "0x3e690000",
+      "0x1d9e5d46",
+      "0x20202e2e",
+      "0x25d46",
+      "0x6f004441",
+      "0x69004400",
+      "0xf007300",
+      "0x744700",
+      "0x6f0072",
+      "0x48002e",
+      "0x43",
+      "0x5a002e",
+      "0x49444f44",
+      "0x4f525453",
+      "0x5a4348",
+      "0x5b2a0000",
+      "0x224f4ad5",
+      "0x416",
+      "0x61004d41",
+      "0x65006b00",
+      "0xf004800",
+      "0x6fcf00",
+      "0x65006d",
+      "0x454b414d",
+      "0x454d4f48",
+      "0x40920000",
+      "0x236e5d46",
+      "0x15a",
+      "0x6d005641",
+      "0x61006c00",
+      "0xf006200",
+      "0x41ec00",
+      "0x740067",
+      "0xffff0000",
+      "0x414c4d56",
+      "0x54474142",
+      "0x204348",
+      "0x40910000",
+      "0x23675d46",
+      "0x35cb",
+      "0x65005241",
+      "0x69006700",
+      "0x743600",
+      "0x790072",
+      "0x49474552",
+      "0x59525453",
+      "0x540f0000",
+      "0x236f5d5f",
+      "0x650052e5",
+      "0x494745e5",
+      "0x2370",
+      "0x72",
+      "0x84",
+      "0x95839290",
+      "0x67655273",
+      "0xa0726556",
+      "0x72908e8c",
+      "0x747369bd",
+      "0x765f7972",
+      "0x6f6973c0",
+      "0x2e353d6e",
+      "0xb4b23330",
+      "0xa291b62c",
+      "0x5dc",
+      "0x38307830",
+      "0x20303030",
+      "0x5a00",
+      "0x20000c4",
+      "0x6d00c3",
+      "0x16fe3188",
+      "0x30307830",
+      "0x20313030",
+      "0x16fe3130",
+      "0x6d542f7e",
+      "0x44442e70",
+      "0x5a2e",
+      "0x16fe3168",
+      "0x5f676264",
+      "0x6f666e69",
+      "0x74005a00",
+      "0xa0",
+      "0x16fe56a8",
+      "0x17af45f0",
+      "0x17af4570",
+      "0xa",
+      "0x70000",
+      "0xffffffa8",
+      "0x8",
+      "0x70617773",
+      "0x6d0073",
+      "0x16fe31d8",
+      "0x23705d5f",
+      "0x2371",
+      "0x1b2",
+      "0x25f",
+      "0x8191b62c",
+      "0xbb6e4983",
+      "0x90a2c2bd",
+      "0x6c656823",
+      "0x6e695f70",
+      "0x20786564",
+      "0xc867bc22"
+    ],
+    "values_truncated": true,
+    "first_line": 1096797
+  },
+  "serial|0x3fb|write|1": {
+    "count": 2,
+    "values": [
+      "0x80",
+      "0x3"
+    ],
+    "values_truncated": false,
+    "first_line": 25335118
+  },
+  "serial|0x3f8|write|1": {
+    "count": 1402,
+    "values": [
+      "0x1",
+      "0x56",
+      "0x4d",
+      "0x4c",
+      "0x42",
+      "0x8b",
+      "0x0",
+      "0x7b",
+      "0x22",
+      "0x65",
+      "0x76",
+      "0x6e",
+      "0x74",
+      "0x3a",
+      "0x68",
+      "0x6c",
+      "0x6f",
+      "0x2c",
+      "0x70",
+      "0x72",
+      "0x5f",
+      "0x73",
+      "0x69",
+      "0x32",
+      "0x61",
+      "0x67",
+      "0x2d",
+      "0x6d",
+      "0x3d",
+      "0x66",
+      "0x31",
+      "0x34",
+      "0x35",
+      "0x75",
+      "0x5b",
+      "0x78",
+      "0x63",
+      "0x5d",
+      "0x6b",
+      "0x36",
+      "0x64",
+      "0x38",
+      "0x39",
+      "0x33",
+      "0x62",
+      "0x7d",
+      "0x10",
+      "0x24",
+      "0x19",
+      "0xc7",
+      "0x44",
+      "0x79",
+      "0x20",
+      "0x43",
+      "0x2f",
+      "0x48",
+      "0xa",
+      "0x41",
+      "0x54",
+      "0x45",
+      "0x49",
+      "0x53",
+      "0x5a",
+      "0x30",
+      "0x37",
+      "0x2e",
+      "0x52",
+      "0x16",
+      "0x11",
+      "0x2",
+      "0x1f",
+      "0x3",
+      "0x57",
+      "0x46",
+      "0x4b",
+      "0x58",
+      "0xe",
+      "0x4",
+      "0x5",
+      "0x77"
+    ],
+    "values_truncated": false,
+    "first_line": 25335121
+  },
+  "serial|0x3fa|write|1": {
+    "count": 1,
+    "values": [
+      "0xc7"
+    ],
+    "values_truncated": false,
+    "first_line": 25335130
+  },
+  "serial|0x3fc|write|1": {
+    "count": 1,
+    "values": [
+      "0xb"
+    ],
+    "values_truncated": false,
+    "first_line": 25335132
+  },
+  "serial|0x3fd|read|1": {
+    "count": 14281522,
+    "values": [
+      "0x60",
+      "0x61"
+    ],
+    "values_truncated": false,
+    "first_line": 25335135
+  },
+  "serial|0x3f8|read|1": {
+    "count": 1055,
+    "values": [
+      "0x56",
+      "0x4d",
+      "0x4c",
+      "0x42",
+      "0x3c",
+      "0x0",
+      "0x7b",
+      "0x22",
+      "0x63",
+      "0x6d",
+      "0x64",
+      "0x3a",
+      "0x68",
+      "0x65",
+      "0x6c",
+      "0x6f",
+      "0x2c",
+      "0x70",
+      "0x72",
+      "0x74",
+      "0x5f",
+      "0x76",
+      "0x73",
+      "0x69",
+      "0x6e",
+      "0x32",
+      "0x6b",
+      "0x66",
+      "0x36",
+      "0x38",
+      "0x35",
+      "0x61",
+      "0x39",
+      "0x33",
+      "0x62",
+      "0x7d",
+      "0xe",
+      "0x67",
+      "0x12",
+      "0x78",
+      "0x31",
+      "0x5b",
+      "0x44",
+      "0x3b",
+      "0x5d",
+      "0x14",
+      "0x58",
+      "0x5c",
+      "0x3d",
+      "0x25",
+      "0x20",
+      "0x47",
+      "0x52",
+      "0x57",
+      "0x49",
+      "0x54",
+      "0x48",
+      "0x45",
+      "0xaf",
+      "0x46",
+      "0x28",
+      "0x7e",
+      "0x2f",
+      "0x2e",
+      "0x53",
+      "0x4b",
+      "0x43",
+      "0x29",
+      "0x55",
+      "0x2a",
+      "0x34",
+      "0x75",
+      "0x79",
+      "0x77"
+    ],
+    "values_truncated": false,
+    "first_line": 25526693
+  },
+  "acpi-cnt|0x604|write|2": {
+    "count": 1,
+    "values": [
+      "0x2000"
+    ],
+    "values_truncated": false,
+    "first_line": 58768082
+  },
+  "vga-lowmem|aperture|write|1": {
+    "count": 6628405,
+    "values": [
+      "0x20",
+      "0x53",
+      "0x7",
+      "0x65",
+      "0x61",
+      "0x42",
+      "0x49",
+      "0x4f",
+      "0x28",
+      "0x76",
+      "0x72",
+      "0x73",
+      "0x69",
+      "0x6f",
+      "0x6e",
+      "0x41",
+      "0x63",
+      "0x68",
+      "0x4c",
+      "0x75",
+      "0x78",
+      "0x31",
+      "0x2e",
+      "0x37",
+      "0x30",
+      "0x2d",
+      "0x32",
+      "0x29",
+      "0x74",
+      "0x67",
+      "0x66",
+      "0x6d",
+      "0x48",
+      "0x64",
+      "0x44",
+      "0x6b",
+      "0x54",
+      "0x70",
+      "0x6c",
+      "0x52",
+      "0x43",
+      "0x3a",
+      "0x0",
+      "0x7e",
+      "0xff",
+      "0x3c",
+      "0x38",
+      "0x18",
+      "0xc",
+      "0x1c",
+      "0x7c",
+      "0x81",
+      "0xa5",
+      "0xbd",
+      "0x99",
+      "0xc3",
+      "0xdb",
+      "0x83",
+      "0xe7",
+      "0x60",
+      "0x6",
+      "0xfe",
+      "0x77",
+      "0x10",
+      "0x36",
+      "0xf3",
+      "0x9f",
+      "0x87",
+      "0x3e",
+      "0x7f",
+      "0x1e",
+      "0xe",
+      "0x1a",
+      "0xcc",
+      "0xf9",
+      "0xcf",
+      "0xc1",
+      "0x3f",
+      "0x33",
+      "0xf0",
+      "0xe0",
+      "0xe6",
+      "0xc0",
+      "0x80",
+      "0xf8",
+      "0xc7",
+      "0x2",
+      "0x9c",
+      "0x7b",
+      "0x1b",
+      "0xf",
+      "0x3",
+      "0x1",
+      "0xd",
+      "0x1f",
+      "0x19",
+      "0xfc",
+      "0x8f",
+      "0xe1",
+      "0x8c",
+      "0xb0",
+      "0xe3",
+      "0xf1",
+      "0xd8",
+      "0xc6",
+      "0x98",
+      "0x86",
+      "0x71",
+      "0x8d",
+      "0xce",
+      "0xb8",
+      "0x3b",
+      "0xb1",
+      "0xee",
+      "0xdc",
+      "0x9d",
+      "0x89",
+      "0x1d",
+      "0x9b",
+      "0x8e",
+      "0xd9",
+      "0xcd",
+      "0xec",
+      "0xb3",
+      "0x58",
+      "0xac",
+      "0x35",
+      "0xd6",
+      "0xfb",
+      "0x9a",
+      "0xf6",
+      "0xfd",
+      "0x24",
+      "0xc8",
+      "0x94",
+      "0x91",
+      "0xad",
+      "0xb6",
+      "0x5b",
+      "0xda",
+      "0xb7",
+      "0xbf",
+      "0xdf",
+      "0xbe",
+      "0xc9",
+      "0xef",
+      "0xf7",
+      "0x79",
+      "0x39",
+      "0x9e",
+      "0xc2",
+      "0x93",
+      "0x6a",
+      "0xde",
+      "0x62",
+      "0x92",
+      "0x95",
+      "0xc4",
+      "0x96",
+      "0x11",
+      "0x55",
+      "0xaa",
+      "0xdd",
+      "0x88",
+      "0x9",
+      "0x40",
+      "0xfa",
+      "0x90",
+      "0x84",
+      "0x85",
+      "0xe4",
+      "0xbc",
+      "0x82",
+      "0xeb",
+      "0xa0",
+      "0x5f",
+      "0x59",
+      "0x4",
+      "0xcb",
+      "0xd7",
+      "0x3d",
+      "0x97",
+      "0xf4"
+    ],
+    "values_truncated": false,
+    "first_line": 3669,
+    "min_address": 655360,
+    "max_address": 786431
+  },
+  "vga-lowmem|aperture|read|1": {
+    "count": 262144,
+    "values": [
+      "0xff",
+      "0xc3",
+      "0x99",
+      "0xc1",
+      "0xf9",
+      "0xf3",
+      "0xc7",
+      "0x0",
+      "0x3c",
+      "0x81",
+      "0xe7",
+      "0x9f",
+      "0xcf",
+      "0x93",
+      "0x83",
+      "0xc9",
+      "0x89",
+      "0x80",
+      "0x92",
+      "0x95",
+      "0x87",
+      "0x94",
+      "0xc4",
+      "0xe3",
+      "0x9c",
+      "0x88",
+      "0x8f",
+      "0x91",
+      "0x7",
+      "0x3f",
+      "0x5f",
+      "0x6f",
+      "0x77",
+      "0xfb",
+      "0xfd",
+      "0xfe",
+      "0x7f",
+      "0xf0",
+      "0xf"
+    ],
+    "values_truncated": false,
+    "first_line": 18984452,
+    "min_address": 655360,
+    "max_address": 786431
+  }
+}

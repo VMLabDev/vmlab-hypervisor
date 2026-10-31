@@ -1,0 +1,2 @@
+  Device 0.2, Port 1, Speed 480 Mb/s, Product QEMU USB Keyboard
+  Device 0.1, Port 2, Speed 480 Mb/s, Product QEMU USB Tablet

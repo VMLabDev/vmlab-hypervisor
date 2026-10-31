@@ -1459,7 +1459,7 @@ mod tests {
 
         fn setup_queue(&mut self, vector: u16) {
             self.bar16_write(COMMON_CFG_OFF + common::QUEUE_SELECT, 0);
-            assert_eq!(self.bar16_read(COMMON_CFG_OFF + common::QUEUE_SIZE), 128);
+            assert_eq!(self.bar16_read(COMMON_CFG_OFF + common::QUEUE_SIZE), 256);
             self.bar16_write(COMMON_CFG_OFF + common::QUEUE_SIZE, QUEUE_SIZE);
             self.bar32_write(COMMON_CFG_OFF + common::QUEUE_DESC, DESC as u32);
             self.bar32_write(COMMON_CFG_OFF + common::QUEUE_DESC + 4, 0);
@@ -1766,7 +1766,7 @@ mod tests {
         assert_eq!(g.bar8_read(COMMON_CFG_OFF + common::DEVICE_STATUS), 0);
         // Queue configuration is wiped: size reads the maximum again and the
         // queue reports disabled.
-        assert_eq!(g.bar16_read(COMMON_CFG_OFF + common::QUEUE_SIZE), 128);
+        assert_eq!(g.bar16_read(COMMON_CFG_OFF + common::QUEUE_SIZE), 256);
         assert_eq!(g.bar16_read(COMMON_CFG_OFF + common::QUEUE_ENABLE), 0);
         // The config vector is NO_VECTOR again (VIRTIO 1.2 §4.1.4.3).
         assert_eq!(g.bar16_read(COMMON_CFG_OFF + common::MSIX_CONFIG), 0xFFFF);
@@ -1801,9 +1801,11 @@ mod tests {
         let mut g = Guest::new();
         // A non power of two is ignored; 0 cannot be written either.
         g.bar16_write(COMMON_CFG_OFF + common::QUEUE_SIZE, 7);
-        assert_eq!(g.bar16_read(COMMON_CFG_OFF + common::QUEUE_SIZE), 128);
-        g.bar16_write(COMMON_CFG_OFF + common::QUEUE_SIZE, 256);
-        assert_eq!(g.bar16_read(COMMON_CFG_OFF + common::QUEUE_SIZE), 128);
+        assert_eq!(g.bar16_read(COMMON_CFG_OFF + common::QUEUE_SIZE), 256);
+        g.bar16_write(COMMON_CFG_OFF + common::QUEUE_SIZE, 512);
+        assert_eq!(g.bar16_read(COMMON_CFG_OFF + common::QUEUE_SIZE), 256);
+        g.bar16_write(COMMON_CFG_OFF + common::QUEUE_SIZE, 0);
+        assert_eq!(g.bar16_read(COMMON_CFG_OFF + common::QUEUE_SIZE), 256);
         g.bar16_write(COMMON_CFG_OFF + common::QUEUE_SIZE, QUEUE_SIZE);
         assert_eq!(
             g.bar16_read(COMMON_CFG_OFF + common::QUEUE_SIZE),

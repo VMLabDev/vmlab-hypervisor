@@ -13,12 +13,85 @@ import json
 import os
 import socket
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
 
 import lib
 from backends import VmSession, hv_machine_description, qemu_vm_argv
+
+
+class QmpTests(unittest.TestCase):
+    def release(self, error=None, running=True):
+        client, peer = socket.socketpair()
+        client.settimeout(0.5)
+        peer.settimeout(2)
+        requests = []
+        failures = []
+
+        def serve():
+            pending = ""
+            decoder = json.JSONDecoder()
+            try:
+                peer.sendall(b'{"QMP":{"version":{},"capabilities":[]}}\r\n')
+                for command in ["qmp_capabilities", "cont", "query-status"]:
+                    while True:
+                        try:
+                            request, end = decoder.raw_decode(pending.lstrip())
+                            pending = pending.lstrip()[end:]
+                            break
+                        except json.JSONDecodeError:
+                            data = peer.recv(4096)
+                            if not data:
+                                return
+                            pending += data.decode()
+                    requests.append(request)
+                    self.assertEqual(request["execute"], command)
+                    reply = {"id": request.get("id")}
+                    if error == command:
+                        reply["error"] = {"class": "GenericError", "desc": "resume refused"}
+                    else:
+                        reply["return"] = {"running": running} if command == "query-status" else {}
+                    event = {"event": "RESUME"}
+                    peer.sendall((json.dumps(event) + "\r\n" + json.dumps(reply) + "\r\n").encode())
+                    if error == command:
+                        return
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                peer.close()
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        connected = mock.Mock(wraps=client)
+        connected.connect = mock.Mock()
+        try:
+            with mock.patch.object(lib.socket, "socket", return_value=connected):
+                if error:
+                    with self.assertRaisesRegex(lib.BenchError, "resume refused"):
+                        lib.qmp_cont("unused", timeout=0.5)
+                elif not running:
+                    with self.assertRaisesRegex(lib.BenchError, "not running"):
+                        lib.qmp_cont("unused", timeout=0.5)
+                else:
+                    lib.qmp_cont("unused", timeout=0.5)
+        finally:
+            client.close()
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        return requests
+
+    def test_release_handles_coalesced_events_and_matches_command_replies(self):
+        requests = self.release()
+        self.assertEqual([r["id"] for r in requests], [1, 2, 3])
+
+    def test_release_reports_qmp_errors(self):
+        self.release(error="cont")
+
+    def test_release_checks_running_state(self):
+        self.release(running=False)
 
 
 class StatsTests(unittest.TestCase):
@@ -328,6 +401,119 @@ class NoiseControlTests(unittest.TestCase):
             finally:
                 first.close()
                 second.close()
+    def test_g2g_samples_are_named_for_the_sender_and_receiver(self):
+        import run
+        agent_a, agent_b = object(), object()
+        backend_a = argparse.Namespace(agent_socket=lambda: "a", session=argparse.Namespace(exit_code=None))
+        backend_b = argparse.Namespace(agent_socket=lambda: "b", session=argparse.Namespace(exit_code=None))
+
+        def direction(sender, _receiver, _ip, _port, _window):
+            return (100 if sender is agent_a else 200), {"bytes": 1}, {"bytes": 1}
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(lib, "RUN_DIR", tmp), \
+                mock.patch.object(lib, "require_vm_slots"), \
+                mock.patch.object(run.netpeer, "Hub"), \
+                mock.patch.object(run, "g2g_launch", side_effect=[backend_a, backend_b]), \
+                mock.patch.object(lib, "wait_for_agent", side_effect=[(agent_a, {}), (agent_b, {})]), \
+                mock.patch.object(run, "g2g_setup_guest"), \
+                mock.patch.object(run, "g2g_direction", side_effect=direction), \
+                mock.patch.object(run, "g2g_teardown"):
+            result, _ = run.g2g_one_repeat(run.parse_args([]), "ubuntu-26.04", 2,
+                "16-19", "20-23", "test", 1)
+            self.assertEqual(result["samples"]["net_g2g_a2b_tcp_mbps"], 100)
+            self.assertEqual(result["samples"]["net_g2g_b2a_tcp_mbps"], 200)
+
+    def test_capacity_failure_does_not_start_a_peer(self):
+        import run
+        with mock.patch.object(lib, "require_vm_slots", side_effect=lib.BenchError("full")), \
+                mock.patch.object(run.netpeer, "Peer") as peer:
+            with self.assertRaisesRegex(lib.BenchError, "full"):
+                run.x86_one_repeat(None, "ubuntu-26.04", 2, "16-23", "test", 1)
+            peer.assert_not_called()
+
+    def test_launch_failure_preserves_error_and_reaps_peer(self):
+        import run
+        backend = argparse.Namespace(
+            launch=mock.Mock(side_effect=lib.BenchError("launch blocked")),
+            quit=mock.Mock())
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(lib, "RUN_DIR", tmp), \
+                mock.patch.object(lib, "require_vm_slots"), \
+                mock.patch.object(lib, "prepare_run_dir", return_value=("overlay", "code", "vars")), \
+                mock.patch.object(run.netpeer, "Peer") as peer, \
+                mock.patch.object(run, "X86HvBackend", return_value=backend):
+            args = run.parse_args(["--backend", "vmlab-hv"])
+            with self.assertRaisesRegex(lib.BenchError, "launch blocked"):
+                run.x86_one_repeat(args, "ubuntu-26.04", 2, "16-23", "test", 1)
+            peer.return_value.kill.assert_called_once()
+
+    def test_g2g_teardown_handles_a_partial_pair(self):
+        import run
+        backend = argparse.Namespace(name="vmlab-hv", quit=mock.Mock(),
+            session=argparse.Namespace(kill=mock.Mock()))
+        run.g2g_teardown([backend, None], [None, None])
+        backend.session.kill.assert_called_once()
+
+    def test_exec_does_not_reuse_a_channel_before_guest_cleanup(self):
+        from collections import deque
+        seen = set()
+        replies = deque()
+
+        def send(frame):
+            message = json.loads(frame[13:])
+            cid = message["id"]
+            if cid in seen:
+                replies.append((0, 0, json.dumps({"event": "error", "id": cid,
+                    "msg": "channel id already in use"}).encode()))
+            else:
+                seen.add(cid)
+                replies.extend((0, 0, json.dumps(message).encode()) for message in [
+                    {"event": "eof", "id": cid},
+                    {"event": "exited", "id": cid, "code": 0}])
+
+        with mock.patch.object(socket, "socket") as factory:
+            factory.return_value.sendall.side_effect = send
+            for _ in range(2):
+                client = lib.AgentClient("unused")
+                client._recv_frame = lambda _timeout: replies.popleft()
+                for _ in range(3):
+                    self.assertEqual(client.exec(["true"], 1)["code"], 0)
+                client.close()
+        self.assertEqual(len(seen), 6)
+
+    def test_sampler_resolves_elf_virtual_addresses_for_pie_and_exec(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = os.path.join(tmp, "ipsample")
+            source = os.path.join(lib.BENCH_DIR, "ipsample.c")
+            for flags in (["-fPIE", "-pie"], ["-fno-pie", "-no-pie"]):
+                subprocess.run(["cc", "-O2", *flags, "-o", binary, source], check=True)
+                subprocess.run([binary, "--self-test"], check=True, capture_output=True)
+
+    def test_host_vm_count_includes_other_worktrees_and_excludes_android(self):
+        with tempfile.TemporaryDirectory() as proc:
+            for pid, argv in {
+                1: ["/other/target/release/vmlab-hv", "--machine", "machine.json"],
+                2: ["qemu-system-x86_64", "-name", "other-project"],
+                3: ["/opt/android/qemu-system-x86_64", "-avd", "thevault"],
+                4: ["python3", "run.py", "--backend", "vmlab-hv"],
+                5: [],
+                6: ["/worktree/target/debug/vmlab-hv-test-plain", "--machine", "test.json"],
+            }.items():
+                os.mkdir(os.path.join(proc, str(pid)))
+                with open(os.path.join(proc, str(pid), "cmdline"), "wb") as f:
+                    f.write(b"\0".join(os.fsencode(arg) for arg in argv))
+            self.assertEqual(lib.project_vm_pids(proc), [1, 2, 6])
+
+    def test_two_vm_cap_checked_before_launch(self):
+        with mock.patch.object(lib, "project_vm_pids", return_value=[1]):
+            lib.require_vm_slots()
+            with self.assertRaisesRegex(lib.BenchError, "need 2 VM slots"):
+                lib.require_vm_slots(2)
+        with mock.patch.object(lib, "project_vm_pids", return_value=[1, 2]):
+            with self.assertRaisesRegex(lib.BenchError, "running project VM PIDs"):
+                lib.require_vm_slots()
 
     def test_pin_windows(self):
         with mock.patch.object(os, "cpu_count", return_value=32):

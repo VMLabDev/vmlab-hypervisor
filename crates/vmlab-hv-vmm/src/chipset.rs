@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{
-    Arc,
+    Arc, Weak,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -24,17 +24,26 @@ use crate::{error::VmmError, layout::MemLayout, q35::PirqRouter};
 struct IrqHub {
     deliver: Box<dyn Fn(u32, bool) + Send + Sync>,
     sources: Mutex<BTreeMap<(u32, u32), bool>>,
+    lines: Mutex<BTreeMap<(u32, u32), Weak<Source>>>,
 }
 
 struct Source {
     hub: Arc<IrqHub>,
     id: u32,
     gsi: u32,
+    level: AtomicBool,
 }
 
 impl IrqLine for Source {
     fn set_level(&self, high: bool) {
+        if self.level.load(Ordering::Acquire) == high {
+            return;
+        }
         let mut sources = self.hub.sources.lock();
+        if sources.get(&(self.id, self.gsi)).copied().unwrap_or(false) == high {
+            self.level.store(high, Ordering::Release);
+            return;
+        }
         let previous = sources
             .iter()
             .any(|((_, gsi), active)| *gsi == self.gsi && *active);
@@ -45,16 +54,32 @@ impl IrqLine for Source {
         if previous != level {
             (self.hub.deliver)(self.gsi, level);
         }
+        // Publish only after the wired-OR output has been delivered. A
+        // repeated level can then return without taking the shared lock.
+        self.level.store(high, Ordering::Release);
     }
 }
 
 impl IrqHub {
     fn line(self: &Arc<Self>, id: u32, gsi: u32) -> Arc<dyn IrqLine> {
-        Arc::new(Source {
+        let mut lines = self.lines.lock();
+        if let Some(line) = lines.get(&(id, gsi)).and_then(Weak::upgrade) {
+            return line;
+        }
+        let level = self
+            .sources
+            .lock()
+            .get(&(id, gsi))
+            .copied()
+            .unwrap_or(false);
+        let line = Arc::new(Source {
             hub: self.clone(),
             id,
             gsi,
-        })
+            level: AtomicBool::new(level),
+        });
+        lines.insert((id, gsi), Arc::downgrade(&line));
+        line
     }
 }
 
@@ -72,6 +97,10 @@ impl IrqLine for RtcGate {
 }
 
 pub struct Chipset {
+    hub: Arc<IrqHub>,
+    pub bridge: Option<Arc<Mutex<crate::pc::Piix3>>>,
+    pub a20: Option<Arc<Mutex<crate::a20::A20>>>,
+    fast_a20: Mutex<u8>,
     pub smi: Mutex<crate::smm::SmiControl>,
     pub smi_pending: AtomicBool,
     pub lpc: Arc<Mutex<Lpc>>,
@@ -96,13 +125,33 @@ pub struct Chipset {
 pub struct ChipsetRegisters(pub Arc<Chipset>);
 impl vmlab_hv_devices::Snapshot for ChipsetRegisters {
     fn state_id(&self) -> String {
-        "q35-platform-registers".into()
+        if self.0.bridge.is_some() {
+            "pc-platform-registers"
+        } else {
+            "q35-platform-registers"
+        }
+        .into()
     }
     fn save_state(&self) -> Result<Vec<u8>, vmlab_hv_devices::DeviceError> {
-        self.0.smi.lock().save_state()
+        let mut bytes = self.0.smi.lock().save_state()?;
+        if self.0.bridge.is_some() {
+            bytes.push(*self.0.fast_a20.lock());
+        }
+        Ok(bytes)
     }
     fn restore_state(&mut self, bytes: &[u8]) -> Result<(), vmlab_hv_devices::DeviceError> {
-        self.0.smi.lock().restore_state(bytes)?;
+        let smi = if self.0.bridge.is_some() {
+            if bytes.len() != 13 {
+                return Err(vmlab_hv_devices::DeviceError::State(
+                    "invalid pc platform state".into(),
+                ));
+            }
+            *self.0.fast_a20.lock() = bytes[12];
+            &bytes[..12]
+        } else {
+            bytes
+        };
+        self.0.smi.lock().restore_state(smi)?;
         self.0.smi_pending.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -115,6 +164,25 @@ impl Chipset {
         rtc_base: i64,
         secure_smm: bool,
     ) -> Result<Arc<Self>, VmmError> {
+        Self::build(vm, layout, rtc_base, secure_smm, None)
+    }
+
+    pub fn pc(
+        vm: Arc<VmFd>,
+        layout: &MemLayout,
+        rtc_base: i64,
+        a20: Arc<Mutex<crate::a20::A20>>,
+    ) -> Result<Arc<Self>, VmmError> {
+        Self::build(vm, layout, rtc_base, false, Some(a20))
+    }
+
+    fn build(
+        vm: Arc<VmFd>,
+        layout: &MemLayout,
+        rtc_base: i64,
+        secure_smm: bool,
+        a20: Option<Arc<Mutex<crate::a20::A20>>>,
+    ) -> Result<Arc<Self>, VmmError> {
         install_irq_routes(&vm)?;
         let irq_vm = vm.clone();
         let hub = Arc::new(IrqHub {
@@ -124,15 +192,24 @@ impl Chipset {
                 }
             }),
             sources: Mutex::new(BTreeMap::new()),
+            lines: Mutex::new(BTreeMap::new()),
         });
-        let pirqs = PirqRouter::new(std::array::from_fn(|gsi| hub.line(0, gsi as u32)));
+        let outputs = std::array::from_fn(|gsi| hub.line(0, gsi as u32));
+        let pirqs = if a20.is_some() {
+            PirqRouter::pc(outputs)
+        } else {
+            PirqRouter::new(outputs)
+        };
         let power = Arc::new(Mutex::new(None));
         let error = Arc::new(Mutex::new(None));
         let pending = power.clone();
-        let lpc = Arc::new(Mutex::new(Lpc::new(
-            hub.line(1, 9),
-            Arc::new(move |action| *pending.lock() = Some(action)),
-        )));
+        let action: Arc<dyn Fn(PowerAction) + Send + Sync> =
+            Arc::new(move |action| *pending.lock() = Some(action));
+        let lpc = Arc::new(Mutex::new(if a20.is_some() {
+            Lpc::piix4(hub.line(1, 9), action)
+        } else {
+            Lpc::new(hub.line(1, 9), action)
+        }));
         let gate = Arc::new(RtcGate {
             enabled: AtomicBool::new(true),
             level: AtomicBool::new(false),
@@ -144,12 +221,20 @@ impl Chipset {
             layout.ram.saturating_sub(layout.low_ram_top()),
         );
         let pending = power.clone();
+        let a20_output = a20.clone();
+        let a20_errors = error.clone();
         let ps2 = Arc::new(Mutex::new(I8042::new(
             hub.line(3, 1),
             hub.line(3, 12),
             Arc::new(move |event| {
                 if event == ControllerEvent::Reset {
                     *pending.lock() = Some(PowerAction::Reset);
+                }
+                if let ControllerEvent::A20(enabled) = event
+                    && let Some(a20) = &a20_output
+                    && let Err(error) = a20.lock().set_enabled(enabled)
+                {
+                    *a20_errors.lock() = Some(error.to_string());
                 }
             }),
         )));
@@ -177,19 +262,33 @@ impl Chipset {
             }),
         )));
         let smbus = Arc::new(Mutex::new(Smbus::new(
-            "ich9-smbus",
-            PirqRouter::line(
-                &pirqs,
-                vmlab_hv_proto::machine::PciAddress {
-                    bus: 0,
-                    device: 31,
-                    function: 3,
-                },
-                1,
-            )
-            .map_err(VmmError::Other)?,
+            if a20.is_some() {
+                "piix4-smbus"
+            } else {
+                "ich9-smbus"
+            },
+            if a20.is_some() {
+                hub.line(5, 9)
+            } else {
+                PirqRouter::line(
+                    &pirqs,
+                    vmlab_hv_proto::machine::PciAddress {
+                        bus: 0,
+                        device: 31,
+                        function: 3,
+                    },
+                    1,
+                )
+                .map_err(VmmError::Other)?
+            },
         )));
         Ok(Arc::new(Self {
+            hub,
+            bridge: a20
+                .as_ref()
+                .map(|_| Arc::new(Mutex::new(crate::pc::Piix3::default()))),
+            a20,
+            fast_a20: Mutex::new(2),
             smi: Mutex::new(crate::smm::SmiControl::default()),
             smi_pending: AtomicBool::new(false),
             lpc,
@@ -210,6 +309,10 @@ impl Chipset {
 
     pub fn advance(&self) {
         self.clock_step(None);
+    }
+
+    pub fn irq_source(&self, id: u32, gsi: u32) -> Arc<dyn IrqLine> {
+        self.hub.line(id, gsi)
     }
     pub fn set_running(&self, running: bool) {
         self.clock_step(Some(running));
@@ -250,6 +353,14 @@ impl Chipset {
     }
 
     pub fn sync_pirqs(&self) {
+        if let Some(bridge) = &self.bridge {
+            let bridge = bridge.lock();
+            let mut router = self.pirqs.lock();
+            for pirq in 0..4 {
+                router.set_route(pirq, bridge.route(pirq));
+            }
+            return;
+        }
         let mut lpc = self.lpc.lock();
         if lpc.config_read(0xa0 / 4) & (1 << 4) != 0 {
             self.smi.lock().lock();
@@ -262,6 +373,18 @@ impl Chipset {
 
     pub fn io_read(&self, port: u16, data: &mut [u8]) -> bool {
         self.advance();
+        if self.bridge.is_some() {
+            if port == 0x92 && data.len() == 1 {
+                data[0] = *self.fast_a20.lock();
+                return true;
+            }
+            if let Some(base) = self.lpc.lock().smbus_base()
+                && port.wrapping_sub(base) < 16
+            {
+                self.smbus.lock().read(u64::from(port - base), data);
+                return true;
+            }
+        }
         if let Some((register, offset)) = self.smi_register(port, data.len()) {
             let bytes = self.smi.lock().read(register).unwrap().to_le_bytes();
             data.copy_from_slice(&bytes[offset..offset + data.len()]);
@@ -310,6 +433,36 @@ impl Chipset {
 
     pub fn io_write(&self, port: u16, data: &[u8]) -> bool {
         self.advance();
+        if let Some(a20) = &self.a20 {
+            if port == 0x92 && data.len() == 1 {
+                let previous = *self.fast_a20.lock();
+                *self.fast_a20.lock() = data[0] & !1;
+                if let Err(error) = a20.lock().set_enabled(data[0] & 2 != 0) {
+                    *self.error.lock() = Some(error.to_string());
+                }
+                if previous & 1 == 0 && data[0] & 1 != 0 {
+                    *self.power.lock() = Some(PowerAction::Reset);
+                }
+                return true;
+            }
+            if let Some(base) = self.lpc.lock().smbus_base()
+                && port.wrapping_sub(base) < 16
+            {
+                let mut smbus = self.smbus.lock();
+                smbus.config_write(1, 0, &[1]);
+                smbus.config_write(0x40 / 4, 0, &[1]);
+                smbus.write(u64::from(port - base), data);
+                return true;
+            }
+            if matches!(port, 0xb2 | 0xb3) && data.len() == 1 {
+                let mut lpc = self.lpc.lock();
+                lpc.write_port(port, data);
+                if port == 0xb2 && lpc.piix4_smi_enabled() {
+                    self.smi_pending.store(true, Ordering::SeqCst);
+                }
+                return true;
+            }
+        }
         if let Some((register, offset)) = self.smi_register(port, data.len()) {
             if register == 0xb2 && !self.secure_smm {
                 self.lpc.lock().write_port(port, data);
@@ -353,6 +506,9 @@ impl Chipset {
     }
 
     fn smi_register(&self, port: u16, len: usize) -> Option<(u16, usize)> {
+        if self.bridge.is_some() {
+            return None;
+        }
         if matches!(port, 0xb2 | 0xb3) && len == 1 {
             return Some((port, 0));
         }
@@ -435,6 +591,60 @@ fn install_irq_routes(vm: &VmFd) -> Result<(), VmmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_irq_levels_do_not_take_the_hub_lock() {
+        let hub = Arc::new(IrqHub {
+            deliver: Box::new(|_, _| {}),
+            sources: Mutex::new(BTreeMap::new()),
+            lines: Mutex::new(BTreeMap::new()),
+        });
+        let line = hub.line(1, 9);
+        for level in [false, true] {
+            line.set_level(level);
+            let guard = hub.sources.lock();
+            let sender = line.clone();
+            let (sent, received) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                sender.set_level(level);
+                sent.send(()).unwrap();
+            });
+            let completed = received.recv_timeout(Duration::from_millis(100)).is_ok();
+            drop(guard);
+            thread.join().unwrap();
+            assert!(completed, "unchanged IRQ level waited for the hub lock");
+        }
+    }
+
+    #[test]
+    fn routed_pci_irq_and_uart_share_the_physical_line() {
+        let edges = Arc::new(Mutex::new(Vec::new()));
+        let sink = edges.clone();
+        let hub = Arc::new(IrqHub {
+            deliver: Box::new(move |gsi, level| sink.lock().push((gsi, level))),
+            sources: Mutex::new(BTreeMap::new()),
+            lines: Mutex::new(BTreeMap::new()),
+        });
+        let uart = hub.line(6, 4);
+        let router = PirqRouter::pc(std::array::from_fn(|gsi| hub.line(0, gsi as u32)));
+        router.lock().set_route(1, 4);
+        let pci = PirqRouter::line(
+            &router,
+            vmlab_hv_proto::machine::PciAddress {
+                bus: 0,
+                device: 2,
+                function: 0,
+            },
+            1,
+        )
+        .unwrap();
+        uart.set_level(true);
+        pci.set_level(true);
+        uart.set_level(false);
+        assert_eq!(*edges.lock(), vec![(4, true)]);
+        pci.set_level(false);
+        assert_eq!(*edges.lock(), vec![(4, true), (4, false)]);
+    }
 
     #[test]
     fn apmc_enables_acpi_without_smm() {
@@ -586,17 +796,26 @@ mod tests {
         let hub = Arc::new(IrqHub {
             deliver: Box::new(move |gsi, level| output.lock().push((gsi, level))),
             sources: Mutex::new(BTreeMap::new()),
+            lines: Mutex::new(BTreeMap::new()),
         });
         let first = hub.line(1, 9);
+        let alias = hub.line(1, 9);
+        assert!(Arc::ptr_eq(&first, &alias));
         let second = hub.line(2, 9);
         for _ in 0..65536 {
             first.set_level(false);
         }
+        assert!(hub.sources.lock().is_empty());
         first.set_level(true);
+        alias.set_level(false);
+        alias.set_level(true);
         second.set_level(true);
         first.set_level(false);
         second.set_level(false);
-        assert_eq!(*events.lock(), [(9, true), (9, false)]);
+        assert_eq!(
+            *events.lock(),
+            [(9, true), (9, false), (9, true), (9, false)]
+        );
     }
     #[test]
     fn platform_timers_freeze_between_pause_and_resume() {

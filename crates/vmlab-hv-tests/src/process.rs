@@ -5,13 +5,20 @@ use std::io;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// A slot shared by all S1 and acceptance test processes for this user.
 pub struct VmPermit(File);
+
+fn vm_slot_directory() -> PathBuf {
+    // SAFETY: geteuid has no preconditions and only reads the effective UID.
+    let uid = unsafe { libc::geteuid() };
+    // The lock namespace is host-wide even when guest data uses another TMPDIR.
+    Path::new("/tmp").join(format!("vmlab-hv-vm-slots-{uid}"))
+}
 
 fn project_vm(command_line: &[u8]) -> bool {
     let arguments: Vec<_> = command_line.split(|byte| *byte == 0).collect();
@@ -79,12 +86,11 @@ impl VmPermit {
         if limit == 0 {
             return Err(io::Error::other("VMLAB_HV_TEST_VM_LIMIT must be positive"));
         }
-        // SAFETY: geteuid has no preconditions and only reads the effective UID.
-        let uid = unsafe { libc::geteuid() };
-        let directory = std::env::temp_dir().join(format!("vmlab-hv-vm-slots-{uid}"));
+        let directory = vm_slot_directory();
         std::fs::create_dir_all(&directory)?;
-        let permit = Self::acquire_in(&directory, limit, Duration::from_secs(600))?;
-        wait_for_vm_capacity(Path::new("/proc"), Duration::from_secs(600))?;
+        let timeout = ManagedChild::timeout()?;
+        let permit = Self::acquire_in(&directory, limit, timeout)?;
+        wait_for_vm_capacity(Path::new("/proc"), timeout)?;
         Ok(permit)
     }
 
@@ -255,6 +261,32 @@ impl Drop for ManagedChild {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_slot_directory_ignores_guest_tmpdir() {
+        const PROBE: &str = "VMLAB_HV_SLOT_DIRECTORY_PROBE";
+        if std::env::var_os(PROBE).is_some() {
+            // SAFETY: geteuid only reads the effective UID.
+            let uid = unsafe { libc::geteuid() };
+            assert_eq!(
+                vm_slot_directory(),
+                Path::new("/tmp").join(format!("vmlab-hv-vm-slots-{uid}"))
+            );
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "process::tests::global_slot_directory_ignores_guest_tmpdir",
+                "--nocapture",
+            ])
+            .env(PROBE, "1")
+            .env("TMPDIR", directory.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
 
     #[test]
     fn host_capacity_counts_project_guests_and_excludes_android() {

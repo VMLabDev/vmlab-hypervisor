@@ -26,9 +26,10 @@ impl Default for FirmwareOptions {
     }
 }
 
-const RESERVATIONS: [(u64, u64); 2] = [(0xfeff_c000, 0x4000), (0xfd_0000_0000, 0x3_0000_0000)];
+pub(crate) const RESERVATIONS: [(u64, u64); 2] =
+    [(0xfeff_c000, 0x4000), (0xfd_0000_0000, 0x3_0000_0000)];
 
-fn e820_entry(bytes: &mut Vec<u8>, base: u64, length: u64, kind: u32) {
+pub(crate) fn e820_entry(bytes: &mut Vec<u8>, base: u64, length: u64, kind: u32) {
     bytes.extend_from_slice(&base.to_le_bytes());
     bytes.extend_from_slice(&length.to_le_bytes());
     bytes.extend_from_slice(&kind.to_le_bytes());
@@ -74,8 +75,22 @@ pub fn numeric_items(
     options: &FirmwareOptions,
 ) -> Result<Vec<(u16, Vec<u8>)>, String> {
     let ram = ram_size(platform)?;
+    Ok(numeric_items_for_ram(
+        platform.vcpus,
+        platform.max_cpus,
+        ram,
+        options,
+    ))
+}
+
+pub(crate) fn numeric_items_for_ram(
+    vcpus: u16,
+    max_cpus: u16,
+    ram: u64,
+    options: &FirmwareOptions,
+) -> Vec<(u16, Vec<u8>)> {
     // No NUMA nodes: retain a zero-valued CPU map for legacy consumers.
-    let numa = vec![0; 8 + usize::from(platform.max_cpus) * 8];
+    let numa = vec![0; 8 + usize::from(max_cpus) * 8];
     let mut reservations = (RESERVATIONS.len() as u32).to_le_bytes().to_vec();
     for (base, length) in RESERVATIONS {
         e820_entry(&mut reservations, base, length, 2);
@@ -86,22 +101,22 @@ pub fn numeric_items(
     uuid[..4].reverse();
     uuid[4..6].reverse();
     uuid[6..8].reverse();
-    Ok(vec![
+    vec![
         (0x02, uuid.to_vec()),
         (0x03, ram.to_le_bytes().to_vec()),
         (0x04, u16::from(options.nographic).to_le_bytes().to_vec()),
-        (0x05, platform.vcpus.to_le_bytes().to_vec()),
+        (0x05, vcpus.to_le_bytes().to_vec()),
         (0x06, 0u16.to_le_bytes().to_vec()),
         (0x0d, numa),
         (0x0e, u16::from(options.boot_menu).to_le_bytes().to_vec()),
-        (0x0f, platform.max_cpus.to_le_bytes().to_vec()),
+        (0x0f, max_cpus.to_le_bytes().to_vec()),
         (0x8000, 0u16.to_le_bytes().to_vec()),
         (0x8001, 0u16.to_le_bytes().to_vec()),
         (0x8002, vec![1]),
         (0x8003, reservations),
         // No legacy HPET configuration records; ACPI describes the HPET.
         (0x8004, vec![0]),
-    ])
+    ]
 }
 
 /// Files consumed before firmware reserves its own tables and low RAM.
@@ -117,6 +132,20 @@ pub fn ancillary_files(
     for &(base, length) in &platform.ram_regions {
         e820_entry(&mut e820, base, length, 1);
     }
+    let smbios = smbios::generate_fw_cfg(platform, &options.smbios)?;
+    let mut files = common_files(options, smbios, e820)?;
+    if platform.tpm {
+        files.push(("etc/tpm/config".into(), vec![0, 0x50, 0xd4, 0xfe, 2, 1]));
+        files.push(("etc/tpm/log".into(), vec![0; 0x10000]));
+    }
+    Ok(files)
+}
+
+pub(crate) fn common_files(
+    options: &FirmwareOptions,
+    smbios: smbios::SmbiosTables,
+    e820: Vec<u8>,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut bootorder = Vec::new();
     for path in &options.bootorder {
         if !path.starts_with('/') || !path.is_ascii() || path.contains(['\n', '\r', '\0']) {
@@ -130,8 +159,7 @@ pub fn ancillary_files(
     if !bootorder.is_empty() {
         bootorder.push(0);
     }
-    let smbios = smbios::generate_fw_cfg(platform, &options.smbios)?;
-    let mut files = vec![
+    Ok(vec![
         ("etc/e820".into(), e820),
         ("bootorder".into(), bootorder),
         (
@@ -145,10 +173,5 @@ pub fn ancillary_files(
         ("etc/smbios/smbios-anchor".into(), smbios.anchor),
         ("etc/smbios/smbios-tables".into(), smbios.tables),
         ("bios-geometry".into(), Vec::new()),
-    ];
-    if platform.tpm {
-        files.push(("etc/tpm/config".into(), vec![0, 0x50, 0xd4, 0xfe, 2, 1]));
-        files.push(("etc/tpm/log".into(), vec![0; 0x10000]));
-    }
-    Ok(files)
+    ])
 }

@@ -52,10 +52,16 @@ fn next_value(argv: &mut impl Iterator<Item = String>, flag: &str) -> Result<Pat
 }
 
 #[cfg(test)]
+mod a20_acceptance;
+#[cfg(test)]
 mod acceptance;
 mod devices;
 #[cfg(test)]
 mod display_acceptance;
+#[cfg(test)]
+mod pc_acceptance;
+#[cfg(test)]
+mod pc_hwref;
 #[cfg(test)]
 mod riscv_acceptance;
 

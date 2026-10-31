@@ -1,0 +1,130 @@
+{
+  "0x0f": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": [
+      "0x00",
+      "0x0a"
+    ]
+  },
+  "0x38": {
+    "read_values": [
+      "0x30"
+    ],
+    "write_values": []
+  },
+  "0x3d": {
+    "read_values": [
+      "0x12"
+    ],
+    "write_values": []
+  },
+  "0x08": {
+    "read_values": [
+      "0x10"
+    ],
+    "write_values": []
+  },
+  "0x5f": {
+    "read_values": [
+      "0x01"
+    ],
+    "write_values": []
+  },
+  "0x00": {
+    "read_values": [
+      "0x47",
+      "0x49",
+      "0x53",
+      "0x17",
+      "0x18",
+      "0x24",
+      "0x41",
+      "0x43",
+      "0x55",
+      "0x56",
+      "0x58"
+    ],
+    "write_values": []
+  },
+  "0x0b": {
+    "read_values": [
+      "0x02"
+    ],
+    "write_values": [
+      "0x02"
+    ]
+  },
+  "0x0c": {
+    "read_values": [
+      "0x00",
+      "0x10"
+    ],
+    "write_values": []
+  },
+  "0x0d": {
+    "read_values": [
+      "0x80"
+    ],
+    "write_values": []
+  },
+  "0x0a": {
+    "read_values": [
+      "0x26"
+    ],
+    "write_values": [
+      "0x26"
+    ]
+  },
+  "0x02": {
+    "read_values": [
+      "0x26",
+      "0x28",
+      "0x29"
+    ],
+    "write_values": []
+  },
+  "0x04": {
+    "read_values": [
+      "0x10"
+    ],
+    "write_values": []
+  },
+  "0x32": {
+    "read_values": [
+      "0x20"
+    ],
+    "write_values": []
+  },
+  "0x10": {
+    "read_values": [
+      "0x50"
+    ],
+    "write_values": []
+  },
+  "0x39": {
+    "read_values": [
+      "0x01"
+    ],
+    "write_values": []
+  },
+  "0x09": {
+    "read_values": [
+      "0x26"
+    ],
+    "write_values": []
+  },
+  "0x07": {
+    "read_values": [
+      "0x31"
+    ],
+    "write_values": []
+  },
+  "0x06": {
+    "read_values": [
+      "0x07"
+    ],
+    "write_values": []
+  }
+}
