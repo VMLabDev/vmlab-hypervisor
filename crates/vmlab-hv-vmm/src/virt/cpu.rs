@@ -49,6 +49,14 @@ pub(super) fn configure_memory<M: Memory>(cpu: &mut Riscv64<M>, size: u64) -> Re
     cpu.interpreter
         .globals
         .insert("zpma_regions".into(), Value::Vector(regions));
+    // Captured QEMU virt identity and the sixteen implemented HPM counters.
+    cpu.interpreter
+        .globals
+        .insert("zmarchid".into(), Value::bits(64, 0x2au64));
+    cpu.interpreter.globals.insert(
+        "zsys_writable_hpm_counters".into(),
+        Value::bits(32, 0x0007fff8u32),
+    );
     Ok(())
 }
 
@@ -69,6 +77,11 @@ mod tests {
         assert_eq!(cpu.gpr(10).unwrap(), 0);
         assert_eq!(cpu.read_csr(0x342).unwrap(), 1);
         configure_memory(&mut cpu, 2 << 30).unwrap();
+        assert_eq!(cpu.read_csr(0xf12).unwrap(), 0x2a);
+        cpu.write_csr(0xb12, 17).unwrap();
+        assert_eq!(cpu.read_csr(0xb12).unwrap(), 17);
+        cpu.write_csr(0xb13, 17).unwrap();
+        assert_eq!(cpu.read_csr(0xb13).unwrap(), 0);
         cpu.set_pc(0x20000000);
         let state = cpu.save_state();
         cpu.run(1).unwrap();
