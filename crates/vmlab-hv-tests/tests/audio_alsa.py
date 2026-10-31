@@ -129,17 +129,33 @@ def negotiate(fd, rate, channels):
 
 
 def play(device, rate, channels):
+    """Play raw PCM from stdin. With ALSA_MARKER set to a virtio-serial
+    port device, one marker byte is written there immediately before the
+    first PCM write; the host sees it within the port's own latency
+    (sub-millisecond), which is the instant the A4 harness measures
+    from. With ALSA_STAMP set, the guest clock is written to that path
+    at the same moment, for diagnostics."""
     fd = os.open(device, os.O_RDWR)
     try:
         period = negotiate(fd, rate, channels)
         fcntl.ioctl(fd, IOCTL_PREPARE)
         frame_bytes = 2 * channels
         chunk = period * frame_bytes
+        stamped = False
         while True:
             data = sys.stdin.buffer.read(chunk)
             if not data:
                 break
             while data:
+                if not stamped:
+                    stamped = True
+                    marker = os.environ.get("ALSA_MARKER")
+                    if marker:
+                        with open(marker, "wb", buffering=0) as port:
+                            port.write(b"M\n")
+                    stamp = os.environ.get("ALSA_STAMP")
+                    if stamp:
+                        open(stamp, "w").write(f"{time.time():.9f}\n")
                 try:
                     written = os.write(fd, data)
                 except OSError as error:
@@ -147,13 +163,6 @@ def play(device, rate, channels):
                         # Underrun: reprepare and keep going.
                         fcntl.ioctl(fd, IOCTL_PREPARE)
                         continue
-                    for name in ("status", "hw_params", "xrun_debug"):
-                        try:
-                            print(f"--- /proc/asound/card0/pcm0p/sub0/{name}:",
-                                  open(f"/proc/asound/card0/pcm0p/sub0/{name}").read(),
-                                  file=sys.stderr)
-                        except OSError:
-                            pass
                     raise
                 data = data[written:]
         fcntl.ioctl(fd, IOCTL_DRAIN)
