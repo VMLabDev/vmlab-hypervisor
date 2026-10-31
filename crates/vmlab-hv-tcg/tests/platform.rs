@@ -135,5 +135,20 @@ fn trap_data_csrs_are_runtime_values_on_platform_cpus() {
                 "CSR {csr:#x} retrained code"
             );
         }
+        if cause {
+            for code in [1, 5, 9] {
+                let value = (1 << 63) | code;
+                for cpu in [&mut reference, &mut specialized] {
+                    cpu.write_csr(csr as u16, value).unwrap();
+                    cpu.run(128).unwrap();
+                }
+                assert_eq!(
+                    *specialized.interpreter.globals,
+                    *reference.interpreter.globals
+                );
+                assert_eq!(specialized.gpr(10).unwrap(), value);
+                assert_eq!(specialized.specialization_stats.recordings, recordings);
+            }
+        }
     }
 }
