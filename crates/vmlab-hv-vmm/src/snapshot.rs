@@ -454,12 +454,39 @@ fn stream_ram_out(
 }
 
 /// The in-kernel and per-vCPU state, as sections.
+fn validate_cpu_frequencies(
+    shared: &crate::vm::VmShared,
+    sections: &SavedSections,
+) -> Result<(), SnapshotError> {
+    for (id, fd) in shared.vcpus.lock().iter() {
+        let key = format!("vcpu{id}/tsc-khz");
+        if let Some(bytes) = sections.get(&key) {
+            let saved: u32 = from_json(bytes, &key)?;
+            let current = fd
+                .lock()
+                .get_tsc_khz()
+                .map_err(|e| SnapshotError::Internal(format!("KVM_GET_TSC_KHZ: {e}")))?;
+            if saved != current {
+                return Err(SnapshotError::Incompatible(format!(
+                    "snapshot TSC frequency {saved} kHz differs from destination {current} kHz"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn save_kernel_state(
     shared: &crate::vm::VmShared,
     sections: &mut Vec<Section>,
 ) -> Result<(), SnapshotError> {
     let vm = &shared.kvm.vm;
     let io = |e: kvm_ioctls::Error| SnapshotError::Internal(format!("KVM ioctl: {e}"));
+
+    sections.push((
+        "ignored-msrs".into(),
+        to_json(&*shared.ignored_msrs.lock())?,
+    ));
 
     for (id, chip) in [
         ("pic-master", KVM_IRQCHIP_PIC_MASTER),
@@ -504,6 +531,15 @@ pub(crate) fn save_kernel_state(
             }
         }
         let p = |s: &str| format!("vcpu{id}/{s}");
+        sections.push((
+            p("cpuid"),
+            to_json(
+                fd.get_cpuid2(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
+                    .map_err(io)?
+                    .as_slice(),
+            )?,
+        ));
+        sections.push((p("tsc-khz"), to_json(&fd.get_tsc_khz().map_err(io)?)?));
         sections.push((p("regs"), to_json(&fd.get_regs().map_err(io)?)?));
         sections.push((p("sregs"), to_json(&fd.get_sregs().map_err(io)?)?));
         sections.push((p("fpu"), encode_fpu(&fd.get_fpu().map_err(io)?)));
@@ -637,6 +673,7 @@ fn restore(
         let (id, body) = format::read_section(&mut reader).map_err(SnapshotError::from_format)?;
         sections.insert(id, body);
     }
+    validate_cpu_frequencies(shared, &sections)?;
     let ram = shared
         .ram()
         .ok_or_else(|| SnapshotError::Internal("machine has no RAM".into()))?;
@@ -753,7 +790,7 @@ fn run_code(state: RunState) -> u8 {
 
 // ---- codec helpers -----------------------------------------------------
 
-fn to_json<T: Serialize>(value: &T) -> Result<Vec<u8>, SnapshotError> {
+fn to_json<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, SnapshotError> {
     serde_json::to_vec(value).map_err(|e| SnapshotError::Internal(format!("encoding state: {e}")))
 }
 
@@ -896,9 +933,14 @@ pub(crate) fn restore_kernel_state(
     shared: &crate::vm::VmShared,
     sections: &SavedSections,
 ) -> Result<(), SnapshotError> {
+    validate_cpu_frequencies(shared, sections)?;
     let vm = &shared.kvm.vm;
     let io = |e: kvm_ioctls::Error| SnapshotError::Internal(format!("KVM ioctl: {e}"));
     let missing = |key: &str| SnapshotError::Internal(format!("snapshot lacks section {key:?}"));
+    if let Some(bytes) = sections.get("ignored-msrs") {
+        let saved: std::collections::BTreeSet<u32> = from_json(bytes, "ignored-msrs")?;
+        shared.ignored_msrs.lock().extend(saved);
+    }
     let pending = sections
         .get("pending-smis")
         .map(|bytes| from_json(bytes, "pending-smis"))
@@ -955,6 +997,12 @@ pub(crate) fn restore_kernel_state(
         let get = |s: &str| -> Result<&[u8], SnapshotError> {
             sections.get(&p(s)).ok_or_else(|| missing(&p(s)))
         };
+        if let Some(bytes) = sections.get(&p("cpuid")) {
+            let entries: Vec<kvm_bindings::kvm_cpuid_entry2> = from_json(bytes, "cpuid")?;
+            let cpuid = kvm_bindings::CpuId::from_entries(&entries)
+                .map_err(|e| SnapshotError::Incompatible(format!("invalid snapshot CPUID: {e}")))?;
+            fd.set_cpuid2(&cpuid).map_err(io)?;
+        }
         let mp_state: kvm_mp_state = from_json(get("mp_state")?, "mp_state")?;
         fd.set_mp_state(mp_state).map_err(io)?;
         let sregs: kvm_sregs = from_json(get("sregs")?, "sregs")?;

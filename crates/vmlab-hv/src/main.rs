@@ -59,6 +59,10 @@ mod devices;
 #[cfg(test)]
 mod display_acceptance;
 #[cfg(test)]
+mod macos_acceptance;
+#[cfg(test)]
+mod macos_hwref;
+#[cfg(test)]
 mod pc_acceptance;
 #[cfg(test)]
 mod pc_hwref;

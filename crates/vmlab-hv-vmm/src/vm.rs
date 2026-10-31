@@ -66,6 +66,8 @@ impl Drop for MemoryUpdateGuard<'_> {
 
 /// Everything the vCPU threads and the control threads share.
 pub struct VmShared {
+    pub(crate) msr_policy: Mutex<vmlab_hv_proto::machine::MsrPolicy>,
+    pub(crate) ignored_msrs: Mutex<std::collections::BTreeSet<u32>>,
     pub(crate) vfio: Mutex<Vec<Arc<Mutex<crate::vfio::AssignedDevice>>>>,
     io_trace: Option<Mutex<std::collections::VecDeque<String>>>,
     pub(crate) display: Mutex<Option<Arc<vmlab_hv_display::DisplayServer>>>,
@@ -140,6 +142,8 @@ impl VmShared {
         mmio64_base: u64,
     ) -> Arc<Self> {
         Arc::new(VmShared {
+            msr_policy: Mutex::new(Default::default()),
+            ignored_msrs: Mutex::new(Default::default()),
             vfio: Mutex::new(Vec::new()),
             io_trace: std::env::var_os("VMLAB_HV_DIAGNOSTICS")
                 .map(|_| Mutex::new(std::collections::VecDeque::new())),
@@ -886,7 +890,7 @@ impl VmShared {
             root.save_bar_states()
                 .into_iter()
                 .find(|(devfn, _)| *devfn == (slot << 3 | function))
-                .and_then(|(_, bars)| bars.first().copied())
+                .and_then(|(_, bars)| bars.get(vga.framebuffer_bar()).copied())
                 .filter(|(base, sizing)| {
                     decoded
                         && !sizing
@@ -1148,6 +1152,9 @@ impl VmShared {
     }
 
     fn trace_io(&self, port: u16, data: &[u8], write: bool) {
+        if (0x300..0x320).contains(&port) {
+            return;
+        }
         if let Some(trace) = &self.io_trace {
             let mut trace = trace.lock();
             if trace.len() == 12 {

@@ -127,6 +127,9 @@ pub fn ancillary_files(
     ram_size(platform)?;
     let mut e820 = Vec::new();
     for (base, length) in RESERVATIONS {
+        if base >= 1 << 32 && !platform.amd_hypertransport {
+            continue;
+        }
         e820_entry(&mut e820, base, length, 2);
     }
     for &(base, length) in &platform.ram_regions {

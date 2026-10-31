@@ -128,7 +128,9 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             Ok(VcpuExit::IoIn(..)
                 | VcpuExit::IoOut(..)
                 | VcpuExit::MmioRead(..)
-                | VcpuExit::MmioWrite(..))
+                | VcpuExit::MmioWrite(..)
+                | VcpuExit::X86Rdmsr(..)
+                | VcpuExit::X86Wrmsr(..))
         );
         let width = if matches!(&result, Ok(VcpuExit::IoIn(..) | VcpuExit::IoOut(..))) {
             // SAFETY: KVM_EXIT_IO selects this union member. run_ptr names
@@ -145,6 +147,13 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             return;
         }
         match result {
+            Ok(VcpuExit::X86Rdmsr(exit)) => {
+                *exit.error = u8::from(!crate::macos::ignored_msr(shared, exit.index, exit.reason));
+                *exit.data = 0;
+            }
+            Ok(VcpuExit::X86Wrmsr(exit)) => {
+                *exit.error = u8::from(!crate::macos::ignored_msr(shared, exit.index, exit.reason));
+            }
             Ok(VcpuExit::IoIn(port, data)) => {
                 for value in data.chunks_mut(io_dispatch_width(port, width, data.len())) {
                     shared.io_read(port, value);
@@ -270,6 +279,15 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                 )));
                 return;
             }
+        }
+        if let Some(error) = shared
+            .vga
+            .lock()
+            .as_ref()
+            .and_then(|vga| vga.unsupported_fifo())
+        {
+            shared.request_exit(crate::vm::ExitReason::Error(error));
+            return;
         }
     }
 }

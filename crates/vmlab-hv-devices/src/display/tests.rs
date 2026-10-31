@@ -6,6 +6,45 @@ fn device() -> StandardVga {
 }
 
 #[test]
+fn vmware_identity_bars_vbe_scanout_snapshot_and_fifo_evidence() {
+    use crate::Resettable;
+    let mut dev = device();
+    dev.enable_vmware();
+    assert_eq!(dev.config_read(0), 0x040515ad);
+    assert_eq!(dev.config_read(2), 0x03000000);
+    assert_eq!(dev.config_read(11), 0x040515ad);
+    assert_eq!(
+        dev.bars()
+            .iter()
+            .map(|bar| (bar.index, bar.size))
+            .collect::<Vec<_>>(),
+        vec![(0, 16), (1, 16 << 20), (2, 65536), (6, 65536)]
+    );
+    assert!(matches!(dev.bars()[0].kind, BarKind::Io));
+    assert_eq!(dev.framebuffer_bar(), 1);
+    vbe(&mut dev, 1280, 800, 32);
+    dev.bar_write(1, 0, &[1, 2, 3, 0]);
+    let frame = dev.frame();
+    assert_eq!((frame.mode.width, frame.mode.height), (1280, 800));
+    assert_eq!(&frame.pixels[..4], &[1, 2, 3, 0]);
+    let saved = dev.save_state().unwrap();
+    dev.reset().unwrap();
+    assert_eq!(dev.config_read(0), 0x040515ad);
+    dev.restore_state(&saved).unwrap();
+    assert_eq!(&dev.frame().pixels[..4], &[1, 2, 3, 0]);
+    dev.bar_write(0, 0, &0u32.to_le_bytes());
+    let mut id = [0; 4];
+    dev.bar_read(0, 4, &mut id);
+    assert_eq!(u32::from_le_bytes(id), 0x90000002);
+    for (offset, value) in [(0, 16u32), (4, 65536), (8, 20), (12, 16), (16, 1)] {
+        dev.bar_write(2, offset, &value.to_le_bytes());
+    }
+    dev.bar_write(0, 0, &20u32.to_le_bytes());
+    dev.bar_write(0, 4, &1u32.to_le_bytes());
+    assert!(dev.unsupported_fifo().unwrap().contains("NEXT_CMD=0x14"));
+}
+
+#[test]
 fn active_black_scanout_is_distinct_from_reset_and_blanking() {
     use crate::Resettable;
     let mut dev = device();

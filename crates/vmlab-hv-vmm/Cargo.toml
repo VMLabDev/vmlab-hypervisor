@@ -34,6 +34,7 @@ vmm-sys-util = "0.15"
 testing = ["vmlab-hv-devices/testing"]
 
 [dev-dependencies]
+vmlab-hv-tests = { path = "../vmlab-hv-tests" }
 tempfile = "3"
 virtio-queue = "0.18"
 

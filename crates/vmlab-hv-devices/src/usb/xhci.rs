@@ -330,10 +330,25 @@ impl XhciController {
     }
 
     pub fn inject_pointer(&mut self, event: PointerEvent) -> Result<(), DeviceError> {
-        self.devices[TABLET_PORT as usize - 1]
-            .as_mut()
+        self.devices
+            .iter_mut()
+            .flatten()
+            .find(|device| device.state_id() == "usb-tablet")
             .ok_or_else(|| DeviceError::Other("USB tablet disconnected".into()))?
             .inject_pointer(event)?;
+        self.poll();
+        Ok(())
+    }
+    pub fn has_keyboard(&self) -> bool {
+        self.devices[super::KEYBOARD_PORT as usize - 1]
+            .as_ref()
+            .is_some_and(|device| device.state_id() == "usb-keyboard")
+    }
+    pub fn inject_key(&mut self, qcode: &str, down: bool) -> Result<(), DeviceError> {
+        self.devices[super::KEYBOARD_PORT as usize - 1]
+            .as_mut()
+            .ok_or_else(|| DeviceError::Other("USB keyboard disconnected".into()))?
+            .inject_key(qcode, down)?;
         self.poll();
         Ok(())
     }

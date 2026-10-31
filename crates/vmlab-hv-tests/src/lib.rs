@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod ctl;
+pub mod host_key;
 pub mod process;
 pub mod switch;
 
@@ -391,6 +392,13 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         machine: Default::default(),
         cpu: Default::default(),
         cpu_model: None,
+        invtsc: false,
+        tsc_khz: None,
+        vmware_cpuid_freq: false,
+        msr_policy: Default::default(),
+        applesmc: None,
+        usb_keyboard: false,
+        smbios_type2: false,
         floppy: None,
         serial_log_port: Default::default(),
         hyperv: vec![],

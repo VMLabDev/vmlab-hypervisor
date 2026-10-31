@@ -65,6 +65,9 @@ impl KvmVm {
         if model == Some("pentium3") {
             pentium3_cpuid(&mut cpuid, 0)?;
         }
+        if model == Some("Skylake-Client-v4") {
+            cpuid = crate::macos::skylake_cpuid(0, count)?;
+        }
         let leaf = cpuid
             .as_slice()
             .iter()
@@ -79,6 +82,8 @@ impl KvmVm {
     pub fn physical_address_bits(&self, model: Option<&str>) -> u8 {
         if model == Some("pentium3") {
             32
+        } else if model == Some("Skylake-Client-v4") {
+            40
         } else {
             self.cpuid
                 .as_slice()
@@ -86,6 +91,14 @@ impl KvmVm {
                 .find(|entry| entry.function == 0x8000_0008)
                 .map_or(36, |leaf| (leaf.eax & 0xff) as u8)
         }
+    }
+
+    pub(crate) fn amd_hypertransport(&self, model: Option<&str>) -> bool {
+        model != Some("Skylake-Client-v4")
+            && self.cpuid.as_slice().iter().any(|entry| {
+                entry.function == 0
+                    && (entry.ebx, entry.ecx, entry.edx) == (0x68747541, 0x444d4163, 0x69746e65)
+            })
     }
 
     /// SeaBIOS places this platform's small prefetchable BARs near the top
@@ -102,14 +115,11 @@ impl KvmVm {
         top - if high_ram { top / 8 } else { 1 << 30 }
     }
 
-    pub(crate) fn ovmf_pci64_base(&self) -> u64 {
-        let bits = self
-            .cpuid
-            .as_slice()
-            .iter()
-            .find(|e| e.function == 0x8000_0008)
-            .map_or(36, |e| e.eax & 0xff)
-            .clamp(32, 46);
+    pub(crate) fn ovmf_pci64_base(&self, model: Option<&str>) -> u64 {
+        if model == Some("Skylake-Client-v4") {
+            return 32 << 30;
+        }
+        let bits = self.physical_address_bits(model).clamp(32, 46);
         let top = 1u64 << bits;
         top - top / 8
     }
@@ -143,6 +153,9 @@ impl KvmVm {
         filter_cpuid(&mut cpuid, id, count, policy)?;
         if model == Some("pentium3") {
             pentium3_cpuid(&mut cpuid, id)?;
+        }
+        if model == Some("Skylake-Client-v4") {
+            cpuid = crate::macos::skylake_cpuid(id, count)?;
         }
         vcpu.set_cpuid2(&cpuid)
             .map_err(|e| E::ioctl("KVM_SET_CPUID2", e))?;

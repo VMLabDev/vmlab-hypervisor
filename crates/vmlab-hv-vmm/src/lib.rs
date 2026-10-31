@@ -19,6 +19,7 @@ pub mod hyperv;
 pub mod kvm;
 pub mod layout;
 pub mod loader;
+mod macos;
 pub mod memory;
 pub mod pc;
 pub mod pci;
