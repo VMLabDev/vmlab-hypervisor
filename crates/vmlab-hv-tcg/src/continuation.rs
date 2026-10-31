@@ -52,8 +52,9 @@ impl<M: Memory> Interpreter<'_, M> {
                             })?;
                     }
                     let result = self.run_frame_from(&frame.function, &mut frame.locals, frame.pc);
-                    if let Some(recorder) = &mut self.recorder {
-                        recorder.leave();
+                    if let Some(mut recorder) = self.recorder.take() {
+                        recorder.leave(self, result.is_ok());
+                        self.recorder = Some(recorder);
                     }
                     result
                 })();

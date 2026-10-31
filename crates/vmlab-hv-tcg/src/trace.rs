@@ -24,10 +24,15 @@ fn lower_stage(graph: &Graph, slots: &[usize], stage: Vec<ScalarId>) -> Stage {
             }
             let mut instruction = vmlab_hv_tcg_ir::native::linear::lower(graph, id)?;
             instruction.remap(slots);
-            Some(
-                vmlab_hv_tcg_ir::native::packed::Packed::new(slots[id], instruction)
-                    .expect("bounded physical scalar instruction"),
-            )
+            let mut packed = vmlab_hv_tcg_ir::native::packed::Packed::new(slots[id], instruction)
+                .expect("bounded physical scalar instruction");
+            if let Operation::Binary(_, _, right) = graph.scalars[id].operation
+                && let Some(value) = graph.literal(right)
+                && let Some(immediate) = packed.with_immediate(value)
+            {
+                packed = immediate;
+            }
+            Some(packed)
         })
         .collect()
 }
@@ -46,6 +51,7 @@ pub(crate) struct Trace {
     global_identity: u64,
     input_values: Vec<bool>,
     successful_runs: u32,
+    returned_runs: u32,
     trained_steps: u32,
     cache_units: usize,
     pub last_used: u64,
@@ -54,7 +60,7 @@ pub(crate) struct Trace {
     fragment_units: Cell<usize>,
     branch_depth: u8,
     input_slots: Vec<Option<usize>>,
-    binding_slots: HashMap<usize, Vec<usize>>,
+    binding_slots: HashMap<usize, crate::publication::Plan>,
     pc_slot: Option<usize>,
     compact_loop: std::sync::OnceLock<bool>,
     wide_inputs: Vec<Option<Value>>,
@@ -80,7 +86,8 @@ struct Evaluation<'a> {
     stamps: Vec<u64>,
     epoch: u64,
     completed_steps: u32,
-    binding_slots: &'a HashMap<usize, Vec<usize>>,
+    complete_path: bool,
+    binding_slots: &'a HashMap<usize, crate::publication::Plan>,
     slots: &'a [usize],
 }
 
@@ -141,6 +148,7 @@ fn capture_value(descriptor: &Input, value: &Value, full: bool) -> Option<Captur
     })
 }
 
+#[inline(always)]
 fn capture_global_word(descriptor: &Input, word: (ScalarType, u128)) -> Option<Captured> {
     let (ty, raw) = word;
     if !matches!(descriptor.shape, Shape::Scalar(expected) if expected == ty)
@@ -314,11 +322,28 @@ impl Evaluation<'_> {
         interpreter: &mut Interpreter<'_, M>,
         bindings: &[Binding],
     ) -> Result<()> {
-        let slots = self
+        let plan = self
             .binding_slots
             .get(&(bindings.as_ptr() as usize))
             .expect("compiled global bindings");
-        for (binding, slot) in bindings.iter().zip(slots) {
+        for (index, (binding, slot)) in bindings.iter().zip(&plan.slots).enumerate() {
+            if let Some(word) = plan.words[index] {
+                if word.destination == u32::MAX {
+                    continue;
+                }
+                let source = word.source as usize;
+                let raw = if self.stamps[source] == self.epoch || self.stamps[source] == u64::MAX {
+                    self.scalars[source]
+                } else {
+                    self.scalar(word.scalar as usize)?
+                };
+                if interpreter
+                    .globals
+                    .write_native_slot(word.destination as usize, word.ty, raw)
+                {
+                    continue;
+                }
+            }
             let word = match self.recorded.block.values[binding.value] {
                 Recipe::Scalar { value, ty } => Some((ty, self.scalar(value)?)),
                 Recipe::Constant(id) => match &self.recorded.constants[id] {
@@ -556,6 +581,7 @@ impl Evaluation<'_> {
 }
 
 impl Trace {
+    #[inline(always)]
     fn begin_capture(&mut self) {
         self.epoch = self
             .epoch
@@ -564,6 +590,7 @@ impl Trace {
             .expect("native scalar epoch exhausted");
     }
 
+    #[inline(always)]
     fn bind_capture(&mut self, id: usize, value: Captured) {
         match value {
             Captured::Word(ty, raw) => {
@@ -678,7 +705,7 @@ impl Trace {
                 _ => None,
             })
             .collect();
-        let binding_slots = recorded
+        let binding_slots: HashMap<usize, Vec<usize>> = recorded
             .block
             .exits
             .iter()
@@ -728,6 +755,13 @@ impl Trace {
                 );
             }
         }
+        let (binding_slots, publication_constants) = crate::publication::compile(
+            &recorded,
+            binding_slots,
+            &slots,
+            &scalar_input_slots,
+            slot_count,
+        );
         let wide_inputs = (0..recorded.inputs.len()).map(|_| None).collect();
         let stages: Vec<Stage> = vmlab_hv_tcg_ir::native::schedule::schedule(&recorded.block)
             .into_iter()
@@ -800,6 +834,17 @@ impl Trace {
                 _ => None,
             })
             .collect();
+        let constant_slots: HashMap<_, _> = recorded
+            .block
+            .graph
+            .scalars
+            .iter()
+            .enumerate()
+            .filter_map(|(id, scalar)| match scalar.operation {
+                Operation::Constant(value) => Some((slots[id], value)),
+                _ => None,
+            })
+            .collect();
         let mut fast_code = Vec::new();
         for &index in &fast_events {
             use vmlab_hv_tcg_ir::native::packed::Packed;
@@ -818,7 +863,14 @@ impl Trace {
                 }
                 _ => Packed::event(index),
             };
-            fast_code.push(instruction.expect("bounded packed event"));
+            let instruction = instruction.expect("bounded packed event");
+            fast_code.push(
+                instruction
+                    .right_slot()
+                    .and_then(|slot| constant_slots.get(&slot))
+                    .and_then(|value| instruction.with_immediate(*value))
+                    .unwrap_or(instruction),
+            );
         }
         let mut trace = Self {
             recorded,
@@ -834,6 +886,7 @@ impl Trace {
             global_identity: interpreter.globals.identity(),
             input_values: Vec::new(),
             successful_runs: 0,
+            returned_runs: 0,
             trained_steps: steps,
             cache_units: 0,
             last_used: 0,
@@ -859,15 +912,25 @@ impl Trace {
                 trace.input_values[*id] = true;
             }
         }
-        trace.cache_units = trace.calculate_cache_units();
-        trace.scratch.resize(slot_count, 0);
-        trace.stamps.resize(slot_count, 0);
+        trace
+            .scratch
+            .resize(slot_count + publication_constants.len(), 0);
+        trace.stamps.resize(trace.scratch.len(), 0);
+        for (index, value) in publication_constants.into_iter().enumerate() {
+            trace.scratch[slot_count + index] = value;
+            trace.stamps[slot_count + index] = u64::MAX;
+        }
         for (id, scalar) in trace.recorded.block.graph.scalars.iter().enumerate() {
             if let Operation::Constant(value) = scalar.operation {
                 trace.scratch[trace.slots[id]] = value;
                 trace.stamps[trace.slots[id]] = u64::MAX;
             }
         }
+        assert!(trace.stages.iter().chain(&trace.checkpoint_stages)
+            .flat_map(|stage| stage.iter()).chain(&trace.fast_code)
+            .all(|instruction| instruction.valid_slots(trace.scratch.len(), trace.stamps.len())),
+            "compiled scalar program exceeds its scratch layout");
+        trace.cache_units = trace.calculate_cache_units();
         trace
     }
 
@@ -1036,6 +1099,7 @@ impl Trace {
             stamps: std::mem::take(&mut self.stamps),
             epoch: self.epoch,
             completed_steps: 0,
+            complete_path: false,
             binding_slots: &self.binding_slots,
             slots: &self.slots,
         };
@@ -1045,7 +1109,10 @@ impl Trace {
         self.stamps = evaluation.stamps;
         self.wide_inputs = evaluation.wide_inputs;
         if matches!(outcome, Ok(Outcome::Returned(_, _))) {
-            self.successful_runs = self.successful_runs.saturating_add(1);
+            self.returned_runs = self.returned_runs.saturating_add(1);
+            if evaluation.complete_path {
+                self.successful_runs = self.successful_runs.saturating_add(1);
+            }
         }
         outcome
     }
@@ -1241,11 +1308,16 @@ impl Trace {
                     let Some(instruction) = fast_code.next() else {
                         return Err(Error::Type("trace has no terminal event".into()));
                     };
-                    match instruction.execute(
-                        &mut evaluation.scalars,
-                        &mut evaluation.stamps,
-                        evaluation.epoch,
-                    ) {
+                    // SAFETY: construction validates every instruction against
+                    // these fixed scratch lengths; neither changes during execution.
+                    let control = unsafe {
+                        instruction.execute_unchecked(
+                            &mut evaluation.scalars,
+                            &mut evaluation.stamps,
+                            evaluation.epoch,
+                        )
+                    };
+                    match control {
                         Control::Continue => {}
                         Control::Event(index) => break index,
                         Control::GuardFailed(index) => {
@@ -1384,6 +1456,7 @@ impl Trace {
                             && self.recorded.stop_reason.is_none()
                     {
                         evaluation.bindings(interpreter, &checkpoint.globals)?;
+                        evaluation.complete_path = checkpoint.completed_steps == self.trained_steps;
                         return Ok(Outcome::Returned(waiting, checkpoint.completed_steps));
                     }
                 }
@@ -1478,7 +1551,7 @@ impl Trace {
     pub fn profile(&self, pc: u64) -> crate::TraceProfile {
         crate::TraceProfile {
             pc,
-            calls: self.successful_runs,
+            calls: self.returned_runs,
             instructions: self.trained_steps,
             operations: self
                 .fast_events
@@ -1613,6 +1686,12 @@ impl Trace {
         let block = &self.recorded.block;
         let breakdown = self.cache_breakdown();
         block.graph.scalars.len()
+            + self
+                .binding_slots
+                .values()
+                .map(|plan| plan.words.len())
+                .sum::<usize>()
+            + self.scratch.len()
             + self.fast_events.len()
             + self.fast_code.len()
             + self.event_steps.len()
@@ -1954,6 +2033,150 @@ mod tests {
         assert!(
             matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Resumed(value, 1) if value == Value::int(9))
         );
+    }
+
+    #[test]
+    fn recording_reuses_only_constant_helpers_with_unchanged_writes() {
+        for changing in [false, true] {
+            let mut code = vec![if changing {
+                Op::Call(
+                    Location::Id("config".into()),
+                    Target::Intrinsic("add_int".into()),
+                    vec![Expr::Id("config".into()), Expr::Integer("1".into(), None)],
+                )
+            } else {
+                Op::Assign(Location::Id("config".into()), Expr::Id("config".into()))
+            }];
+            for index in 0..32 {
+                code.push(Op::Declare(
+                    format!("scratch_{index}"),
+                    Type::Integer(None),
+                    Some(Expr::Integer("0".into(), None)),
+                ));
+            }
+            code.extend([
+                Op::Assign(Location::Id("return".into()), Expr::Id("config".into())),
+                Op::Return,
+            ]);
+            let helper = Function {
+                name: "constant_writer".into(),
+                args: vec![],
+                result: Type::Integer(None),
+                locals: BTreeMap::new(),
+                code,
+            };
+            let root = Function {
+                name: "constant_writer_root".into(),
+                args: vec![],
+                result: Type::Bool,
+                locals: BTreeMap::new(),
+                code: vec![
+                    Op::Assign(
+                        Location::Id("config".into()),
+                        Expr::Integer("0".into(), None),
+                    ),
+                    Op::Call(
+                        Location::Id("result".into()),
+                        Target::Function(helper.name.clone()),
+                        vec![],
+                    ),
+                    Op::Assign(Location::Id("return".into()), Expr::Bool(false)),
+                    Op::Return,
+                ],
+            };
+            let program = Program {
+                functions: BTreeMap::from([(helper.name.clone(), helper)]),
+                globals: BTreeMap::from([("config".into(), Type::Integer(None))]),
+                ..Program::default()
+            };
+            let mut interpreter = Interpreter::new(&program, FlatMemory::new(0, vec![]));
+            interpreter.initialize().unwrap();
+            interpreter.profile = Some(Default::default());
+            let options = Options {
+                dynamic_globals: BTreeSet::from(["config".into()]),
+                ..Options::default()
+            };
+            let (_, _, steps) =
+                Trace::record_block(&mut interpreter, &root, vec![], options, 4).unwrap();
+            assert_eq!(steps, 4);
+            assert_eq!(
+                interpreter.globals["config"],
+                Value::int(i32::from(changing))
+            );
+            assert_eq!(
+                interpreter.profile.as_ref().unwrap().functions["constant_writer"].0,
+                if changing { 4 } else { 1 }
+            );
+        }
+    }
+
+    #[test]
+    fn early_native_alternatives_do_not_count_as_complete_path_successes() {
+        let increment = |amount: &str| {
+            Op::Call(
+                Location::Id("counter".into()),
+                Target::Intrinsic("add_int".into()),
+                vec![
+                    Expr::Id("counter".into()),
+                    Expr::Integer(amount.into(), None),
+                ],
+            )
+        };
+        let function = Function {
+            name: "partial_success".into(),
+            args: vec![],
+            result: Type::Bool,
+            locals: BTreeMap::new(),
+            code: vec![
+                Op::Branch(Expr::Id("decision".into()), 4),
+                increment("3"),
+                Op::Assign(Location::Id("return".into()), Expr::Bool(false)),
+                Op::Jump(6),
+                increment("1"),
+                Op::Assign(Location::Id("return".into()), Expr::Bool(false)),
+                Op::Return,
+            ],
+        };
+        let program = Program {
+            globals: BTreeMap::from([
+                ("decision".into(), Type::Bool),
+                ("counter".into(), Type::Integer(None)),
+            ]),
+            ..Program::default()
+        };
+        let mut interpreter = Interpreter::new(&program, FlatMemory::new(0, vec![]));
+        interpreter.initialize().unwrap();
+        let options = Options {
+            dynamic_globals: BTreeSet::from(["decision".into(), "counter".into()]),
+            ..Options::default()
+        };
+        let (mut trace, _, steps) =
+            Trace::record_block(&mut interpreter, &function, vec![], options, 4).unwrap();
+        assert_eq!(steps, 4);
+        interpreter
+            .globals
+            .insert("decision".into(), Value::Bool(true));
+        assert!(matches!(
+            trace.run(&mut interpreter, &[], 4).unwrap(),
+            Outcome::Resumed(_, 1)
+        ));
+        for _ in 0..8 {
+            assert!(matches!(
+                trace.run(&mut interpreter, &[], 4).unwrap(),
+                Outcome::Returned(_, 1)
+            ));
+        }
+        assert_eq!(trace.successful_runs, 0);
+        interpreter
+            .globals
+            .insert("decision".into(), Value::Bool(false));
+        for _ in 0..8 {
+            assert!(matches!(
+                trace.run(&mut interpreter, &[], 4).unwrap(),
+                Outcome::Returned(_, 4)
+            ));
+        }
+        assert_eq!(trace.successful_runs, 8);
     }
 
     #[test]

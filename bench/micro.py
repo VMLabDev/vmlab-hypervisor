@@ -32,7 +32,9 @@ def measure(command, environment, timeout=7200):
     return result
 
 
-def build_coremark():
+def build_coremark(iterations=1):
+    if iterations < 1:
+        raise lib.BenchError("CoreMark iterations must be positive")
     root = Path(lib.REPO_DIR)
     source = root / "target/tcg/coremark"
     if not source.exists():
@@ -47,18 +49,19 @@ def build_coremark():
     port = root / "bench/rv64"
     flags = ["clang", "--target=riscv64-unknown-elf", "-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany",
              "-O2", "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fdata-sections",
-             "-I" + str(port), "-I" + str(source), "-DITERATIONS=1"]
+             "-I" + str(port), "-I" + str(source), f"-DITERATIONS={iterations}"]
     objects = []
     for name in ("core_main", "core_list_join", "core_matrix", "core_state", "core_util"):
         dest = output / (name + ".o")
         rename = ["-Dmain=unused_coremark_main"] if name == "core_main" else []
         subprocess.run([*flags, *rename, "-c", str(source / (name + ".c")), "-o", str(dest)], check=True)
         objects.append(str(dest))
-    elf = output / "coremark.elf"
+    stem = "coremark" if iterations == 1 else f"coremark-{iterations}"
+    elf = output / (stem + ".elf")
     subprocess.run([*flags, "-nostdlib", "-static", "-fuse-ld=lld", "-Wl,--gc-sections",
                     "-T", str(port / "link.ld"), str(port / "start.S"), str(port / "coremark.c"),
                     *objects, "-o", str(elf)], check=True)
-    image = output / "coremark.bin"
+    image = output / (stem + ".bin")
     subprocess.run(["llvm-objcopy", "-O", "binary", str(elf), str(image)], check=True)
     return image
 
@@ -86,14 +89,14 @@ def run(args, commit, dirty, host, log):
     if args.dry_run:
         return 0
     subprocess.run(["cargo", "build", "--release", "-p", "vmlab-hv-tcg", "--example", "micro"], cwd=lib.REPO_DIR, check=True)
-    image = build_coremark()
+    specialized = args.backend == "interpreter-specialized"
+    image = build_coremark(1000 if specialized else 1)
     binary = str(Path(lib.REPO_DIR) / "target/release/examples/micro")
     workloads = {"scalar_loop_3000": ["loop", "1000"],
                  "coremark_algorithms_1": ["image", str(image), "80001000", "10000000"]}
-    specialized = args.backend == "interpreter-specialized"
     if specialized:
         workloads = {"scalar_loop_30000000_warm": ["loop", "10000000"],
-                     "coremark_algorithms_1_warm": ["image", str(image), "80001000", "10000000"]}
+                     "coremark_algorithms_1000_warm": ["image", str(image), "80001000", "1000000000"]}
     environment = execution_environment(args.backend, os.environ)
     for name, command in workloads.items():
         samples = []

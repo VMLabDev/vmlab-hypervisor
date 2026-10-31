@@ -169,6 +169,11 @@ pub fn lower(graph: &Graph, id: ScalarId) -> Option<Instruction> {
         Operation::Binary(operation, a, b) => match scalar.ty {
             ScalarType::Bits(width)
                 if width <= 64
+                    && (operation != Binary::ShiftRight
+                        || matches!(graph.scalars[a].ty, ScalarType::Bits(actual) if actual <= width)
+                        || graph.scalars[a].range.is_some_and(|range| {
+                            range.min >= 0 && range.max as u128 <= mask(width)
+                        }))
                     && matches!(
                         operation,
                         Binary::Add
@@ -237,6 +242,28 @@ pub fn binary64(operation: Binary, a: u64, b: u128, width: u16) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_narrow_logical_right_shift_keeps_wider_input_bits() {
+        for (source_width, width, value, count, expected) in [
+            (64, 8, 1u128 << 20, 20, 1),
+            (128, 64, 1u128 << 70, 16, 1u128 << 54),
+        ] {
+            let mut graph = Graph::default();
+            let input = graph.input(0, ScalarType::Bits(source_width), None);
+            let amount = graph.constant(ScalarType::Integer, count);
+            let shifted = graph
+                .binary(ScalarType::Bits(width), Binary::ShiftRight, input, amount)
+                .unwrap();
+            let instruction = lower(&graph, shifted).unwrap();
+            assert!(matches!(
+                instruction,
+                Instruction::Binary(Binary::ShiftRight, _, _, _)
+            ));
+            let packed = super::super::packed::Packed::new(2, instruction).unwrap();
+            assert_eq!(packed.evaluate(&[value, count]), Some(expected));
+        }
+    }
 
     #[test]
     fn logical_views_share_a_slot_and_preserve_their_types() {

@@ -180,6 +180,57 @@ fn a_batch_fault_keeps_the_completed_instruction_count() {
 }
 
 #[test]
+fn guarded_pending_interrupt_state_tracks_timer_and_external_changes() {
+    let make = || {
+        let mut memory = FlatMemory::new(0x8000_0000, vec![0; 4096]);
+        for (index, instruction) in [0x00108093u32, 0xfff10113, 0xfe011ce3].iter().enumerate() {
+            memory
+                .write(0x8000_0000 + index as u64 * 4, &instruction.to_le_bytes())
+                .unwrap();
+        }
+        let mut cpu = Riscv64::new(memory).unwrap();
+        cpu.set_pc(0x8000_0000);
+        cpu.set_gpr(2, 1_000_000).unwrap();
+        cpu
+    };
+    let mut reference = make();
+    let mut specialized = make();
+    specialized.specialize = true;
+    for _ in 0..12 {
+        assert_eq!(specialized.step().unwrap(), reference.step().unwrap());
+    }
+    let deadline = reference.interpreter.globals["zmtime"].u64().unwrap() + 3;
+    for cpu in [&mut reference, &mut specialized] {
+        cpu.interpreter
+            .globals
+            .insert("zmtimecmp".into(), vmlab_hv_tcg::Value::bits(64, deadline));
+    }
+    for _ in 0..8 {
+        assert_eq!(specialized.step().unwrap(), reference.step().unwrap());
+        assert_eq!(
+            *specialized.interpreter.globals,
+            *reference.interpreter.globals
+        );
+    }
+    for bits in [130u64, 128, 130, 128] {
+        for cpu in [&mut reference, &mut specialized] {
+            let vmlab_hv_tcg::Value::Struct(fields) =
+                cpu.interpreter.globals.get_mut("zmip").unwrap()
+            else {
+                panic!("MIP register shape");
+            };
+            *fields.get_mut("zbits").unwrap() = vmlab_hv_tcg::Value::bits(64, bits);
+        }
+        assert_eq!(specialized.step().unwrap(), reference.step().unwrap());
+        assert_eq!(
+            *specialized.interpreter.globals,
+            *reference.interpreter.globals
+        );
+    }
+    assert!(specialized.specialization_stats.hits > 0);
+}
+
+#[test]
 fn address_specialization_preserves_pointer_reads_and_fault_state() {
     struct ObservedMemory {
         ram: FlatMemory,
@@ -308,7 +359,12 @@ fn data_registers_relax_a_failed_ram_range_without_repeated_recording() {
         memory
             .write(0x8000_0000, &0x00008193u32.to_le_bytes())
             .unwrap();
-        Riscv64::new(memory).unwrap()
+        let mut cpu = Riscv64::new(memory).unwrap();
+        // Measure range specialization after the model's initial interrupt update.
+        cpu.interpreter
+            .call("zupdate_mip", vec![vmlab_hv_tcg::Value::Unit])
+            .unwrap();
+        cpu
     };
     let mut reference = make();
     let mut specialized = make();
@@ -336,7 +392,12 @@ fn native_addresses_cross_ram_chunks_without_entry_respecialization() {
         memory
             .write(0x8000_0000, &0x0020b023u32.to_le_bytes())
             .unwrap();
-        Riscv64::new(memory).unwrap()
+        let mut cpu = Riscv64::new(memory).unwrap();
+        // Measure range specialization after the model's initial interrupt update.
+        cpu.interpreter
+            .call("zupdate_mip", vec![vmlab_hv_tcg::Value::Unit])
+            .unwrap();
+        cpu
     };
     let mut reference = make();
     let mut specialized = make();

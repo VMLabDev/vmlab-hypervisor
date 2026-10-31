@@ -37,6 +37,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 start.elapsed().as_secs_f64(),
                 cpu.steps as f64 / start.elapsed().as_secs_f64() / 1e6
             );
+            if cpu.specialize {
+                let stats = &cpu.specialization_stats;
+                eprintln!(
+                    "trace: recordings={} native={} exits={}",
+                    stats.recordings, stats.hits, stats.exits
+                );
+            }
             if value != 1 {
                 return Err(format!("guest test failed: {}", value >> 1).into());
             }

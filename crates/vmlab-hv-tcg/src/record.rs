@@ -83,6 +83,13 @@ struct ShadowFrame {
     call_site: usize,
     pending_result: Option<Location>,
     pending: Pending,
+    memo_candidate: Option<MemoCandidate>,
+}
+
+struct MemoCandidate {
+    args: Vec<Value>,
+    versions: Vec<(usize, u64)>,
+    identity: u64,
 }
 
 pub(crate) struct Source {
@@ -182,6 +189,7 @@ impl Recorder {
                 call_site: frame.call_site,
                 pending_result: frame.pending_result.clone(),
                 pending: Pending::None,
+                memo_candidate: None,
             });
         }
         recorder
@@ -454,7 +462,12 @@ impl Recorder {
         Some(symbol)
     }
 
-    pub fn enter(&mut self, source: Arc<Source>, actual: &Frame) {
+    pub fn enter<M: Memory>(
+        &mut self,
+        interpreter: &Interpreter<'_, M>,
+        source: Arc<Source>,
+        actual: &Frame,
+    ) {
         if self.stopped.is_some() {
             return;
         }
@@ -491,6 +504,9 @@ impl Recorder {
                 })
                 .collect()
         };
+        let memo_candidate = (!self.frames.is_empty())
+            .then(|| self.memo_candidate(interpreter, &function, &args))
+            .flatten();
         let mut locals: BTreeMap<_, _> = function
             .args
             .iter()
@@ -506,15 +522,63 @@ impl Recorder {
             call_site: 0,
             pending_result: None,
             pending: Pending::None,
+            memo_candidate,
         });
     }
 
-    pub fn leave(&mut self) {
+    pub fn leave<M: Memory>(&mut self, interpreter: &mut Interpreter<'_, M>, success: bool) {
         if self.stopped.is_some() {
             return;
         }
         let frame = self.frames.pop().expect("recorded frame");
         self.returned = frame.locals.get("return").copied();
+        if success
+            && let Some(candidate) = frame.memo_candidate
+            && candidate.identity == interpreter.globals.identity()
+            && candidate
+                .versions
+                .iter()
+                .all(|(slot, version)| interpreter.globals.version(*slot) == *version)
+            && let Some(value) = self.returned.and_then(|value| self.known(value))
+            && let Some(memo) = interpreter.memo.get_mut(&frame.function.name)
+        {
+            memo.insert(&interpreter.globals, candidate.args, value);
+        }
+    }
+
+    fn memo_candidate<M: Memory>(
+        &self,
+        interpreter: &Interpreter<'_, M>,
+        function: &Function,
+        args: &[ValueId],
+    ) -> Option<MemoCandidate> {
+        if !interpreter.memoize {
+            return None;
+        }
+        let (dependencies, pure) = interpreter.memo.get(&function.name)?.record_dependencies();
+        if pure {
+            return None;
+        }
+        let args = args
+            .iter()
+            .map(|value| self.known(*value))
+            .collect::<Option<Vec<_>>>()?;
+        let versions = dependencies
+            .iter()
+            .map(|name| {
+                self.known(*self.globals.get(name)?)?;
+                let slot = interpreter.globals.slot(name)?;
+                Some((slot, interpreter.globals.version(slot)))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if interpreter.program.functions.get(&function.name)? != function {
+            return None;
+        }
+        Some(MemoCandidate {
+            args,
+            versions,
+            identity: interpreter.globals.identity(),
+        })
     }
 
     fn bindings(&self) -> Arc<Vec<Binding>> {
@@ -1190,7 +1254,7 @@ impl Recorder {
         name: &str,
         args: &[ValueId],
     ) -> Option<crate::Result<Value>> {
-        let dependencies = interpreter.memo.get(name)?.record_dependencies()?;
+        let (dependencies, pure) = interpreter.memo.get(name)?.record_dependencies();
         for dependency in dependencies {
             if let Some(symbol) = self.globals.get(dependency) {
                 self.known(*symbol)?;
@@ -1206,8 +1270,24 @@ impl Recorder {
             let value = self.global(interpreter, dependency)?;
             self.known(value)?;
         }
-        // The recording hook holds the recorder outside Interpreter. The
-        // existing pure-call cache can execute this constant helper once.
-        Some(interpreter.call(name, args))
+        if pure {
+            // The recording hook holds the recorder outside Interpreter.
+            return Some(interpreter.call(name, args));
+        }
+        if !interpreter.memoize {
+            return None;
+        }
+        // A hit proves every possible write left the guarded state unchanged.
+        // A miss executes normally; the source frame snapshots its versions.
+        let value = interpreter
+            .memo
+            .get_mut(name)?
+            .lookup(&mut interpreter.globals, &args)?;
+        interpreter.operations += 1;
+        Some(if interpreter.operations > interpreter.operation_limit {
+            Err(crate::Error::Limit)
+        } else {
+            Ok(value)
+        })
     }
 }

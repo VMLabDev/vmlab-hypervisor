@@ -6,6 +6,7 @@ mod globals;
 mod indexed;
 mod intrinsics;
 mod memo;
+mod publication;
 mod record;
 mod trace;
 pub use globals::Globals;
@@ -424,7 +425,7 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             },
         );
         self.depth += 1;
-        if let Some(recorder) = &mut self.recorder {
+        if let Some(mut recorder) = self.recorder.take() {
             let key = if self.depth == 1 {
                 format!("root:{}", function.name)
             } else {
@@ -443,15 +444,17 @@ impl<'a, M: Memory> Interpreter<'a, M> {
                 .entry(key)
                 .or_insert_with(|| std::sync::Arc::new(record::Source::new(function)))
                 .clone();
-            recorder.enter(source, &frame);
+            recorder.enter(self, source, &frame);
+            self.recorder = Some(recorder);
         }
         let start = self.operations;
         if let Some(profile) = &mut self.profile {
             profile.children.push(0);
         }
         let result = self.run_frame(function, &mut frame);
-        if let Some(recorder) = &mut self.recorder {
-            recorder.leave();
+        if let Some(mut recorder) = self.recorder.take() {
+            recorder.leave(self, result.is_ok());
+            self.recorder = Some(recorder);
         }
         if let Some(profile) = &mut self.profile {
             let inclusive = self.operations - start;

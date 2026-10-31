@@ -69,8 +69,11 @@ The interpreter micro-benchmarks use flat RV64 images rather than booting a VM:
   training time and records that time separately.
 
 Run `just bench-run interpreter-specialized riscv64 1 3` for three pinned
-samples of the 30-million-instruction scalar loop and the CRC-checked CoreMark
-algorithm mix. These workloads do not establish Linux boot performance or an
+samples of the 30-million-instruction scalar loop and 1,000 iterations of the
+CRC-checked CoreMark algorithm mix. The longer mix reduces the timing noise and
+fixed startup contribution of the earlier one-iteration workload; it has a
+distinct history key. Reference and indexed backends retain one iteration.
+These workloads do not establish Linux boot performance or an
 official CoreMark score. Measurements include guest instruction counts,
 execution and initialization time, native and training instructions, slow
 continuations, and cache evictions. Backend selection clears inherited debug

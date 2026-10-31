@@ -2,11 +2,11 @@
 
 ## Result and target
 
-The 50 MIPS target is not met on the realistic mix. Exploratory warm runs
-reached 361.00 MIPS on the scalar loop and 19.71 MIPS on the CoreMark mix.
-These are single trials, not pinned benchmark medians. They do not establish
-that Linux can boot in minutes. The pruned-interpreter checkpoint below
-predates whole-block specialization.
+Exploratory warm runs reach 1,167.63 MIPS on the scalar loop and 51.13 MIPS
+on the longer CoreMark mix. These single trials meet 50 MIPS, but repeated
+pinned benchmark medians and workspace CI are still pending at this checkpoint.
+They do not establish that Linux can boot in minutes. The pruned-interpreter
+checkpoint below predates whole-block specialization.
 
 All results below use release builds on helios. Model initialization is
 outside the timed region; fetch, protection checks, translation, decode,
@@ -521,3 +521,86 @@ and a fresh 133/133 lockstep run over 452,776 instructions, including 4,392
 native instructions. Logs are `target/tcg/stream-native-{0,1,2}.log`. The full
 container-backed generation check verifies unchanged artifacts. Later MIP,
 publication-plan, and promotion experiments are outside that gate.
+
+### Typed execution and state publication checkpoint
+
+MIP is now guarded block context rather than an always-dynamic input. A change
+in pending interrupts takes the precise source continuation; a regression
+compares timer and external-interrupt transitions across every Sail global.
+Precompiled publication plans bind physical scalar destinations, intern typed
+constants, and omit identity writes. Aggregate and deferred values retain the
+existing materialization path.
+
+| Change | Workload iterations | Seconds | MIPS |
+| --- | ---: | ---: | ---: |
+| Guard stable MIP | 100 | 1.090952 | 27.90 |
+| Precompile publication plans | 100 | 1.036129 | 29.38 |
+| General 16-instruction promotion, full-path accounting | 100 | 3.128093 | 9.73 |
+| Also cache constant idempotent helpers | 100 | 2.259469 | 13.47 |
+| Restore loop-only promotion | 1,000 | 7.747348 | 39.27 |
+| Width-specific scalar operations and guards | 1,000 | 6.878904 | 44.23 |
+| Immediate 64-bit operands and prebound PC slot | 1,000 | 6.477528 | 46.97 |
+| Additional narrow immediates and shifts | 1,000 | 6.607790 | 46.05 |
+| Validate scratch bounds once | 1,000 | 6.360919 | 47.83 |
+| Coalesce pending unwatched global versions | 1,000 | 6.285514 | 48.41 |
+| Inline scalar capture methods | 1,000 | 5.950196 | 51.13 |
+
+These are exploratory CPU-16 trials. General promotion regressed and was
+reverted. Its experiment exposed a promotion-counter bug: eight early native
+returns incorrectly counted as complete executions of a four-instruction path.
+A regression requires zero full-path successes for those exits. The helper
+cache reduces that experiment's source operations from 3,439,691 to 1,939,024
+and warmup from 93.74 to 70.67 seconds, but does not rescue general promotion.
+An impure helper is reused only after a completed call proves its writes
+unchanged, with matching arguments and versioned global dependencies.
+State-changing helpers remain on the source path.
+
+Packed operations specialize model-level arithmetic at 16, 32, and 64 bits;
+other widths retain the generic implementation. Constants can become immediate
+operands. No guest opcode semantics are hand-written. Trace construction
+validates every packed scratch access before using unchecked host-array
+indexing. Guest memory accesses remain checked. Regressions cover malformed
+layouts, concat width 255, checked/unchecked equivalence, and right shifts whose
+input width exceeds the result width. Logical shifts truncate after shifting.
+
+Native global writes update unwatched version counters on the first pending
+write. Later writes coalesce until source execution flushes the native bank.
+Watched context globals still invalidate on every change. Source memo lookup
+always follows a flush; tests cover repeated flushes and late watchers.
+
+The final long trial executes 304,258,499 guest instructions: 304,258,465 native,
+28 training, and six slow continuations, with two recordings and no evictions.
+Initialization takes 0.802465 seconds; warmup takes 34.976837 seconds and restores
+RAM and model globals between passes. The timed pass executes 149,835 source IR
+operations. The scalar trial executes 30 million instructions in 0.025693
+seconds, with 29,999,998 native instructions, two slow continuations, no
+recordings, and 1.965125 seconds of warmup. Both check their results.
+
+The benchmark suite now measures 1,000 CoreMark algorithm iterations for the
+specialized backend, under the distinct history key
+`coremark_algorithms_1000_warm`. Reference backends retain the one-iteration
+workload. Upstream algorithms are unchanged, published first-iteration CRCs
+remain enabled, and the rebuilt ELF exits successfully under black-box
+`qemu-riscv64`. This is not an official CoreMark score.
+
+### Final profile and correctness gates
+
+`target/tcg/perf/final.data` contains 9,353 cycles samples with no loss, using
+199 Hz DWARF call graphs on CPU 18. Its timed long workload reaches 46.24 MIPS
+under profiling. The warm slice attributes 38.67% exclusively to
+`Trace::execute` (including inlined packed dispatch), 16.20% to
+`Evaluation::scalar`, 12.68% to `Evaluation::bindings`, 5.42% to
+`Trace::run_inputs`, 4.66% to `Trace::run_captured`, 4.43% to
+`Trace::guard_failed`, 3.13% to `Evaluation::capture`, 2.52% to
+`Riscv64::account_outcome`, and 2.21% to `FlatMemory::read`. Remaining costs
+are primarily scalar dispatch, lazy alternate-exit evaluation, and boundary
+state transfer. Shared typed IR is available to a future JIT; none is used here.
+
+The current runtime passes fresh 133/133 lockstep cases over 452,776 instructions,
+including 4,392 native instructions, with no divergences
+(`target/tcg/final-native-{0,1,2}.log`). The broader flat architectural corpus
+passes 134/134 cases, including 8,576 native instructions
+(`target/tcg/final-flat/results.json`). Full container-backed generation checking
+verifies unchanged 81,607 Rust bytes and 2,085,721 compressed IR bytes. Workspace
+format and all-target clippy pass after merging current main. Benchmark harness
+tests pass 34/34. Workspace CI and repeated timing remain pending here.

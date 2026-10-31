@@ -31,7 +31,6 @@ fn dynamic_names() -> &'static std::collections::BTreeSet<String> {
             "zminstret",
             "zmtime",
             "zminstret_increment",
-            "zmip",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -185,8 +184,9 @@ impl<M: Memory> Riscv64<M> {
     pub fn step(&mut self) -> Result<bool> {
         self.interpreter.fetch_address = None;
         if self.specialize {
+            let pc_slot = self.interpreter.globals.slot("zPC");
             self.interpreter.globals.begin_native();
-            let result = self.specialized_run(1);
+            let result = self.specialized_run(1, pc_slot);
             self.interpreter.globals.end_native();
             return result.map(|(_, waiting)| waiting);
         }
@@ -216,9 +216,13 @@ impl<M: Memory> Riscv64<M> {
 
     fn run_inner(&mut self, limit: u64) -> Result<(u64, bool)> {
         let start = self.steps;
+        let pc_slot = self
+            .specialize
+            .then(|| self.interpreter.globals.slot("zPC"))
+            .flatten();
         while self.steps - start < limit {
             let waiting = if self.specialize {
-                self.specialized_run((limit - (self.steps - start)).min(256) as u32)?
+                self.specialized_run((limit - (self.steps - start)).min(256) as u32, pc_slot)?
                     .1
             } else {
                 self.step()?
@@ -241,8 +245,8 @@ impl<M: Memory> Riscv64<M> {
         result
     }
 
-    fn specialized_run(&mut self, limit: u32) -> Result<(u32, bool)> {
-        let pc = match self.interpreter.globals.native_word("zPC") {
+    fn specialized_run(&mut self, limit: u32, pc_slot: Option<usize>) -> Result<(u32, bool)> {
+        let pc = match pc_slot.and_then(|slot| self.interpreter.globals.native_slot(slot)) {
             Some((vmlab_hv_tcg_ir::native::ScalarType::Bits(64), raw)) => raw as u64,
             Some(_) => return Err(crate::Error::Type("native PC is not Bits(64)".into())),
             None => self.pc()?,

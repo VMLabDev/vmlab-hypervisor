@@ -36,8 +36,8 @@ impl Memo {
             .collect()
     }
 
-    pub fn record_dependencies(&self) -> Option<&[String]> {
-        self.pure.then_some(&self.dependencies)
+    pub fn record_dependencies(&self) -> (&[String], bool) {
+        (&self.dependencies, self.pure)
     }
 
     pub fn lookup(&mut self, globals: &mut Globals, args: &[Value]) -> Option<Value> {

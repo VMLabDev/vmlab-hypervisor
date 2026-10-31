@@ -175,6 +175,7 @@ impl Globals {
         self.write_native_slot(slot, ty, raw)
     }
 
+    #[inline(always)]
     pub(crate) fn write_native_slot(&mut self, slot: usize, ty: ScalarType, mut raw: u128) -> bool {
         if !self.native_active {
             return false;
@@ -186,14 +187,20 @@ impl Globals {
             raw = u128::from(raw != 0);
         }
         if self.native[slot] != Some((ty, raw)) {
-            if self.native[slot].is_none() {
+            let first_write = self.native[slot].is_none();
+            if first_write {
                 self.native_dirty.push(slot);
             }
             self.native[slot] = Some((ty, raw));
-            self.clock = self.clock.checked_add(1).expect("global version exhausted");
-            self.versions[slot] = self.clock;
-            if self.context_watched[slot] {
-                self.context_clock = self.clock;
+            // The first pending write invalidates source caches. Source execution
+            // flushes the bank before reading them. Context guards remain live
+            // inside native execution, so watched slots advance on every change.
+            if first_write || self.context_watched[slot] {
+                self.clock = self.clock.checked_add(1).expect("global version exhausted");
+                self.versions[slot] = self.clock;
+                if self.context_watched[slot] {
+                    self.context_clock = self.clock;
+                }
             }
         }
         true
@@ -234,6 +241,88 @@ impl Deref for Globals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unobserved_words_coalesce_versions_but_watched_words_do_not() {
+        let mut globals = Globals::default();
+        globals.insert("plain".into(), Value::int(0));
+        globals.insert("watched".into(), Value::int(0));
+        let plain = globals.slot("plain").unwrap();
+        let watched = globals.slot("watched").unwrap();
+        globals.watch_context(watched);
+        globals.begin_native();
+        globals.write_native_slot(plain, ScalarType::Integer, 1);
+        let first = globals.version(plain);
+        globals.write_native_slot(plain, ScalarType::Integer, 2);
+        assert_eq!(globals.version(plain), first);
+        globals.write_native_slot(watched, ScalarType::Integer, 1);
+        let revision = globals.context_revision();
+        globals.write_native_slot(watched, ScalarType::Integer, 2);
+        assert!(globals.context_revision() > revision);
+        globals.flush_native();
+        assert_eq!(globals["plain"], Value::int(2));
+        globals.write_native_slot(plain, ScalarType::Integer, 3);
+        assert!(globals.version(plain) > first);
+        let before_watch = globals.version(plain);
+        globals.watch_context(plain);
+        globals.write_native_slot(plain, ScalarType::Integer, 4);
+        assert!(globals.version(plain) > before_watch);
+        globals.end_native();
+        assert_eq!(globals["plain"], Value::int(4));
+        assert_eq!(globals["watched"], Value::int(2));
+    }
+
+    #[test]
+    fn coalesced_native_writes_invalidate_source_memos_at_each_flush() {
+        use crate::{FlatMemory, Interpreter};
+        use vmlab_hv_tcg_ir::{Expr, Function, Location, Op, Program, Type};
+        let mut code: Vec<_> = (0..32)
+            .map(|index| {
+                Op::Declare(
+                    format!("scratch_{index}"),
+                    Type::Integer(None),
+                    Some(Expr::Integer("0".into(), None)),
+                )
+            })
+            .collect();
+        code.extend([
+            Op::Assign(Location::Id("return".into()), Expr::Id("value".into())),
+            Op::Return,
+        ]);
+        let function = Function {
+            name: "read_value".into(),
+            args: vec![],
+            result: Type::Integer(None),
+            locals: BTreeMap::new(),
+            code,
+        };
+        let program = Program {
+            functions: BTreeMap::from([(function.name.clone(), function)]),
+            globals: BTreeMap::from([("value".into(), Type::Integer(None))]),
+            ..Program::default()
+        };
+        let mut interpreter = Interpreter::new(&program, FlatMemory::new(0, vec![]));
+        interpreter.initialize().unwrap();
+        assert_eq!(
+            interpreter.call("read_value", vec![]).unwrap(),
+            Value::int(0)
+        );
+        let slot = interpreter.globals.slot("value").unwrap();
+        interpreter.globals.begin_native();
+        for pair in [[1, 2], [3, 4]] {
+            for value in pair {
+                interpreter
+                    .globals
+                    .write_native_slot(slot, ScalarType::Integer, value);
+            }
+            interpreter.globals.flush_native();
+            assert_eq!(
+                interpreter.call("read_value", vec![]).unwrap(),
+                Value::int(pair[1] as i128)
+            );
+        }
+        interpreter.globals.end_native();
+    }
 
     #[test]
     fn native_words_publish_at_boundaries_and_legacy_writes_supersede_them() {
