@@ -359,7 +359,8 @@ def windows_boot_id(agent):
 
 
 class WindowsReady:
-    """State for the windows first-boot sequence (see windows_provision)."""
+    """The windows first-boot sequence, ported from the template's
+    provision script (see wait_x86_ready)."""
 
     def __init__(self, backend, args, run_dir, t0):
         self.backend = backend
@@ -426,23 +427,31 @@ class WindowsReady:
 
     def wait_oobe(self, agent):
         """Phase 2: user OOBE done (best-effort ~10 min, like the script:
-        a stuck OOBE costs time, never the boot)."""
+        a stuck OOBE costs time, never the boot). The agent blips across
+        the specialize reboots, so every iteration works with whatever
+        connection it can get."""
         end = min(time.monotonic() + 600, self.deadline)
         while time.monotonic() < end:
+            if agent is None:
+                agent, _ = self.connect()
+                if agent is None:
+                    time.sleep(5)
+                    continue
             try:
                 chan = win_ps(agent, WINDOWS_OOBE_PS)
                 state = chan["data"].decode(errors="replace").strip()
                 if chan["code"] == 0 and state == "done":
                     log("windows OOBE finished")
-                    return
+                    return agent
             except (TimeoutError, ConnectionError, lib.BenchError, OSError):
-                agent.close()
-                agent, _ = self.connect()
-                if agent is None:
-                    time.sleep(5)
-                    continue
+                try:
+                    agent.close()
+                except Exception:
+                    pass
+                agent = None
             time.sleep(5)
         log("windows OOBE still running after ~10 minutes; continuing")
+        return agent
 
     def settle_appx(self, agent):
         """Phase 3: consume the staged-AppX reconciliation (best-effort,
@@ -526,7 +535,7 @@ class WindowsReady:
 
     def run(self):
         agent, hello = self.wait_marker()
-        self.wait_oobe(agent)
+        agent = self.wait_oobe(agent) or agent
         self.settle_appx(agent)
         agent, hello = self.reboot_and_return(agent)
         return agent, hello, round(time.monotonic() - self.t0, 2)
