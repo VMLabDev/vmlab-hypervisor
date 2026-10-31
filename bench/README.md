@@ -1,18 +1,23 @@
-# vmlab-hv benchmarks (D2)
+# vmlab-hv benchmarks (D2, D28)
 
-The continuous benchmark suite that holds phase 3's speed bar: `vmlab-hv`
-with `accel: tcg` must reach at least 100 % of QEMU TCG's speed on this host
-(D1, `notes/04-speed-bar.md`), tracked by a result history and a regression
-check (D2). Spec: `.scratch/plans/phase-3-tcg/SPEC.md`, section
-*Benchmarks*. Baseline method and first numbers:
-`notes/03-architecture-baseline.md`.
+The continuous benchmark suite that holds the phase gates: on TCG arches
+(aarch64, riscv64) `vmlab-hv` with `accel: tcg` must reach at least 100 %
+of QEMU TCG's speed on this host (D1, `notes/04-speed-bar.md`); on x86_64
+KVM it must hold HV-D28 before the VM default flips (`notes/29-performance.md`):
+boot to agent ready no slower than QEMU, virtio-blk and virtio-net at
+least 80 % of QEMU's throughput. Tracked by a result history and a
+regression check (D2). TCG baseline method and first numbers:
+`notes/03-architecture-baseline.md`; the phase-2 gate verdicts live in
+`bench/PHASE2-GATE.md`.
 
 ## Recipes
 
 | Recipe | Does |
 |---|---|
-| `just bench-run backend='qemu' arch='all' vcpus='1,4' repeats='3' guest='debian-13'` | run the suite, append to the history |
-| `just bench-report` | print the per-workload trend, and hv-vs-qemu against D1 |
+| `just bench-run backend='qemu' arch='all' vcpus='1,4' repeats='3' guest='debian-13'` | run the TCG suite, append to the history |
+| `just bench-run-kvm backend='qemu' guest='ubuntu-26.04' repeats='3'` | run the x86_64 KVM suite (guest `ubuntu-26.04` or `windows-10`; vcpus defaults to the template's) |
+| `just bench-run-g2g backend='qemu'` | the x86_64 guest-to-guest net pair (two VMs at once) |
+| `just bench-report` | print the per-workload trend, and hv-vs-qemu against the phase's bar |
 | `just bench-check` | fail (exit 1) if the latest run of a backend regressed beyond measured noise |
 | `just bench-test` | the suite's own unit tests |
 
@@ -38,39 +43,85 @@ written):
 3. **xz_9_32M** — `xz -9 -T1` over 32 MiB of repeated text, timed the same
    way.
 
+
 Every repeat also verifies the xz roundtrip (`cmp`) and that the guest
 really sees the configured CPU count (`nproc`).
 
-## Backends
+## x86_64 KVM workloads (phase 2, HV-D28)
 
-- **qemu** — vmlab's exact QEMU argv for a linux-modern profile VM on the
-  `virt` machine, as captured in notes/03 (`src/qemu/cmdline.rs:427`
-  `build_args`): `-machine virt[acpi=off] -accel tcg -cpu max`, the edk2
-  pflash pair vmlab's firmware picker chooses, virtio-serial with
-  `vmlab.agent.0`, a qcow2 overlay on virtio-blk, `-S` then QMP `cont`.
-  Harness deviations, both forced: `-nic none` (no network segment) and no
-  TPM/GPU. This backend works today and holds the baseline.
-- **vmlab-hv** — the same guest as a `vmlab-hv-proto` machine description
-  with `accel: tcg`, launched `--paused` and released with a control-socket
-  `resume`. Until phase 3 lands foreign-arch TCG support, `vmlab-hv` exits
-  at launch with "is not supported"; the runner reports that reason as a
-  skip, records nothing, and exits 0. The plumbing (overlay, control client,
-  agent wait, workloads, shutdown) is complete, so the same command starts
-  measuring the day support lands — then also pass `--timeout-scale` until
-  the JIT exists.
+Per guest template (ubuntu-26.04, windows-10 — the template's own vCPU
+count and memory), N repeats, fresh qcow2 overlay per repeat:
+
+1. **boot_to_agent_ready** — process spawn to vmlab's own readiness: the
+   agent's answered Hello plus, for the sysprep-generalized windows
+   template, both setup phases cleared and the first-boot reboot done
+   (the gate vmlab's provision script applies). vmlab-hv exits cleanly on
+   a guest reset, so the bench respawns it exactly as vmlab would; QEMU
+   reboots in-process. The clock starts at the first spawn.
+2. **blk_seq_read_mbps** — 1-MiB O_DIRECT reads over the template-backed
+   overlay's allocated extent (`/dev/vda`), via bench/randblke.c copied in
+   through the agent (the template ships no fio, and GNU dd's
+   `iflag=direct` buffer is refused with EINVAL by the virtio-blk device).
+3. **blk_seq_write_mbps** — 512 MiB of 1-MiB O_DIRECT writes with a final
+   `fdatasync` inside the timed window, to a fresh file on the overlay.
+4. **blk_rand_read_4k_iops** / **blk_rand_write_4k_iops** — 4-KiB O_DIRECT
+   ops at fixed-seed random offsets (reads over the allocated extent,
+   writes over a preallocated 1-GiB file).
+5. **net_tx_udp_mbps** — the guest blasts 65 000-byte UDP payloads at the
+   host peer for 12 s; the rate is what the peer received: guest →
+   virtio-net → the backend's stream netdev → vmlab's 4-byte-big-endian
+   framing → the unix socket. Delivery below 90 % of what the guest sent
+   fails the repeat instead of recording a broken number.
+6. **net_rx_udp_mbps** — the peer blasts the guest for 12 s; the rate is
+   the guest interface's own `rx_bytes` delta (kernel-counted, immune to
+   userspace starvation under the flood).
+7. **net_g2g_a2b_tcp_mbps** / **net_g2g_b2a_tcp_mbps** (`--suite g2g`) —
+   two VMs on one two-port hub (raw byte pump, the framing is
+   transparent), real TCP between the guest stacks, both directions,
+   receiver-side bytes.
+8. **idle_cpu_pct** — host CPU (utime+stime of the whole VM process, all
+   threads) over a 60 s idle window, as a percentage of one core.
+   Reported against QEMU; D28 sets no bar for it.
+
+Both sides measure ethernet-level bytes, and both carry the one forced
+deviation: `host_mtu=65520` (jumbo frames keep the stdlib guest tools and
+the framing peer off the measured ceiling). The windows-10 template runs
+boot_to_agent_ready only.
+
+## Backends (x86_64)
+
+- **qemu** — vmlab's exact argv for the profile shape
+  (`src/qemu/cmdline.rs build_args`, mirrored black-box in `docs/hwref`):
+  `q35`/`kvm`, `host,vmx=off,svm=off` (plus the Hyper-V enlightenments and
+  the kvm-pit global for windows on this AVIC host), SeaBIOS or the OVMF
+  pflash pair, virtio-serial `vmlab.agent.0`, one qcow2 overlay on
+  virtio-blk (SeaBIOS bootindex), one stream-netdev virtio-net NIC,
+  virtio-vga, `-usb` + usb-tablet, `-S` then QMP `cont`.
+- **vmlab-hv** — the same machine as a machine description, every device
+  at the PCI function QEMU auto-assigns for that argv (00:01.0 console,
+  00:02.0 blk, 00:03.0 net, 00:04.0 vga, 00:05.0 the xHCI that replaces
+  QEMU's ICH9 USB set, D6; AHCI at 00:1f.2 as on q35), launched `--paused`
+  and released with a control-socket `resume`. The NIC carries the
+  separately built iPXE ROM (D16) where QEMU loads its own combo ROM.
+
+The host side of the segment is `bench/netpeer.c` (`netpeer peer`:
+  ARP responder, byte counter, on-command blaster; `netpeer hub`:
+  two-port pump), built on demand into `bench/run/bin/`.
 
 ## Noise control
 
 - **Pinning**: the VM process tree runs under `taskset -c` on full physical
   cores in the top half of the topology (smp1 → e.g. `16-19`, smp4 →
   `16-23` on the 32-thread host this was written on; `--cpus` overrides).
-  Every backend gets the same window.
+  Every backend gets the same window. The g2g pair pins one VM per half
+  (`16-19` + `20-23`) so the two never contend.
 - **Recorded per run**: cpufreq governor, load average (start and end of
   each repeat), pin window, memory cap, template version, backend version,
-  host CPU count, git commit (with dirty marker).
+  host CPU count, git commit (with dirty marker), and for x86_64 the APIC
+  virtualisation fact, the NIC MTU and the block tool actually used.
 - **Repeats**: N per configuration (default 3); the history stores the
   samples, the median, and the max-min spread.
-- **Safety**: one VM at a time, always inside
+- **Safety**: at most two VMs at a time (only the g2g pair), always inside
   `systemd-run --user --scope -p MemoryMax=24G -p MemorySwapMax=0`, always
   reaped (group kill plus a run-path sweep) even on failure.
 
@@ -86,18 +137,19 @@ survives. Fields:
 | `commit`, `dirty` | worktree commit the suite ran from |
 | `host` | hostname |
 | `backend` | `qemu` or `vmlab-hv` |
-| `arch`, `guest`, `vcpus`, `workload`, `unit` | the configuration |
-| `repeats`, `samples` | N and the raw seconds |
+| `arch`, `guest`, `vcpus`, `workload`, `unit`, `direction` | the configuration; `direction` says which way is a regression (`lower` for seconds and CPU %, `higher` for rates) |
+| `repeats`, `samples` | N and the raw values |
 | `median`, `spread` | median and max-min of the samples |
 | `qemu_baseline` | on `vmlab-hv` lines: the newest same-config QEMU record (median, spread, commit, recorded); `null` on `qemu` lines |
 | `env` | the noise-control record above |
 
 `bench-check` compares, per configuration, the latest entry with the
-previous one **of the same backend**, and fails when the median grew by more
-than the noise: the larger of the two spreads, or 5 % of the previous
-median. Cross-backend comparison is D1's bar; `bench-report` prints that
-ratio (`hv/qemu`, bar ≥ 1.00x) rather than gating on it, because the bar
-gates flipping a TCG default, not every commit.
+previous one **of the same backend**, and fails when the median moved by
+more than the noise **in the workload's worse direction**: the larger of
+the two spreads, or 5 % of the previous median. Cross-backend comparison
+is the phase bar; `bench-report` prints the hv/qemu ratio against it
+(TCG ≥ 1.00x, x86_64 boot ≤ 1.00x and throughput ≥ 0.80x) rather than
+gating on it, because the bar gates flipping a default, not every commit.
 
 ## Profiling hooks
 

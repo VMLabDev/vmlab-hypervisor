@@ -30,10 +30,7 @@ import lib
 import netpeer
 from backends import HvBackend, QemuBackend, X86HvBackend, X86QemuBackend
 
-# Generous ceilings; a TCG riscv64 boot is ~1 min under QEMU and the guest
-# workloads run for minutes, so these only catch hangs. The future
-# interpreter-class vmlab-hv may need `--timeout-scale`.
-BOOT_DEADLINE = 1800.0
+X86_BOOT_DEADLINE = {"windows-10": 1800.0, "ubuntu-26.04": 300.0}
 PREP_TIMEOUT = 3600
 WORKLOAD_TIMEOUT = {"sha256_256M": 3600, "xz_9_32M": 7200}
 VERIFY_TIMEOUT = 3600
@@ -42,7 +39,6 @@ SHUTDOWN_TIMEOUT = 300
 
 # x86_64 ceilings and workload sizes (phase 2). A windows sysprep first
 # boot runs several minutes; everything else is minutes at most.
-X86_BOOT_DEADLINE = {"windows-10": 900.0, "ubuntu-26.04": 300.0}
 X86_EXEC_TIMEOUT = 180
 X86_SHUTDOWN_TIMEOUT = 300
 X86_MAX_RESETS = 3
@@ -304,34 +300,23 @@ def must_sh(agent, cmd, what, timeout=X86_EXEC_TIMEOUT, stdin_data=None):
     return out
 
 
-def windows_setup_done(agent):
-    """The sysprep gate vmlab's readiness uses: both setup phases at 0."""
+def windows_firstboot_marker(agent):
+    """vmlab's real gate: the sysprep-unattend specialize pass writes the
+    `vmlab-firstboot.done` marker under Windows' Temp directory when the
+    first boot genuinely finishes (the registry setup keys read 0 for a
+    while *before* sysprep starts, so they cannot gate the reboot).
+    Returns ('present'|'absent', probe output)."""
     probe = (
         "powershell.exe -NoProfile -NonInteractive -Command "
-        "\"$s = Get-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\Setup' -ErrorAction Stop; "
-        "Write-Output ('setup=' + $s.SystemSetupInProgress + ', oobe=' + $s.OOBEInProgress); "
-        "if ($s.SystemSetupInProgress -eq 0 -and $s.OOBEInProgress -eq 0) { exit 0 }; exit 1\""
+        "\"if (Test-Path 'C:\\Windows\\Temp\\vmlab-firstboot.done') { "
+        "Write-Output present; exit 0 }; Write-Output absent; exit 1\""
     )
     try:
         chan = agent.exec(["cmd.exe", "/C", probe], 60, 60)
     except (TimeoutError, ConnectionError, lib.BenchError):
-        return False, "agent unreachable during setup probe"
-    if chan["code"] == 0:
-        return True, ""
+        return "agent-gone", ""
     out = chan["data"].decode(errors="replace")
-    err = chan["stderr"].decode(errors="replace")
-    return False, out + err
-
-
-def respawn_hv(backend, run_dir):
-    """vmlab-hv exits 0 on a guest reset (triple fault); vmlab restarts the
-    process, so the bench does too — same machine description, same disks."""
-    for name in ("control.sock", "agent.sock", "display.sock", "vnc.sock"):
-        path = os.path.join(run_dir, name)
-        if os.path.exists(path):
-            os.remove(path)
-    backend.launch()
-    backend.release_cpus()
+    return ("present" if "present" in out else "absent"), out.strip()[:60]
 
 
 def wait_x86_ready(backend, args, guest, run_dir, t0):
@@ -339,19 +324,27 @@ def wait_x86_ready(backend, args, guest, run_dir, t0):
 
     Linux: the agent answers its Hello and runs an exec. Windows: the agent
     answers during sysprep specialize long before the machine is usable, so
-    readiness additionally waits for both setup phases to clear, requests
-    the first-boot reboot vmlab's provision script performs, and waits for
-    the agent to answer again after it. vmlab-hv exits 0 on the guest reset
-    (triple fault = clean exit) and is respawned; QEMU reboots in-process.
-    The clock starts at the first spawn and never resets.
+    readiness waits for the first-boot marker vmlab's provision script gates
+    on, deletes it, requests the reboot, and waits for the agent to answer
+    again after it (vmlab's own first-boot sequence). vmlab-hv exits 0 on
+    the guest reset (triple fault = clean exit) and is respawned; QEMU
+    reboots in-process. The clock starts at the first spawn and never
+    resets.
     """
-    windows = guest == "windows-10"
-    deadline = t0 + X86_BOOT_DEADLINE[guest] * args.timeout_scale
-    resets = 0
     reboot_requested = False
     reboot_done = False
+    saw_agent_down = False
     setup_status = ""
     while time.monotonic() < deadline:
+        if windows and int(time.monotonic() - t0) % 60 == 0:
+            serial_bytes = 0
+            try:
+                serial_bytes = os.path.getsize(
+                    os.path.join(run_dir, "serial.log"))
+            except OSError:
+                pass
+            log(f"waiting for {guest}: {time.monotonic() - t0:.0f}s, "
+                f"serial {serial_bytes} B, firstboot {setup_status[:60]!r}")
         if backend.session.exited():
             code = backend.session.exit_code()
             if (windows and code == 0 and args.backend == "vmlab-hv"
@@ -376,6 +369,8 @@ def wait_x86_ready(backend, args, guest, run_dir, t0):
             if cand is not None:
                 cand.close()
         if agent is None:
+            if reboot_requested:
+                saw_agent_down = True
             time.sleep(1)
             continue
         if not windows:
@@ -383,11 +378,18 @@ def wait_x86_ready(backend, args, guest, run_dir, t0):
             if "hv-agent-ready" not in out:
                 raise lib.BenchError(f"guest agent echo failed: {out!r}")
             return agent, hello, round(time.monotonic() - t0, 2)
-        if reboot_requested and reboot_done:
+        if reboot_requested and (reboot_done or saw_agent_down):
+            # hv: the respawn after the reset exit proved the reboot.
+            # QEMU: the agent has to disappear once (the guest going down)
+            # before the next answered Hello counts as the post-reboot
+            # agent — otherwise the pre-reboot agent still answers with
+            # the deleted marker and reads as a false ready.
             return agent, hello, round(time.monotonic() - t0, 2)
-        done, setup_status = windows_setup_done(agent)
-        if done and not reboot_requested:
-            log("windows setup finished; requesting the first-boot reboot")
+        marker, setup_status = windows_firstboot_marker(agent)
+        if marker == "present" and not reboot_requested:
+            log("windows first boot finished; requesting the provision reboot")
+            agent.exec(["cmd.exe", "/C",
+                        "del /f C:\\Windows\\Temp\\vmlab-firstboot.done"], 30, 30)
             chan = agent.exec(["cmd.exe", "/C", "shutdown.exe /r /t 5 /f"], 60, 60)
             if chan["code"] != 0:
                 raise lib.BenchError(
@@ -397,12 +399,9 @@ def wait_x86_ready(backend, args, guest, run_dir, t0):
             agent.close()
             time.sleep(6)  # /t 5 plus the shutdown grace
             continue
-        if done and reboot_requested:
-            # QEMU rebooted in-process and the agent is back.
-            return agent, hello, round(time.monotonic() - t0, 2)
         agent.close()
         time.sleep(2)
-    raise TimeoutError(f"{guest} never reached agent ready (setup: {setup_status})")
+    raise TimeoutError(f"{guest} never reached agent ready (firstboot: {setup_status})")
 
 
 def guest_nic(agent):
