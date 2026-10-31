@@ -282,3 +282,72 @@ impl Snapshot for FwCfg {
         Ok(())
     }
 }
+
+/// MMIO register layout. Selector and DMA registers are big-endian; the data
+/// register returns the file stream in ascending byte order.
+pub struct MmioFwCfg(pub FwCfg);
+
+impl BusDevice for MmioFwCfg {
+    fn read(&mut self, offset: u64, data: &mut [u8]) {
+        data.fill(0);
+        if offset == 0 && matches!(data.len(), 1 | 2 | 4 | 8) {
+            self.0.stream_read(data);
+        } else if offset >= 16 && offset + data.len() as u64 <= 24 {
+            data.copy_from_slice(
+                &b"QEMU CFG"[(offset - 16) as usize..(offset - 16) as usize + data.len()],
+            );
+        }
+    }
+
+    fn write(&mut self, offset: u64, data: &[u8]) {
+        if offset == 8 && data.len() == 2 {
+            self.0.select(u16::from_be_bytes(data.try_into().unwrap()));
+        } else if offset >= 16 && offset + data.len() as u64 <= 24 {
+            self.0.write(offset - 12, data);
+        }
+    }
+}
+
+impl Snapshot for MmioFwCfg {
+    fn state_id(&self) -> String {
+        self.0.state_id()
+    }
+    fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
+        self.0.save_state()
+    }
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceError> {
+        self.0.restore_state(bytes)
+    }
+}
+
+#[cfg(test)]
+mod mmio_tests {
+    use super::*;
+    #[test]
+    fn big_endian_selector_stream_and_dma() {
+        let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 4096)]).unwrap();
+        let mut device = MmioFwCfg(FwCfg::new(mem.clone()));
+        device.write(8, &0u16.to_be_bytes());
+        let mut signature = [0; 4];
+        device.read(0, &mut signature);
+        assert_eq!(&signature, b"QEMU");
+        device.write(8, &1u16.to_be_bytes());
+        device.read(0, &mut signature);
+        assert_eq!(u32::from_le_bytes(signature), 3);
+        let mut dma = [0; 16];
+        dma[..4].copy_from_slice(&10u32.to_be_bytes());
+        dma[4..8].copy_from_slice(&4u32.to_be_bytes());
+        dma[8..].copy_from_slice(&256u64.to_be_bytes());
+        mem.write_slice(&dma, GuestAddress(128)).unwrap();
+        device.write(16, &128u64.to_be_bytes());
+        mem.read_slice(&mut signature, GuestAddress(256)).unwrap();
+        assert_eq!(&signature, b"QEMU");
+        mem.read_slice(&mut signature, GuestAddress(128)).unwrap();
+        assert_eq!(signature, [0; 4]);
+        let state = device.save_state().unwrap();
+        device.write(8, &1u16.to_be_bytes());
+        device.restore_state(&state).unwrap();
+        device.read(0, &mut signature);
+        assert_eq!(signature, [0; 4]);
+    }
+}

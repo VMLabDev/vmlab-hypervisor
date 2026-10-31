@@ -13,6 +13,45 @@ const HEADER: u64 = 0x21000;
 const STATUS: u64 = 0x22000;
 
 #[test]
+fn modern_gpu_matches_captured_identity_bars_and_transport_state() {
+    let mut gpu = VirtioPciDevice::new_modern_gpu(
+        "gpu",
+        Box::new(crate::virtio::gpu::Gpu::new("gpu")),
+        memory(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(gpu.config_read(0), 0x1050_1af4);
+    assert_eq!(gpu.config_read(2), 0x0380_0001);
+    assert_eq!(gpu.config_read(11), 0x1100_1af4);
+    assert_eq!(gpu.config_read(13) & 0xff, 0x98);
+    let bars = gpu.bars();
+    assert_eq!(bars.len(), 2);
+    assert_eq!((bars[0].index, bars[0].size), (1, 0x1000));
+    assert_eq!((bars[1].index, bars[1].size), (4, 0x4000));
+    config_write(&mut gpu, 0x10, &u32::MAX.to_le_bytes());
+    assert_eq!(gpu.config_read(4), 0);
+    config_write(&mut gpu, 0x14, &u32::MAX.to_le_bytes());
+    assert_eq!(gpu.config_read(5), 0xffff_f000);
+    assert_eq!(gpu.offered_features() & (1 << 27), 0);
+    assert_ne!(gpu.offered_features() & F_VERSION_1, 0);
+    assert_eq!(gpu.config_read(0x98 / 4) >> 16, 2);
+    gpu.bar_write(0, 4, &u32::MAX.to_le_bytes());
+    assert_eq!(gpu.driver_features, 0);
+    gpu.bar_write(4, 0x14, &[3]);
+    gpu.bar_write(4, 0x16, &1u16.to_le_bytes());
+    gpu.bar_write(1, 0, &0x1234u64.to_le_bytes());
+    let state = gpu.save_state().unwrap();
+    gpu.bar_write(4, 0x14, &[0]);
+    gpu.restore_state(&state).unwrap();
+    assert_eq!(read::<1>(&mut gpu, 4, 0x14), [3]);
+    assert_eq!(read::<2>(&mut gpu, 4, 0x16), 1u16.to_le_bytes());
+    assert_eq!(read::<8>(&mut gpu, 1, 0), 0x1234u64.to_le_bytes());
+    assert_eq!(gpu.save_state().unwrap(), state);
+}
+
+#[test]
 fn legacy_unaligned_reads_do_not_expose_register_fragments() {
     let mut pci = Driver::new().pci;
     for offset in [1, 5, 7] {

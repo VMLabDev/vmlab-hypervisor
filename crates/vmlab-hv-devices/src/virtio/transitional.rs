@@ -21,11 +21,6 @@ impl LegacyPci {
     pub(super) fn bars(&self) -> Vec<BarInfo> {
         let mut bars = vec![
             BarInfo {
-                index: 0,
-                size: self.io_size,
-                kind: BarKind::Io,
-            },
-            BarInfo {
                 index: 1,
                 size: 0x1000,
                 kind: BarKind::Mmio32,
@@ -36,6 +31,16 @@ impl LegacyPci {
                 kind: BarKind::Mmio64 { prefetchable: true },
             },
         ];
+        if self.io_size != 0 {
+            bars.insert(
+                0,
+                BarInfo {
+                    index: 0,
+                    size: self.io_size,
+                    kind: BarKind::Io,
+                },
+            );
+        }
         if self.rom_image.is_some() {
             bars.push(BarInfo {
                 index: ROM_BAR,
@@ -90,6 +95,40 @@ impl VirtioPciDevice {
         intx: Option<Arc<dyn IrqLine>>,
         msix_vectors: u16,
     ) -> Result<Self, DeviceError> {
+        if !matches!(device.device_type(), 1..=3) {
+            return Err(DeviceError::Other(format!(
+                "virtio type {} has no supported transitional PCI identity",
+                device.device_type()
+            )));
+        }
+        Self::new_captured(id, device, mem, msi, intx, msix_vectors)
+    }
+
+    /// Modern-only virtio-gpu with the captured BAR1 MSI-X and BAR4 regions.
+    pub fn new_modern_gpu(
+        id: impl Into<String>,
+        device: Box<dyn VirtioDevice>,
+        mem: GuestMemory,
+        msi: Option<Arc<dyn MsiSink>>,
+        intx: Option<Arc<dyn IrqLine>>,
+    ) -> Result<Self, DeviceError> {
+        if device.device_type() != 16 {
+            return Err(DeviceError::Other(
+                "modern GPU layout requires virtio-gpu".into(),
+            ));
+        }
+        Self::new_captured(id, device, mem, msi, intx, 3)
+    }
+
+    fn new_captured(
+        id: impl Into<String>,
+        device: Box<dyn VirtioDevice>,
+        mem: GuestMemory,
+        msi: Option<Arc<dyn MsiSink>>,
+        intx: Option<Arc<dyn IrqLine>>,
+        msix_vectors: u16,
+    ) -> Result<Self, DeviceError> {
+        let modern_gpu = device.device_type() == 16;
         let (pci_id, class, io_size) = match device.device_type() {
             1 => (
                 0x1000u16,
@@ -102,6 +141,7 @@ impl VirtioPciDevice {
             ),
             2 => (0x1001, 0x0100_0000, 128),
             3 => (0x1003, 0x0780_0000, 64),
+            16 if modern_gpu => (0x1050, 0x0380_0001, 0),
             ty => {
                 return Err(DeviceError::Other(format!(
                     "virtio type {ty} has no supported transitional PCI identity"
@@ -109,7 +149,7 @@ impl VirtioPciDevice {
             }
         };
         if !(1..=64).contains(&msix_vectors)
-            || (device.device_type() != 1 && device.config_len() > io_size - 24)
+            || (io_size != 0 && device.device_type() != 1 && device.config_len() > io_size - 24)
         {
             return Err(DeviceError::Other(
                 "invalid transitional vector count or configuration size".into(),
@@ -119,6 +159,9 @@ impl VirtioPciDevice {
         let config = &mut pci.config;
         config[2..4].copy_from_slice(&pci_id.to_le_bytes());
         config[8..12].copy_from_slice(&class.to_le_bytes());
+        if modern_gpu {
+            config[0x2c..0x30].copy_from_slice(&0x1100_1af4u32.to_le_bytes());
+        }
         config[0x34] = 0x98;
         config[0x3d] = 1;
         config[0x40..].fill(0);
@@ -169,7 +212,10 @@ impl VirtioPciDevice {
                     }
                 }
             }
-            0x10 => bar_value(legacy.bar0 as u64, legacy.io_size, 1, 0xffff_fffc),
+            0x10 if legacy.io_size != 0 => {
+                bar_value(legacy.bar0 as u64, legacy.io_size, 1, 0xffff_fffc)
+            }
+            0x10 => 0,
             0x14 => bar_value(legacy.bar1 as u64, 0x1000, 0, 0xffff_fff0),
             0x20 => bar_value(self.bar4, 0x4000, BAR64_PREFETCHABLE, 0xffff_fff0),
             0x24 => (self.bar4 >> 32) as u32,
@@ -216,7 +262,9 @@ impl VirtioPciDevice {
                     set_byte16(&mut self.command, pos - 4, byte);
                     self.command &= 0x0507;
                 }
-                0x10..=0x13 => set_byte32(&mut legacy.bar0, pos - 0x10, byte),
+                0x10..=0x13 if legacy.io_size != 0 => {
+                    set_byte32(&mut legacy.bar0, pos - 0x10, byte)
+                }
                 0x14..=0x17 => set_byte32(&mut legacy.bar1, pos - 0x14, byte),
                 0x20..=0x27 => {
                     let shift = (pos - 0x20) * 8;

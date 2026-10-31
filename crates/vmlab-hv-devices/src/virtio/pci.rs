@@ -439,7 +439,7 @@ impl VirtioPciDevice {
     fn offered_features(&self) -> u64 {
         self.device.features()
             | F_VERSION_1
-            | if self.transitional.is_some() {
+            | if self.transitional.as_ref().is_some_and(|s| s.io_size != 0) {
                 1 << 27
             } else {
                 0
@@ -873,7 +873,9 @@ impl PciDevice for VirtioPciDevice {
         }
         let offset = if self.transitional.is_some() {
             match bar {
-                0 => return self.legacy_read(offset, data),
+                0 if self.transitional.as_ref().unwrap().io_size != 0 => {
+                    return self.legacy_read(offset, data);
+                }
                 1 => return self.msix_region_read(offset, data),
                 4 => match transitional::modern_offset(offset) {
                     Some(offset) => offset,
@@ -922,7 +924,9 @@ impl PciDevice for VirtioPciDevice {
     fn bar_write(&mut self, bar: u8, offset: u64, data: &[u8]) {
         let offset = if self.transitional.is_some() {
             match bar {
-                0 => return self.legacy_write(offset, data),
+                0 if self.transitional.as_ref().unwrap().io_size != 0 => {
+                    return self.legacy_write(offset, data);
+                }
                 1 => return self.msix_region_write(offset, data),
                 4 => match transitional::modern_offset(offset) {
                     Some(offset) => offset,
