@@ -25,7 +25,7 @@ pub(super) fn configure_memory<M: Memory>(cpu: &mut Riscv64<M>, size: u64) -> Re
         (0x2000000, 0x10000, false, false),
         (0x3000000, 0x10000, false, false),
         (0xc000000, 0x600000, false, false),
-        (0x10000000, 0x1000, false, false),
+        (0x10000000, 0x9000, false, false),
         (0x10100000, 0x1000, false, false),
         (0x20000000, 0x4000000, true, false),
         (0x30000000, 0x50000000, false, false),

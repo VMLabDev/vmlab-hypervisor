@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BusDevice, DeviceError, Snapshot};
 pub mod rtc;
+pub mod virtio_mmio;
 
 pub const TIMEBASE_HZ: u64 = 10_000_000;
 pub const PLIC_SOURCES: usize = 96;

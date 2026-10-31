@@ -65,9 +65,10 @@ regression test reproduces the fault with the defaults and executes the
 pflash instruction with the virt PMAs, including after CPU-state restore.
 The paused S1 snapshot save/load/delete round trip passes.
 
-The complete Sail-oracle corpus passes: 133 programs, including the two FP
-regressions. `just tcg-generate-check` reproduces both committed generated
-artifacts byte-for-byte. Three fresh warm interpreter measurements pass
+Earlier runtime revisions passed the complete Sail-oracle corpus: 133
+programs, including the two FP regressions. The latest runtime changes
+require another complete run. `just tcg-generate-check` reproduces both
+committed generated artifacts byte-for-byte. Three warm measurements passed
 `just bench-check riscv64 interpreter-specialized`; the CoreMark median is
 50.899 MIPS (5.978 seconds for 304,258,499 instructions).
 
@@ -115,6 +116,18 @@ indices without retraining. Projected-input dependencies survive scalar
 pruning and renumbering. Memory-derived indices keep ordered guards, and
 vector updates retain their existing index guards. The paged-load revisit
 regression also passes with the interpreter's default metadata budget.
+
+The next firmware replay reached an edk2 load-access exception at
+`0x10008008`, the device-ID register of an advertised empty virtio-MMIO
+transport. The PMA covered only the UART page, and the bus lacked these
+eight transports. `empty-virtio-mmio.json` records a QEMU 11.1.2 black-box
+capture of their registers, writes, and narrow and unaligned accesses.
+The reduced oracle machine uses 128 MiB and no attached PCI devices; its
+empty transport configuration is the same as the full capture. The VMM
+now exposes the captured empty registers and covers their full IO aperture.
+The regression reproduces cause 5 before the PMA fix and reads each
+transport after CPU-state restoration. Direct-kernel S1 tests also probe
+every transport before printing their success marker.
 
 edk2 boot, Linux hardware capture, booted-guest snapshot restoration, and
 boot-to-agent-ready timing are pending. This reference does not establish

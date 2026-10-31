@@ -57,6 +57,21 @@ fn direct_kernel(reset: bool, exit_on_reset: bool) {
     let machine = directory.path().join("machine.json");
     // Reject a nonzero hart ID or an a1 pointer that does not address an FDT.
     let mut words = vec![0, 0x0005a303, 0xedfe13b7, 0xdd038393, 0, 0x100002b7];
+    let mut checks = vec![(0, 10, 0), (4, 6, 7)];
+    // Probe every empty transport advertised by the device tree.
+    for slot in 1..=8 {
+        words.extend([
+            (0x10000000 + slot * 0x1000) | 28 << 7 | 0x37,
+            28 << 15 | 6 << 12 | 29 << 7 | 0x03,
+            0x74727f37,
+            0x976f0f13,
+        ]);
+        checks.push((words.len(), 29, 30));
+        words.push(0);
+        words.push(8 << 20 | 28 << 15 | 6 << 12 | 29 << 7 | 0x03);
+        checks.push((words.len(), 29, 0));
+        words.push(0);
+    }
     if reset {
         // Keep a marker outside the boot images. The second boot must see it
         // in the same RAM, and return through OpenSBI with a fresh device tree.
@@ -77,7 +92,7 @@ fn direct_kernel(reset: bool, exit_on_reset: bool) {
     words.extend([0x001002b7, 0x00005337, 0x55530313, 0x0062a023, 0x0000006f]);
     let failure = words.len();
     words.extend([0x001002b7, 0x00003337, 0x33330313, 0x0062a023, 0x0000006f]);
-    for (index, first, second) in [(0, 10, 0), (4, 6, 7)] {
+    for (index, first, second) in checks {
         words[index] = branch_ne(index, failure, first, second);
     }
     std::fs::write(

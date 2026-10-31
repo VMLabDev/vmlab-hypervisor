@@ -322,6 +322,46 @@ mod tests {
     }
 
     #[test]
+    fn advertised_empty_virtio_mmio_transports_are_readable_after_cpu_restore() {
+        use vmlab_hv_devices::riscv::virtio_mmio::EmptyVirtioMmio;
+        use vmlab_hv_tcg::Riscv64;
+        let mut memory = memory();
+        for (i, word) in [0x0005e503u32, 0x0085e603, 0x00c5e683]
+            .into_iter()
+            .enumerate()
+        {
+            memory
+                .write(RAM_BASE + i as u64 * 4, &word.to_le_bytes())
+                .unwrap();
+        }
+        for slot in 1..=8 {
+            memory
+                .bus
+                .lock()
+                .register(
+                    0x10000000 + slot * 0x1000,
+                    0x1000,
+                    Arc::new(Mutex::new(EmptyVirtioMmio)),
+                )
+                .unwrap();
+        }
+        let mut cpu = Riscv64::new(memory).unwrap();
+        super::super::cpu::configure_memory(&mut cpu, 4 * 4096).unwrap();
+        cpu.set_pc(RAM_BASE);
+        let state = cpu.save_state();
+        for slot in 1..=8 {
+            cpu.restore_state(&state).unwrap();
+            cpu.set_gpr(11, 0x10000000 + slot * 0x1000).unwrap();
+            cpu.run(1).unwrap();
+            assert_eq!(cpu.read_csr(0x342).unwrap(), 0, "slot {slot}");
+            cpu.run(2).unwrap();
+            assert_eq!(cpu.gpr(10).unwrap(), 0x74726976);
+            assert_eq!(cpu.gpr(12).unwrap(), 0);
+            assert_eq!(cpu.gpr(13).unwrap(), 0x554d4551);
+        }
+    }
+
+    #[test]
     fn flash_code_stamps_follow_command_mode_programming_and_restore() {
         use vmlab_hv_devices::{BusDevice, Snapshot};
         let file = tempfile::NamedTempFile::new().unwrap();

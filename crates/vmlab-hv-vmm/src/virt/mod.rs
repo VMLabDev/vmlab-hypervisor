@@ -269,6 +269,15 @@ pub fn build(desc: &MachineDescription, factory: &dyn DeviceFactory) -> Result<V
         .serial(&desc.serial_log, irqs.line(10))
         .map_err(|e| e.to_string())?;
     bus.register(0x1000_0000, 0x100, serial.device)?;
+    for slot in 1..=8 {
+        bus.register(
+            0x1000_0000 + slot * 0x1000,
+            0x1000,
+            Arc::new(Mutex::new(
+                vmlab_hv_devices::riscv::virtio_mmio::EmptyVirtioMmio,
+            )),
+        )?;
+    }
     if let Some(snapshot) = serial.snapshot {
         nodes.push(DeviceNode::Plain(snapshot));
     }
