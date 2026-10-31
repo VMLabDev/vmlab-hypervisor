@@ -2,18 +2,19 @@
 """Fail when the latest run regressed beyond measured noise (D2).
 
 For every (arch, backend, guest, vcpus, workload) with at least two history
-entries, the latest median must not exceed the previous median by more than
-the measured noise: the larger of the two runs' spreads, or 5 % of the
-previous median. Comparisons are within one backend; the D1 hv-vs-qemu bar is
-reported by `just bench-report`, not gated here.
+entries, the latest median must not move beyond the measured noise in the
+workload's worse direction: the larger of the two runs' spreads, or 5 % of
+the previous median. Rate workloads (iops, MiB/s, Mbit/s) regress downward;
+seconds and percentages regress upward. Comparisons are within one backend;
+the phase bars (D1 TCG, D28 x86_64) are reported by `just bench-report`,
+not gated here.
 """
 
 import argparse
 import sys
 
 import lib
-
-ARCHES = ("aarch64", "riscv64")
+ARCHES = ("aarch64", "riscv64", "x86_64")
 
 
 def parse_args(argv):
@@ -51,10 +52,11 @@ def compare(arch, args):
             continue
         previous, latest = entries[-2], entries[-1]
         verdict, allowed = lib.regression_verdict(previous, latest)
+        unit = latest.get("unit", "s")
         line = (
             f"{arch} {key[0]} {key[1]} vcpus={key[2]} {key[3]}: "
-            f"{previous['median']}s -> {latest['median']}s "
-            f"(noise <= {allowed}s) {verdict}"
+            f"{previous['median']} -> {latest['median']} {unit} "
+            f"(noise <= {allowed}) {verdict}"
         )
         if verdict == "worse":
             regressions.append(line)

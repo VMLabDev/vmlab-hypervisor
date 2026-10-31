@@ -80,7 +80,7 @@ def execution_environment(backend, inherited):
 
 
 def run(args, commit, dirty, host, log):
-    if args.arch not in ("all", "riscv64") or args.vcpus not in ("1", "1,4"):
+    if args.arch not in ("all", "riscv64") or (args.vcpus or "1,4") not in ("1", "1,4"):
         raise lib.BenchError("interpreter micro-benchmarks support riscv64 and one hart")
     if args.repeats < 1:
         raise lib.BenchError("repeats must be positive")

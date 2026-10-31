@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Print the per-workload trend from bench/history (D2).
+"""Print the per-workload trend from bench/history (D2, D28).
 
 For every (backend, guest, vcpus, workload) configuration of every arch, the
 series of recorded medians with spread and the move against the first and the
 previous entry. When both backends have history for a configuration, the
-vmlab-hv/QEMU ratio prints against D1's bar (at least 100 % of QEMU TCG).
+vmlab-hv/QEMU ratio prints against the phase's bar: TCG arches hold D1's
+"at least 100 % of QEMU TCG" (a ≥1.00x speed ratio on seconds), x86_64 KVM
+holds HV-D28 (boot no slower than QEMU, throughput at least 80 % of QEMU's).
 """
 
 import argparse
@@ -12,8 +14,7 @@ import sys
 
 import lib
 
-ARCHES = ("aarch64", "riscv64")
-
+ARCHES = ("aarch64", "riscv64", "x86_64")
 
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -58,7 +59,8 @@ def print_arch(arch, args):
         if args.limit:
             entries = entries[-args.limit :]
         first = entries[0]["median"]
-        print(f"{backend:>9}  {guest}  vcpus={vcpus}  {workload}  (unit: s)")
+        unit = entries[-1].get("unit", "s")
+        print(f"{backend:>9}  {guest}  vcpus={vcpus}  {workload}  (unit: {unit})")
         prev = None
         for rec in entries:
             moves = f"vs first {pct(rec['median'], first)}"
@@ -75,13 +77,35 @@ def print_arch(arch, args):
             base = lib.latest_baseline(records, arch, guest, vcpus, workload)
             if base:
                 ratio = entries[-1]["median"] / base["median"]
-                bar = "meets" if ratio <= 1.0 else "BELOW"
-                print(
-                    f"  D1 bar: last hv median {entries[-1]['median']:.2f}s vs"
-                    f" qemu {base['median']:.2f}s ({base['recorded']})"
-                    f" = {ratio:.2f}x -> {bar} D1 (>=1.00x)"
-                )
+                if arch == "x86_64":
+                    print(bar_line_d28(workload, ratio, entries[-1]["median"], base))
+                else:
+                    bar = "meets" if ratio <= 1.0 else "BELOW"
+                    print(
+                        f"  D1 bar: last hv median {entries[-1]['median']:.2f}s vs"
+                        f" qemu {base['median']:.2f}s ({base['recorded']})"
+                        f" = {ratio:.2f}x -> {bar} D1 (>=1.00x)"
+                    )
         print()
+
+
+def bar_line_d28(workload, ratio, hv_median, base):
+    """The HV-D28 verdict line for one workload's hv/qemu ratio."""
+    bar = lib.D28_BAR.get(workload)
+    hv = f"{hv_median:.2f}"
+    qemu = f"{base['median']:.2f}"
+    provenance = f"({base['recorded']})"
+    if bar is None:
+        return (f"  D28: last hv {hv} vs qemu {qemu} {provenance} = {ratio:.2f}x"
+                f" -> reported, no bar (D28 sets none for {workload})")
+    op, bound = bar
+    if op == "<=":
+        meets = ratio <= bound
+        return (f"  D28 bar: last hv {hv} vs qemu {qemu} {provenance} = {ratio:.2f}x"
+                f" -> {'meets' if meets else 'FAILS'} D28 (boot <= {bound:.2f}x qemu)")
+    meets = ratio >= bound
+    return (f"  D28 bar: last hv {hv} vs qemu {qemu} {provenance} = {ratio:.2f}x"
+            f" -> {'meets' if meets else 'FAILS'} D28 (throughput >= {bound:.2f}x qemu)")
 
 
 def main(argv=None):
