@@ -16,6 +16,13 @@ parking_lot.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 
+[features]
+# The host-audio backends ship behind the same cargo features as the
+# devices crate (hv-audio D3, D4): a default build has the null fallback.
+pipewire = ["vmlab-hv-devices/pipewire"]
+pulse = ["vmlab-hv-devices/pulse"]
+testing = ["vmlab-hv-vmm/testing"]
+
 [lints]
 workspace = true
 

@@ -143,26 +143,59 @@ fn workspace_root() -> PathBuf {
 /// Use an explicit binary override, or ask Cargo for a current debug build
 /// once per test process. An existing executable may predate a merge.
 pub fn hv_binary() -> PathBuf {
-    if let Some(path) = std::env::var_os("VMLAB_HV_BIN") {
+    hv_binary_with(&[])
+}
+
+/// [`hv_binary`] with cargo features enabled on the binary (for example
+/// `testing`, which compiles the recording host seam A3 observes). The
+/// built executable is copied once to a per-feature-set path: tests asking
+/// for different feature sets must not hand each other a binary built with
+/// the wrong ones.
+pub fn hv_binary_with(features: &[&str]) -> PathBuf {
+    if features.is_empty()
+        && let Some(path) = std::env::var_os("VMLAB_HV_BIN")
+    {
         let path = PathBuf::from(path);
         assert!(path.is_file(), "VMLAB_HV_BIN={path:?} does not exist");
         return path;
     }
-    static BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    BINARY
-        .get_or_init(|| {
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let status = Command::new(cargo)
-                .args(["build", "-p", "vmlab-hv"])
-                .current_dir(workspace_root())
-                .status()
-                .expect("spawn cargo to build vmlab-hv");
-            assert!(status.success(), "cargo build -p vmlab-hv failed");
-            let debug = target_dir().join("debug/vmlab-hv");
-            assert!(debug.is_file(), "cargo did not produce {}", debug.display());
-            debug
-        })
-        .clone()
+    static BINARIES: std::sync::LazyLock<
+        parking_lot::Mutex<std::collections::HashMap<String, PathBuf>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let key = features.join("+");
+    let mut binaries = BINARIES.lock();
+    if let Some(path) = binaries.get(&key) {
+        return path.clone();
+    }
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(&cargo);
+    command
+        .args(["build", "-p", "vmlab-hv"])
+        .current_dir(workspace_root());
+    if !features.is_empty() {
+        command.arg("--features").arg(&key);
+    }
+    // Holding the cache lock across the build also serialises the copy:
+    // two tests racing would hand each other a half-written binary.
+    let status = command.status().expect("spawn cargo to build vmlab-hv");
+    assert!(status.success(), "cargo build -p vmlab-hv ({key}) failed");
+    let debug = target_dir().join("debug/vmlab-hv");
+    assert!(debug.is_file(), "cargo did not produce {}", debug.display());
+    let snapshot = target_dir().join(format!(
+        "debug/vmlab-hv-test-{}",
+        if key.is_empty() {
+            "plain".into()
+        } else {
+            key.clone()
+        }
+    ));
+    let staging = snapshot.with_extension("staging");
+    std::fs::copy(&debug, &staging)
+        .unwrap_or_else(|e| panic!("copying {debug:?} to {staging:?}: {e}"));
+    std::fs::rename(&staging, &snapshot)
+        .unwrap_or_else(|e| panic!("publishing {staging:?} as {snapshot:?}: {e}"));
+    binaries.insert(key, snapshot.clone());
+    snapshot
 }
 
 // ---- the machine ------------------------------------------------------------

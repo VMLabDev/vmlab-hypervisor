@@ -43,3 +43,7 @@ default = []
 pipewire = ["dep:pipewire"]
 pulse = ["dep:libpulse-binding"]
 testing = []
+
+[[example]]
+name = "monitor_tap"
+required-features = ["pipewire"]
