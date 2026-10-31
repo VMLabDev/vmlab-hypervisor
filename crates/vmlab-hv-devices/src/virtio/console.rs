@@ -97,6 +97,7 @@ struct PortState {
 
 /// Everything the device and its worker thread share.
 struct Shared {
+    snapshot_paused: bool,
     mem: Option<GuestMemory>,
     interrupt: Option<Arc<dyn VirtioInterrupt>>,
     queues: Vec<Option<Queue>>,
@@ -112,6 +113,7 @@ struct Shared {
 enum Cmd {
     /// The driver kicked the queue with this index.
     Kick(u16),
+    Barrier(Sender<()>),
     Shutdown,
 }
 
@@ -148,6 +150,7 @@ impl Console {
         wake_worker.set_nonblocking(true)?;
         let (kicks, rx) = mpsc::channel();
         let shared = Arc::new(Mutex::new(Shared {
+            snapshot_paused: false,
             mem: None,
             interrupt: None,
             queues: (0..2 * (ports.len() + 2)).map(|_| None).collect(),
@@ -333,6 +336,9 @@ fn run(
             while let Ok(cmd) = cmds.try_recv() {
                 match cmd {
                     Cmd::Kick(queue) => handle_kick(&shared, &mut clients, queue),
+                    Cmd::Barrier(done) => {
+                        let _ = done.send(());
+                    }
                     Cmd::Shutdown => shutdown = true,
                 }
             }
@@ -457,6 +463,9 @@ fn handle_kick(shared: &Arc<Mutex<Shared>>, clients: &mut [Option<UnixStream>], 
 /// the worker only reads a client socket under this condition.
 fn rx_has_capacity(shared: &Arc<Mutex<Shared>>, queue: u16) -> bool {
     let sh = lock(shared);
+    if sh.snapshot_paused {
+        return false;
+    }
     let Some(mem) = sh.mem.as_ref() else {
         return false;
     };
@@ -471,6 +480,9 @@ fn rx_has_capacity(shared: &Arc<Mutex<Shared>>, queue: u16) -> bool {
 
 /// Move staged host→guest bytes into as many receiveq buffers as are free.
 fn drain_rx_stage(sh: &mut Shared, i: usize) {
+    if sh.snapshot_paused {
+        return;
+    }
     let queue = rx_queue(i as u16 + 1);
     let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
     {
@@ -523,6 +535,9 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, clients: &mut [Option<UnixStream>], p
             let mut sh = lock(shared);
             // A plain reborrow lets the field borrows below stay disjoint.
             let sh = &mut *sh;
+            if sh.snapshot_paused {
+                return;
+            }
             let pending = if connected {
                 sh.ports[port as usize - 1].tx_stage.len()
             } else {
@@ -618,6 +633,9 @@ fn process_ctrl_tx(shared: &Arc<Mutex<Shared>>) {
     let mut guard = lock(shared);
     // A plain reborrow lets the field borrows below stay disjoint.
     let sh = &mut *guard;
+    if sh.snapshot_paused {
+        return;
+    }
     let msgs: Vec<(u32, u16, u16)> = {
         let Some(mem) = sh.mem.as_ref() else {
             return;
@@ -710,6 +728,9 @@ fn announce_ports(sh: &mut Shared, max_port: u32) {
 
 /// Deliver pending control messages into free control-receiveq buffers.
 fn flush_pending(sh: &mut Shared) {
+    if sh.snapshot_paused {
+        return;
+    }
     let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
     {
         let Some(mem) = sh.mem.as_ref() else {
@@ -851,6 +872,23 @@ const SNAPSHOT_MAGIC: &[u8; 6] = b"VLCONS";
 const SNAPSHOT_VERSION: u16 = 1;
 
 impl Snapshot for Console {
+    fn quiesce(&mut self) {
+        lock(&self.shared).snapshot_paused = true;
+        // Drain work that released the shared lock before notifying an IRQ.
+        let (done, wait) = mpsc::channel();
+        if self.kicks.send(Cmd::Barrier(done)).is_ok() {
+            self.wake_worker();
+            let _ = wait.recv();
+        }
+    }
+
+    fn resume_snapshot(&mut self) {
+        lock(&self.shared).snapshot_paused = false;
+        for queue in 0..self.queue_count() {
+            self.queue_notify(queue as u16);
+        }
+    }
+
     fn state_id(&self) -> String {
         self.id.clone()
     }
@@ -1388,6 +1426,7 @@ mod tests {
     fn transmit_staging_is_bounded_when_client_stops_reading() {
         let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 2 << 20)]).unwrap();
         let shared = Arc::new(Mutex::new(Shared {
+            snapshot_paused: false,
             mem: Some(mem.clone()),
             interrupt: None,
             queues: (0..6).map(|_| None).collect(),

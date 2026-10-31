@@ -559,6 +559,221 @@ fn snapshot_at_io(instruction: &[u8], expected: u16) {
 }
 
 #[test]
+fn snapshot_stops_console_dma_before_saving_ram() {
+    use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use virtio_queue::QueueT;
+    use vmlab_hv_devices::virtio::console::{Console, PortConfig};
+    use vmlab_hv_devices::{DeviceError, Snapshot, VirtioDevice, VirtioInterrupt};
+
+    struct Interrupt;
+    impl VirtioInterrupt for Interrupt {
+        fn notify_queue(&self, _: u16) {}
+        fn notify_config(&self) {}
+    }
+    struct ConnectDuringSave {
+        path: std::path::PathBuf,
+        mem: vmlab_hv_devices::GuestMemory,
+        client: PlMutex<Option<UnixStream>>,
+        wrote: Arc<AtomicBool>,
+    }
+    impl ConnectDuringSave {
+        fn connect_and_observe(&self) -> Result<(), DeviceError> {
+            self.client.lock().take();
+            *self.client.lock() = Some(UnixStream::connect(&self.path)?);
+            // A host connection queues PORT_OPEN after the console state has
+            // been captured, but before the VMM captures RAM. No guest runs.
+            let deadline = std::time::Instant::now() + Duration::from_millis(200);
+            while std::time::Instant::now() < deadline {
+                if self.mem.read_obj::<u32>(GuestAddress(0x9000)).unwrap() != 0 {
+                    self.wrote.store(true, Ordering::SeqCst);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(())
+        }
+    }
+    impl Snapshot for ConnectDuringSave {
+        fn state_id(&self) -> String {
+            "connect-during-save".into()
+        }
+        fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
+            self.connect_and_observe()?;
+            Ok(Vec::new())
+        }
+        fn restore_state(&mut self, _: &[u8]) -> Result<(), DeviceError> {
+            self.connect_and_observe()
+        }
+    }
+    let Some(m) = machine(&[0xe4, 0x80, 0xeb, 0xfc], 8) else {
+        return;
+    };
+    m.handle
+        .shared()
+        .wait_quiesced(Duration::from_secs(5))
+        .unwrap();
+    let path = m._dir.path().join("console.sock");
+    let mut console = Console::new(
+        "console",
+        vec![PortConfig {
+            name: "test".into(),
+            path: path.clone(),
+        }],
+    )
+    .unwrap();
+    let queues = console
+        .queue_max_sizes()
+        .iter()
+        .enumerate()
+        .map(|(i, &size)| {
+            let mut queue = virtio_queue::Queue::new(size).unwrap();
+            queue.set_size(size);
+            queue.set_desc_table_address(Some(0x10000 + i as u32 * 0x10000), Some(0));
+            queue.set_avail_ring_address(Some(0x11000 + i as u32 * 0x10000), Some(0));
+            queue.set_used_ring_address(Some(0x12000 + i as u32 * 0x10000), Some(0));
+            queue.set_ready(true);
+            queue
+        })
+        .collect();
+    let mem = m.vm.ram.mem.clone();
+    mem.write_obj(0x9000u64, GuestAddress(0x30000)).unwrap();
+    mem.write_obj(64u32, GuestAddress(0x30008)).unwrap();
+    mem.write_obj(2u16, GuestAddress(0x3000c)).unwrap();
+    mem.write_obj(1u16, GuestAddress(0x31002)).unwrap();
+    console
+        .activate(mem.clone(), Arc::new(Interrupt), queues)
+        .unwrap();
+    let wrote = Arc::new(AtomicBool::new(false));
+    let original = m.handle.shared().snapshot_registry().unwrap();
+    m.handle
+        .shared()
+        .set_snapshot_registry(Arc::new(SnapshotRegistry {
+            digest: original.digest,
+            disks: original
+                .disks
+                .iter()
+                .map(|disk| DiskNode {
+                    id: disk.id.clone(),
+                    writable: disk.writable,
+                    vmstate: disk.vmstate,
+                    image: disk.image.clone(),
+                })
+                .collect(),
+            nodes: vec![
+                DeviceNode::Plain(Arc::new(PlMutex::new(console))),
+                DeviceNode::Plain(Arc::new(PlMutex::new(ConnectDuringSave {
+                    path,
+                    mem,
+                    client: PlMutex::new(None),
+                    wrote: wrote.clone(),
+                }))),
+            ],
+        }));
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = vmlab_hv_proto::client::Client::connect(socket).unwrap();
+    assert!(matches!(
+        client
+            .call(vmlab_hv_proto::control::Command::SnapshotSave { name: "dma".into() })
+            .unwrap(),
+        vmlab_hv_proto::control::Outcome::Ok { .. }
+    ));
+    assert!(
+        !wrote.load(Ordering::SeqCst),
+        "console DMA changed RAM after its queue indices were captured"
+    );
+    let wait_for_dma = || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while m.vm.ram.mem.read_obj::<u32>(GuestAddress(0x9000)).unwrap() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "console did not resume DMA"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    wait_for_dma();
+    wrote.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        client
+            .call(vmlab_hv_proto::control::Command::SnapshotLoad { name: "dma".into() })
+            .unwrap(),
+        vmlab_hv_proto::control::Outcome::Ok { .. }
+    ));
+    assert!(
+        !wrote.load(Ordering::SeqCst),
+        "console DMA resumed before every device was restored"
+    );
+    wait_for_dma();
+}
+
+#[test]
+fn rapid_snapshot_loads_roll_back_guest_tsc() {
+    // IN pauses before RDTSC; each resume stores EDX:EAX and pauses again.
+    let payload = [
+        0xe4, 0x80, 0x0f, 0x31, 0x66, 0xa3, 0x00, 0x90, 0x66, 0x89, 0x16, 0x04, 0x90, 0xeb, 0xf1,
+    ];
+    let Some(m) = machine(&payload, 8) else {
+        return;
+    };
+    let wait = || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while m.handle.status() != vmlab_hv_proto::control::RunState::Paused {
+            assert!(std::time::Instant::now() < deadline, "guest did not pause");
+            std::thread::yield_now();
+        }
+        m.handle
+            .shared()
+            .wait_quiesced(Duration::from_secs(5))
+            .unwrap();
+    };
+    wait();
+    let cpus = m.handle.shared().vcpus.lock().clone();
+    let khz = cpus[0].1.lock().get_tsc_khz().unwrap() as u64;
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = vmlab_hv_proto::client::Client::connect(socket).unwrap();
+    let call = |client: &mut vmlab_hv_proto::client::Client, command| {
+        assert!(matches!(
+            client.call(command).unwrap(),
+            vmlab_hv_proto::control::Outcome::Ok { .. }
+        ));
+    };
+    call(
+        &mut client,
+        vmlab_hv_proto::control::Command::SnapshotSave { name: "tsc".into() },
+    );
+    let mut tsc = kvm_bindings::Msrs::from_entries(&[kvm_bindings::kvm_msr_entry {
+        index: 0x10,
+        ..Default::default()
+    }])
+    .unwrap();
+    assert_eq!(cpus[0].1.lock().get_msrs(&mut tsc).unwrap(), 1);
+    let saved = tsc.as_slice()[0].data;
+    for cycle in 0..3 {
+        std::thread::sleep(Duration::from_millis(100));
+        call(
+            &mut client,
+            vmlab_hv_proto::control::Command::SnapshotLoad { name: "tsc".into() },
+        );
+        call(&mut client, vmlab_hv_proto::control::Command::Resume);
+        wait();
+        let mut bytes = [0; 8];
+        m.vm.ram
+            .mem
+            .read_slice(&mut bytes, GuestAddress(0x9000))
+            .unwrap();
+        let observed = u64::from_le_bytes(bytes);
+        assert!(
+            observed.abs_diff(saved) < khz * 50,
+            "load {cycle}: guest TSC drifted {} ms",
+            observed.abs_diff(saved) / khz
+        );
+    }
+}
+
+#[test]
 fn snapshot_restores_tsc_deadline_after_lapic() {
     use kvm_bindings::{Msrs, kvm_msr_entry};
     let Some(m) = machine(&counter_payload(), 8) else {

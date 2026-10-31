@@ -49,7 +49,11 @@ impl ResetState {
         crate::snapshot::save_kernel_state(shared, &mut sections).map_err(|e| e.to_string())?;
         let mut kernel = SavedSections::default();
         for (key, bytes) in sections {
-            kernel.insert(key, bytes);
+            // Reset starts a new TSC epoch, rather than migrating the saved
+            // TSC/reference-clock relation. Its MSR writes synchronize at zero.
+            if key != "tsc-offsets" {
+                kernel.insert(key, bytes);
+            }
         }
         let mut devices = Vec::new();
         if let Some(registry) = shared.snapshot_registry() {

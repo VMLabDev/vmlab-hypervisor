@@ -61,6 +61,33 @@ const MIGRATABLE_MSRS: &[u32] = &[
     0x4b56_4d01, // MSR_KVM_SYSTEM_TIME_NEW
 ];
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TscState {
+    host_tsc: u64,
+    clock: u64,
+    khz: u32,
+    offsets: Vec<(u8, u64)>,
+}
+
+fn tsc_offset(fd: &VcpuFd, value: &mut u64, write: bool) -> Result<(), kvm_ioctls::Error> {
+    use std::os::fd::AsRawFd;
+    let attr = kvm_bindings::kvm_device_attr {
+        group: kvm_bindings::KVM_VCPU_TSC_CTRL,
+        attr: u64::from(kvm_bindings::KVM_VCPU_TSC_OFFSET),
+        addr: value as *mut u64 as u64,
+        ..Default::default()
+    };
+    // Linux _IOW(KVMIO, 0xe1/e2, struct kvm_device_attr), 24-byte header.
+    // kvm-ioctls does not wrap GET_DEVICE_ATTR on an x86 vCPU.
+    let request = if write { 0x4018_aee1 } else { 0x4018_aee2 };
+    // SAFETY: fd is live, attr points to value for the duration of the ioctl.
+    if unsafe { libc::ioctl(fd.as_raw_fd(), request as libc::c_ulong, &attr) } < 0 {
+        Err(kvm_ioctls::Error::last())
+    } else {
+        Ok(())
+    }
+}
+
 /// Why a snapshot operation failed, mapped onto control error codes.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -235,6 +262,33 @@ pub struct SnapshotRegistry {
     pub nodes: Vec<DeviceNode>,
 }
 
+struct QuiescedDevices<'a>(&'a SnapshotRegistry);
+
+impl<'a> QuiescedDevices<'a> {
+    fn new(registry: &'a SnapshotRegistry) -> Self {
+        for node in &registry.nodes {
+            match node {
+                DeviceNode::Plain(device) => device.lock().quiesce(),
+                DeviceNode::Resettable(device) => device.lock().quiesce(),
+                DeviceNode::Virtio(device) => device.lock().quiesce(),
+            }
+        }
+        Self(registry)
+    }
+}
+
+impl Drop for QuiescedDevices<'_> {
+    fn drop(&mut self) {
+        for node in &self.0.nodes {
+            match node {
+                DeviceNode::Plain(device) => device.lock().resume_snapshot(),
+                DeviceNode::Resettable(device) => device.lock().resume_snapshot(),
+                DeviceNode::Virtio(device) => device.lock().resume_snapshot(),
+            }
+        }
+    }
+}
+
 /// The registry of a machine that can snapshot.
 fn registry(handle: &VmHandle) -> Result<Arc<SnapshotRegistry>, SnapshotError> {
     handle
@@ -304,7 +358,9 @@ pub fn save(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
         .stop_for_snapshot(QUIESCE_TIMEOUT)
         .map_err(SnapshotError::Internal)?;
 
+    let devices = QuiescedDevices::new(&reg);
     let captured = capture_and_write(shared, &reg, vmstate_disk, name, was);
+    drop(devices);
     // The machine goes back to the run state it had, error or not.
     shared.finish_snapshot(run_code(was));
     captured
@@ -443,8 +499,25 @@ pub(crate) fn save_kernel_state(
         .as_slice()
         .contains(&0x6e0);
     let vcpus = shared.vcpus.lock().clone();
+    let mut tsc = (clock.flags & kvm_bindings::KVM_CLOCK_HOST_TSC != 0).then_some(TscState {
+        host_tsc: clock.host_tsc,
+        clock: clock.clock,
+        khz: 0,
+        offsets: Vec::new(),
+    });
     for (id, fd) in &vcpus {
         let fd = fd.lock();
+        if let Some(state) = tsc.as_mut() {
+            let mut offset = 0;
+            match tsc_offset(&fd, &mut offset, false) {
+                Ok(()) => {
+                    state.khz = fd.get_tsc_khz().map_err(io)?;
+                    state.offsets.push((*id, offset));
+                }
+                Err(error) if error.errno() == libc::ENXIO => tsc = None,
+                Err(error) => return Err(io(error)),
+            }
+        }
         let p = |s: &str| format!("vcpu{id}/{s}");
         sections.push((p("regs"), to_json(&fd.get_regs().map_err(io)?)?));
         sections.push((p("sregs"), to_json(&fd.get_sregs().map_err(io)?)?));
@@ -465,6 +538,9 @@ pub(crate) fn save_kernel_state(
         sections.push((p("lapic"), encode_lapic(&fd.get_lapic().map_err(io)?)));
         sections.push((p("events"), to_json(&fd.get_vcpu_events().map_err(io)?)?));
         sections.push((p("mp_state"), to_json(&fd.get_mp_state().map_err(io)?)?));
+    }
+    if let Some(tsc) = tsc {
+        sections.push(("tsc-offsets".into(), to_json(&tsc)?));
     }
     Ok(())
 }
@@ -508,7 +584,10 @@ pub fn load(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
         .stop_for_snapshot(QUIESCE_TIMEOUT)
         .map_err(SnapshotError::Internal)?;
 
-    match restore(shared, &reg, vmstate_disk, name) {
+    let devices = QuiescedDevices::new(&reg);
+    let restored = restore(shared, &reg, vmstate_disk, name);
+    drop(devices);
+    match restored {
         Ok(run_code) => {
             shared.finish_snapshot(run_code);
             Ok(())
@@ -859,6 +938,17 @@ pub(crate) fn restore_kernel_state(
     clock.flags = 0;
     vm.set_clock(&clock).map_err(io)?;
 
+    let tsc: Option<TscState> = sections
+        .get("tsc-offsets")
+        .map(|bytes| from_json(bytes, "tsc-offsets"))
+        .transpose()?;
+    let destination_clock = vm.get_clock().map_err(io)?;
+    if tsc.is_some() && destination_clock.flags & kvm_bindings::KVM_CLOCK_HOST_TSC == 0 {
+        return Err(SnapshotError::Unsupported(
+            "restoring TSC offsets requires a stable host TSC".into(),
+        ));
+    }
+
     let vcpus = shared.vcpus.lock().clone();
     for (id, fd) in &vcpus {
         let fd = fd.lock();
@@ -884,6 +974,33 @@ pub(crate) fn restore_kernel_state(
         let mut entries = decode_msrs(get("msrs")?)?;
         let deadline = entries.iter().find(|entry| entry.index == 0x6e0).copied();
         entries.retain(|entry| entry.index != 0x6e0);
+        if let Some(tsc) = &tsc {
+            if fd.get_tsc_khz().map_err(io)? != tsc.khz {
+                return Err(SnapshotError::Unsupported(
+                    "snapshot TSC frequency differs from this vCPU".into(),
+                ));
+            }
+            let offset = tsc
+                .offsets
+                .iter()
+                .find(|(cpu, _)| cpu == id)
+                .ok_or_else(|| {
+                    SnapshotError::Internal(format!("snapshot lacks vcpu{id} TSC offset"))
+                })?
+                .1;
+            // KVM's legacy IA32_TSC write heuristic can ignore rollback when
+            // successive loads are less than a second apart. The offset API
+            // applies an exact value. Use one clock pair for every vCPU so
+            // the saved inter-vCPU offsets and reference-time relation survive.
+            let elapsed = i128::from(destination_clock.clock) - i128::from(tsc.clock);
+            let cycles = elapsed * i128::from(tsc.khz) / 1_000_000;
+            let mut restored = offset
+                .wrapping_add(tsc.host_tsc)
+                .wrapping_sub(destination_clock.host_tsc)
+                .wrapping_add(cycles as u64);
+            tsc_offset(&fd, &mut restored, true).map_err(io)?;
+            entries.retain(|entry| entry.index != 0x10);
+        }
         let msrs = Msrs::from_entries(&entries)
             .map_err(|e| SnapshotError::Internal(format!("building the MSR list: {e}")))?;
         let written = fd

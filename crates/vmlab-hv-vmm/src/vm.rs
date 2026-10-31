@@ -1244,23 +1244,6 @@ impl Vm {
                         sregs.cs.base, regs.rip, regs.rax, regs.rdx, sregs.cr0
                     );
                     eprintln!("vcpu {id} MP state: {:?}", fd.get_mp_state());
-                    if let Ok(address) = fd.translate_gva(sregs.cs.base.wrapping_add(regs.rip))
-                        && address.valid != 0
-                    {
-                        use vm_memory::Bytes;
-                        let mut code = [0; 64];
-                        if self
-                            .ram
-                            .mem
-                            .read_slice(
-                                &mut code,
-                                vm_memory::GuestAddress(address.physical_address),
-                            )
-                            .is_ok()
-                        {
-                            eprintln!("vcpu {id} instructions: {code:02x?}");
-                        }
-                    }
                 }
                 eprintln!(
                     "vcpu {id} SMI state: {:?}",
@@ -1404,7 +1387,6 @@ impl VmHandle {
             RunState::Paused | RunState::Suspended => {
                 *state = RunState::Running;
                 drop(state);
-                crate::diagnostics::resume_hook(&self.0);
                 self.0.clock_running(true);
                 if was == RunState::Suspended
                     && let Some(chipset) = self.0.chipset.lock().as_ref()

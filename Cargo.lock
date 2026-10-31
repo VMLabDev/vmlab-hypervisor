@@ -1357,6 +1357,7 @@ dependencies = [
  "thiserror 2.0.21",
  "vfio-bindings",
  "vfio-ioctls",
+ "virtio-queue",
  "vm-memory",
  "vmlab-disk",
  "vmlab-hv-devices",

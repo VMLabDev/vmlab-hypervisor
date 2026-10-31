@@ -24,6 +24,12 @@ pub(crate) fn dump_timer_state(shared: &VmShared, mem: &GuestMemoryMmap) {
     indices.extend((0xb0..=0xb7).map(|n| HV + n));
     for (id, fd) in shared.vcpus.lock().iter() {
         let fd = fd.lock();
+        if let Ok(regs) = fd.get_regs() {
+            eprintln!(
+                "timer vcpu {id} registers: rip={:#x} rflags={:#x}",
+                regs.rip, regs.rflags
+            );
+        }
         let mut found = Vec::new();
         for &index in &indices {
             let mut msrs = Msrs::from_entries(&[kvm_msr_entry {
@@ -79,13 +85,18 @@ pub(crate) fn dump_timer_state(shared: &VmShared, mem: &GuestMemoryMmap) {
         {
             let mut slots = Vec::new();
             for sint in 0..16u64 {
-                let mut header = [0u8; 8];
+                let mut header = [0u8; 40];
                 if mem
                     .read_slice(&mut header, GuestAddress((simp & !0xfff) + sint * 256))
                     .is_ok()
-                    && header != [0; 8]
+                    && header != [0; 40]
                 {
-                    slots.push(format!("{sint}:{header:02x?}"));
+                    let expires = u64::from_le_bytes(header[24..32].try_into().unwrap());
+                    let delivered = u64::from_le_bytes(header[32..40].try_into().unwrap());
+                    slots.push(format!(
+                        "{sint}:{:02x?} expires={expires} delivered={delivered}",
+                        &header[..8]
+                    ));
                 }
             }
             eprintln!("timer vcpu {id} SIMP slots: {}", slots.join(" "));
@@ -166,70 +177,31 @@ pub(crate) fn dump_timer_state(shared: &VmShared, mem: &GuestMemoryMmap) {
     }
 }
 
-/// Investigation aid: `VMLAB_HV_DIAG_RESUME_HOOK=eom` writes the SynIC EOM
-/// register on every vCPU at resume; `stimer` rewrites each enabled
-/// synthetic timer, restarting it from the current reference time.
-pub(crate) fn resume_hook(shared: &VmShared) {
-    let Some(hook) = std::env::var_os("VMLAB_HV_DIAG_RESUME_HOOK") else {
-        return;
-    };
-    let one = |index, data| {
-        Msrs::from_entries(&[kvm_msr_entry {
-            index,
-            data,
-            ..Default::default()
-        }])
-        .expect("one MSR")
-    };
-    for (id, fd) in shared.vcpus.lock().iter() {
-        let Some(fd) = fd.try_lock_for(std::time::Duration::from_secs(1)) else {
-            eprintln!("resume hook: vcpu {id} is running");
-            continue;
-        };
-        let mut reference = one(HV + 0x20, 0);
-        let _ = fd.get_msrs(&mut reference);
-        eprintln!(
-            "resume hook {hook:?}: vcpu {id} reference time {:#x}",
-            reference.as_slice()[0].data
-        );
-        if hook == "eom" {
-            let result = fd.set_msrs(&one(HV + 0x84, 0));
-            eprintln!("resume hook: vcpu {id} EOM {result:?}");
-            continue;
-        }
-        for timer in 0..4 {
-            let mut config = one(HV + 0xb0 + timer * 2, 0);
-            let mut count = one(HV + 0xb1 + timer * 2, 0);
-            if fd.get_msrs(&mut config).is_err() || fd.get_msrs(&mut count).is_err() {
-                continue;
-            }
-            if config.as_slice()[0].data & 1 == 0 {
-                continue;
-            }
-            let a = fd.set_msrs(&config);
-            let b = fd.set_msrs(&count);
-            eprintln!(
-                "resume hook: vcpu {id} stimer {timer} config {:#x} count {:#x}: {a:?} {b:?}",
-                config.as_slice()[0].data,
-                count.as_slice()[0].data
-            );
-        }
-    }
-}
-
 /// Investigation aid enabled by `VMLAB_HV_DIAG_TIME_SAMPLE_MS`: interrupts
-/// vCPU 0 periodically and reports discontinuities between KVM's Hyper-V
+/// each vCPU periodically and reports discontinuities between KVM's Hyper-V
 /// reference counter, the guest's reference TSC page and the KVM clock, and
 /// every change to the synthetic timer 0 and SynIC registers.
 pub(crate) struct TimeSampler {
+    id: u8,
     last: Option<[u64; 12]>,
     due: std::sync::Arc<std::sync::atomic::AtomicBool>,
     heartbeat: std::time::Instant,
     verbose_until: Option<std::time::Instant>,
+    stop: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for TimeSampler {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 impl TimeSampler {
-    pub(crate) fn start() -> Option<Self> {
+    pub(crate) fn start(id: u8) -> Option<Self> {
         let period: u64 = std::env::var("VMLAB_HV_DIAG_TIME_SAMPLE_MS")
             .ok()?
             .parse()
@@ -237,22 +209,29 @@ impl TimeSampler {
         // SAFETY: pthread_self has no preconditions.
         let tid = unsafe { libc::pthread_self() } as usize;
         let due = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = std::sync::Arc::downgrade(&due);
-        std::thread::spawn(move || {
-            while let Some(flag) = flag.upgrade() {
+        let flag = due.clone();
+        let (stop, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            loop {
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                drop(flag);
-                // SAFETY: the vCPU thread owns the Arc; once it drops the
-                // sampler the upgrade above fails before another signal.
+                // SAFETY: the vCPU joins this worker before exiting, so its
+                // pthread ID cannot be reused while signals are sent.
                 unsafe { libc::pthread_kill(tid as libc::pthread_t, libc::SIGUSR1) };
-                std::thread::sleep(std::time::Duration::from_millis(period));
+                if receiver.recv_timeout(std::time::Duration::from_millis(period))
+                    != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                {
+                    break;
+                }
             }
         });
         Some(Self {
+            id,
             last: None,
             due,
             heartbeat: std::time::Instant::now(),
             verbose_until: None,
+            stop,
+            worker: Some(worker),
         })
     }
 
@@ -347,7 +326,7 @@ impl TimeSampler {
             let regs = fd.get_regs().ok();
             let lapic = fd.get_lapic().ok();
             let mp = fd.get_mp_state().map(|m| m.mp_state).unwrap_or(99);
-            let mut slot = [0u8; 8];
+            let mut slot = [0u8; 40];
             if v[5] & 1 != 0
                 && let Some(ram) = shared.ram()
             {
@@ -364,11 +343,13 @@ impl TimeSampler {
                 )
             });
             eprintln!(
-                "time trace: host={:?} ref={reference} stimer0={:#x}/{} slot3={:02x?} rip={:#x} if={} mp={mp} tpr={tpr:#x} isr={isr} irr_d1={irr_d1}",
+                "time trace: vcpu={} host={:?} ref={reference} stimer0={:#x}/{} slot3={:02x?} delivered={} rip={:#x} if={} mp={mp} tpr={tpr:#x} isr={isr} irr_d1={irr_d1}",
+                self.id,
                 std::time::Instant::now(),
                 v[3],
                 v[4],
                 &slot[..6],
+                u64::from_le_bytes(slot[32..40].try_into().unwrap()),
                 regs.map_or(0, |r| r.rip),
                 regs.map_or(0, |r| (r.rflags >> 9) & 1),
             );
@@ -379,7 +360,8 @@ impl TimeSampler {
         if !reasons.is_empty() {
             self.heartbeat = std::time::Instant::now();
             eprintln!(
-                "time sample [{}]: tsc={tsc:#x} ref={reference} kvmclock/100={} skew={} refpage={page_msr:#x} stimer0={:#x}/{} simp={:#x} sint3={:#x} page seq={seq} scale={scale:#x} offset={offset:#x} pageref={page_ref}",
+                "time sample vcpu={} [{}]: tsc={tsc:#x} ref={reference} kvmclock/100={} skew={} refpage={page_msr:#x} stimer0={:#x}/{} simp={:#x} sint3={:#x} page seq={seq} scale={scale:#x} offset={offset:#x} pageref={page_ref}",
+                self.id,
                 reasons.join(", "),
                 now[7],
                 reference as i64 - now[7] as i64,
@@ -391,72 +373,4 @@ impl TimeSampler {
         }
         self.last = Some(now);
     }
-}
-
-/// Investigation aid enabled by `VMLAB_HV_DIAG_EXIT_STATS`: counts exits by
-/// kind during the first two seconds of execution and prints the totals.
-pub(crate) fn exit_stats(id: u8, result: &Result<kvm_ioctls::VcpuExit<'_>, kvm_ioctls::Error>) {
-    use std::collections::BTreeMap;
-    use std::sync::{Mutex, OnceLock};
-    static ON: OnceLock<bool> = OnceLock::new();
-    type Stats = (std::time::Instant, BTreeMap<String, u64>, u32);
-    static STATS: Mutex<Option<Stats>> = Mutex::new(None);
-    if !*ON.get_or_init(|| std::env::var_os("VMLAB_HV_DIAG_EXIT_STATS").is_some()) {
-        return;
-    }
-    let key = match result {
-        Ok(kvm_ioctls::VcpuExit::IoIn(port, _)) => format!("in {port:#x}"),
-        Ok(kvm_ioctls::VcpuExit::IoOut(port, _)) => format!("out {port:#x}"),
-        Ok(kvm_ioctls::VcpuExit::MmioRead(addr, _)) if *addr < 0xff00_0000 => {
-            format!("mmio-r {addr:#x}")
-        }
-        Ok(kvm_ioctls::VcpuExit::MmioRead(addr, _)) => format!("mmio-r {:#x}", addr >> 16 << 16),
-        Ok(kvm_ioctls::VcpuExit::MmioWrite(addr, _)) => format!("mmio-w {:#x}", addr >> 16 << 16),
-        Ok(other) => format!("{other:?}").chars().take(12).collect(),
-        Err(e) => format!("err {}", e.errno()),
-    };
-    let mut stats = STATS.lock().unwrap();
-    let (start, map, printed) =
-        stats.get_or_insert_with(|| (std::time::Instant::now(), BTreeMap::new(), 0));
-    *map.entry(format!("cpu{id} {key}")).or_default() += 1;
-    let elapsed = start.elapsed().as_millis() as u32;
-    if elapsed / 100 > *printed && *printed < 12 {
-        *printed = elapsed / 100;
-        let snapshot = std::mem::take(map);
-        let mut top: Vec<_> = snapshot.iter().collect();
-        top.sort_by(|a, b| b.1.cmp(a.1));
-        let top: Vec<_> = top
-            .iter()
-            .take(12)
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect();
-        eprintln!("exit stats at {elapsed} ms: {}", top.join(" "));
-    }
-}
-
-/// Investigation aid enabled by `VMLAB_HV_DIAG_PS2`: logs i8042 accesses,
-/// collapsing repeated identical status reads.
-pub(crate) fn ps2_trace(port: u16, data: &[u8], write: bool) {
-    use std::sync::{Mutex, OnceLock};
-    static ON: OnceLock<Option<std::time::Instant>> = OnceLock::new();
-    static LAST: Mutex<(String, u32)> = Mutex::new((String::new(), 0));
-    let Some(start) =
-        ON.get_or_init(|| std::env::var_os("VMLAB_HV_DIAG_PS2").map(|_| std::time::Instant::now()))
-    else {
-        return;
-    };
-    if !matches!(port, 0x60 | 0x64) {
-        return;
-    }
-    let line = format!("{} {port:#x} {data:x?}", if write { "out" } else { "in" });
-    let mut last = LAST.lock().unwrap();
-    if last.0 == line {
-        last.1 += 1;
-        return;
-    }
-    if last.1 > 0 {
-        eprintln!("ps2   (x{} more)", last.1);
-    }
-    eprintln!("ps2 {:>4} ms {line}", start.elapsed().as_millis());
-    *last = (line, 0);
 }

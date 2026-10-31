@@ -82,9 +82,7 @@ impl VcpuThread {
 /// the snapshot path can hold it while this thread is parked.
 fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
     let mut pending_completion = false;
-    let mut sampler = (id == 0)
-        .then(crate::diagnostics::TimeSampler::start)
-        .flatten();
+    let mut sampler = crate::diagnostics::TimeSampler::start(id);
     loop {
         let running = shared.should_run();
         // KVM_EXIT_IO/MMIO finish on the next KVM_RUN. Their pending state
@@ -136,16 +134,13 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             )));
             return;
         }
-        crate::diagnostics::exit_stats(id, &result);
         match result {
             Ok(VcpuExit::IoIn(port, data)) => {
                 for value in data.chunks_mut(width) {
                     shared.io_read(port, value);
                 }
-                crate::diagnostics::ps2_trace(port, data, false);
             }
             Ok(VcpuExit::IoOut(port, data)) => {
-                crate::diagnostics::ps2_trace(port, data, true);
                 for value in data.chunks(width) {
                     shared.io_write(port, value);
                 }

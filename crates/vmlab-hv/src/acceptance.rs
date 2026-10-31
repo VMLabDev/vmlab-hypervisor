@@ -186,7 +186,9 @@ fn boot_template(
             "tlbflush",
             "ipi"
         ]);
-        if vmlab_hv_vmm::hyperv::host_apic_virtualization() {
+        if vmlab_hv_vmm::hyperv::host_apic_virtualization()
+            && std::env::var_os("VMLAB_HV_TEST_NO_AVIC").is_none()
+        {
             description["hyperv"]
                 .as_array_mut()
                 .unwrap()
@@ -337,13 +339,10 @@ fn boot_template(
                 .arg(dir.path().join("failure.png"))
                 .status();
         }
-        if std::env::var_os("VMLAB_HV_DIAG_RESUME_HOOK").is_some() {
-            // Investigation aid: see whether the resume hook revives a hung guest.
-            let _ = client.call(Control::Pause);
-            std::thread::sleep(Duration::from_secs(1));
-            let _ = client.call(Control::Resume);
-            let revived = AgentClient::connect(&agent, Duration::from_secs(90)).is_ok();
-            eprintln!("{name}: resume hook revived the guest: {revived}");
+        if let Ok(seconds) = std::env::var("VMLAB_HV_DIAG_FAILURE_WAIT_SECS") {
+            let seconds: u64 = seconds.parse().unwrap();
+            eprintln!("{message}; waiting {seconds}s for guest crash reporting");
+            std::thread::sleep(Duration::from_secs(seconds));
         }
         // Quit rather than kill so diagnostics can report the halted state.
         let _ = client.call(Control::Quit);
@@ -373,6 +372,10 @@ fn boot_template(
                 Duration::from_secs(20),
             ) {
                 Ok(output) if output.exit_code == 0 => {
+                    // Observe only resets caused by the setup reboot below.
+                    // OVMF can leave earlier reset events in the client queue.
+                    client.call(Control::Status).unwrap();
+                    client.take_events();
                     let reboot = guest.exec(&["shutdown.exe", "/r", "/t", "5", "/f"], Duration::from_secs(20))
                         .unwrap_or_else(|error| panic!("{name} first-boot reboot: {error}; {}", diagnostics()));
                     assert_eq!(reboot.exit_code, 0, "{name} first-boot reboot: {reboot:?}");
@@ -587,6 +590,22 @@ fn boot_template(
                 Duration::from_secs(20),
             )
             .unwrap();
+        let before = guest
+            .exec(
+                &[
+                    shell,
+                    flag,
+                    if windows {
+                        "type C:\\Windows\\Temp\\vmlab-hv-snapshot"
+                    } else {
+                        "cat /run/vmlab-hv-snapshot"
+                    },
+                ],
+                Duration::from_secs(20),
+            )
+            .unwrap();
+        assert_eq!(before.exit_code, 0);
+        assert_eq!(String::from_utf8_lossy(&before.stdout).trim(), "before");
         let saved = client
             .call(Control::SnapshotSave {
                 name: "firmware".into(),
@@ -650,7 +669,22 @@ fn boot_template(
                         format!("{name} exec after snapshot load {cycle}: {error}"),
                     )
                 });
-            assert_eq!(String::from_utf8_lossy(&restored.stdout).trim(), "before");
+            if restored.exit_code != 0
+                || String::from_utf8_lossy(&restored.stdout).trim() != "before"
+            {
+                if windows {
+                    let report = guest.exec(&["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                        "Get-CimInstance Win32_OperatingSystem | Select-Object LastBootUpTime,LocalDateTime | Format-List; \
+                         Get-WinEvent -FilterHashtable @{LogName='System';Id=41,1001,1074,6008} -MaxEvents 6 -ErrorAction Continue | Format-List TimeCreated,Id,Message; \
+                         [Convert]::ToBase64String([IO.File]::ReadAllBytes('C:\\Windows\\Temp\\vmlab-hv-snapshot'))"], Duration::from_secs(30));
+                    eprintln!("{name} guest report after snapshot load {cycle}: {report:?}");
+                }
+                fail(
+                    &mut client,
+                    &mut process,
+                    format!("{name} snapshot load {cycle} returned {restored:?}"),
+                );
+            }
             eprintln!(
                 "{name}: snapshot load {cycle} answered in {:.1?}",
                 started.elapsed()

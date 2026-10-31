@@ -121,6 +121,10 @@ pub trait VirtioDevice: Snapshot + Send {
 /// Guest-visible state a device saves into and restores from a snapshot.
 /// `Send` because the VMM keeps snapshot handles in its shared state.
 pub trait Snapshot: Send {
+    /// Stop asynchronous guest-memory access until `resume_snapshot`.
+    /// Synchronous devices have no work to stop once vCPUs are parked.
+    fn quiesce(&mut self) {}
+    fn resume_snapshot(&mut self) {}
     /// Stable id of this device instance in the machine, used as the section key.
     fn state_id(&self) -> String;
     fn save_state(&self) -> Result<Vec<u8>, DeviceError>;
@@ -139,6 +143,8 @@ pub trait Resettable: Send {
 /// and restores the function's state first. A virtio transport activates
 /// the wrapped device only after its own state and queue indices have landed.
 pub trait PciSnapshot: Resettable {
+    fn quiesce(&mut self) {}
+    fn resume_snapshot(&mut self) {}
     /// Stable id of this function instance, keying its snapshot sections.
     fn snapshot_id(&self) -> String;
     fn save_function_state(&self) -> Result<Vec<u8>, DeviceError>;

@@ -1291,6 +1291,14 @@ impl crate::Resettable for VirtioPciDevice {
 }
 
 impl PciSnapshot for VirtioPciDevice {
+    fn quiesce(&mut self) {
+        self.device_mut().quiesce();
+    }
+
+    fn resume_snapshot(&mut self) {
+        self.device_mut().resume_snapshot();
+    }
+
     fn snapshot_id(&self) -> String {
         Snapshot::state_id(self)
     }
