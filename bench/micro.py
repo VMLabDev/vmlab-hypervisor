@@ -63,6 +63,19 @@ def build_coremark():
     return image
 
 
+def execution_environment(backend, inherited):
+    environment = dict(inherited)
+    for name in ("NO_MEMO", "NO_INDEXED", "SPECIALIZE", "WARM", "PROFILE", "PROGRESS", "TRACE_PC"):
+        environment.pop("VMLAB_TCG_" + name, None)
+    if backend == "interpreter-reference":
+        environment["VMLAB_TCG_NO_MEMO"] = "1"
+        environment["VMLAB_TCG_NO_INDEXED"] = "1"
+    elif backend == "interpreter-specialized":
+        environment["VMLAB_TCG_SPECIALIZE"] = "1"
+        environment["VMLAB_TCG_WARM"] = "1"
+    return environment
+
+
 def run(args, commit, dirty, host, log):
     if args.arch not in ("all", "riscv64") or args.vcpus not in ("1", "1,4"):
         raise lib.BenchError("interpreter micro-benchmarks support riscv64 and one hart")
@@ -77,21 +90,22 @@ def run(args, commit, dirty, host, log):
     binary = str(Path(lib.REPO_DIR) / "target/release/examples/micro")
     workloads = {"scalar_loop_3000": ["loop", "1000"],
                  "coremark_algorithms_1": ["image", str(image), "80001000", "10000000"]}
-    environment = dict(os.environ)
-    if args.backend == "interpreter-reference":
-        environment["VMLAB_TCG_NO_MEMO"] = "1"
-        environment["VMLAB_TCG_NO_INDEXED"] = "1"
-    else:
-        environment.pop("VMLAB_TCG_NO_MEMO", None)
-        environment.pop("VMLAB_TCG_NO_INDEXED", None)
+    specialized = args.backend == "interpreter-specialized"
+    if specialized:
+        workloads = {"scalar_loop_30000000_warm": ["loop", "10000000"],
+                     "coremark_algorithms_1_warm": ["image", str(image), "80001000", "10000000"]}
+    environment = execution_environment(args.backend, os.environ)
     for name, command in workloads.items():
         samples = []
         raw = []
         noise = {"governor": lib.read_governor(), "loadavg_start": lib.read_loadavg(),
                  "pin": pin, "memory_max": lib.MEMORY_MAX, "host_cpus": os.cpu_count(),
-                 "coremark_revision": COREMARK_REVISION, "backend_version": "generated IR interpreter"}
+                 "coremark_revision": COREMARK_REVISION, "backend_version": "guarded scalar blocks" if specialized else "generated IR interpreter",
+                 "warmup_excluded": specialized}
         for repeat in range(args.repeats):
             result = measure([*lib.systemd_run_prefix(), *lib.taskset_prefix(pin), binary, *command], environment)
+            if specialized and result["native_instructions"] == 0:
+                raise lib.BenchError("specialized measurement executed no native instructions")
             raw.append(result)
             samples.append(result["seconds"])
             log(f"{name} repeat {repeat + 1}: {result['mips']:.6f} MIPS, {result['instructions']} instructions")

@@ -13,7 +13,7 @@ int main(void) {
     result.seed2 = bench_seed2;
     result.seed3 = bench_seed3;
     result.size = sizeof(memory) / NUM_ALGORITHMS;
-    result.iterations = 1;
+    result.iterations = ITERATIONS;
     result.execs = ALL_ALGORITHMS_MASK;
     result.memblock[0] = memory;
     for (unsigned i = 0; i < NUM_ALGORITHMS; ++i)

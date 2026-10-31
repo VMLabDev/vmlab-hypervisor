@@ -13,7 +13,13 @@ fn adapter_restores_state_clears_writes_and_resets_counters() {
     state.fpr[3] = 0x7ff8_0123_4567_89ab;
     state.csrs.insert(0xb00, 0);
     let mut cpu = LockstepCpu::for_lockstep(memory.clone()).unwrap();
+    cpu.specialize = true;
+    cpu.interpreter.indexed = false;
+    cpu.interpreter.memoize = false;
     cpu.reset(&state, &memory).unwrap();
+    assert!(cpu.specialize);
+    assert!(!cpu.interpreter.indexed);
+    assert!(!cpu.interpreter.memoize);
     assert_eq!(StepCpu::state(&mut cpu).unwrap(), state);
     let writes = StepCpu::step(&mut cpu).unwrap();
     assert_eq!(writes.len(), 1);

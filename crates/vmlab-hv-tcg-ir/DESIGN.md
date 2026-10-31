@@ -172,3 +172,136 @@ independent oracle driver in `examples/lockstep.rs`.
 The deterministic step schedule calls generated `try_step` with forced
 wait completion disabled, then calls generated `tick_clock`. This matches
 the oracle's instruction-count clock rather than the host wall clock.
+
+## Whole-block specialization contract
+
+Why does removing more than 23,000 dead locals still leave only about
+0.01 MIPS? The remaining path interprets roughly 1,647 model operations per
+guest instruction. Most describe generic model machinery rather than the
+guest's scalar work. `../vmlab-hv-tcg/PERF.md` records the measurements.
+The optional `Riscv64::specialize` path implements whole-block recording and
+native scalar interpretation. It assumes familiarity with `Function`, `Op`, and the
+physical-memory contract above.
+
+### Record generated execution and residualize its dynamic work
+
+The named interpreter supplies the concrete execution while a recorder
+tracks symbolic values beside its frames. Recording disables memoization,
+indexed execution, and decoder memoization so every generated call and
+architectural effect is visible. Constants, decoded instruction operands,
+and guarded configuration values fold through all calls. GPRs, FPRs,
+architectural counters, and data-memory results remain dynamic.
+
+The residual representation has two parts:
+
+- A scalar SSA DAG over bools, bounded integers, and bitvectors up to 128 bits.
+- An ordered sequence of guards, physical-memory effects, and guest-instruction
+  checkpoints. Each guard has an exact source continuation.
+
+The `native` module supplies the scalar DAG. Range checks reject unsafe
+unbounded-integer lowering. Its tests show that repeated tick additions can
+combine and that byte slicing followed by concatenation can become the
+original scalar again (`src/native.rs`, tests `repeated_ticks_collapse_to_one_add`,
+`byte_unpack_and_repack_disappears`, and `unbounded_integer_overflow_is_not_silently_lowered`).
+The JIT will consume the same residual operations; it must not rediscover
+RISC-V semantics in a second instruction implementation.
+
+Pure scalar work is scheduled only when a guard, memory event, or final
+output needs it. Values needed only for a cold exit stay as DAG expressions.
+This lets three counter updates combine on a complete block while retaining
+the intermediate value needed to stop after its first instruction.
+
+### A failed guard resumes; it does not restart an instruction
+
+The named executor can resume at a specified operation with materialized
+locals through `continuation`. A snapshot retains the active
+Sail frames, local bindings, global writes so far, pending caller destinations,
+and the next source operation. It refers to immutable function definitions.
+
+If a guard fails, the runtime materializes that snapshot, resumes the deepest
+frame, assigns its result to its caller, and continues outward. The root is
+the same generated `try_step` followed by generated `tick_clock` used by
+`Riscv64::step`. No host opcode implementation
+replaces those functions.
+
+Contrast two cases. Before a RAM store, restarting the current operation
+has not duplicated a write. After a RAM store, restarting the instruction
+could duplicate MMIO, change LR/SC state, and repeat an ordered write.
+Therefore an exit after a completed memory event resumes after that event;
+its result is captured and never fetched or written again. Unsupported
+operations exit before the operation and use the working Sail interpreter.
+These are precise slow continuations, not fabricated results.
+
+Prediction: if a branch guard fails after a store, does the oracle observe
+two writes? It must observe one. The store is already complete and the
+continuation starts at the alternate branch destination. A regression must
+check both the final state and the ordered write log, because final RAM
+contents alone would miss a duplicated write.
+
+### Keep the hot state scalar without losing model state
+
+A batch executes against native scalar slots. It loads dynamic inputs once,
+keeps intermediate register and counter values unboxed, and commits state at
+an observation or exit. Per-step lockstep observation remains supported by
+instruction checkpoints. A checkpoint can materialize values lazily without
+requiring those computations on an uninterrupted batch path.
+
+Wide RVFI packets and other aggregates remain symbolic recipes. Publication
+updates their existing model containers in place and reuses bignum capacity.
+Scalar globals remain in native slots across blocks inside one API call;
+return, error, or source execution publishes pending values. No recipe points
+at another block's reusable scratch storage.
+
+Per-step execution records at most one instruction and publishes every model
+value before returning to its observer. Batched execution records bounded
+blocks and uses the same residual graph without publishing every intermediate
+checkpoint. It does not retain a partially executed graph between API calls.
+
+### Guard configuration and instruction memory
+
+An entry is specialized for its PC, decoded instruction stream, and observed
+mode/configuration values. Context guards compare versioned globals; a changed
+version may be refreshed only after checking that the expected value is still
+equal. Dynamic register/counter inputs also have type and range constraints.
+An input that does not satisfy them takes a correct slow path.
+
+Only memory that explicitly promises side-effect-free instruction fetch may
+replace a fetch with a code-generation guard. The default memory behavior
+must remain conservative. RAM implementations need page generations so a
+data-page store does not invalidate every decoded block. A write that changes
+the current block's code must exit after the completed write and finish the
+current instruction through its continuation. MMIO fetches keep their read
+and guard the returned instruction bits.
+
+Shared-memory block execution uses the memory transaction contract so code
+and PTE checks do not race other harts. Barriers, reservations, and unsupported
+platform operations retain their generated ordering or exit before the
+operation. Range, code, and context guards are correctness requirements;
+benchmark speed never permits dropping them.
+
+### Extend common guard alternatives instead of repeatedly deoptimizing
+
+A loop's final conditional branch changes outcome once per traversal. A
+full Sail continuation on every such change would cap mixed-workload speed.
+After a cold branch exit, the recorder can specialize that source continuation
+as an alternative fragment. It shares the parent SSA values and memory-event
+results, so entering it does not repeat the prefix or copy whole Sail frames.
+The guarded graph grows into a bounded control-flow graph. Unsupported host
+operations and mode transitions can remain precise slow exits.
+
+Recording, snapshot size, and cache memory require explicit bounds. Hitting
+one stops recording at a source continuation and executes the remaining
+instruction normally. It must never discard state or report an unexecuted
+instruction as retired.
+
+### Evidence required before enabling the whole-block path
+
+The scalar DAG tests establish local algebra only. Runtime regression tests
+must also prove exact mid-instruction continuation, memory-effect ordering,
+code invalidation, counter ticks, mode transitions, and both step and batch
+execution. The 133-program Sail comparison must exercise native instructions,
+not merely succeed while all instructions use the recorder. Batch-vs-step
+comparisons and native/slow instruction counts are required alongside the
+existing 134 flat-image tests and generation check. Throughput measurements
+must distinguish one-time specialization from warm block execution and must
+retain the CRC and final-state checks.

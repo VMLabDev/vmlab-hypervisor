@@ -5,6 +5,8 @@ use vmlab_hv_lockstep::{CpuError, Memory, MemoryWrite, State, StepCpu};
 pub struct LockstepMemory {
     memory: Memory,
     generation: u64,
+    identity: u64,
+    code_pages: std::collections::BTreeMap<u64, u64>,
     csrs: Vec<u16>,
 }
 
@@ -14,6 +16,8 @@ impl LockstepMemory {
         Self {
             memory,
             generation: 0,
+            identity: crate::memory::next_identity(),
+            code_pages: std::collections::BTreeMap::new(),
             csrs,
         }
     }
@@ -27,6 +31,13 @@ fn memory_error(error: CpuError) -> crate::Error {
 }
 
 impl PhysicalMemory for LockstepMemory {
+    fn ram_bounds(&self, address: u64) -> Option<(u64, u64)> {
+        let end = self
+            .memory
+            .base
+            .checked_add(u64::try_from(self.memory.bytes().len().checked_sub(1)?).ok()?)?;
+        (address >= self.memory.base && address <= end).then_some((self.memory.base, end))
+    }
     fn read(&mut self, address: u64, bytes: &mut [u8]) -> crate::Result<()> {
         bytes.copy_from_slice(
             self.memory
@@ -38,10 +49,35 @@ impl PhysicalMemory for LockstepMemory {
     fn write(&mut self, address: u64, bytes: &[u8]) -> crate::Result<()> {
         self.memory.write(address, bytes).map_err(memory_error)?;
         self.generation = self.generation.wrapping_add(1);
+        if !bytes.is_empty() {
+            let last = address
+                .checked_add(bytes.len() as u64 - 1)
+                .ok_or(crate::Error::Memory(address))?;
+            for page in address / 4096..=last / 4096 {
+                self.code_pages.insert(page, self.generation);
+            }
+        }
         Ok(())
     }
     fn generation(&self) -> u64 {
         self.generation
+    }
+    fn code_stamp(&self, address: u64, len: usize) -> Option<crate::CodeStamp> {
+        self.memory.read(address, len).ok()?;
+        if len == 0 {
+            return None;
+        }
+        let first_page = address / 4096;
+        let last_page = address.checked_add(len as u64 - 1)? / 4096;
+        Some(crate::CodeStamp {
+            identity: self.identity,
+            mapping: self.memory.base,
+            first_page,
+            last_page,
+            generation: (first_page..=last_page)
+                .map(|page| self.code_pages.get(&page).copied().unwrap_or(0))
+                .max()?,
+        })
     }
     fn load_reserved(&mut self, address: u64, bytes: &mut [u8]) -> crate::Result<u64> {
         self.read(address, bytes)?;
@@ -80,11 +116,21 @@ impl StepCpu for LockstepCpu {
         {
             return Err(CpuError("invalid architectural initial state".into()));
         }
+        let execution_options = (
+            self.specialize,
+            self.interpreter.indexed,
+            self.interpreter.memoize,
+        );
         *self = Self::new(LockstepMemory::new(
             memory.clone(),
             state.csrs.keys().copied().collect(),
         ))
         .map_err(model_error)?;
+        (
+            self.specialize,
+            self.interpreter.indexed,
+            self.interpreter.memoize,
+        ) = execution_options;
         for (&csr, &value) in &state.csrs {
             self.write_csr(csr, value).map_err(model_error)?;
         }

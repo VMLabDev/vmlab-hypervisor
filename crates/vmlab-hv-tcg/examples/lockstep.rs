@@ -10,6 +10,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pair = None;
     let mut count = 0;
     let mut failures = 0;
+    let specialize = std::env::var_os("VMLAB_TCG_SPECIALIZE").is_some();
+    let mut native_steps = 0;
     for path in std::env::args_os().skip(1) {
         let image = TestImage::elf(&std::fs::read(&path)?, 0x80000000, 16 * 1024 * 1024)?;
         if pair.is_none() {
@@ -22,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ));
         }
         let (interpreter, sail, initial) = pair.as_mut().ok_or("missing CPU pair")?;
+        interpreter.specialize = specialize;
         match image.run(interpreter, sail, initial, 1_000_000) {
             Ok(steps) => println!(
                 "{}: matched {steps} instructions, tohost pass",
@@ -33,6 +36,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         count += 1;
+        assert_eq!(
+            interpreter.specialize, specialize,
+            "lockstep reset changed the execution path"
+        );
+        if specialize {
+            let stats = &interpreter.specialization_stats;
+            native_steps += stats.hits;
+            eprintln!(
+                "trace: recordings={} native={} exits={}",
+                stats.recordings, stats.hits, stats.exits
+            );
+        }
     }
     if count == 0 {
         return Err("supply RV64 ELF paths".into());
@@ -43,6 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     if failures != 0 {
         return Err("lockstep divergences found".into());
+    }
+    if specialize && native_steps == 0 {
+        return Err("specialization enabled but no native instruction ran".into());
     }
     Ok(())
 }

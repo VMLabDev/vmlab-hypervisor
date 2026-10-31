@@ -23,3 +23,13 @@ class MicroTests(unittest.TestCase):
 
     def test_backend_routes_without_template_lookup(self):
         self.assertEqual(run.main(["--backend", "interpreter", "--arch", "riscv64", "--vcpus", "1", "--dry-run"]), 0)
+
+    def test_specialized_backend_routes_without_template_lookup(self):
+        self.assertEqual(run.main(["--backend", "interpreter-specialized", "--arch", "riscv64", "--vcpus", "1", "--dry-run"]), 0)
+
+    def test_backend_selection_ignores_conflicting_inherited_flags(self):
+        inherited = {"VMLAB_TCG_SPECIALIZE": "1", "VMLAB_TCG_WARM": "1", "VMLAB_TCG_NO_MEMO": "1", "VMLAB_TCG_PROFILE": "1", "VMLAB_TCG_TRACE_PC": "all", "KEEP": "value"}
+        self.assertEqual(micro.execution_environment("interpreter", inherited), {"KEEP": "value"})
+        reference = micro.execution_environment("interpreter-reference", inherited)
+        self.assertEqual(reference, {"KEEP": "value", "VMLAB_TCG_NO_MEMO": "1", "VMLAB_TCG_NO_INDEXED": "1"})
+        self.assertEqual(micro.execution_environment("interpreter-specialized", reference), {"KEEP": "value", "VMLAB_TCG_SPECIALIZE": "1", "VMLAB_TCG_WARM": "1"})

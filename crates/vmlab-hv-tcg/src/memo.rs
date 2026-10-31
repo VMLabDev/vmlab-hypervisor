@@ -7,6 +7,8 @@ pub(crate) struct Memo {
     slots: Vec<usize>,
     versions: Vec<u64>,
     values: BTreeMap<Vec<Value>, Value>,
+    identity: Option<u64>,
+    pure: bool,
 }
 
 impl Memo {
@@ -17,6 +19,7 @@ impl Memo {
                 name != "zread_CSR" && !effect.external && program.functions[name].code.len() >= 32
             })
             .map(|(name, mut effect)| {
+                let pure = effect.writes.is_empty();
                 effect.reads.extend(effect.writes.iter().cloned());
                 (
                     name,
@@ -25,13 +28,25 @@ impl Memo {
                         slots: Vec::new(),
                         versions: Vec::new(),
                         values: BTreeMap::new(),
+                        identity: None,
+                        pure,
                     },
                 )
             })
             .collect()
     }
 
+    pub fn record_dependencies(&self) -> Option<&[String]> {
+        self.pure.then_some(&self.dependencies)
+    }
+
     pub fn lookup(&mut self, globals: &mut Globals, args: &[Value]) -> Option<Value> {
+        if self.identity != Some(globals.identity()) {
+            self.slots.clear();
+            self.versions.clear();
+            self.values.clear();
+            self.identity = Some(globals.identity());
+        }
         if self.slots.len() != self.dependencies.len() {
             self.slots = self
                 .dependencies
@@ -62,6 +77,9 @@ impl Memo {
     }
 
     pub fn insert(&mut self, globals: &Globals, args: Vec<Value>, value: Value) {
+        if self.identity != Some(globals.identity()) {
+            return;
+        }
         // Results are valid for the input state, not an altered post-call state.
         // Read/write dependencies must remain unchanged across the miss.
         if self.versions.len() != self.dependencies.len()

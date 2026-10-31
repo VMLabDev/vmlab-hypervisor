@@ -111,7 +111,7 @@ fn expression(expr: &Expr, globals: &BTreeSet<String>, effect: &mut Effects) {
     }
 }
 
-fn pure_intrinsic(name: &str) -> bool {
+pub fn pure_intrinsic(name: &str) -> bool {
     matches!(
         name,
         "%i->%i64"

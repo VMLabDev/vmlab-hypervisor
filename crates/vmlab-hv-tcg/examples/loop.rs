@@ -15,23 +15,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cpu.interpreter.operation_limit = u64::MAX;
     cpu.interpreter.memoize = !std::env::args().any(|arg| arg == "--no-memo");
     cpu.interpreter.indexed = !std::env::args().any(|arg| arg == "--no-indexed");
+    cpu.specialize = std::env::args().any(|arg| arg == "--specialize");
     if std::env::args().any(|arg| arg == "--profile") {
         cpu.interpreter.profile = Some(Default::default());
     }
-    let start = std::time::Instant::now();
-    for _ in 0..iterations * 3 {
-        cpu.step()?;
+    if std::env::args().any(|arg| arg == "--warm") {
+        cpu.set_gpr(1, 1_000_000)?;
+        cpu.set_gpr(2, 1_000_000)?;
+        let warm = std::time::Instant::now();
+        cpu.run(65_536)?;
+        eprintln!("warmup_seconds={:.6}", warm.elapsed().as_secs_f64());
+        cpu.set_pc(0x8000_0000);
+        cpu.set_gpr(1, 0)?;
+        cpu.set_gpr(2, iterations)?;
     }
+    let start_steps = cpu.steps;
+    let start_operations = cpu.interpreter.operations;
+    let start = std::time::Instant::now();
+    cpu.run(iterations * 3)?;
     let elapsed = start.elapsed().as_secs_f64();
     assert_eq!(cpu.gpr(1)?, iterations);
     assert_eq!(cpu.gpr(2)?, 0);
     assert_eq!(cpu.pc()?, 0x8000_000c);
     println!(
         "instructions={} seconds={elapsed:.6} MIPS={:.6} IR_operations={}",
-        cpu.steps,
-        cpu.steps as f64 / elapsed / 1e6,
-        cpu.interpreter.operations
+        cpu.steps - start_steps,
+        (cpu.steps - start_steps) as f64 / elapsed / 1e6,
+        cpu.interpreter.operations - start_operations
     );
+    if cpu.specialize {
+        println!("specialization={:?}", cpu.specialization_stats);
+    }
     if let Some(profile) = cpu.interpreter.profile {
         let mut functions: Vec<_> = profile.functions.into_iter().collect();
         functions.sort_by_key(|(_, (_, own, _))| std::cmp::Reverse(*own));

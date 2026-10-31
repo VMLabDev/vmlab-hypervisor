@@ -1,7 +1,8 @@
 //! Target-independent emulation IR. Branches address instruction indices.
 mod effects;
 pub mod indexed;
-pub use effects::{Effects, effects};
+pub mod native;
+pub use effects::{Effects, effects, pure_intrinsic};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use vmlab_hv_sail_ir::{Definition, Instruction, Statement};

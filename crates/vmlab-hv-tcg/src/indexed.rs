@@ -16,7 +16,7 @@ struct Slots {
 
 impl<M: Memory> Interpreter<'_, M> {
     pub(crate) fn run_cached(&mut self, function: &Function, args: Vec<Value>) -> Result<Value> {
-        if !self.indexed {
+        if !self.indexed || self.recorder.is_some() {
             return self.run_function(function, args);
         }
         if self.depth >= 256 {
