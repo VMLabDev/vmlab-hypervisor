@@ -148,7 +148,12 @@ fn softfloat_rounding_flags_and_nan() {
 
 fn paged(mode: u64, user: bool) -> Riscv64<FlatMemory> {
     let mut cpu = cpu(&[0x00500093]);
-    let levels = if mode == 8 { 3 } else { 4 };
+    let levels = match mode {
+        8 => 3,
+        9 => 4,
+        10 => 5,
+        _ => panic!("unsupported paging mode"),
+    };
     for level in 1..levels {
         let next = 0x8000_0000 + (level + 1) * 4096;
         let pte = ((next >> 12) << 10) | 1;
@@ -186,8 +191,15 @@ fn sail_sv39_sv48_page_walks_and_tlb() {
 
 #[test]
 fn unrelated_tlb_entries_do_not_retrain_a_paged_instruction_loop() {
+    for mode in [8, 9, 10] {
+        unused_tlb_entries(mode);
+    }
+}
+
+fn unused_tlb_entries(mode: u64) {
+    let leaf_table = 0x8000_0000 + (mode - 5) * 4096;
     let make = || {
-        let mut cpu = paged(8, true);
+        let mut cpu = paged(mode, true);
         for (index, instruction) in [0x00108093u32, 0xffdff06f].into_iter().enumerate() {
             cpu.interpreter
                 .memory
@@ -199,7 +211,7 @@ fn unrelated_tlb_entries_do_not_retrain_a_paged_instruction_loop() {
             let pte = (0x80000u64 << 10) | 0xdf;
             cpu.interpreter
                 .memory
-                .write(0x8000_3000 + vpn * 8, &pte.to_le_bytes())
+                .write(leaf_table + vpn * 8, &pte.to_le_bytes())
                 .unwrap();
         }
         cpu.set_gpr(1, 0).unwrap();
@@ -228,7 +240,7 @@ fn unrelated_tlb_entries_do_not_retrain_a_paged_instruction_loop() {
             };
             let vpn = 63 + index * 64;
             fields.insert("zvpn".into(), Value::bits(47, vpn));
-            fields.insert("zpteAddr".into(), Value::bits(64, 0x8000_3000u64 + vpn * 8));
+            fields.insert("zpteAddr".into(), Value::bits(64, leaf_table + vpn * 8));
             cpu.interpreter
                 .call("zwrite_TLB", vec![Value::int(63), Value::Struct(fields)])
                 .unwrap();
@@ -259,13 +271,13 @@ fn unrelated_tlb_entries_do_not_retrain_a_paged_instruction_loop() {
         for (index, instruction) in [0x00208093u32, 0xffdff06f].into_iter().enumerate() {
             cpu.interpreter
                 .memory
-                .write(0x8000_4000 + index as u64 * 4, &instruction.to_le_bytes())
+                .write(0x8000_8000 + index as u64 * 4, &instruction.to_le_bytes())
                 .unwrap();
         }
-        let pte = (0x80004u64 << 10) | 0xdf;
+        let pte = (0x80008u64 << 10) | 0xdf;
         cpu.interpreter
             .memory
-            .write(0x8000_3020, &pte.to_le_bytes())
+            .write(leaf_table + 4 * 8, &pte.to_le_bytes())
             .unwrap();
         let Value::Vector(entries) = &cpu.interpreter.globals["ztlb"] else {
             panic!("TLB vector expected");
@@ -276,7 +288,7 @@ fn unrelated_tlb_entries_do_not_retrain_a_paged_instruction_loop() {
         let Value::Struct(mut fields) = *entry else {
             panic!("TLB entry expected");
         };
-        fields.insert("zppn".into(), Value::bits(44, 0x80004u64));
+        fields.insert("zppn".into(), Value::bits(44, 0x80008u64));
         fields.insert("zpte".into(), Value::bits(64, pte));
         cpu.interpreter
             .call("zwrite_TLB", vec![Value::int(4), Value::Struct(fields)])
