@@ -57,6 +57,7 @@ pub fn open_image(disk: &Disk) -> Result<SharedImage, DeviceUnavailable> {
 /// A built serial console: the bus device plus its snapshot handle (the
 /// same object), when the model carries guest-visible state.
 pub struct BuiltSerial {
+    pub clock: Option<Arc<Mutex<vmlab_hv_devices::serial::Serial>>>,
     pub device: Arc<Mutex<dyn BusDevice>>,
     pub snapshot: Option<Arc<Mutex<dyn Snapshot>>>,
 }

@@ -1,0 +1,58 @@
+[
+  {
+    "address": "0x7fe52000",
+    "checksum": true,
+    "file": "acpi/RSDT-7fe52000.bin",
+    "length": 60,
+    "signature": "RSDT"
+  },
+  {
+    "address": "0x7fe4e000",
+    "checksum": true,
+    "file": "acpi/FACP-7fe4e000.bin",
+    "length": 244,
+    "signature": "FACP"
+  },
+  {
+    "address": "0x7fe4f000",
+    "checksum": true,
+    "file": "acpi/DSDT-7fe4f000.bin",
+    "length": 8753,
+    "signature": "DSDT"
+  },
+  {
+    "address": "0x7fe4d000",
+    "checksum": true,
+    "file": "acpi/APIC-7fe4d000.bin",
+    "length": 144,
+    "signature": "APIC"
+  },
+  {
+    "address": "0x7fe4c000",
+    "checksum": true,
+    "file": "acpi/HPET-7fe4c000.bin",
+    "length": 56,
+    "signature": "HPET"
+  },
+  {
+    "address": "0x7fe4b000",
+    "checksum": true,
+    "file": "acpi/MCFG-7fe4b000.bin",
+    "length": 60,
+    "signature": "MCFG"
+  },
+  {
+    "address": "0x7fe4a000",
+    "checksum": true,
+    "file": "acpi/WAET-7fe4a000.bin",
+    "length": 40,
+    "signature": "WAET"
+  },
+  {
+    "address": "0x7fe49000",
+    "checksum": true,
+    "file": "acpi/BGRT-7fe49000.bin",
+    "length": 56,
+    "signature": "BGRT"
+  }
+]

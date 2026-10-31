@@ -1,0 +1,131 @@
+{
+  "captured_utc": "2026-10-31T12:43:54.719934+00:00",
+  "qemu_version": "QEMU emulator version 11.1.2\nCopyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers",
+  "argv": [
+    "qemu-system-x86_64",
+    "-machine",
+    "pc,accel=qtest",
+    "-nodefaults",
+    "-display",
+    "none",
+    "-monitor",
+    "none",
+    "-qtest",
+    "unix:/var/tmp/pc-uart-bmg_w7tp/qtest.sock,server=on,wait=off",
+    "-qtest-log",
+    "/dev/null",
+    "-chardev",
+    "socket,id=uart,path=/var/tmp/pc-uart-bmg_w7tp/uart.sock,server=on,wait=off",
+    "-device",
+    "isa-serial,chardev=uart,index=0"
+  ],
+  "project_vm_pids_before_launch": [
+    669125
+  ],
+  "tx_unblocked": {
+    "input_hex": "4142434445464748494a4b4c4d4e4f5051525354",
+    "immediate_hex": "4142434445464748494a4b4c4d4e4f5051525354",
+    "lsr": 96,
+    "iir": 194,
+    "virtual_ns": 1,
+    "samples": [
+      {
+        "virtual_ns": 2,
+        "output_hex": "",
+        "lsr": 96,
+        "iir": 193
+      },
+      {
+        "virtual_ns": 86806,
+        "output_hex": "",
+        "lsr": 96,
+        "iir": 193
+      },
+      {
+        "virtual_ns": 86807,
+        "output_hex": "",
+        "lsr": 96,
+        "iir": 193
+      },
+      {
+        "virtual_ns": 2690987,
+        "output_hex": "",
+        "lsr": 96,
+        "iir": 193
+      }
+    ],
+    "total_hex": "4142434445464748494a4b4c4d4e4f5051525354",
+    "complete_delivery": true
+  },
+  "tx_backpressure": {
+    "filler_written": 279,
+    "filler_received": 279,
+    "blocked_lsr": 32,
+    "full_lsr": 0,
+    "full_iir": 193,
+    "markers_written_hex": "b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0",
+    "markers_received_hex": "b1b2b3b4b5b6b7b8b9babbbcbdbebfc0",
+    "final_lsr": 96,
+    "final_iir": 194,
+    "filler_preserved": true
+  },
+  "rx_backpressure": {
+    "sent_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "received_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "initial_iir": 196,
+    "final_lsr": 96,
+    "complete_delivery": true
+  },
+  "rx_triggers": [
+    {
+      "threshold": 4,
+      "below_iir": 193,
+      "reached_iir": 196,
+      "received_hex": "78787879",
+      "empty_iir": 193,
+      "complete_delivery": true
+    },
+    {
+      "threshold": 8,
+      "below_iir": 193,
+      "reached_iir": 196,
+      "received_hex": "7878787878787879",
+      "empty_iir": 193,
+      "complete_delivery": true
+    },
+    {
+      "threshold": 14,
+      "below_iir": 193,
+      "reached_iir": 196,
+      "received_hex": "7878787878787878787878787879",
+      "empty_iir": 193,
+      "complete_delivery": true
+    }
+  ],
+  "rx_timeout": {
+    "samples": [
+      {
+        "elapsed_ns": 0,
+        "iir": 193
+      },
+      {
+        "elapsed_ns": 260418,
+        "iir": 193
+      },
+      {
+        "elapsed_ns": 347224,
+        "iir": 204
+      }
+    ],
+    "received_hex": "7e",
+    "cleared_iir": 193,
+    "four_character_interrupt": true
+  },
+  "rx_nonfifo": {
+    "received_hex": "31323334",
+    "final_lsr": 96,
+    "iir": 1,
+    "complete_delivery": true
+  },
+  "qemu_stderr_tail": ""
+}

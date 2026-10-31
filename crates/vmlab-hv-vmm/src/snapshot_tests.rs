@@ -214,6 +214,7 @@ fn machine_with_ram_setup(
         }],
         nodes: vec![DeviceNode::Plain(snap_serial)],
     }));
+    shared.serials.lock().push(serial);
     let mut vcpu = shared.kvm.create_vcpu(0).ok()?;
     crate::loader::init_real_mode(&mut vcpu, 0x8000).ok()?;
     let mut sregs = vcpu.get_sregs().ok()?;

@@ -1,0 +1,106 @@
+[
+  {
+    "count": 1,
+    "direction": "read",
+    "first_raw_line": 21071,
+    "index": 0,
+    "values": [
+      "0xb0c5"
+    ]
+  },
+  {
+    "count": 1,
+    "direction": "read",
+    "first_raw_line": 21073,
+    "index": 10,
+    "values": [
+      "0x100"
+    ]
+  },
+  {
+    "count": 4,
+    "direction": "write",
+    "first_raw_line": 21078,
+    "index": 4,
+    "values": [
+      "0x0",
+      "0x41"
+    ]
+  },
+  {
+    "count": 2,
+    "direction": "write",
+    "first_raw_line": 21080,
+    "index": 5,
+    "values": [
+      "0x0"
+    ]
+  },
+  {
+    "count": 2,
+    "direction": "write",
+    "first_raw_line": 21082,
+    "index": 8,
+    "values": [
+      "0x0"
+    ]
+  },
+  {
+    "count": 2,
+    "direction": "write",
+    "first_raw_line": 21084,
+    "index": 9,
+    "values": [
+      "0x0"
+    ]
+  },
+  {
+    "count": 2,
+    "direction": "write",
+    "first_raw_line": 21086,
+    "index": 3,
+    "values": [
+      "0x20"
+    ]
+  },
+  {
+    "count": 2,
+    "direction": "write",
+    "first_raw_line": 21088,
+    "index": 1,
+    "values": [
+      "0x280",
+      "0x500"
+    ]
+  },
+  {
+    "count": 2,
+    "direction": "write",
+    "first_raw_line": 21090,
+    "index": 6,
+    "values": [
+      "0x280",
+      "0x500"
+    ]
+  },
+  {
+    "count": 2,
+    "direction": "write",
+    "first_raw_line": 21092,
+    "index": 2,
+    "values": [
+      "0x1e0",
+      "0x320"
+    ]
+  },
+  {
+    "count": 2,
+    "direction": "write",
+    "first_raw_line": 21094,
+    "index": 7,
+    "values": [
+      "0x1e0",
+      "0x320"
+    ]
+  }
+]

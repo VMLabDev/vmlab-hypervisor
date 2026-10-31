@@ -20,3 +20,11 @@ _start:
 .balign 8
 .global tohost
 tohost: .quad 0
+# QEMU's spike machine discovers the HTIF exit device by these symbols and
+# requires the 8-byte size on each; fromhost is its response channel. The
+# directives live in the symbol table only: the executed stream, the entry
+# point and the tohost watch address 0x80001000 are unchanged, and the flat
+# image grows by eight zero bytes at 0x80001008.
+fromhost: .quad 0
+.size tohost, 8
+.size fromhost, 8

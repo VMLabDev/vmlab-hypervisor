@@ -1,0 +1,36 @@
+{
+  "captured_utc": "2026-10-31T12:43:54.719934+00:00",
+  "qemu_version": "11.1.2",
+  "machine": "pc,accel=qtest",
+  "backend": "socket,server=on,wait=off",
+  "oracle": "scripts/pc-uart-oracle.py",
+  "tx_unblocked": {
+    "virtual_ns": 1,
+    "input": [65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84],
+    "immediate": [65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84],
+    "lsr": 96,
+    "iir": 194,
+    "acknowledged_iir": 193
+  },
+  "tx_backpressure": {
+    "filler_written": 279,
+    "filler_received": 279,
+    "blocked_lsr": 32,
+    "full_lsr": 0,
+    "full_iir": 193,
+    "markers_written": [176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192],
+    "markers_received": [177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192],
+    "final_lsr": 96,
+    "final_iir": 194
+  },
+  "rx": {
+    "triggers": [4,8,14],
+    "below_iir": 193,
+    "reached_iir": 196,
+    "empty_iir": 193,
+    "timeout_ns": 347224,
+    "timeout_iir": 204,
+    "burst_count": 32,
+    "nonfifo": [49,50,51,52]
+  }
+}

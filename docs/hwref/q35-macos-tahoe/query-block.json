@@ -1,0 +1,196 @@
+[
+  {
+    "device": "pflash0",
+    "inserted": {
+      "active": true,
+      "backing_file_depth": 0,
+      "bps": 0,
+      "bps_rd": 0,
+      "bps_wr": 0,
+      "cache": {
+        "direct": false,
+        "no-flush": false,
+        "writeback": true
+      },
+      "children": [
+        {
+          "child": "file",
+          "node-name": "#block317"
+        }
+      ],
+      "detect_zeroes": "off",
+      "drv": "raw",
+      "encrypted": false,
+      "file": "/home/wil/.local/share/vmlab/guest/firmware/x86_64/OVMF_CODE_4M.fd",
+      "image": {
+        "actual-size": 3653632,
+        "dirty-flag": false,
+        "filename": "/home/wil/.local/share/vmlab/guest/firmware/x86_64/OVMF_CODE_4M.fd",
+        "format": "raw",
+        "limits": {
+          "max-iov": 1024,
+          "min-mem-alignment": 1,
+          "opt-mem-alignment": 4096,
+          "request-alignment": 1
+        },
+        "virtual-size": 3653632
+      },
+      "iops": 0,
+      "iops_rd": 0,
+      "iops_wr": 0,
+      "node-name": "#block433",
+      "ro": true,
+      "write_threshold": 0
+    },
+    "locked": false,
+    "qdev": "/machine/system.flash0",
+    "removable": false,
+    "type": "unknown"
+  },
+  {
+    "device": "pflash1",
+    "inserted": {
+      "active": true,
+      "backing_file_depth": 0,
+      "bps": 0,
+      "bps_rd": 0,
+      "bps_wr": 0,
+      "cache": {
+        "direct": false,
+        "no-flush": false,
+        "writeback": true
+      },
+      "children": [
+        {
+          "child": "file",
+          "node-name": "#block532"
+        }
+      ],
+      "detect_zeroes": "off",
+      "drv": "raw",
+      "encrypted": false,
+      "file": "/tmp/maccap.8E3Qjc/.vmlab/vms/mac/OVMF_VARS.fd",
+      "image": {
+        "actual-size": 540672,
+        "dirty-flag": false,
+        "filename": "/tmp/maccap.8E3Qjc/.vmlab/vms/mac/OVMF_VARS.fd",
+        "format": "raw",
+        "limits": {
+          "max-iov": 1024,
+          "min-mem-alignment": 1,
+          "opt-mem-alignment": 4096,
+          "request-alignment": 1
+        },
+        "virtual-size": 540672
+      },
+      "iops": 0,
+      "iops_rd": 0,
+      "iops_wr": 0,
+      "node-name": "#block694",
+      "ro": false,
+      "write_threshold": 0
+    },
+    "locked": false,
+    "qdev": "/machine/system.flash1",
+    "removable": false,
+    "type": "unknown"
+  },
+  {
+    "device": "",
+    "inserted": {
+      "active": true,
+      "backing_file": "/home/wil/.local/share/vmlab/templates/x86_64/macos-tahoe/26.7.0/disk.qcow2",
+      "backing_file_depth": 1,
+      "bps": 0,
+      "bps_rd": 0,
+      "bps_wr": 0,
+      "cache": {
+        "direct": false,
+        "no-flush": false,
+        "writeback": true
+      },
+      "children": [
+        {
+          "child": "backing",
+          "node-name": "#block273"
+        },
+        {
+          "child": "file",
+          "node-name": "#block031"
+        }
+      ],
+      "detect_zeroes": "off",
+      "drv": "qcow2",
+      "encrypted": false,
+      "file": "/tmp/maccap.8E3Qjc/.vmlab/vms/mac/disk0.qcow2",
+      "image": {
+        "actual-size": 42930176,
+        "backing-filename": "/home/wil/.local/share/vmlab/templates/x86_64/macos-tahoe/26.7.0/disk.qcow2",
+        "backing-filename-format": "qcow2",
+        "backing-image": {
+          "actual-size": 18971693056,
+          "cluster-size": 65536,
+          "dirty-flag": false,
+          "filename": "/home/wil/.local/share/vmlab/templates/x86_64/macos-tahoe/26.7.0/disk.qcow2",
+          "format": "qcow2",
+          "format-specific": {
+            "data": {
+              "compat": "1.1",
+              "compression-type": "zlib",
+              "corrupt": false,
+              "extended-l2": false,
+              "lazy-refcounts": false,
+              "refcount-bits": 16
+            },
+            "type": "qcow2"
+          },
+          "limits": {
+            "discard-alignment": 65536,
+            "max-iov": 1024,
+            "min-mem-alignment": 1,
+            "opt-mem-alignment": 4096,
+            "request-alignment": 1,
+            "write-zeroes-alignment": 65536
+          },
+          "virtual-size": 85899345920
+        },
+        "cluster-size": 65536,
+        "dirty-flag": false,
+        "filename": "/tmp/maccap.8E3Qjc/.vmlab/vms/mac/disk0.qcow2",
+        "format": "qcow2",
+        "format-specific": {
+          "data": {
+            "compat": "1.1",
+            "compression-type": "zlib",
+            "corrupt": false,
+            "extended-l2": false,
+            "lazy-refcounts": false,
+            "refcount-bits": 16
+          },
+          "type": "qcow2"
+        },
+        "full-backing-filename": "/home/wil/.local/share/vmlab/templates/x86_64/macos-tahoe/26.7.0/disk.qcow2",
+        "limits": {
+          "discard-alignment": 65536,
+          "max-iov": 1024,
+          "min-mem-alignment": 1,
+          "opt-mem-alignment": 4096,
+          "request-alignment": 1,
+          "write-zeroes-alignment": 65536
+        },
+        "virtual-size": 85899345920
+      },
+      "iops": 0,
+      "iops_rd": 0,
+      "iops_wr": 0,
+      "node-name": "disk0",
+      "ro": false,
+      "write_threshold": 0
+    },
+    "io-status": "ok",
+    "locked": false,
+    "qdev": "/machine/peripheral-anon/device[3]",
+    "removable": false,
+    "type": "unknown"
+  }
+]

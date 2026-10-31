@@ -1,0 +1,2 @@
+memory.max=25769803776
+memory.swap.max=0

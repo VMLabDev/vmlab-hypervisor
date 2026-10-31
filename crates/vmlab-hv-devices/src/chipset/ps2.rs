@@ -222,11 +222,8 @@ impl I8042 {
     }
 
     fn set_output_port(&mut self, value: u8) {
-        let changed = (self.output_port ^ value) & 2 != 0;
         self.output_port = value;
-        if changed {
-            (self.output)(ControllerEvent::A20(value & 2 != 0));
-        }
+        (self.output)(ControllerEvent::A20(value & 2 != 0));
         if value & 1 == 0 {
             (self.output)(ControllerEvent::Reset);
         }
@@ -875,6 +872,22 @@ mod tests {
                 ControllerEvent::Reset
             ]
         );
+    }
+
+    #[test]
+    fn repeated_output_write_reasserts_a20_after_another_controller_changes_it() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let mut controller = I8042::new(
+            Arc::new(Irq::default()),
+            Arc::new(Irq::default()),
+            Arc::new(move |event| sink.lock().unwrap().push(event)),
+        );
+        for _ in 0..2 {
+            write(&mut controller, 4, 0xd1);
+            write(&mut controller, 0, 3);
+        }
+        assert_eq!(*events.lock().unwrap(), vec![ControllerEvent::A20(true); 2]);
     }
     #[test]
     fn mouse_probe_reporting_and_snapshot() {

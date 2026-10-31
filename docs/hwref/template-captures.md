@@ -10,11 +10,23 @@ templates. They do not replace S1 acceptance tests on vmlab-hv.
 | `pc-windows-98-se` | Desktop and agent | Two 16-bit modes, GDI blits, 2918 BitBLT starts | Disk and CD readback | No active PCnet interface | Host quit after two failed stop attempts |
 | `pc-windows-7` | Desktop and agent | Interactive modes and blits passed | Disk and CD readback | e1000 DHCP and two ping replies | Guest poweroff |
 | `pc-templeos` | Desktop and HolyC agent | 640x480 observed; no alternate mode | File write/read/delete; no CD attached | No NIC attached | Guest poweroff |
-| `q35-macos-tahoe` | Not started | Unknown | Unknown | Unknown | Not tested |
+| `q35-macos-tahoe` | Agent-ready, macOS 26.7.2 | VBE modes and framebuffer; no SVGA FIFO activity | SATA file readback | Transitional virtio-net, two ping replies | Guest poweroff |
 
-macOS is blocked because `host.apple_smc_osk` is unset. No key value was
-printed, saved, or committed. The XNU MSR list and the VMware FIFO verdict
-are both unknown. The owner must set the key before that part can proceed.
+The macOS follow-up used the now-configured `host.apple_smc_osk` and the
+current locally compiled vmlab binary. Its FIFO verdict is no commands:
+all VMware event counts were zero and the entire FIFO BAR was zero.
+Mode-setting used the VGA-compatible VBE ports instead of VMware-indexed
+registers. The owner deferred the XNU MSR list to vmlab-hv's D2 userspace
+MSR exits and once-per-MSR logging; no privileged host changes were made.
+The macOS README records a secret-handling incident: the initial local
+QMP qtree artifact contained the OSK property before redaction. No value
+was displayed in tool output or committed; the final secret scan passed.
+
+The macOS lab was `/tmp/maccap.8E3Qjc`, isolated from the earlier four
+captures. It added a qtest observation socket alongside tracing and QMP.
+Its directory contains register and command summaries, static hardware
+state, checksum-valid ACPI and SMBIOS data, input evidence, and an overlay
+check. See its README for interpretation limits and deferred observations.
 
 ## Provenance and safety
 
@@ -97,3 +109,11 @@ the scratch lab configuration.
 
 These checks validate the recorded evidence. They do not resolve the guest
 failures or missing observations described above.
+
+The macOS follow-up has its own `validation.json` and SHA-256 manifest.
+Its independent artifact checks passed. Its repository gate did not:
+the first `just ci::check` run hit four VM-permit timeouts; a serialized
+retry passed those tests but hit host-capacity and permit timeouts in the
+audio integration tests. Both CI runs exited 101, and later workspace
+test binaries were not run. The macOS README and `ci-*.json` retain the
+details. The earlier four-capture CI success does not cover this follow-up.

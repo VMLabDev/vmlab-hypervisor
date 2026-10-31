@@ -1,0 +1,30 @@
+{
+  "guest_static": [
+    "/bin/sh",
+    "-c",
+    "sw_vers; uname -a; sysctl machdep.cpu hw.memsize machdep.tsc.frequency; system_profiler SPDisplaysDataType SPSerialATADataType SPUSBDataType SPPCIDataType; ioreg -p IOUSB -l; kextstat | grep -Ei \"AHCI|VirtIO|SMC|XHCI\"; ifconfig; ioreg -r -c AppleSMC"
+  ],
+  "storage_network_display": [
+    "/bin/sh",
+    "-c",
+    "printf hwref-macos > /Users/Shared/hwref-capture.txt; cat /Users/Shared/hwref-capture.txt; sync; rm /Users/Shared/hwref-capture.txt; ping -c 2 10.219.89.1; open -a TextEdit; sleep 3"
+  ],
+  "hid_and_driver_inventory": [
+    "/bin/sh",
+    "-c",
+    "hidutil list; ioreg -r -c AppleUSBXHCIPCI -l; ioreg -r -c AppleVirtIO -l; ioreg -r -c IONDRVFramebuffer -l"
+  ],
+  "qtest_observation": {
+    "fifo_read": "b64read 0x81040000 0x10000",
+    "fwcfg_directory_selector": "outw 0x510 0x19",
+    "fwcfg_data_read": "inb 0x511",
+    "memory_scan": "128 one-MiB reads from 0x78000000 through 0x7fffffff; retain checksum-valid ACPI and SMBIOS structures only",
+    "rtc_index_write": "outb 0x70 <index>",
+    "rtc_data_read": "inb 0x71"
+  },
+  "notes": [
+    "Guest commands ran through vmlab exec mac --; individual HID commands are recorded in hid-exercise.json",
+    "The compound storage/network command returned the status of its final sleep; file stdout and ping output were also checked",
+    "No password was submitted"
+  ]
+}

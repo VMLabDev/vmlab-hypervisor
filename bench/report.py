@@ -73,7 +73,7 @@ def print_arch(arch, args):
                 f"  {moves}"
             )
             prev = rec["median"]
-        if backend == "vmlab-hv":
+        if backend == "vmlab-hv" or backend.startswith("interpreter"):
             base = lib.latest_baseline(records, arch, guest, vcpus, workload)
             if base:
                 ratio = entries[-1]["median"] / base["median"]
@@ -82,7 +82,7 @@ def print_arch(arch, args):
                 else:
                     bar = "meets" if ratio <= 1.0 else "BELOW"
                     print(
-                        f"  D1 bar: last hv median {entries[-1]['median']:.2f}s vs"
+                        f"  D1 bar: last {backend} median {entries[-1]['median']:.2f}s vs"
                         f" qemu {base['median']:.2f}s ({base['recorded']})"
                         f" = {ratio:.2f}x -> {bar} D1 (>=1.00x)"
                     )
