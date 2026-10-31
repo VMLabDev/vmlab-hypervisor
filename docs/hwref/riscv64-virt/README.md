@@ -174,9 +174,20 @@ executor, independently of unread aggregate size. Bounds, type errors,
 bit selection, nested projections, and ownership tests pass. Repeated
 code/data TLB conflicts stay native, and machine/supervisor timer entry and
 return still match every Sail global. Formatting and TCG clippy pass.
-These checks establish the reproduced allocation fix; full lockstep,
-performance measurements, and live throughput confirmation for this
-revision are pending the end of the shared benchmark window.
+After merging main `6cceef4`, revision `0d6d578` passes all 133 Sail-oracle
+programs without divergence. Generated Rust and compressed IR remain
+byte-identical. Three-repeat warm medians are 0.019528 seconds for the
+scalar loop and 6.167672 seconds for CoreMark, or 49.331 MIPS.
+`just bench-check` passes. These measurements exclude cold trace creation
+and do not establish firmware boot throughput.
+
+The fresh initial-tree comparison reports exactly the ten approved D7
+differences. The hwref suite runs 62 tests with two optional recaptures
+skipped; all other tests pass. All 87 benchmark unit tests pass after the
+merge. Full CI is still running. Its three direct-kernel S1 tests pass,
+including all empty MMIO transports, shutdown, exit-on-reset, and preserved
+RAM across warm reset in the same process. Cold edk2 and Linux acceptance
+remain pending.
 
 The benchmark runner's TCG path referenced an undefined `BOOT_DEADLINE`,
 removed by an earlier x86 readiness change. The original 1,800-second
