@@ -30,6 +30,7 @@ import lib
 import netpeer
 from backends import HvBackend, QemuBackend, X86HvBackend, X86QemuBackend
 
+BOOT_DEADLINE = 1800.0
 X86_BOOT_DEADLINE = {"windows-10": 1800.0, "ubuntu-26.04": 300.0}
 PREP_TIMEOUT = 3600
 WORKLOAD_TIMEOUT = {"sha256_256M": 3600, "xz_9_32M": 7200}

@@ -357,6 +357,39 @@ class NoiseControlTests(unittest.TestCase):
 
 
 class ScriptSmokeTests(unittest.TestCase):
+    def test_tcg_boot_repeat_waits_for_agent_and_cleans_up(self):
+        import run
+
+        args = run.parse_args([
+            "--backend", "vmlab-hv", "--arch", "riscv64", "--suite", "boot",
+            "--timeout-scale", "20", "--keep",
+        ])
+        backend = mock.Mock()
+        session = backend.launch.return_value
+        session.elapsed.side_effect = [0.25, 1234.5]
+        session.wait_exit.return_value = 0
+        session.exit_code.return_value = 0
+        agent = mock.Mock()
+        hello = {"agent_version": "test", "os": "linux", "features": []}
+        with tempfile.TemporaryDirectory() as root, \
+             mock.patch.object(lib, "RUN_DIR", root), \
+             mock.patch.object(lib, "prepare_run_dir", return_value=("disk", "code", "vars")), \
+             mock.patch.object(run, "make_backend", return_value=backend), \
+             mock.patch.object(lib, "wait_for_agent", return_value=(agent, hello)) as ready:
+            result, *_ = run.one_repeat(args, "riscv64", 1, "16-19", "test", 1)
+            self.assertEqual(result["samples"], {"boot_to_agent_ready": 1234.5})
+            self.assertEqual(ready.call_args.args[0], backend.agent_socket.return_value)
+            self.assertEqual(ready.call_args.args[1], 1800 * 20)
+            self.assertEqual(ready.call_args.kwargs["vm_exited"], session.exit_code)
+            backend.release_cpus.assert_called_once_with()
+            agent.exec.assert_not_called()
+            agent.shutdown.assert_called_once_with()
+            agent.close.assert_called_once_with()
+            backend.quit.assert_called_once_with()
+            session.kill.assert_called_once_with()
+            with open(os.path.join(result["run"], "result.json")) as saved:
+                self.assertEqual(json.load(saved)["samples"], result["samples"])
+
     def test_run_help(self):
         import run
         import contextlib
