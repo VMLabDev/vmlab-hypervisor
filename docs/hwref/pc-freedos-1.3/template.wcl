@@ -1,0 +1,15 @@
+import <vmlab-meta.wcl>
+
+template_meta "freedos-1.3" {
+  arch = "x86"
+  version = "1.3.0"
+  profile = "windows-9x"
+  cpus = 1
+  memory = 64MiB
+  disk = 2GiB
+  created = "2026-10-06T08:07:14.755603718+00:00"
+  registry = "ghcr.io/vmlabdev/vmlab-templates/freedos-1.3"
+  sha256 = "383cfffa886174911c01216a8372a5ff2e245d7360aa28a8508d9eef44602223"
+  agent_version = "agent-legacy=f1e4515"
+  wscript_surface = 1
+}

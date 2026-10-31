@@ -1,0 +1,56 @@
+["exec", "temple", "--", "Dir;"]
+temple: no vmlab-agent answered on the agent channel — the guest's vmlab-agent (agent-templeos=f1e4515) has not answered yet — the guest is likely still booting; retry once `vmlab status` shows it ready
+
+exit=1
+["exec", "temple", "--", "\"screen=%d x %d\\n\",GR_WIDTH,GR_HEIGHT;"]
+temple: the guest's vmlab-agent (agent-templeos=f1e4515) has not answered yet — the guest is likely still booting; retry once `vmlab status` shows it ready
+
+exit=1
+["vm", "screenshot", "temple", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/temple/desktop.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/temple/desktop.png
+
+exit=0
+["exec", "temple", "--", "Dir;"]
+Directory of C:/Home
+DATE_ TIME_ SIZE
+10/06 07:51 0000 .
+10/06 07:51 0000 ..
+10/06 08:04 35CB VmlabAgt.HC
+06/21 11:25 0416 DoDistro.HC.Z
+10/06 08:04 015A MakeHome.HC.Z
+10/31 10:32 01D2 Registry.HC.Z
+
+exit=0
+["exec", "temple", "--", "\"screen=%d x %d\\n\",GR_WIDTH,GR_HEIGHT;"]
+screen=640 x 480
+
+exit=0
+["exec", "temple", "--", "FileWrite(\"~/HWREF.TXT\",\"HWREF DISK CHECK\",16); U8 *d=FileRead(\"~/HWREF.TXT\"); \"%s\\n\",d; Free(d); Del(\"~/HWREF.TXT\");"]
+HWREF DISK CHECK
+Del HWREF.TXT
+
+exit=0
+["vm", "mouse-move", "temple", "200", "150"]
+
+exit=0
+["vm", "click", "temple", "200", "150"]
+
+exit=0
+["vm", "sendkeys", "temple", "a"]
+
+exit=0
+["vm", "sendkeys", "temple", "backspace"]
+
+exit=0
+["vm", "screenshot", "temple", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/temple/desktop.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/temple/desktop.png
+
+exit=0
+["exec", "temple", "--", "\"mouse=%d,%d\\n\",ms.pos.x,ms.pos.y;"]
+mouse=320,240
+
+exit=0
+["exec", "temple", "--", "\"mouse=%d,%d\\n\",ms.pos.x,ms.pos.y;"]
+mouse=320,240
+
+exit=0

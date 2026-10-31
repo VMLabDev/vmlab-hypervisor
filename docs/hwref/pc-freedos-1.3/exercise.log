@@ -1,0 +1,159 @@
+["exec", "dos", "--", "D:\\DOSNET.BAT"]
+Packet driver for an PCNTPK, version 02.20
+Packet driver skeleton copyright 1988-92, Crynwr Software.
+This program is free software; see the file COPYING for details.
+NO WARRANTY; see the file COPYING for details.
+
+Packet driver is at segment 34B5
+PCNTPK-DOS-001: PCNTPK [-n] [-d] [-w] <INT=packet_int_no>
+[IRQ=int_no] [IOADDR=io_addr] [DMA=dma_no]
+[BUSTYPE=bus] [DMAROTATE] [TP] [FDUP=xx]
+[LED0=xx] [LED1=xx] [LED2=xx] [LED3=xx]
+mTCP DHCP Client by M Brutman (mbbrutman@gmail.com) (C)opyright 2008-2020
+Version: Mar  7 2020
+
+
+mTCP Ping by M Brutman (mbbrutman@gmail.com) (C)opyright 2009-2020
+Version: Mar  7 2020
+
+Unknown option: -c
+
+ping [options] <ipaddr>
+
+Options:
+  -help        Shows this help
+  -count <n>   Number of packets to send, default is 4
+  -size <n>    Size of ICMP payload to send, default is 32
+  -timeout <n> Number of seconds to wait for a response packet
+Init: could not setup packet driver
+Could not initialize TCP/IP stack
+
+
+exit=1
+["exec", "dos", "--", "dir", "C:\\NET\\MTCP", "/b"]
+MANUAL
+SAMPLES
+00README.TXT
+00_MTCP.TXT
+COPYING.TXT
+DHCP.EXE
+DNSTEST.EXE
+FTP.EXE
+FTPSRV.EXE
+HTGET.EXE
+HTTPSERV.EXE
+IRCJR.EXE
+NC.EXE
+PING.EXE
+PKTTOOL.EXE
+SNTP.EXE
+SPDTEST.EXE
+TELNET.EXE
+
+exit=0
+["exec", "dos", "--", "C:\\NET\\FDNET\\PCNTPK.COM", "INT=0x60"]
+Packet driver for an PCNTPK, version 02.20
+Packet driver skeleton copyright 1988-92, Crynwr Software.
+This program is free software; see the file COPYING for details.
+NO WARRANTY; see the file COPYING for details.
+
+Packet driver is at segment 23A8
+Interrupt number 0xA (10)
+I/O port 0xC020 (49184)
+My Ethernet address is 52:54:00:09:78:DF
+
+exit=0
+["exec", "dos", "--", "echo", "SET", "MTCPCFG=C:\\NET\\FDNET\\MTCP.CFG", ">", "C:\\VMLAB\\NET.BAT"]
+
+exit=0
+["exec", "dos", "--", "echo", "C:\\NET\\FDNET\\DHCP.EXE", ">>", "C:\\VMLAB\\NET.BAT"]
+
+exit=0
+["exec", "dos", "--", "echo", "C:\\NET\\MTCP\\PING.EXE", "-count", "2", "10.219.87.1", ">>", "C:\\VMLAB\\NET.BAT"]
+
+exit=0
+["exec", "dos", "--", "C:\\VMLAB\\NET.BAT"]
+C:\>SET MTCPCFG=C:\NET\FDNET\MTCP.CFG
+C:\>C:\NET\FDNET\DHCP.EXE
+mTCP DHCP Client by M Brutman (mbbrutman@gmail.com) (C)opyright 2008-2020
+Version: Mar  7 2020
+
+Timeout per request: 10 seconds, Retry attempts: 3
+Sending DHCP requests, Press [ESC] to abort.
+
+DHCP request sent, attempt 1: Offer received, Acknowledged
+
+Good news everyone!
+
+IPADDR 10.219.87.2
+NETMASK 255.255.255.0
+GATEWAY 10.219.87.1
+NAMESERVER 10.219.87.1
+LEASE_TIME 3600 seconds
+
+Settings written to 'C:\NET\FDNET\MTCP.CFG '
+C:\>C:\NET\MTCP\PING.EXE -count 2 10.219.87.1
+
+mTCP Ping by M Brutman (mbbrutman@gmail.com) (C)opyright 2009-2020
+Version: Mar  7 2020
+
+Your DHCP lease expires in less than 3600 seconds!  Please run DHCP.EXE.
+
+exit=1
+["exec", "dos", "--", "D:\\DOSTEST.EXE"]
+VBE 640x480x8 requested; text mode 3 restored
+disk_close=0
+disk_content=HWREF DOS DISK CHECK
+cd_open=ok
+cd_content=VMLAB clean-room optical-media capture fixture.
+keyboard_byte=0
+mouse_x=320 mouse_y=96 buttons=0
+
+exit=0
+["vm", "screenshot", "dos", "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/dos-r4/desktop.png"]
+/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/dos-r4/desktop.png
+
+exit=0
+["exec", "dos", "--", "echo", "PACKETINT", "0x60", ">", "C:\\VMLAB\\STATIC.CFG"]
+
+exit=0
+["exec", "dos", "--", "echo", "IPADDR", "10.219.87.2", ">>", "C:\\VMLAB\\STATIC.CFG"]
+
+exit=0
+["exec", "dos", "--", "echo", "NETMASK", "255.255.255.0", ">>", "C:\\VMLAB\\STATIC.CFG"]
+
+exit=0
+["exec", "dos", "--", "echo", "GATEWAY", "10.219.87.1", ">>", "C:\\VMLAB\\STATIC.CFG"]
+
+exit=0
+["exec", "dos", "--", "echo", "HOSTNAME", "hwref-dos", ">>", "C:\\VMLAB\\STATIC.CFG"]
+
+exit=0
+["exec", "dos", "--", "echo", "SET", "MTCPCFG=C:\\VMLAB\\STATIC.CFG", ">", "C:\\VMLAB\\PING.BAT"]
+
+exit=0
+["exec", "dos", "--", "echo", "C:\\NET\\MTCP\\PING.EXE", "-count", "2", "10.219.87.1", ">>", "C:\\VMLAB\\PING.BAT"]
+
+exit=0
+["exec", "dos", "--", "C:\\VMLAB\\PING.BAT"]
+C:\>SET MTCPCFG=C:\VMLAB\STATIC.CFG
+C:\>C:\NET\MTCP\PING.EXE -count 2 10.219.87.1
+
+mTCP Ping by M Brutman (mbbrutman@gmail.com) (C)opyright 2009-2020
+Version: Mar  7 2020
+
+ICMP Packet payload is 32 bytes.
+
+Packet sequence number 0 received in 0.00 ms, ttl=64
+Packet sequence number 1 received in 0.00 ms, ttl=64
+
+Packets sent: 2, Replies received: 2, Replies lost: 0
+Average time for a reply: 0.00 ms (not counting lost packets)
+mTCP: Warning - trailing whitespace detected on line 1 of the config file.
+mTCP: Warning - trailing whitespace detected on line 2 of the config file.
+mTCP: Warning - trailing whitespace detected on line 3 of the config file.
+mTCP: Warning - trailing whitespace detected on line 4 of the config file.
+mTCP: Warning - trailing whitespace detected on line 5 of the config file.
+
+
+exit=0

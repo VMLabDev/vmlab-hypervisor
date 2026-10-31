@@ -1,0 +1,157 @@
+[
+  {
+    "device": "floppy0",
+    "locked": false,
+    "removable": true,
+    "qdev": "/machine/unattached/device[12]",
+    "type": "unknown"
+  },
+  {
+    "io-status": "ok",
+    "device": "",
+    "locked": false,
+    "removable": false,
+    "inserted": {
+      "iops_rd": 0,
+      "detect_zeroes": "off",
+      "active": true,
+      "image": {
+        "backing-image": {
+          "limits": {
+            "write-zeroes-alignment": 65536,
+            "request-alignment": 1,
+            "min-mem-alignment": 1,
+            "discard-alignment": 65536,
+            "opt-mem-alignment": 4096,
+            "max-iov": 1024
+          },
+          "virtual-size": 2147483648,
+          "filename": "/home/wil/.local/share/vmlab/templates/x86/freedos-1.3/1.3.0/disk.qcow2",
+          "cluster-size": 65536,
+          "format": "qcow2",
+          "actual-size": 250744832,
+          "format-specific": {
+            "type": "qcow2",
+            "data": {
+              "compat": "1.1",
+              "compression-type": "zlib",
+              "lazy-refcounts": false,
+              "refcount-bits": 16,
+              "corrupt": false,
+              "extended-l2": false
+            }
+          },
+          "dirty-flag": false
+        },
+        "limits": {
+          "write-zeroes-alignment": 65536,
+          "request-alignment": 1,
+          "min-mem-alignment": 1,
+          "discard-alignment": 65536,
+          "opt-mem-alignment": 4096,
+          "max-iov": 1024
+        },
+        "backing-filename-format": "qcow2",
+        "virtual-size": 2147483648,
+        "filename": "/home/wil/dev/vmlab/.scratch/hwref-captures.MTzhVI/.vmlab/vms/dos/disk0.qcow2",
+        "cluster-size": 65536,
+        "format": "qcow2",
+        "actual-size": 8851456,
+        "format-specific": {
+          "type": "qcow2",
+          "data": {
+            "compat": "1.1",
+            "compression-type": "zlib",
+            "lazy-refcounts": false,
+            "refcount-bits": 16,
+            "corrupt": false,
+            "extended-l2": false
+          }
+        },
+        "full-backing-filename": "/home/wil/.local/share/vmlab/templates/x86/freedos-1.3/1.3.0/disk.qcow2",
+        "backing-filename": "/home/wil/.local/share/vmlab/templates/x86/freedos-1.3/1.3.0/disk.qcow2",
+        "dirty-flag": false
+      },
+      "iops_wr": 0,
+      "ro": false,
+      "children": [
+        {
+          "node-name": "#block225",
+          "child": "backing"
+        },
+        {
+          "node-name": "#block035",
+          "child": "file"
+        }
+      ],
+      "node-name": "disk0",
+      "backing_file_depth": 1,
+      "drv": "qcow2",
+      "iops": 0,
+      "bps_wr": 0,
+      "write_threshold": 0,
+      "backing_file": "/home/wil/.local/share/vmlab/templates/x86/freedos-1.3/1.3.0/disk.qcow2",
+      "encrypted": false,
+      "bps": 0,
+      "bps_rd": 0,
+      "cache": {
+        "no-flush": false,
+        "direct": false,
+        "writeback": true
+      },
+      "file": "/home/wil/dev/vmlab/.scratch/hwref-captures.MTzhVI/.vmlab/vms/dos/disk0.qcow2"
+    },
+    "qdev": "/machine/peripheral-anon/device[2]",
+    "type": "unknown"
+  },
+  {
+    "io-status": "ok",
+    "device": "",
+    "locked": false,
+    "removable": true,
+    "inserted": {
+      "iops_rd": 0,
+      "detect_zeroes": "off",
+      "active": true,
+      "image": {
+        "limits": {
+          "request-alignment": 1,
+          "min-mem-alignment": 1,
+          "opt-mem-alignment": 4096,
+          "max-iov": 1024
+        },
+        "virtual-size": 428032,
+        "filename": "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/dos-fixture.iso",
+        "format": "raw",
+        "actual-size": 430080,
+        "dirty-flag": false
+      },
+      "iops_wr": 0,
+      "ro": true,
+      "children": [
+        {
+          "node-name": "#block360",
+          "child": "file"
+        }
+      ],
+      "node-name": "cd0",
+      "backing_file_depth": 0,
+      "drv": "raw",
+      "iops": 0,
+      "bps_wr": 0,
+      "write_threshold": 0,
+      "encrypted": false,
+      "bps": 0,
+      "bps_rd": 0,
+      "cache": {
+        "no-flush": false,
+        "direct": false,
+        "writeback": true
+      },
+      "file": "/home/wil/dev/vmlab-hypervisor-wt/captures/.scratch/dos-fixture.iso"
+    },
+    "qdev": "install-cd",
+    "tray_open": false,
+    "type": "unknown"
+  }
+]

@@ -1,0 +1,315 @@
+{
+  "0x0f": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": [
+      "0x00"
+    ]
+  },
+  "0x38": {
+    "read_values": [
+      "0x30"
+    ],
+    "write_values": []
+  },
+  "0x3d": {
+    "read_values": [
+      "0x12"
+    ],
+    "write_values": []
+  },
+  "0x08": {
+    "read_values": [
+      "0x10"
+    ],
+    "write_values": []
+  },
+  "0x5f": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x00": {
+    "read_values": [
+      "0x28",
+      "0x29",
+      "0x59",
+      "0x00",
+      "0x01",
+      "0x04",
+      "0x05",
+      "0x09",
+      "0x10",
+      "0x11",
+      "0x12",
+      "0x13",
+      "0x17",
+      "0x21",
+      "0x22",
+      "0x23",
+      "0x24",
+      "0x25",
+      "0x26"
+    ],
+    "write_values": []
+  },
+  "0x0b": {
+    "read_values": [
+      "0x02"
+    ],
+    "write_values": [
+      "0x02"
+    ]
+  },
+  "0x0c": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x0d": {
+    "read_values": [
+      "0x80"
+    ],
+    "write_values": []
+  },
+  "0x0a": {
+    "read_values": [
+      "0x26"
+    ],
+    "write_values": [
+      "0x26"
+    ]
+  },
+  "0x02": {
+    "read_values": [
+      "0x44",
+      "0x45"
+    ],
+    "write_values": []
+  },
+  "0x04": {
+    "read_values": [
+      "0x20"
+    ],
+    "write_values": []
+  },
+  "0x32": {
+    "read_values": [
+      "0x20"
+    ],
+    "write_values": []
+  },
+  "0x10": {
+    "read_values": [
+      "0x50"
+    ],
+    "write_values": []
+  },
+  "0x39": {
+    "read_values": [
+      "0x02"
+    ],
+    "write_values": []
+  },
+  "0x09": {
+    "read_values": [
+      "0x26"
+    ],
+    "write_values": []
+  },
+  "0x07": {
+    "read_values": [
+      "0x31"
+    ],
+    "write_values": []
+  },
+  "0x2d": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x2c": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x2b": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x2a": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x29": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x28": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x27": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x26": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x25": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x24": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x23": {
+    "read_values": [
+      "0x3f"
+    ],
+    "write_values": []
+  },
+  "0x22": {
+    "read_values": [
+      "0x10"
+    ],
+    "write_values": []
+  },
+  "0x21": {
+    "read_values": [
+      "0x41"
+    ],
+    "write_values": []
+  },
+  "0x20": {
+    "read_values": [
+      "0xc8"
+    ],
+    "write_values": []
+  },
+  "0x1f": {
+    "read_values": [
+      "0xff"
+    ],
+    "write_values": []
+  },
+  "0x1e": {
+    "read_values": [
+      "0xff"
+    ],
+    "write_values": []
+  },
+  "0x1d": {
+    "read_values": [
+      "0x10"
+    ],
+    "write_values": []
+  },
+  "0x1c": {
+    "read_values": [
+      "0x10"
+    ],
+    "write_values": []
+  },
+  "0x1b": {
+    "read_values": [
+      "0x41"
+    ],
+    "write_values": []
+  },
+  "0x1a": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x19": {
+    "read_values": [
+      "0x2f"
+    ],
+    "write_values": []
+  },
+  "0x18": {
+    "read_values": [
+      "0xff"
+    ],
+    "write_values": []
+  },
+  "0x17": {
+    "read_values": [
+      "0xff"
+    ],
+    "write_values": []
+  },
+  "0x16": {
+    "read_values": [
+      "0x02"
+    ],
+    "write_values": []
+  },
+  "0x15": {
+    "read_values": [
+      "0x80"
+    ],
+    "write_values": []
+  },
+  "0x14": {
+    "read_values": [
+      "0x06"
+    ],
+    "write_values": []
+  },
+  "0x13": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x12": {
+    "read_values": [
+      "0xf0"
+    ],
+    "write_values": []
+  },
+  "0x11": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x2e": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  },
+  "0x2f": {
+    "read_values": [
+      "0x00"
+    ],
+    "write_values": []
+  }
+}

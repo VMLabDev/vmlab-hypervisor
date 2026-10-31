@@ -1,0 +1,81 @@
+[
+    {
+        "children": [
+            {
+                "name": "file",
+                "info": {
+                    "children": [
+                    ],
+                    "virtual-size": 8912896,
+                    "filename": "/home/wil/dev/vmlab/.scratch/hwref-captures.MTzhVI/.vmlab/vms/dos/disk0.qcow2",
+                    "format": "file",
+                    "actual-size": 8851456,
+                    "format-specific": {
+                        "type": "file",
+                        "data": {
+                        }
+                    },
+                    "dirty-flag": false
+                }
+            }
+        ],
+        "backing-filename-format": "qcow2",
+        "virtual-size": 2147483648,
+        "filename": "/home/wil/dev/vmlab/.scratch/hwref-captures.MTzhVI/.vmlab/vms/dos/disk0.qcow2",
+        "cluster-size": 65536,
+        "format": "qcow2",
+        "actual-size": 8851456,
+        "format-specific": {
+            "type": "qcow2",
+            "data": {
+                "compat": "1.1",
+                "compression-type": "zlib",
+                "lazy-refcounts": false,
+                "refcount-bits": 16,
+                "corrupt": false,
+                "extended-l2": false
+            }
+        },
+        "full-backing-filename": "/home/wil/.local/share/vmlab/templates/x86/freedos-1.3/1.3.0/disk.qcow2",
+        "backing-filename": "/home/wil/.local/share/vmlab/templates/x86/freedos-1.3/1.3.0/disk.qcow2",
+        "dirty-flag": false
+    },
+    {
+        "children": [
+            {
+                "name": "file",
+                "info": {
+                    "children": [
+                    ],
+                    "virtual-size": 250806272,
+                    "filename": "/home/wil/.local/share/vmlab/templates/x86/freedos-1.3/1.3.0/disk.qcow2",
+                    "format": "file",
+                    "actual-size": 250744832,
+                    "format-specific": {
+                        "type": "file",
+                        "data": {
+                        }
+                    },
+                    "dirty-flag": false
+                }
+            }
+        ],
+        "virtual-size": 2147483648,
+        "filename": "/home/wil/.local/share/vmlab/templates/x86/freedos-1.3/1.3.0/disk.qcow2",
+        "cluster-size": 65536,
+        "format": "qcow2",
+        "actual-size": 250744832,
+        "format-specific": {
+            "type": "qcow2",
+            "data": {
+                "compat": "1.1",
+                "compression-type": "zlib",
+                "lazy-refcounts": false,
+                "refcount-bits": 16,
+                "corrupt": false,
+                "extended-l2": false
+            }
+        },
+        "dirty-flag": false
+    }
+]

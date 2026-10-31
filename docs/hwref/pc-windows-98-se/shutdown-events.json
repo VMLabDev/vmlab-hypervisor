@@ -1,0 +1,20 @@
+[
+  {
+    "timestamp": {
+      "seconds": 1793443958,
+      "microseconds": 734167
+    },
+    "event": "POWERDOWN"
+  },
+  {
+    "timestamp": {
+      "seconds": 1793443988,
+      "microseconds": 735931
+    },
+    "event": "SHUTDOWN",
+    "data": {
+      "guest": false,
+      "reason": "host-qmp-quit"
+    }
+  }
+]

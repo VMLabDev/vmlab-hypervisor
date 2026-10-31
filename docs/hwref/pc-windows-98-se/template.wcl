@@ -1,0 +1,15 @@
+import <vmlab-meta.wcl>
+
+template_meta "windows-98-se" {
+  arch = "x86"
+  version = "4.10.2222.5"
+  profile = "windows-9x"
+  cpus = 1
+  memory = 128MiB
+  disk = 2GiB
+  cpu_model = "pentium3"
+  created = "2026-10-12T03:44:13.764473245+00:00"
+  sha256 = "9c738c3bfb1758661947e6038ccf854b1f3c15e0113840da0a4a72b2d68c93e6"
+  agent_version = "agent-legacy=5692f58"
+  wscript_surface = 1
+}

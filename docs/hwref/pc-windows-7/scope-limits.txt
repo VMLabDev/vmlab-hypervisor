@@ -1,0 +1,2 @@
+MemoryMax=25769803776
+MemorySwapMax=0

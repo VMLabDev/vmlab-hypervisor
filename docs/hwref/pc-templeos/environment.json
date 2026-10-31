@@ -1,0 +1,25 @@
+{
+  "captured_on": "2026-10-31",
+  "recorded_at": "2026-10-31T10:56:33.518482+00:00",
+  "uname": "Linux helios 7.2.10-1-cachyos #1 SMP PREEMPT_DYNAMIC Wed, 14 Oct 2026 07:02:02 +0000 x86_64 GNU/Linux",
+  "qemu_version": "QEMU emulator version 11.1.2",
+  "vmlab_version": "vmlab 0.40.0-alpha",
+  "vmlab_binary_sha256": "8b13f8391f407249326919b82e135d82ec99139c63514da086c43b2078d56998",
+  "qemu_binary_sha256": "a2250f5e2b3b07c754473c0817df1cccf6c3c2443fc616dc474c4c311fa6ef1c",
+  "template_metadata_path": "/home/wil/.local/share/vmlab/templates/x86_64/templeos/5.03.2/template.wcl",
+  "template_metadata_sha256": "5a565b8174cd1e5c0d6bb0986b0b5ef722c6bb0ece397006bdfb5386167c1bfa",
+  "observation_flags": [
+    "-trace events=...,file=...",
+    "-qmp unix:.../observe.sock,server=on,wait=off"
+  ],
+  "raw_trace_cap_bytes": 67108864,
+  "value_limit_per_register": 256,
+  "argument_sample_limit_per_event": 256,
+  "firmware_sha256": {
+    "/usr/share/qemu/bios-256k.bin": "b7dea28b1ab93d43f427232f5f6ab07c828fd97765d9b1daaf1b1712b39946e2",
+    "/usr/share/qemu/vgabios-cirrus.bin": "895134681e126a0a06197e3ec6827e9582377a6f925aed20e8bbf3f70e79a818",
+    "/usr/share/qemu/vgabios-stdvga.bin": "7c2d15feadfcaf35bd8b9d20983f32c4dd9895a6045a4c9e67a28727bc9b629c"
+  },
+  "ignore_msrs": "Y",
+  "report_ignored_msrs": "N"
+}

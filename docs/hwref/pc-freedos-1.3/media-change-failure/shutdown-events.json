@@ -1,0 +1,42 @@
+[
+  {
+    "timestamp": {
+      "seconds": 1793443166,
+      "microseconds": 183277
+    },
+    "event": "VNC_DISCONNECTED",
+    "data": {
+      "server": {
+        "auth": "none",
+        "family": "unix",
+        "service": "/tmp/hwcap.8ao1in/vmlab/labs/hwref-gates/vms/dos/vnc.sock",
+        "host": "",
+        "websocket": false
+      },
+      "client": {
+        "family": "unix",
+        "service": "",
+        "host": "",
+        "websocket": false
+      }
+    }
+  },
+  {
+    "timestamp": {
+      "seconds": 1793443168,
+      "microseconds": 525127
+    },
+    "event": "POWERDOWN"
+  },
+  {
+    "timestamp": {
+      "seconds": 1793443198,
+      "microseconds": 526813
+    },
+    "event": "SHUTDOWN",
+    "data": {
+      "guest": false,
+      "reason": "host-qmp-quit"
+    }
+  }
+]

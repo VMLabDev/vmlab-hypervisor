@@ -1,0 +1,31 @@
+  Bus  0, device   0, function 0:
+    Host bridge: PCI device 8086:1237
+      PCI subsystem 1af4:1100
+      id ""
+  Bus  0, device   1, function 0:
+    ISA bridge: PCI device 8086:7000
+      PCI subsystem 1af4:1100
+      id ""
+  Bus  0, device   1, function 1:
+    IDE controller: PCI device 8086:7010
+      PCI subsystem 1af4:1100
+      BAR4: I/O at 0xc020 [0xc02f]
+      id ""
+  Bus  0, device   1, function 2:
+    USB controller: PCI device 8086:7020
+      PCI subsystem 1af4:1100
+      IRQ 11, pin D
+      BAR4: I/O at 0xc000 [0xc01f]
+      id ""
+  Bus  0, device   1, function 3:
+    Bridge: PCI device 8086:7113
+      PCI subsystem 1af4:1100
+      IRQ 9, pin A
+      id ""
+  Bus  0, device   2, function 0:
+    VGA controller: PCI device 1234:1111
+      PCI subsystem 1af4:1100
+      BAR0: 32 bit prefetchable memory at 0xfd000000 [0xfdffffff]
+      BAR2: 32 bit memory at 0xfebf0000 [0xfebf0fff]
+      BAR6: 32 bit memory (not mapped)
+      id ""

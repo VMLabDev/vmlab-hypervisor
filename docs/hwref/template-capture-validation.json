@@ -1,0 +1,58 @@
+{
+  "pc-freedos-1.3": {
+    "artifacts": 54,
+    "register_rows": 167,
+    "events": 3264057,
+    "raw_prefix_lines": 691832,
+    "raw_prefix_bytes": 67108848,
+    "omitted_raw_lines": 2572225,
+    "acpi_checksums": "passed",
+    "smbios_checksums": "passed",
+    "register_counts_reconciled": true,
+    "raw_prefix_counts_reconciled": true,
+    "overlay_check": "passed",
+    "scope_limits": "24 GiB, no swap"
+  },
+  "pc-windows-98-se": {
+    "artifacts": 56,
+    "register_rows": 187,
+    "events": 48172390,
+    "raw_prefix_lines": 690007,
+    "raw_prefix_bytes": 67108861,
+    "omitted_raw_lines": 47482383,
+    "acpi_checksums": "passed",
+    "smbios_checksums": "passed",
+    "register_counts_reconciled": true,
+    "raw_prefix_counts_reconciled": true,
+    "overlay_check": "passed",
+    "scope_limits": "24 GiB, no swap"
+  },
+  "pc-windows-7": {
+    "artifacts": 50,
+    "register_rows": 1134,
+    "events": 79909198,
+    "raw_prefix_lines": 703548,
+    "raw_prefix_bytes": 67108863,
+    "omitted_raw_lines": 79205650,
+    "acpi_checksums": "passed",
+    "smbios_checksums": "passed",
+    "register_counts_reconciled": true,
+    "raw_prefix_counts_reconciled": true,
+    "overlay_check": "passed",
+    "scope_limits": "24 GiB, no swap"
+  },
+  "pc-templeos": {
+    "artifacts": 48,
+    "register_rows": 379,
+    "events": 58768082,
+    "raw_prefix_lines": 698587,
+    "raw_prefix_bytes": 67108850,
+    "omitted_raw_lines": 58069495,
+    "acpi_checksums": "passed",
+    "smbios_checksums": "passed",
+    "register_counts_reconciled": true,
+    "raw_prefix_counts_reconciled": true,
+    "overlay_check": "passed",
+    "scope_limits": "24 GiB, no swap"
+  }
+}
