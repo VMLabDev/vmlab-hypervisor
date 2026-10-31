@@ -235,7 +235,7 @@ fn bdl_with_a_position_adjustment_entry_plays_without_error() {
     // Entry 0: one frame at the buffer start, interrupt on completion.
     // Entry 1: the first period's remainder, starting four bytes in.
     // Entry 2: the second period, itself unaligned by the leading frame.
-    let mut entry = |index: usize, buffer: u64, length: u32| {
+    let entry = |index: usize, buffer: u64, length: u32| {
         let mut descriptor = [0; 16];
         descriptor[..8].copy_from_slice(&buffer.to_le_bytes());
         descriptor[8..12].copy_from_slice(&length.to_le_bytes());

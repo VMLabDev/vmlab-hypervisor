@@ -163,7 +163,8 @@ pub fn hv_binary_with(features: &[&str]) -> PathBuf {
         parking_lot::Mutex<std::collections::HashMap<String, PathBuf>>,
     > = std::sync::LazyLock::new(Default::default);
     let key = features.join("+");
-    if let Some(path) = BINARIES.lock().get(&key) {
+    let mut binaries = BINARIES.lock();
+    if let Some(path) = binaries.get(&key) {
         return path.clone();
     }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -174,6 +175,8 @@ pub fn hv_binary_with(features: &[&str]) -> PathBuf {
     if !features.is_empty() {
         command.arg("--features").arg(&key);
     }
+    // Holding the cache lock across the build also serialises the copy:
+    // two tests racing would hand each other a half-written binary.
     let status = command.status().expect("spawn cargo to build vmlab-hv");
     assert!(status.success(), "cargo build -p vmlab-hv ({key}) failed");
     let debug = target_dir().join("debug/vmlab-hv");
@@ -186,9 +189,12 @@ pub fn hv_binary_with(features: &[&str]) -> PathBuf {
             key.clone()
         }
     ));
-    std::fs::copy(&debug, &snapshot)
-        .unwrap_or_else(|e| panic!("copying {debug:?} to {snapshot:?}: {e}"));
-    BINARIES.lock().insert(key, snapshot.clone());
+    let staging = snapshot.with_extension("staging");
+    std::fs::copy(&debug, &staging)
+        .unwrap_or_else(|e| panic!("copying {debug:?} to {staging:?}: {e}"));
+    std::fs::rename(&staging, &snapshot)
+        .unwrap_or_else(|e| panic!("publishing {staging:?} as {snapshot:?}: {e}"));
+    binaries.insert(key, snapshot.clone());
     snapshot
 }
 
