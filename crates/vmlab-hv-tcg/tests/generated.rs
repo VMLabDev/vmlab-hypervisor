@@ -324,7 +324,7 @@ fn paged_data_loads_specialize_and_revalidate_the_tlb_index() {
                 .write(0x8000_0000 + index as u64 * 4, &instruction.to_le_bytes())
                 .unwrap();
         }
-        for index in 0..2 {
+        for index in 0..8 {
             let pte = ((0x80008u64 + index) << 10) | 0xdf;
             cpu.interpreter
                 .memory
@@ -342,17 +342,28 @@ fn paged_data_loads_specialize_and_revalidate_the_tlb_index() {
     };
     let mut reference = make();
     let mut specialized = make();
+    specialized.set_trace_cache_limit(64_000_000).unwrap();
     specialized.specialize = true;
-    for address in [0x10000, 0x10000, 0x11000, 0x10000, 0x11000] {
+    for page in 0..8 {
+        let address = 0x10000 + page * 4096;
         for cpu in [&mut reference, &mut specialized] {
             cpu.set_gpr(2, address).unwrap();
-            cpu.run(192).unwrap();
+            for _ in 0..3 {
+                cpu.run(192).unwrap();
+            }
         }
+        let before = specialized.interpreter.operations;
+        reference.run(192).unwrap();
+        specialized.run(192).unwrap();
         assert_eq!(
             *specialized.interpreter.globals,
             *reference.interpreter.globals
         );
         assert_eq!(specialized.gpr(3).unwrap(), 42 + (address - 0x10000) / 4096);
+        assert_eq!(
+            specialized.interpreter.operations, before,
+            "paged load at {address:#x} returned to Sail"
+        );
     }
     eprintln!(
         "paged load stops: {:?}",

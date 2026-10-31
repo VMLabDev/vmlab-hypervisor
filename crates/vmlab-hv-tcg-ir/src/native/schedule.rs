@@ -132,6 +132,7 @@ mod tests {
             condition,
             expected: true,
             exit: 1,
+            entry: false,
         });
         let stages = schedule(&block);
         assert_eq!(stages[0], vec![address]);

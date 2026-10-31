@@ -902,6 +902,7 @@ impl Recorder {
                                     condition,
                                     expected: true,
                                     exit,
+                                    entry: true,
                                 });
                             self.block.graph.assume_guard(condition, true);
                         }
@@ -997,6 +998,7 @@ impl Recorder {
                                     condition,
                                     expected,
                                     exit,
+                                    entry: false,
                                 });
                             self.block.graph.assume_guard(condition, expected);
                         }
@@ -1100,6 +1102,7 @@ impl Recorder {
                             condition,
                             expected: true,
                             exit: error,
+                            entry: false,
                         });
                     }
                     self.block.code_guards.push(CodeGuard {
@@ -1185,6 +1188,7 @@ impl Recorder {
                     condition,
                     expected: true,
                     exit,
+                    entry: false,
                 });
             self.block.graph.assume_guard(condition, true);
             return;
@@ -1210,6 +1214,7 @@ impl Recorder {
                     condition,
                     expected,
                     exit,
+                    entry: false,
                 });
             self.block.graph.assume_guard(condition, expected);
         }

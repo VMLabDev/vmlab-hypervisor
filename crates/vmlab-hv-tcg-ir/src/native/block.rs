@@ -99,6 +99,9 @@ pub enum Event {
         condition: ScalarId,
         expected: bool,
         exit: ExitId,
+        /// May reject the trace before execution when no ordered effect feeds
+        /// the condition. Otherwise this remains an ordinary ordered guard.
+        entry: bool,
     },
     ReadMemory {
         address: ScalarId,

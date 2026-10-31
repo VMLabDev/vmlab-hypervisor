@@ -224,6 +224,7 @@ impl Recorder {
                             condition,
                             expected: true,
                             exit,
+                            entry: false,
                         });
                 }
                 return Some(self.constant(Value::Unit));

@@ -50,6 +50,7 @@ pub(crate) struct Trace {
     waiting: Vec<Option<bool>>,
     global_identity: u64,
     input_values: Vec<bool>,
+    entry_guards: Vec<(ScalarId, bool)>,
     successful_runs: u32,
     returned_runs: u32,
     trained_steps: u32,
@@ -686,6 +687,34 @@ impl Trace {
         options: Options,
         steps: u32,
     ) -> Self {
+        let mut entry_values = Vec::with_capacity(recorded.block.graph.scalars.len());
+        for scalar in &recorded.block.graph.scalars {
+            let available = match scalar.operation {
+                Operation::Constant(_) => true,
+                Operation::Input(id) => id < recorded.inputs.len(),
+                Operation::Effect(_) => false,
+                Operation::Refine(value)
+                | Operation::Unary(_, value)
+                | Operation::Slice { value, .. } => entry_values[value],
+                Operation::Binary(_, left, right) => entry_values[left] && entry_values[right],
+                Operation::Concat { high, low, .. } => entry_values[high] && entry_values[low],
+            };
+            entry_values.push(available);
+        }
+        let entry_guards = recorded
+            .block
+            .events
+            .iter()
+            .filter_map(|event| match *event {
+                Event::Guard {
+                    condition,
+                    expected,
+                    entry: true,
+                    ..
+                } if entry_values[condition] => Some((condition, expected)),
+                _ => None,
+            })
+            .collect();
         let mut code = BTreeSet::new();
         recorded.block.code_guards.retain(|guard| {
             code.insert((
@@ -886,6 +915,7 @@ impl Trace {
             waiting,
             global_identity: interpreter.globals.identity(),
             input_values: Vec::new(),
+            entry_guards,
             successful_runs: 0,
             returned_runs: 0,
             trained_steps: steps,
@@ -1104,7 +1134,14 @@ impl Trace {
             binding_slots: &self.binding_slots,
             slots: &self.slots,
         };
-        let outcome = self.execute(interpreter, &mut evaluation, limit);
+        let outcome = (|| {
+            for &(condition, expected) in &self.entry_guards {
+                if (evaluation.scalar(condition)? != 0) != expected {
+                    return Ok(Outcome::Miss);
+                }
+            }
+            self.execute(interpreter, &mut evaluation, limit)
+        })();
         interpreter.trace_completed = evaluation.completed_steps;
         self.scratch = evaluation.scalars;
         self.stamps = evaluation.stamps;
@@ -1356,6 +1393,7 @@ impl Trace {
                     condition,
                     expected,
                     exit,
+                    ..
                 } => {
                     let matches = if let Some(guard) = self.fused_guards[event_index] {
                         guard.matches(
@@ -1695,6 +1733,7 @@ impl Trace {
             + self.scratch.len()
             + self.fast_events.len()
             + self.fast_code.len()
+            + self.entry_guards.len()
             + self.event_steps.len()
             + self.slots.len()
             + self.stages.iter().map(Vec::len).sum::<usize>()
@@ -1839,9 +1878,11 @@ mod tests {
         interpreter
             .globals
             .insert("items".into(), Value::Vector(vec![none(), some(99)]));
+        let operations = interpreter.operations;
         assert!(
-            matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Resumed(value, 1) if value == Value::int(99))
+            matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(value, 1) if value == Value::int(99))
         );
+        assert_eq!(interpreter.operations, operations);
         interpreter.globals.insert("index".into(), Value::int(2));
         assert!(trace.run(&mut interpreter, &[], 1).is_err());
         interpreter
@@ -1851,6 +1892,144 @@ mod tests {
             trace.run(&mut interpreter, &[], 1).unwrap(),
             Outcome::Miss
         ));
+    }
+
+    #[test]
+    fn vector_entry_guards_preserve_ordered_memory_effects() {
+        struct CountingMemory {
+            ram: FlatMemory,
+            index: u8,
+            reads: usize,
+            writes: usize,
+        }
+        impl Memory for CountingMemory {
+            fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<()> {
+                assert_eq!((address, bytes.len()), (8, 1));
+                self.reads += 1;
+                bytes[0] = self.index;
+                Ok(())
+            }
+            fn write(&mut self, address: u64, bytes: &[u8]) -> Result<()> {
+                self.writes += 1;
+                self.ram.write(address, bytes)
+            }
+            fn generation(&self) -> u64 {
+                self.ram.generation()
+            }
+            fn transaction_lock(&self) -> Option<std::sync::Arc<parking_lot::ReentrantMutex<()>>> {
+                None
+            }
+            fn load_reserved(&mut self, address: u64, bytes: &mut [u8]) -> Result<u64> {
+                self.ram.load_reserved(address, bytes)
+            }
+            fn store_conditional(
+                &mut self,
+                address: u64,
+                bytes: &[u8],
+                generation: u64,
+            ) -> Result<bool> {
+                self.ram.store_conditional(address, bytes, generation)
+            }
+        }
+        for memory_index in [false, true] {
+            let mut code = vec![store()];
+            if memory_index {
+                code.extend([
+                    Op::Call(
+                        Location::Id("loaded".into()),
+                        Target::Memory {
+                            name: "read_mem".into(),
+                            write: false,
+                            exclusive: false,
+                            fetch: false,
+                        },
+                        vec![
+                            Expr::Unit,
+                            Expr::Unit,
+                            Expr::Bits("0x0000000000000008".into()),
+                            Expr::Integer("1".into(), None),
+                        ],
+                    ),
+                    Op::Call(
+                        Location::Id("selected".into()),
+                        Target::Intrinsic("sail_unsigned".into()),
+                        vec![Expr::Id("loaded".into())],
+                    ),
+                ]);
+            }
+            code.extend([
+                Op::Call(
+                    Location::Id("return".into()),
+                    Target::Intrinsic("vector_access".into()),
+                    vec![
+                        Expr::Id("items".into()),
+                        Expr::Id(if memory_index { "selected" } else { "index" }.into()),
+                    ],
+                ),
+                Op::Return,
+            ]);
+            let function = Function {
+                name: "ordered_selection".into(),
+                args: vec![],
+                result: Type::Integer(None),
+                locals: BTreeMap::new(),
+                code,
+            };
+            let program = Program {
+                globals: BTreeMap::from([
+                    ("index".into(), Type::Integer(None)),
+                    ("items".into(), Type::Vector(Box::new(Type::Integer(None)))),
+                ]),
+                ..Program::default()
+            };
+            let mut interpreter = Interpreter::new(
+                &program,
+                CountingMemory {
+                    ram: FlatMemory::new(0, vec![0; 16]),
+                    index: 0,
+                    reads: 0,
+                    writes: 0,
+                },
+            );
+            interpreter.initialize().unwrap();
+            interpreter.globals.insert("index".into(), Value::int(0));
+            interpreter.globals.insert(
+                "items".into(),
+                Value::Vector(vec![Value::int(42), Value::int(99)]),
+            );
+            let options = Options {
+                dynamic_globals: BTreeSet::from(["index".into(), "items".into()]),
+                ..Options::default()
+            };
+            let (mut trace, first) =
+                Trace::record(&mut interpreter, &function, vec![], options.clone()).unwrap();
+            assert_eq!(first, Value::int(42));
+            assert_eq!(interpreter.memory.writes, 1);
+            interpreter.globals.insert("index".into(), Value::int(1));
+            interpreter.memory.index = 1;
+            let outcome = trace.run(&mut interpreter, &[], 1).unwrap();
+            if memory_index {
+                assert!(trace.entry_guards.is_empty());
+                assert!(matches!(outcome, Outcome::Resumed(value, 1) if value == Value::int(99)));
+                assert_eq!(interpreter.memory.reads, 2);
+            } else {
+                assert!(!trace.entry_guards.is_empty());
+                assert!(matches!(outcome, Outcome::Miss));
+                assert_eq!(interpreter.memory.writes, 1);
+                let (next, value) =
+                    Trace::record(&mut interpreter, &function, vec![], options).unwrap();
+                assert_eq!(value, Value::int(99));
+                trace = next;
+            }
+            assert_eq!(interpreter.memory.writes, 2);
+            let operations = interpreter.operations;
+            assert!(
+                matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(value, 1) if value == Value::int(99))
+            );
+            assert_eq!(interpreter.operations, operations);
+            assert_eq!(interpreter.memory.writes, 3);
+            assert_eq!(interpreter.memory.reads, if memory_index { 3 } else { 0 });
+        }
     }
 
     #[test]
