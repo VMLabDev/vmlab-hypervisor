@@ -405,6 +405,7 @@ fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
         hyperv: vec![],
         display: None,
         tablet: None,
+        usb: None,
         tpm: None,
         console_pci: None,
         ahci_pci: None,

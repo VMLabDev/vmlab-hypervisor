@@ -24,6 +24,13 @@ pub struct MachineDescription {
     pub display: Option<Display>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tablet: Option<PciAddress>,
+    /// The xHCI controller for host USB passthrough (the VM's `usb = true`):
+    /// the controller vmlab names `usbx`, whose root ports `device_add`
+    /// addresses as `usbx.0`. One controller carries the tablet and the
+    /// passthrough ports; when both this and `tablet` are set they name the
+    /// same PCI function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb: Option<PciAddress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tpm: Option<Tpm>,
     /// PCI address of the shared multiport virtio-serial controller.

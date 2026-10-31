@@ -114,6 +114,7 @@ fn sample_machine() -> MachineDescription {
         hyperv: vec![],
         display: None,
         tablet: None,
+        usb: None,
         tpm: None,
         console_pci: None,
         ahci_pci: None,
@@ -477,6 +478,37 @@ fn pinned_handshake_rejection() {
 
 #[test]
 fn every_command_round_trips() {
+    wire(
+        &ClientMsg::Request {
+            id: 7,
+            command: Command::DeviceAdd {
+                id: "usbhost-1-2".to_owned(),
+                driver: "usb-host".to_owned(),
+                bus: Some("usbx.0".to_owned()),
+                hostbus: 1,
+                hostaddr: 5,
+                hostport: "2.4".to_owned(),
+            },
+        },
+        r#"{"type":"request","id":7,"command":{"command":"device_add","id":"usbhost-1-2","driver":"usb-host","bus":"usbx.0","hostbus":1,"hostaddr":5,"hostport":"2.4"}}"#,
+    );
+    wire(
+        &ClientMsg::Request {
+            id: 8,
+            command: Command::DeviceDel {
+                id: "usbhost-1-2".to_owned(),
+            },
+        },
+        r#"{"type":"request","id":8,"command":{"command":"device_del","id":"usbhost-1-2"}}"#,
+    );
+    wire(
+        &ServerMsg::Event {
+            event: Event::DeviceDeleted {
+                id: "usbhost-1-2".to_owned(),
+            },
+        },
+        r#"{"type":"event","event":"device_deleted","id":"usbhost-1-2"}"#,
+    );
     round_trip(&Command::Status);
     round_trip(&Command::Resume);
     round_trip(&Command::Pause);

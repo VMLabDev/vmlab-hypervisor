@@ -225,6 +225,16 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
     if let Some(tablet) = desc.tablet {
         add(Some(tablet), "tablet")?;
     }
+    // The tablet and the passthrough controller are one xHCI function.
+    match (desc.tablet, desc.usb) {
+        (Some(tablet), Some(usb)) if tablet != usb => {
+            return Err(VmmError::InvalidMachine(
+                "the tablet and usb functions must share one xHCI controller".into(),
+            ));
+        }
+        (None, Some(usb)) => add(Some(usb), "usb")?,
+        _ => {}
+    }
     if let Some(audio) = &desc.audio {
         add(audio.pci, "audio")?;
     }
@@ -787,7 +797,19 @@ pub fn build(
             .register(PM1A_EVT_BASE, PM_BLOCK_LEN, pm.clone())
             .map_err(VmmError::Other)?;
     }
-    let xhci = if let Some(address) = desc.tablet {
+    // One xHCI carries the absolute tablet and the host passthrough ports:
+    // `tablet` places it for input, `usb` (vmlab's `usb = true`, the
+    // controller it names `usbx`) additionally enables hot-plug.
+    let xhci_address = match (desc.tablet, desc.usb) {
+        (Some(tablet), Some(usb)) if tablet != usb => {
+            return Err(VmmError::DeviceUnavailable {
+                device: "usb controller",
+                reason: "the tablet and usb functions must share one xHCI".into(),
+            });
+        }
+        (tablet, usb) => tablet.or(usb),
+    };
+    let xhci = if let Some(address) = xhci_address {
         let transport = wiring(Some(address), 1, false)?;
         let xhci = Arc::new(Mutex::new(vmlab_hv_devices::usb::XhciController::new(
             "xhci",
@@ -904,6 +926,9 @@ pub fn build(
     *shared.chipset.lock() = chipset;
     *shared.vga.lock() = vga;
     *shared.xhci.lock() = xhci;
+    shared
+        .usb_hotplug
+        .store(desc.usb.is_some(), std::sync::atomic::Ordering::SeqCst);
     *shared.pflash.lock() = pflash;
     *shared.tpm.lock() = tpm;
     *shared.smi_fwcfg.lock() = smi_fwcfg;
@@ -1036,6 +1061,7 @@ mod tests {
             hyperv: vec![],
             display: None,
             tablet: None,
+            usb: None,
             tpm: None,
             console_pci: None,
             ahci_pci: None,
@@ -1268,5 +1294,36 @@ mod tests {
         };
         let err = err.to_string();
         assert!(err.contains("serial") && err.contains("COM1"), "{err}");
+    }
+    #[test]
+    fn usb_and_tablet_must_share_one_controller() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut machine = desc();
+        machine.machine = Machine::Q35;
+        machine.boot = Boot::Firmware {
+            firmware: FirmwareKind::Seabios,
+            code: tiny_bzimage(dir.path()),
+            vars: None,
+            secure_boot: false,
+            bootorder: vec![],
+        };
+        machine.tablet = Some(PciAddress {
+            bus: 0,
+            device: 5,
+            function: 0,
+        });
+        machine.usb = Some(PciAddress {
+            bus: 0,
+            device: 6,
+            function: 0,
+        });
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("one xHCI controller")
+        );
+        machine.usb = machine.tablet;
+        validate(&machine).unwrap();
     }
 }
