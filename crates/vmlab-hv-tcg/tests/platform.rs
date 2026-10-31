@@ -1,4 +1,4 @@
-use vmlab_hv_tcg::{FlatMemory, Memory, Riscv64, Value};
+use vmlab_hv_tcg::{FlatMemory, Memory, Privilege, Riscv64, Value};
 
 fn loop_cpu() -> Riscv64<FlatMemory> {
     let mut memory = FlatMemory::new(0x80000000, vec![0; 4096]);
@@ -148,6 +148,81 @@ fn trap_data_csrs_are_runtime_values_on_platform_cpus() {
                 );
                 assert_eq!(specialized.gpr(10).unwrap(), value);
                 assert_eq!(specialized.specialization_stats.recordings, recordings);
+            }
+        }
+    }
+}
+
+#[test]
+fn platform_timer_interrupt_entry_and_return_match_sail() {
+    for supervisor in [false, true] {
+        let mut reference = loop_cpu();
+        let mut specialized = loop_cpu();
+        specialized.specialize = true;
+        let irq = if supervisor { 5 } else { 7 };
+        let vector = if supervisor { 0x105 } else { 0x305 };
+        let cause = if supervisor { 0x142 } else { 0x342 };
+        let epc = if supervisor { 0x141 } else { 0x341 };
+        let ret: u32 = if supervisor { 0x10200073 } else { 0x30200073 };
+        for cpu in [&mut reference, &mut specialized] {
+            for (index, word) in [0x00110113, ret].into_iter().enumerate() {
+                cpu.interpreter
+                    .memory
+                    .write(0x80000100 + index as u64 * 4, &word.to_le_bytes())
+                    .unwrap();
+            }
+            cpu.write_csr(vector, 0x80000100).unwrap();
+            cpu.write_csr(0x304, 1 << irq).unwrap();
+            let status = cpu.read_csr(0x300).unwrap();
+            cpu.write_csr(0x300, status | if supervisor { 2 } else { 8 })
+                .unwrap();
+            if supervisor {
+                cpu.write_csr(0x3b0, (1u64 << 54) - 1).unwrap();
+                cpu.write_csr(0x3a0, 0x1f).unwrap();
+                cpu.write_csr(0x303, 1 << irq).unwrap();
+                cpu.write_csr(0x30a, 1 << 63).unwrap();
+                cpu.write_csr(0x14d, 1_000_000).unwrap();
+                cpu.set_privilege(Privilege::Supervisor);
+            } else {
+                cpu.interpreter
+                    .globals
+                    .insert("zmtimecmp".into(), Value::bits(64, 1_000_000u64));
+            }
+            cpu.run(4096).unwrap();
+        }
+        for round in 1..5 {
+            let return_pc = reference.pc().unwrap();
+            for deadline in [500u64, 1_000_000] {
+                for cpu in [&mut reference, &mut specialized] {
+                    if supervisor {
+                        cpu.write_csr(0x14d, deadline).unwrap();
+                    } else {
+                        cpu.interpreter
+                            .globals
+                            .insert("zmtimecmp".into(), Value::bits(64, deadline));
+                    }
+                }
+                if deadline == 500 {
+                    reference.step().unwrap();
+                    specialized.step().unwrap();
+                    assert_eq!(
+                        *specialized.interpreter.globals,
+                        *reference.interpreter.globals
+                    );
+                    assert_eq!(reference.read_csr(cause).unwrap(), (1 << 63) | irq);
+                    assert_eq!(reference.read_csr(epc).unwrap(), return_pc);
+                    assert_eq!(reference.pc().unwrap(), 0x80000100);
+                } else {
+                    for _ in 0..3 {
+                        reference.step().unwrap();
+                        specialized.step().unwrap();
+                        assert_eq!(
+                            *specialized.interpreter.globals,
+                            *reference.interpreter.globals
+                        );
+                    }
+                    assert_eq!(reference.gpr(2).unwrap(), round);
+                }
             }
         }
     }
