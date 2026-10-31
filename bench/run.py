@@ -993,15 +993,14 @@ def g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, index):
         g2g_setup_guest(agent_b, net["g2g_b_ip"])
 
         port = 5903
-        a2b, blast, sink = g2g_direction(agent_b, agent_a, net["g2g_a_ip"], port, NET_WINDOW)
-        log(f"g2g b->a: {a2b} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
-        b2a, blast, sink = g2g_direction(agent_a, agent_b, net["g2g_b_ip"], port, NET_WINDOW)
-        log(f"g2g a->b: {b2a} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
+        b2a, blast, sink = g2g_direction(agent_b, agent_a, net["g2g_a_ip"], port, NET_WINDOW)
+        log(f"g2g b->a: {b2a} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
+        a2b, blast, sink = g2g_direction(agent_a, agent_b, net["g2g_b_ip"], port, NET_WINDOW)
+        log(f"g2g a->b: {a2b} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
         result["samples"] = {
             "net_g2g_a2b_tcp_mbps": a2b,
             "net_g2g_b2a_tcp_mbps": b2a,
         }
-        # b sent to a first: a2b is the a-side sink rate.
         return result, a
     finally:
         g2g_teardown([a, b], [agent_a, agent_b])

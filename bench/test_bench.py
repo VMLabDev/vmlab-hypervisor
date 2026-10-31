@@ -287,6 +287,29 @@ class HvMachineTests(unittest.TestCase):
 
 
 class NoiseControlTests(unittest.TestCase):
+    def test_g2g_samples_are_named_for_the_sender_and_receiver(self):
+        import run
+        agent_a, agent_b = object(), object()
+        backend_a = argparse.Namespace(agent_socket=lambda: "a", session=argparse.Namespace(exit_code=None))
+        backend_b = argparse.Namespace(agent_socket=lambda: "b", session=argparse.Namespace(exit_code=None))
+
+        def direction(sender, _receiver, _ip, _port, _window):
+            return (100 if sender is agent_a else 200), {"bytes": 1}, {"bytes": 1}
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(lib, "RUN_DIR", tmp), \
+                mock.patch.object(lib, "require_vm_slots"), \
+                mock.patch.object(run.netpeer, "Hub"), \
+                mock.patch.object(run, "g2g_launch", side_effect=[backend_a, backend_b]), \
+                mock.patch.object(lib, "wait_for_agent", side_effect=[(agent_a, {}), (agent_b, {})]), \
+                mock.patch.object(run, "g2g_setup_guest"), \
+                mock.patch.object(run, "g2g_direction", side_effect=direction), \
+                mock.patch.object(run, "g2g_teardown"):
+            result, _ = run.g2g_one_repeat(run.parse_args([]), "ubuntu-26.04", 2,
+                "16-19", "20-23", "test", 1)
+            self.assertEqual(result["samples"]["net_g2g_a2b_tcp_mbps"], 100)
+            self.assertEqual(result["samples"]["net_g2g_b2a_tcp_mbps"], 200)
+
     def test_capacity_failure_does_not_start_a_peer(self):
         import run
         with mock.patch.object(lib, "require_vm_slots", side_effect=lib.BenchError("full")), \
