@@ -221,6 +221,9 @@ fn unused_tlb_entries(mode: u64) {
     let mut reference = make();
     let mut specialized = make();
     specialized.specialize = true;
+    let Value::Vector(empty_tlb) = reference.interpreter.globals["ztlb"].clone() else {
+        panic!("TLB vector expected");
+    };
     for _ in 0..4 {
         reference.run(64).unwrap();
         specialized.run(64).unwrap();
@@ -238,6 +241,16 @@ fn unused_tlb_entries(mode: u64) {
             let Value::Struct(mut fields) = *entry else {
                 panic!("TLB entry expected");
             };
+            if index % 2 == 1 {
+                let Value::Vector(mut entries) = cpu.interpreter.globals["ztlb"].clone() else {
+                    panic!("TLB vector expected");
+                };
+                entries[63] = empty_tlb[63].clone();
+                cpu.interpreter
+                    .globals
+                    .insert("ztlb".into(), Value::Vector(entries));
+                continue;
+            }
             let vpn = 63 + index * 64;
             fields.insert("zvpn".into(), Value::bits(47, vpn));
             fields.insert("zpteAddr".into(), Value::bits(64, leaf_table + vpn * 8));
@@ -260,12 +273,7 @@ fn unused_tlb_entries(mode: u64) {
     }
     let retrained = specialized.specialization_stats.recordings - trained;
     eprintln!("unused TLB entry replacement: {retrained} retrainings over 8 batches");
-    // The initial None-to-Some shape change can require one specialization;
-    // changing the cached translation's fields must not retrain every batch.
-    assert!(
-        retrained <= 1,
-        "unrelated translations retrained {retrained} times"
-    );
+    assert_eq!(retrained, 0, "unrelated translations were retrained");
     let before = reference.gpr(1).unwrap();
     for cpu in [&mut reference, &mut specialized] {
         for (index, instruction) in [0x00208093u32, 0xffdff06f].into_iter().enumerate() {
@@ -301,6 +309,63 @@ fn unused_tlb_entries(mode: u64) {
         *specialized.interpreter.globals,
         *reference.interpreter.globals
     );
+}
+
+#[test]
+fn paged_data_loads_specialize_and_revalidate_the_tlb_index() {
+    let make = || {
+        let mut cpu = paged(8, true);
+        for (index, instruction) in [0x00013183u32, 0x00108093, 0xff9ff06f]
+            .into_iter()
+            .enumerate()
+        {
+            cpu.interpreter
+                .memory
+                .write(0x8000_0000 + index as u64 * 4, &instruction.to_le_bytes())
+                .unwrap();
+        }
+        for index in 0..2 {
+            let pte = ((0x80008u64 + index) << 10) | 0xdf;
+            cpu.interpreter
+                .memory
+                .write(0x8000_3000 + (16 + index) * 8, &pte.to_le_bytes())
+                .unwrap();
+            cpu.interpreter
+                .memory
+                .write(0x8000_8000 + index * 4096, &(42 + index).to_le_bytes())
+                .unwrap();
+        }
+        cpu.set_gpr(1, 0).unwrap();
+        cpu.set_gpr(2, 0x10000).unwrap();
+        cpu.interpreter.operation_limit = u64::MAX;
+        cpu
+    };
+    let mut reference = make();
+    let mut specialized = make();
+    specialized.specialize = true;
+    for address in [0x10000, 0x10000, 0x11000, 0x10000, 0x11000] {
+        for cpu in [&mut reference, &mut specialized] {
+            cpu.set_gpr(2, address).unwrap();
+            cpu.run(192).unwrap();
+        }
+        assert_eq!(
+            *specialized.interpreter.globals,
+            *reference.interpreter.globals
+        );
+        assert_eq!(specialized.gpr(3).unwrap(), 42 + (address - 0x10000) / 4096);
+    }
+    eprintln!(
+        "paged load stops: {:?}",
+        specialized.specialization_stats.stop_reasons
+    );
+    assert!(
+        !specialized
+            .specialization_stats
+            .stop_reasons
+            .keys()
+            .any(|reason| reason.contains("vector_access"))
+    );
+    assert!(specialized.specialization_stats.hits > 192);
 }
 
 #[test]

@@ -118,6 +118,7 @@ pub(crate) struct Recorder {
     constants: Vec<Value>,
     constant_ids: BTreeMap<Value, ConstantId>,
     inputs: Vec<Input>,
+    input_samples: Vec<Value>,
     input_ids: BTreeMap<InputSource, usize>,
     scalar_values: std::collections::HashMap<(ScalarId, ScalarType), ValueId>,
     frames: Vec<ShadowFrame>,
@@ -221,6 +222,7 @@ impl Recorder {
             constants: Vec::new(),
             constant_ids: BTreeMap::new(),
             inputs: Vec::new(),
+            input_samples: Vec::new(),
             input_ids: BTreeMap::new(),
             scalar_values: std::collections::HashMap::new(),
             frames: Vec::new(),
@@ -352,6 +354,7 @@ impl Recorder {
             shape,
             range: bounds.or(range),
         });
+        self.input_samples.push(value.clone());
         self.input_ids.insert(source, id);
         self.input_recipe(id, value)
     }
@@ -396,15 +399,12 @@ impl Recorder {
                 let value = self.input(project(Projection::Payload(tag.clone())), value);
                 self.block.value(Recipe::Union(tag.clone(), value))
             }
-            Value::Vector(values)
+            Value::Vector(_)
                 if matches!(source, InputSource::Global(..) | InputSource::Local(..)) =>
             {
-                let values = values
-                    .iter()
-                    .enumerate()
-                    .map(|(i, value)| self.input(project(Projection::Index(i)), value))
-                    .collect();
-                self.block.value(Recipe::Vector(values))
+                // Eager decomposition guards unused entries' shapes, coupling
+                // unrelated TLB slots and continuation inputs to this trace.
+                self.block.value(Recipe::Input(id))
             }
             _ if matches!(self.inputs[id].shape, Shape::Other(_)) => self.constant(value.clone()),
             _ => self.block.value(Recipe::Input(id)),
@@ -872,10 +872,41 @@ impl Recorder {
                 }
                 Op::Call(location, target, exprs) => {
                     self.prime_destination(interpreter, location)?;
-                    let args: Vec<_> = exprs
+                    let mut args: Vec<_> = exprs
                         .iter()
                         .map(|e| self.expr(interpreter, actual, e))
                         .collect::<Option<_>>()?;
+                    if let Target::Intrinsic(name) = target
+                        && matches!(
+                            name.as_str(),
+                            "vector_access" | "vector_update" | "zinternal_vector_update"
+                        )
+                        && args.len() >= 2
+                        && self.vector_length(args[0]).is_some()
+                        && self.known(args[1]).is_none()
+                    {
+                        let index = interpreter.eval(actual, &exprs[1]).ok()?.index().ok()?;
+                        let (value, ty) = self.scalar(args[1])?;
+                        let expected = self.block.graph.constant(ty, index as u128);
+                        let condition = self.block.graph.binary(
+                            ScalarType::Bool,
+                            Binary::Equal,
+                            value,
+                            expected,
+                        )?;
+                        if self.guards.insert((condition, true)) {
+                            let exit = self.snapshot(None, None);
+                            self.block
+                                .events
+                                .push(vmlab_hv_tcg_ir::native::block::Event::Guard {
+                                    condition,
+                                    expected: true,
+                                    exit,
+                                });
+                            self.block.graph.assume_guard(condition, true);
+                        }
+                        args[1] = self.constant(Value::int(index));
+                    }
                     if self.options.narrow_ram_inputs
                         && let Target::Function(name) = target
                         && let Some(indices) = interpreter.address_arguments.get(name)

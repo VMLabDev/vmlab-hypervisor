@@ -82,13 +82,18 @@ between fetch and recording, and bounded guard storage. These changes are
 in the VMM adapter, not the interpreter's execution engine.
 
 A second slowdown appeared after edk2 enabled paging. S1 CPU-state snapshots
-identified the software TLB as changing trace context beyond registers and counters. The
+identified the software TLB as changing trace context beyond registers and
+counters. The
 recorder treated the entire TLB as a constant guard, so replacing an unused
 translation retrained an otherwise unchanged code loop. TLB contents are now
-runtime inputs. The paged regression compares every Sail global with the
-reference interpreter, checks that repeated unused-entry replacements stop
-retraining after the initial shape change, and remaps the executing page to
-prove that cached code still observes a changed translation.
+runtime inputs. Vector inputs project only the entries a trace selects;
+dynamic indexes have explicit guards, and vector updates preserve unread
+entries. This also removes an unsupported `vector_access` stop from paged
+loads. The regressions compare every Sail global with the reference
+interpreter, execute without retraining when unused TLB entries change
+between empty and filled in Sv39, Sv48, and Sv57, and remap the executing
+page to prove that cached code observes a changed translation. Continuation
+tests cover unused entry shapes, changed indexes, and bounds failures.
 
 edk2 boot, Linux hardware capture, booted-guest snapshot restoration, and
 boot-to-agent-ready timing are pending. This reference does not establish

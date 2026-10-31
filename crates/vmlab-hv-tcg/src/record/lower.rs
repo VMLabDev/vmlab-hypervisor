@@ -4,6 +4,60 @@ use vmlab_hv_tcg_ir::native::Unary;
 use vmlab_hv_tcg_ir::native::block::{DeferredOperation, Recipe};
 
 impl Recorder {
+    pub(super) fn vector_length(&self, value: ValueId) -> Option<usize> {
+        match &self.block.values[value] {
+            Recipe::Vector(values) => Some(values.len()),
+            Recipe::Input(id) => match self.inputs[*id].shape {
+                Shape::Vector(length) => Some(length),
+                _ => None,
+            },
+            Recipe::Deferred {
+                operation: DeferredOperation::Intrinsic { name, .. },
+                args,
+                ..
+            } if matches!(name.as_str(), "vector_update" | "zinternal_vector_update") => {
+                self.vector_length(args[0])
+            }
+            _ => None,
+        }
+    }
+
+    fn vector_element(&mut self, vector: ValueId, index: usize) -> Option<ValueId> {
+        match self.block.values[vector].clone() {
+            Recipe::Vector(values) => values.get(index).copied(),
+            Recipe::Input(id) => {
+                let source = match self.inputs[id].source.clone() {
+                    InputSource::Global(name, mut path) => {
+                        path.push(Projection::Index(index));
+                        InputSource::Global(name, path)
+                    }
+                    InputSource::Local(frame, name, mut path) => {
+                        path.push(Projection::Index(index));
+                        InputSource::Local(frame, name, path)
+                    }
+                    _ => return None,
+                };
+                let Value::Vector(values) = &self.input_samples[id] else {
+                    return None;
+                };
+                let value = values.get(index)?.clone();
+                Some(self.input(source, &value))
+            }
+            Recipe::Deferred {
+                operation: DeferredOperation::Intrinsic { name, .. },
+                args,
+                ..
+            } if matches!(name.as_str(), "vector_update" | "zinternal_vector_update") => {
+                if self.known(args[1])?.index().ok()? == index {
+                    Some(args[2])
+                } else {
+                    self.vector_element(args[0], index)
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn value_type(&self, id: ValueId) -> Type {
         match &self.block.values[id] {
             Recipe::Scalar { ty, .. } => match ty {
@@ -187,12 +241,10 @@ impl Recorder {
             }
             "%i64->%i" | "monomorphize" => return Some(a),
             "length" => {
-                let length = self.bits_width(a).map(|w| w as usize).or_else(|| {
-                    match &self.block.values[a] {
-                        Recipe::Vector(v) => Some(v.len()),
-                        _ => None,
-                    }
-                })?;
+                let length = self
+                    .bits_width(a)
+                    .map(|w| w as usize)
+                    .or_else(|| self.vector_length(a))?;
                 return Some(self.constant(Value::int(length)));
             }
             "@unsigned" | "sail_unsigned" => {
@@ -390,8 +442,8 @@ impl Recorder {
             }
             "vector_access" | "@bvaccess" => {
                 let i = index(self, 1)?;
-                if let Recipe::Vector(values) = &self.block.values[a] {
-                    return values.get(i).copied();
+                if self.vector_length(a).is_some() {
+                    return self.vector_element(a, i);
                 }
                 let (a, ScalarType::Bits(w)) = self.scalar(a)? else {
                     return None;
@@ -428,6 +480,16 @@ impl Recorder {
                 if let Some(mut values) = vector {
                     *values.get_mut(index)? = args[2];
                     return Some(self.block.value(Recipe::Vector(values)));
+                }
+                if self.vector_length(a).is_some_and(|length| index < length) {
+                    return Some(self.block.value(Recipe::Deferred {
+                        operation: DeferredOperation::Intrinsic {
+                            name: name.into(),
+                            width,
+                        },
+                        args: args.to_vec(),
+                        ty: Type::Unit,
+                    }));
                 }
                 let (old, ScalarType::Bits(width)) = self.scalar(a)? else {
                     return None;

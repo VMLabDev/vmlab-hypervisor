@@ -72,6 +72,7 @@ pub(crate) struct Trace {
     waiting_is_false: bool,
 }
 
+#[derive(Debug)]
 pub(crate) enum Outcome {
     Miss,
     Returned(Value, u32),
@@ -1723,6 +1724,134 @@ mod tests {
     use crate::FlatMemory;
     use std::collections::{BTreeMap, BTreeSet};
     use vmlab_hv_tcg_ir::{Expr, Location, Op, Program, Target, Type};
+
+    #[test]
+    fn vector_fragments_guard_only_the_selected_entry_and_index() {
+        let child = Function {
+            name: "select".into(),
+            args: vec![
+                (
+                    "items".into(),
+                    Type::Vector(Box::new(Type::Union("option".into()))),
+                ),
+                ("index".into(), Type::Integer(None)),
+            ],
+            result: Type::Integer(None),
+            locals: BTreeMap::new(),
+            code: vec![
+                Op::Declare("picked".into(), Type::Union("option".into()), None),
+                Op::Branch(Expr::Id("decision".into()), 5),
+                Op::Call(
+                    Location::Id("picked".into()),
+                    Target::Intrinsic("vector_access".into()),
+                    vec![Expr::Id("items".into()), Expr::Id("index".into())],
+                ),
+                Op::Assign(
+                    Location::Id("return".into()),
+                    Expr::As(Box::new(Expr::Id("picked".into())), "some".into()),
+                ),
+                Op::Return,
+                Op::Assign(
+                    Location::Id("return".into()),
+                    Expr::Integer("0".into(), None),
+                ),
+                Op::Return,
+            ],
+        };
+        let root = Function {
+            name: "root".into(),
+            args: Vec::new(),
+            result: Type::Integer(None),
+            locals: BTreeMap::new(),
+            code: vec![
+                Op::Call(
+                    Location::Id("return".into()),
+                    Target::Function("select".into()),
+                    vec![Expr::Id("items".into()), Expr::Id("index".into())],
+                ),
+                Op::Return,
+            ],
+        };
+        let program = Program {
+            functions: BTreeMap::from([("select".into(), child)]),
+            globals: BTreeMap::from([
+                ("decision".into(), Type::Bool),
+                ("index".into(), Type::Integer(None)),
+                (
+                    "items".into(),
+                    Type::Vector(Box::new(Type::Union("option".into()))),
+                ),
+            ]),
+            ..Program::default()
+        };
+        let mut interpreter = Interpreter::new(&program, FlatMemory::new(0, Vec::new()));
+        interpreter.initialize().unwrap();
+        let some = |value| Value::Union("some".into(), Box::new(Value::int(value)));
+        let none = || Value::Union("none".into(), Box::new(Value::Unit));
+        interpreter
+            .globals
+            .insert("decision".into(), Value::Bool(true));
+        interpreter.globals.insert("index".into(), Value::int(0));
+        interpreter
+            .globals
+            .insert("items".into(), Value::Vector(vec![some(42), none()]));
+        let options = Options {
+            dynamic_globals: BTreeSet::from(["decision".into(), "index".into(), "items".into()]),
+            ..Options::default()
+        };
+        let (mut trace, first) =
+            Trace::record(&mut interpreter, &root, Vec::new(), options).unwrap();
+        assert_eq!(first, Value::int(0));
+        interpreter
+            .globals
+            .insert("decision".into(), Value::Bool(false));
+        let outcome = trace.run(&mut interpreter, &[], 1).unwrap();
+        assert!(
+            matches!(&outcome, Outcome::Resumed(value, 1) if *value == Value::int(42)),
+            "{outcome:?}; stop={:?}",
+            trace.stop_reason()
+        );
+        fn fragments(trace: &Trace) -> usize {
+            trace
+                .fragments
+                .borrow()
+                .values()
+                .flatten()
+                .map(|child| 1 + fragments(child))
+                .sum()
+        }
+        let trained = fragments(&trace);
+        let operations = interpreter.operations;
+        for unused in [some(13), none(), some(99)] {
+            interpreter
+                .globals
+                .insert("items".into(), Value::Vector(vec![some(42), unused]));
+            assert!(
+                matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(value, 1) if value == Value::int(42))
+            );
+            assert_eq!(fragments(&trace), trained);
+            assert_eq!(interpreter.operations, operations);
+        }
+        interpreter.globals.insert("index".into(), Value::int(1));
+        assert!(
+            matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Resumed(value, 1) if value == Value::int(99))
+        );
+        interpreter
+            .globals
+            .insert("items".into(), Value::Vector(vec![none(), some(99)]));
+        assert!(
+            matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Resumed(value, 1) if value == Value::int(99))
+        );
+        interpreter.globals.insert("index".into(), Value::int(2));
+        assert!(trace.run(&mut interpreter, &[], 1).is_err());
+        interpreter
+            .globals
+            .insert("items".into(), Value::Vector(vec![some(42)]));
+        assert!(matches!(
+            trace.run(&mut interpreter, &[], 1).unwrap(),
+            Outcome::Miss
+        ));
+    }
 
     #[test]
     fn replacing_globals_cannot_alias_a_context_version() {
