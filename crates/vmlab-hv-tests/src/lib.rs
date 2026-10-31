@@ -180,7 +180,11 @@ pub fn hv_binary_with(features: &[&str]) -> PathBuf {
     assert!(debug.is_file(), "cargo did not produce {}", debug.display());
     let snapshot = target_dir().join(format!(
         "debug/vmlab-hv-test-{}",
-        if key.is_empty() { "plain".into() } else { key.clone() }
+        if key.is_empty() {
+            "plain".into()
+        } else {
+            key.clone()
+        }
     ));
     std::fs::copy(&debug, &snapshot)
         .unwrap_or_else(|e| panic!("copying {debug:?} to {snapshot:?}: {e}"));

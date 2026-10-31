@@ -196,6 +196,7 @@ impl Hda {
         self.wall_ticks = self.wall_ticks.wrapping_add((ticks / 1_000_000_000) as u64);
         self.wall_fraction = (ticks % 1_000_000_000) as u64;
         self.put32(0x30, self.wall_ticks as u32);
+
         self.commands();
         if !self.dma_enabled() {
             self.update_irq();

@@ -376,7 +376,6 @@ fn stream_tag_format_pin_and_power_gate_playback() {
         (2, 0x70503, 0x70500),
         (1, 0x70503, 0x70500),
         (3, 0x70503, 0x70500),
-        (3, 0x70c00, 0x70c02),
     ] {
         verb(&mut hda, node, disable);
         interval(&mut hda);
@@ -385,6 +384,11 @@ fn stream_tag_format_pin_and_power_gate_playback() {
         interval(&mut hda);
         assert_eq!(host.periods().last().unwrap().pcm, pcm[..192]);
     }
+    // EAPD powers a board amplifier; it must not gate the converter's
+    // stream. The generic parser leaves it untouched at boot.
+    verb(&mut hda, 3, 0x70c00);
+    interval(&mut hda);
+    assert_eq!(host.periods().last().unwrap().pcm, pcm[..192]);
 }
 
 struct BufferedHost {

@@ -161,6 +161,11 @@ impl Codec {
         }
     }
 
+    /// Whether the converter is live: matching stream tag, matching
+    /// converter format, every widget in D0, and the pin enabled in the
+    /// stream's direction. EAPD is deliberately absent: it powers a board
+    /// amplifier, and the generic parser leaves it untouched — a controller
+    /// must not mute the stream for it.
     pub fn connected(&self, input: bool, tag: u8, format: u16) -> bool {
         let converter = if input { 4 } else { 2 } * 24;
         let pin = if input { 5 } else { 3 } * 24;
@@ -173,7 +178,6 @@ impl Codec {
             && self.bytes[converter + 5] == 0
             && self.bytes[pin + 5] == 0
             && self.bytes[pin + 7] & if input { 0x20 } else { 0x40 } != 0
-            && (input || self.bytes[pin + 9] & 2 != 0)
     }
 
     pub fn amplify(&self, input: bool, pcm: &mut [u8], channels: usize) {
