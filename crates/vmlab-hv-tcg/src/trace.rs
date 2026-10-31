@@ -1003,6 +1003,7 @@ impl Trace {
         self.run_inputs(interpreter, &[], Some(steps), limit)
     }
 
+    #[inline(always)]
     fn run_inputs<M: Memory>(
         &mut self,
         interpreter: &mut Interpreter<'_, M>,
@@ -1017,6 +1018,7 @@ impl Trace {
         }
     }
 
+    #[inline(never)]
     fn run_inputs_indexed<M: Memory, const INDEXED: bool>(
         &mut self,
         interpreter: &mut Interpreter<'_, M>,
@@ -1231,6 +1233,7 @@ impl Trace {
         outcome
     }
 
+    #[inline(always)]
     fn run_bound<M: Memory>(
         &mut self,
         interpreter: &mut Interpreter<'_, M>,
@@ -1244,6 +1247,7 @@ impl Trace {
         }
     }
 
+    #[inline(never)]
     fn run_bound_indexed<M: Memory, const INDEXED: bool>(
         &mut self,
         interpreter: &mut Interpreter<'_, M>,
