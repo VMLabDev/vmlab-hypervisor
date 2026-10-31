@@ -74,6 +74,9 @@ impl PhysicalMemory {
     }
 
     pub(super) fn invalidate_code(&self) {
+        let _guard = self.transaction.lock();
+        self.cache_safe
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.code_windows.lock().entries.clear();
     }
 
@@ -368,6 +371,11 @@ mod tests {
         let restored = memory.code_stamp(RAM_BASE, 4).unwrap();
         assert_ne!(restored, before);
         assert_eq!(memory.code_stamp(RAM_BASE, 4), Some(restored));
+        memory
+            .ram
+            .write_slice(&[2], GuestAddress(RAM_BASE))
+            .unwrap();
+        assert_ne!(memory.code_stamp(RAM_BASE, 4), Some(restored));
     }
 
     #[test]
