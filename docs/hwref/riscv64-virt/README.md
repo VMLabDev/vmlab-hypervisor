@@ -68,9 +68,14 @@ The paused S1 snapshot save/load/delete round trip passes.
 Earlier runtime revisions passed the complete Sail-oracle corpus: 133
 programs, including the two FP regressions. The latest runtime changes
 require another complete run. `just tcg-generate-check` reproduces both
-committed generated artifacts byte-for-byte. Three warm measurements passed
-`just bench-check riscv64 interpreter-specialized`; the CoreMark median is
-50.899 MIPS (5.978 seconds for 304,258,499 instructions).
+committed generated artifacts byte-for-byte. The three-repeat warm run for
+`b7747be8` passes `just bench-check`; its CoreMark median is 46.861 MIPS
+(6.493 seconds for 304,258,499 instructions). Earlier failed comparisons
+remain in benchmark history. A matched, alternating three-repeat comparison
+with pre-projection revision `2083e3b0` measures the corrected runtime 3.71%
+slower on scalar code and 3.19% slower on CoreMark. Both remain within the
+suite's five-percent regression threshold; this does not establish equal
+speed.
 
 Live firmware execution exposed excessive block-cache invalidation in the
 VMM memory adapter. Page-wide guards treated stores to data beside code as
