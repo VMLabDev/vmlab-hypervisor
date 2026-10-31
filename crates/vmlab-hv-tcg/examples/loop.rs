@@ -13,6 +13,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cpu.set_pc(0x8000_0000);
     cpu.set_gpr(2, iterations)?;
     cpu.interpreter.operation_limit = u64::MAX;
+    cpu.interpreter.memoize = !std::env::args().any(|arg| arg == "--no-memo");
+    cpu.interpreter.indexed = !std::env::args().any(|arg| arg == "--no-indexed");
+    if std::env::args().any(|arg| arg == "--profile") {
+        cpu.interpreter.profile = Some(Default::default());
+    }
     let start = std::time::Instant::now();
     for _ in 0..iterations * 3 {
         cpu.step()?;
@@ -27,5 +32,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cpu.steps as f64 / elapsed / 1e6,
         cpu.interpreter.operations
     );
+    if let Some(profile) = cpu.interpreter.profile {
+        let mut functions: Vec<_> = profile.functions.into_iter().collect();
+        functions.sort_by_key(|(_, (_, own, _))| std::cmp::Reverse(*own));
+        for (name, (calls, own, inclusive)) in functions.into_iter().take(30) {
+            println!("{name}: calls={calls} own={own} inclusive={inclusive}");
+        }
+    }
     Ok(())
 }

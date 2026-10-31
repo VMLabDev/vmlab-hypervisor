@@ -1250,6 +1250,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "parking_lot",
+ "serde_json",
  "thiserror 2.0.21",
  "vmlab-hv-lockstep",
  "vmlab-hv-sail-ir",

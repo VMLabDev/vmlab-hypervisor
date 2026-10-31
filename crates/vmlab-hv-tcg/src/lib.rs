@@ -1,7 +1,11 @@
 //! Reference execution of the same specialised IR consumed by the trace compiler.
 mod cpu;
 mod decode;
+mod globals;
+mod indexed;
 mod intrinsics;
+mod memo;
+pub use globals::Globals;
 #[cfg(feature = "lockstep")]
 pub mod lockstep;
 mod memory;
@@ -40,14 +44,26 @@ pub enum Error {
 
 type Frame = BTreeMap<String, Value>;
 
+#[derive(Default)]
+pub struct Profile {
+    /// Function name -> (calls, exclusive operations, inclusive operations).
+    pub functions: BTreeMap<String, (u64, u64, u64)>,
+    children: Vec<u64>,
+}
+
 pub struct Interpreter<'a, M> {
     pub program: &'a Program,
-    pub globals: BTreeMap<String, Value>,
+    pub globals: Globals,
     pub memory: M,
     pub operations: u64,
     pub operation_limit: u64,
     pub diagnostics: std::collections::VecDeque<String>,
     pub terminal: Vec<u8>,
+    pub profile: Option<Profile>,
+    pub memoize: bool,
+    pub indexed: bool,
+    indexed_cache: BTreeMap<String, std::sync::Arc<indexed::Compiled>>,
+    memo: BTreeMap<String, memo::Memo>,
     depth: u32,
     reservation: Option<(u64, u64)>,
     fetch_address: Option<u64>,
@@ -61,12 +77,17 @@ impl<'a, M: Memory> Interpreter<'a, M> {
     pub fn new(program: &'a Program, memory: M) -> Self {
         Self {
             program,
-            globals: BTreeMap::new(),
+            globals: Globals::default(),
             memory,
             operations: 0,
             operation_limit: 100_000_000,
             diagnostics: std::collections::VecDeque::new(),
             terminal: Vec::new(),
+            profile: None,
+            memoize: true,
+            indexed: true,
+            indexed_cache: BTreeMap::new(),
+            memo: memo::Memo::analyze(program),
             depth: 0,
             reservation: None,
             fetch_address: None,
@@ -196,6 +217,13 @@ impl<'a, M: Memory> Interpreter<'a, M> {
     }
 
     fn assign(&mut self, frame: &mut Frame, location: &Location, value: Value) -> Result<()> {
+        if let Location::Id(name) = location
+            && !frame.contains_key(name)
+            && self.globals.contains_key(name)
+        {
+            self.globals.insert(name.clone(), value);
+            return Ok(());
+        }
         fn path(location: &Location, fields: &mut Vec<String>) -> Option<String> {
             match location {
                 Location::Id(name) => Some(name.clone()),
@@ -255,6 +283,26 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             .functions
             .get(name)
             .ok_or_else(|| Error::Undefined(format!("function {name}")))?;
+        if self.memoize && self.memo.contains_key(name) {
+            if let Some(value) = self
+                .memo
+                .get_mut(name)
+                .unwrap()
+                .lookup(&mut self.globals, &args)
+            {
+                self.operations += 1;
+                if self.operations > self.operation_limit {
+                    return Err(Error::Limit);
+                }
+                return Ok(value);
+            }
+            let result = self.run_cached(function, args.clone())?;
+            self.memo
+                .get_mut(name)
+                .unwrap()
+                .insert(&self.globals, args, result.clone());
+            return Ok(result);
+        }
         if name == "zread_CSR" {
             let csr = u16::try_from(
                 args.first()
@@ -273,10 +321,11 @@ impl<'a, M: Memory> Interpreter<'a, M> {
                         &argument,
                         Expr::Bits(format!("0x{csr:03x}")),
                     );
+                    builder.name = format!("zread_CSR:{csr}");
                     std::sync::Arc::new(builder)
                 })
                 .clone();
-            return self.run_function(&builder, args);
+            return self.run_cached(&builder, args);
         }
         if name == "zexecute"
             && let Some(Value::Union(tag, _)) = args.first()
@@ -295,16 +344,17 @@ impl<'a, M: Memory> Interpreter<'a, M> {
                 .or_insert_with(|| {
                     let mut builder = function.clone();
                     vmlab_hv_tcg_ir::specialize_constructor(&mut builder, tag);
+                    builder.name = format!("zexecute:{tag}");
                     std::sync::Arc::new(builder)
                 })
                 .clone();
-            return self.run_function(&builder, args);
+            return self.run_cached(&builder, args);
         }
         if name == "zpt_walk" {
             // Serialize the complete PTE read/check/A-D update with RAM stores.
             let transaction = self.memory.transaction_lock();
             let _pte = transaction.as_ref().map(|lock| lock.lock());
-            return self.run_function(function, args);
+            return self.run_cached(function, args);
         }
         if matches!(name, "zext_decode" | "zext_decode_compressed")
             && let Some(address) = self.fetch_address
@@ -320,7 +370,7 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             if let Some(value) = self.decode_cache.get(&key) {
                 return Ok(value.clone());
             }
-            let value = self.run_function(function, args)?;
+            let value = self.run_cached(function, args)?;
             if self.decode_cache.len() >= 4096 {
                 self.decode_cache.clear();
             }
@@ -333,7 +383,7 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             }
             return Ok(value);
         }
-        self.run_function(function, args)
+        self.run_cached(function, args)
     }
 
     pub fn run_function(&mut self, function: &Function, args: Vec<Value>) -> Result<Value> {
@@ -358,7 +408,22 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             },
         );
         self.depth += 1;
+        let start = self.operations;
+        if let Some(profile) = &mut self.profile {
+            profile.children.push(0);
+        }
         let result = self.run_frame(function, &mut frame);
+        if let Some(profile) = &mut self.profile {
+            let inclusive = self.operations - start;
+            let children = profile.children.pop().expect("profile frame");
+            let counts = profile.functions.entry(function.name.clone()).or_default();
+            counts.0 += 1;
+            counts.1 += inclusive - children;
+            counts.2 += inclusive;
+            if let Some(parent) = profile.children.last_mut() {
+                *parent += inclusive;
+            }
+        }
         self.depth -= 1;
         result
     }

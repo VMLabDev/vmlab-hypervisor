@@ -139,6 +139,21 @@ is bounded to 4096 entries and is cleared when full. Constructor-specialised
 instruction bodies are cached separately because their semantics do not
 depend on guest memory.
 
+`effects` computes transitive global reads, writes, and external effects to
+a fixed point, including recursive call graphs. The runtime memoizes calls
+only when every read and written global retains its version across the call.
+Memory, references, unknown calls, barriers, and platform effects are excluded.
+Versioned `Globals` also track mutations by platform and lockstep callers.
+This avoids caching an input-state result as if it described a changed output
+state. The cache bounds each function to 128 argument entries.
+
+`indexed` lowers local names to slots and extracts a literal pool. Its branch
+indices match the original IR, and it retains global names and explicit
+reference destinations. The interpreter binds the literals once, executes
+local frames as vectors, and borrows aggregate fields before copying their
+leaf values. This form is shared compiler input; it does not yet perform
+interprocedural partial evaluation or native scalar register allocation.
+
 A trace compiler can consume the same `Function`, `Op`, `NativeOperation`,
 and typed register slots. It must convert the explicit control-flow graph
 to SSA, keep guest registers in host values within a trace, and lower memory

@@ -24,6 +24,7 @@ vmlab-hv-lockstep = { path = "../vmlab-hv-lockstep", optional = true }
 cc = "1"
 
 [dev-dependencies]
+serde_json.workspace = true
 vmlab-hv-sail-ir = { path = "../vmlab-hv-sail-ir" }
 
 [lints]
