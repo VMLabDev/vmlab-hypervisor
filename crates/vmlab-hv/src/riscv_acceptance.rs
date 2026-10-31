@@ -216,38 +216,52 @@ fn boot(linux: bool, paused_snapshot: bool) {
             directory.path().display()
         );
     }
-    let vars_copy = directory.path().join("vars.fd");
-    std::fs::copy(vars, &vars_copy).unwrap();
-    let serial = directory.path().join("serial.log");
-    let control = directory.path().join("control.sock");
-    let machine = directory.path().join("machine.json");
-    let mut description = serde_json::json!({
-        "name": "vmlab:p3b/firmware", "arch": "riscv64", "machine": "virt", "accel": "tcg",
-        "vcpus": 1, "memory_mib": 256,
-        "boot": { "kind": "firmware", "firmware": "edk2_riscv", "code": code, "vars": vars_copy },
-        "disks": [], "nics": [], "ports": [], "serial_log": serial,
-    });
-    if paused_snapshot {
-        let disk = directory.path().join("state.qcow2");
-        vmlab_disk::ops::create_qcow2(&disk, 32 << 20, None, None).unwrap();
-        description["disks"] = serde_json::json!([{ "id": "state", "pci": { "bus": 0, "device": 2, "function": 0 }, "path": disk, "format": "qcow2", "read_only": false, "vmstate": true }]);
+    let replay = linux
+        .then(|| std::env::var_os("VMLAB_HV_RISCV_REPLAY"))
+        .flatten()
+        .map(std::path::PathBuf::from);
+    let artifacts = replay.as_deref().unwrap_or(directory.path());
+    let serial = artifacts.join("serial.log");
+    let control = artifacts.join("control.sock");
+    let machine = artifacts.join("machine.json");
+    if replay.is_some() {
+        validate_replay_fixture(artifacts);
+        eprintln!(
+            "RISC-V diagnostic replay: {}; this does not prove a cold boot",
+            artifacts.display()
+        );
+    } else {
+        let vars_copy = directory.path().join("vars.fd");
+        std::fs::copy(vars, &vars_copy).unwrap();
+        let mut description = serde_json::json!({
+            "name": "vmlab:p3b/firmware", "arch": "riscv64", "machine": "virt", "accel": "tcg",
+            "vcpus": 1, "memory_mib": 256,
+            "boot": { "kind": "firmware", "firmware": "edk2_riscv", "code": code, "vars": vars_copy },
+            "disks": [], "nics": [], "ports": [], "serial_log": serial,
+        });
+        if paused_snapshot {
+            let disk = directory.path().join("state.qcow2");
+            vmlab_disk::ops::create_qcow2(&disk, 32 << 20, None, None).unwrap();
+            description["disks"] = serde_json::json!([{ "id": "state", "pci": { "bus": 0, "device": 2, "function": 0 }, "path": disk, "format": "qcow2", "read_only": false, "vmstate": true }]);
+        }
+        if linux {
+            let Some(template) = template() else {
+                eprintln!("skipping RISC-V Linux: Debian template is unavailable");
+                return;
+            };
+            let overlay = directory.path().join("root.qcow2");
+            vmlab_disk::ops::create_linked_clone(&template, &overlay).unwrap();
+            description["vcpus"] = 2.into();
+            description["memory_mib"] = 2048.into();
+            description["console_pci"] =
+                serde_json::json!({ "bus": 0, "device": 1, "function": 0 });
+            description["ports"] = serde_json::json!([{ "name": "vmlab.agent.0", "socket": directory.path().join("agent.sock") }]);
+            description["disks"] = serde_json::json!([{ "id": "root", "pci": { "bus": 0, "device": 2, "function": 0 }, "path": overlay, "format": "qcow2", "read_only": false, "vmstate": true }]);
+            description["display"] = serde_json::json!({ "device": "virtio-gpu", "pci": { "bus": 0, "device": 4, "function": 0 }, "rom": null });
+            description["tablet"] = serde_json::json!({ "bus": 0, "device": 5, "function": 0 });
+        }
+        std::fs::write(&machine, serde_json::to_vec(&description).unwrap()).unwrap();
     }
-    if linux {
-        let Some(template) = template() else {
-            eprintln!("skipping RISC-V Linux: Debian template is unavailable");
-            return;
-        };
-        let overlay = directory.path().join("root.qcow2");
-        vmlab_disk::ops::create_linked_clone(&template, &overlay).unwrap();
-        description["vcpus"] = 2.into();
-        description["memory_mib"] = 2048.into();
-        description["console_pci"] = serde_json::json!({ "bus": 0, "device": 1, "function": 0 });
-        description["ports"] = serde_json::json!([{ "name": "vmlab.agent.0", "socket": directory.path().join("agent.sock") }]);
-        description["disks"] = serde_json::json!([{ "id": "root", "pci": { "bus": 0, "device": 2, "function": 0 }, "path": overlay, "format": "qcow2", "read_only": false, "vmstate": true }]);
-        description["display"] = serde_json::json!({ "device": "virtio-gpu", "pci": { "bus": 0, "device": 4, "function": 0 }, "rom": null });
-        description["tablet"] = serde_json::json!({ "bus": 0, "device": 5, "function": 0 });
-    }
-    std::fs::write(&machine, serde_json::to_vec(&description).unwrap()).unwrap();
     let timeout = Duration::from_secs(
         std::env::var("VMLAB_HV_RISCV_BOOT_TIMEOUT")
             .unwrap_or_else(|_| if linux { "3600" } else { "1800" }.into())
@@ -332,7 +346,15 @@ fn boot(linux: bool, paused_snapshot: bool) {
         return;
     }
     assert!(matches!(
-        client.call(Control::Resume).unwrap(),
+        client
+            .call(if replay.is_some() {
+                Control::SnapshotLoad {
+                    name: "p3b-replay".into(),
+                }
+            } else {
+                Control::Resume
+            })
+            .unwrap(),
         Outcome::Ok { .. }
     ));
     let mut last_progress = Instant::now();
@@ -363,7 +385,7 @@ fn boot(linux: bool, paused_snapshot: bool) {
     );
     if linux {
         use vmlab_hv_tests::agent::AgentClient;
-        let agent_path = directory.path().join("agent.sock");
+        let agent_path = artifacts.join("agent.sock");
         let mut agent = AgentClient::connect(&agent_path, timeout.saturating_sub(start.elapsed()))
             .unwrap_or_else(|error| panic!("agent: {error}\n{}", diagnostics()));
         eprintln!(
@@ -444,4 +466,68 @@ fn boot(linux: bool, paused_snapshot: bool) {
     ));
     client.call(Control::Quit).unwrap();
     assert!(process.wait().unwrap().success(), "{}", diagnostics());
+}
+
+fn validate_replay_fixture(directory: &Path) {
+    use std::os::unix::{fs::FileTypeExt, net::UnixStream};
+    use vmlab_hv_proto::machine::{Accel, Arch, Boot, Machine, MachineDescription};
+    assert_eq!(directory.canonicalize().unwrap(), directory);
+    assert!(directory.starts_with(std::env::temp_dir()));
+    assert!(
+        directory
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("hv-riscv-")
+    );
+    let desc: MachineDescription =
+        serde_json::from_slice(&std::fs::read(directory.join("machine.json")).unwrap()).unwrap();
+    assert_eq!(desc.name, "vmlab:p3b/firmware");
+    assert_eq!(
+        (desc.arch, desc.machine, desc.accel),
+        (Arch::Riscv64, Machine::Virt, Accel::Tcg)
+    );
+    assert_eq!(desc.serial_log, directory.join("serial.log"));
+    assert_eq!(desc.disks.len(), 1);
+    assert_eq!(
+        desc.disks[0].path.as_deref(),
+        Some(directory.join("root.qcow2").as_path())
+    );
+    assert!(desc.disks[0].vmstate && !desc.disks[0].read_only);
+    assert!(
+        matches!(desc.boot, Boot::Firmware { vars: Some(ref vars), .. } if *vars == directory.join("vars.fd"))
+    );
+    assert!(desc.nics.is_empty() && desc.shares.is_empty() && desc.vfio.is_empty());
+    assert!(
+        desc.ports
+            .iter()
+            .all(|port| port.socket == directory.join("agent.sock"))
+    );
+    let mut stale = Vec::new();
+    for name in ["control.sock", "display.sock", "vnc.sock", "agent.sock"] {
+        let path = directory.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                assert!(
+                    metadata.file_type().is_socket(),
+                    "not a socket: {}",
+                    path.display()
+                );
+                match UnixStream::connect(&path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+                    result => panic!(
+                        "replay requires a stopped fixture: {}: {result:?}",
+                        path.display()
+                    ),
+                }
+                stale.push(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("{}: {error}", path.display()),
+        }
+    }
+    for path in stale {
+        std::fs::remove_file(path).unwrap();
+    }
 }
