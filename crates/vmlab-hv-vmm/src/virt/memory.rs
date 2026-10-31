@@ -7,6 +7,21 @@ use vmlab_hv_tcg::{CodeStamp, Error, Memory, Result};
 use super::RAM_BASE;
 use crate::{bus::MmioBus, pci::PciRoot};
 
+const MAX_CODE_PAGES: usize = 4096;
+
+#[derive(Clone)]
+struct ReadObservation {
+    address: u64,
+    len: usize,
+    generation: u64,
+    bytes: [u8; 16],
+}
+
+struct CodePage {
+    bytes: Box<[u8; 4096]>,
+    generation: u64,
+}
+
 #[derive(Clone)]
 pub struct PhysicalMemory {
     pub ram: GuestMemory,
@@ -19,6 +34,8 @@ pub struct PhysicalMemory {
     identity: u64,
     cache_safe: Arc<std::sync::atomic::AtomicBool>,
     flash: Vec<(u64, Arc<Mutex<super::flash::Flash>>)>,
+    last_read: Option<ReadObservation>,
+    code_pages: Arc<Mutex<std::collections::BTreeMap<u64, CodePage>>>,
 }
 
 impl PhysicalMemory {
@@ -39,6 +56,8 @@ impl PhysicalMemory {
             identity: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             cache_safe: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             flash: Vec::new(),
+            last_read: None,
+            code_pages: Arc::default(),
         }
     }
 
@@ -51,6 +70,82 @@ impl PhysicalMemory {
             && address
                 .checked_add(len as u64)
                 .is_some_and(|end| end <= RAM_BASE + self.size)
+    }
+
+    fn access_generation(&self, address: u64, len: usize) -> Option<u64> {
+        if len == 0 {
+            return None;
+        }
+        if self.is_ram(address, len) {
+            let first = ((address - RAM_BASE) / 4096) as usize;
+            let last = ((address - RAM_BASE + len as u64 - 1) / 4096) as usize;
+            return self.pages[first..=last]
+                .iter()
+                .map(|page| page.load(std::sync::atomic::Ordering::SeqCst))
+                .max();
+        }
+        self.flash.iter().find_map(|(base, flash)| {
+            (address >= *base
+                && address
+                    .checked_add(len as u64)
+                    .is_some_and(|end| end <= base + (32 << 20)))
+            .then(|| flash.lock().code_generation())
+            .flatten()
+        })
+    }
+}
+
+impl PhysicalMemory {
+    /// Device DMA bypasses CPU write epochs. Validate code pages by exact
+    /// comparison, including the bytes the recorder actually fetched.
+    fn dma_code_generation(&self, address: u64, len: usize) -> Option<u64> {
+        let first = (address - RAM_BASE) / 4096;
+        let last = (address - RAM_BASE + len as u64 - 1) / 4096;
+        if last - first >= MAX_CODE_PAGES as u64 {
+            return None;
+        }
+        let mut pages = self.code_pages.lock();
+        let mut generation = 0;
+        for index in first..=last {
+            let base = RAM_BASE + index * 4096;
+            let mut actual = [0; 4096];
+            self.ram.read_slice(&mut actual, GuestAddress(base)).ok()?;
+            if let Some(read) = &self.last_read
+                && (read.address, read.len) == (address, len)
+            {
+                let start = address.max(base);
+                let end = (address + len as u64).min(base + 4096);
+                let offset = (start - address) as usize;
+                let count = (end - start) as usize;
+                if actual[(start - base) as usize..(end - base) as usize]
+                    != read.bytes[offset..offset + count]
+                {
+                    return None;
+                }
+            }
+            if pages.len() == MAX_CODE_PAGES
+                && !pages.contains_key(&index)
+                && let Some(evict) = pages
+                    .keys()
+                    .copied()
+                    .find(|page| *page < first || *page > last)
+            {
+                pages.remove(&evict);
+            }
+            let page = pages.entry(index).or_insert_with(|| CodePage {
+                bytes: Box::new([0; 4096]),
+                generation: 0,
+            });
+            if page.generation == 0 || *page.bytes != actual {
+                page.bytes.copy_from_slice(&actual);
+                page.generation = self
+                    .generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    .wrapping_add(1);
+            }
+            generation = generation.max(page.generation);
+        }
+        Some(generation)
     }
 }
 
@@ -68,6 +163,19 @@ impl Memory for PhysicalMemory {
         } else if !self.pci.lock().dispatch_mmio_read(address, bytes) {
             self.bus.lock().read(address, bytes);
         }
+        self.last_read = self
+            .access_generation(address, bytes.len())
+            .filter(|_| bytes.len() <= 16)
+            .map(|generation| {
+                let mut observed = [0; 16];
+                observed[..bytes.len()].copy_from_slice(bytes);
+                ReadObservation {
+                    address,
+                    len: bytes.len(),
+                    generation,
+                    bytes: observed,
+                }
+            });
         Ok(())
     }
     fn write(&mut self, address: u64, bytes: &[u8]) -> Result<()> {
@@ -77,8 +185,8 @@ impl Memory for PhysicalMemory {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .wrapping_add(1);
         // These platform registers cannot initiate DMA. Any other MMIO write
-        // permanently revokes RAM code stamps before firmware can start a PCI
-        // device or fw_cfg DMA. Device writes bypass this CPU memory adapter.
+        // switches RAM stamps to exact code-page validation before firmware can
+        // start PCI or fw_cfg DMA. Device writes bypass this CPU memory adapter.
         if !self.is_ram(address, bytes.len())
             && !matches!(address,
             0x100000..=0x101fff | 0x2000000..=0x200ffff | 0xc000000..=0xc5fffff | 0x10000000..=0x100000ff | 0x20000000..=0x23ffffff)
@@ -125,7 +233,15 @@ impl Memory for PhysicalMemory {
         if len == 0 {
             return None;
         }
-        for (base, flash) in &self.flash {
+        let generation = self.access_generation(address, len)?;
+        // The recorder asks for a stamp after its fetch. Do not attach a newer
+        // generation to bytes read before another hart's intervening store.
+        if self.last_read.as_ref().is_some_and(|read| {
+            (read.address, read.len) == (address, len) && read.generation != generation
+        }) {
+            return None;
+        }
+        for (base, _) in &self.flash {
             if address >= *base
                 && address
                     .checked_add(len as u64)
@@ -136,14 +252,18 @@ impl Memory for PhysicalMemory {
                     mapping: *base,
                     first_page: (address - base) / 4096,
                     last_page: (address - base + len as u64 - 1) / 4096,
-                    generation: flash.lock().code_generation()?,
+                    generation,
                 });
             }
         }
-        if !self.cache_safe.load(std::sync::atomic::Ordering::SeqCst) || !self.is_ram(address, len)
-        {
+        if !self.is_ram(address, len) {
             return None;
         }
+        let generation = if self.cache_safe.load(std::sync::atomic::Ordering::SeqCst) {
+            generation
+        } else {
+            self.dma_code_generation(address, len)?
+        };
         let first = (address - RAM_BASE) / 4096;
         let last = (address - RAM_BASE + len as u64 - 1) / 4096;
         Some(CodeStamp {
@@ -151,10 +271,7 @@ impl Memory for PhysicalMemory {
             mapping: RAM_BASE,
             first_page: first,
             last_page: last,
-            generation: self.pages[first as usize..=last as usize]
-                .iter()
-                .map(|p| p.load(std::sync::atomic::Ordering::SeqCst))
-                .max()?,
+            generation,
         })
     }
     fn load_reserved(&mut self, address: u64, bytes: &mut [u8]) -> Result<u64> {
@@ -182,7 +299,11 @@ mod tests {
     use super::*;
 
     fn memory() -> PhysicalMemory {
-        let size = 4 * 4096;
+        memory_with_pages(4)
+    }
+
+    fn memory_with_pages(pages: usize) -> PhysicalMemory {
+        let size = pages * 4096;
         let ram = GuestMemory::from_ranges(&[(GuestAddress(RAM_BASE), size)]).unwrap();
         PhysicalMemory::new(
             ram,
@@ -225,9 +346,22 @@ mod tests {
         flash.lock().restore_state(&state).unwrap();
         assert_ne!(memory.code_stamp(0x20000000, 4), Some(array));
         memory.write(0x30008004, &7u16.to_le_bytes()).unwrap();
-        assert!(memory.code_stamp(RAM_BASE, 4).is_none());
+        assert!(memory.code_stamp(RAM_BASE, 4).is_some());
         assert!(memory.code_stamp(0x20000000, 4).is_some());
         assert!(memory.code_stamp(0x21ffffff, 2).is_none());
+    }
+
+    #[test]
+    fn a_store_between_fetch_and_stamp_cannot_validate_the_old_instruction() {
+        let mut memory = memory();
+        let mut peer = memory.clone();
+        memory
+            .write(RAM_BASE, &0x00108093u32.to_le_bytes())
+            .unwrap();
+        let mut instruction = [0; 4];
+        memory.read(RAM_BASE, &mut instruction).unwrap();
+        peer.write(RAM_BASE, &0x00208093u32.to_le_bytes()).unwrap();
+        assert!(memory.code_stamp(RAM_BASE, 4).is_none());
     }
 
     #[test]
@@ -248,16 +382,77 @@ mod tests {
     }
 
     #[test]
-    fn possible_dma_revokes_code_stamps_before_device_access() {
+    fn possible_dma_switches_to_exact_code_page_validation() {
         let mut memory = memory();
         let other = memory.clone();
         memory.write(0x2000000, &1u32.to_le_bytes()).unwrap();
         memory.write(0x10000000, &[65]).unwrap();
         assert!(other.code_stamp(RAM_BASE, 4).is_some());
         memory.write(0x30008004, &7u16.to_le_bytes()).unwrap();
-        assert!(other.code_stamp(RAM_BASE, 4).is_none());
+        let enabled = other.code_stamp(RAM_BASE, 4).unwrap();
+        memory
+            .ram
+            .write_slice(&[2], GuestAddress(RAM_BASE))
+            .unwrap();
+        let changed = other.code_stamp(RAM_BASE, 4).unwrap();
+        assert_ne!(enabled, changed);
+        assert_eq!(other.code_stamp(RAM_BASE, 4), Some(changed));
         memory.write(RAM_BASE, &[1]).unwrap();
-        assert!(other.code_stamp(RAM_BASE, 4).is_none());
+        assert_ne!(other.code_stamp(RAM_BASE, 4), Some(changed));
+    }
+
+    #[test]
+    fn dma_between_fetch_and_stamp_does_not_fold_stale_bytes() {
+        let mut memory = memory();
+        memory.write(0x30008004, &[7]).unwrap();
+        memory.write(RAM_BASE + 4094, &[1, 2, 3, 4]).unwrap();
+        let mut instruction = [0; 4];
+        memory.read(RAM_BASE + 4094, &mut instruction).unwrap();
+        memory
+            .ram
+            .write_slice(&[5, 6], GuestAddress(RAM_BASE + 4096))
+            .unwrap();
+        assert!(memory.code_stamp(RAM_BASE + 4094, 4).is_none());
+        memory.read(RAM_BASE + 4094, &mut instruction).unwrap();
+        assert_eq!(instruction, [1, 2, 5, 6]);
+        let stamp = memory.code_stamp(RAM_BASE + 4094, 4).unwrap();
+        assert_eq!(memory.code_stamp(RAM_BASE + 4094, 4), Some(stamp));
+    }
+
+    #[test]
+    fn dma_code_tracking_is_bounded_and_eviction_changes_the_stamp() {
+        let mut memory = memory_with_pages(MAX_CODE_PAGES + 1);
+        memory.write(0x30008004, &[7]).unwrap();
+        let first = memory.code_stamp(RAM_BASE, 4).unwrap();
+        for page in 1..=MAX_CODE_PAGES {
+            memory.code_stamp(RAM_BASE + page as u64 * 4096, 4).unwrap();
+        }
+        assert_eq!(memory.code_pages.lock().len(), MAX_CODE_PAGES);
+        assert_ne!(memory.code_stamp(RAM_BASE, 4), Some(first));
+        assert_eq!(memory.code_pages.lock().len(), MAX_CODE_PAGES);
+    }
+
+    #[test]
+    fn execution_observes_dma_replacement_of_cached_instructions() {
+        let mut memory = memory();
+        memory
+            .write(RAM_BASE, &0x00108093u32.to_le_bytes())
+            .unwrap();
+        memory
+            .write(RAM_BASE + 4, &0xffdff06fu32.to_le_bytes())
+            .unwrap();
+        memory.write(0x30008004, &[7]).unwrap();
+        let dma = memory.ram.clone();
+        let mut cpu = vmlab_hv_tcg::Riscv64::new(memory).unwrap();
+        cpu.specialize = true;
+        cpu.set_pc(RAM_BASE);
+        cpu.run(64).unwrap();
+        assert_eq!(cpu.gpr(1).unwrap(), 32);
+        assert!(cpu.specialization_stats.hits > 0);
+        dma.write_slice(&0x00208093u32.to_le_bytes(), GuestAddress(RAM_BASE))
+            .unwrap();
+        cpu.run(64).unwrap();
+        assert_eq!(cpu.gpr(1).unwrap(), 96);
     }
 
     #[test]
