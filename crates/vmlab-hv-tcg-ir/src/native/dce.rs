@@ -35,7 +35,7 @@ pub fn prune(block: &mut Block) -> Vec<usize> {
         .filter_map(|(id, exit)| exits[id].then_some(exit))
         .collect();
     let mut values = Vec::new();
-    let mut scalars = Vec::new();
+    let mut scalars = block.entry_scalars.clone();
     for event in &mut block.events {
         match event {
             Event::Guard {
@@ -124,6 +124,9 @@ pub fn prune(block: &mut Block) -> Vec<usize> {
         }
     }
     let scalar_map = block.graph.retain(&live_scalars);
+    for scalar in &mut block.entry_scalars {
+        *scalar = scalar_map[*scalar];
+    }
     let constants: Vec<_> = constants.into_iter().collect();
     let constant_map: std::collections::BTreeMap<_, _> = constants
         .iter()
@@ -241,6 +244,32 @@ mod tests {
     use super::*;
     use crate::native::ScalarType;
     use crate::native::block::{Binding, Checkpoint, ContextGuard, Exit};
+
+    #[test]
+    fn projected_entry_dependencies_survive_pruning_and_scalar_renumbering() {
+        let mut block = Block::default();
+        block.graph.input(99, ScalarType::Bits(64), None);
+        let input = block.graph.input(0, ScalarType::Bits(64), None);
+        let mask = block.graph.constant(ScalarType::Bits(64), 63);
+        let index = block
+            .graph
+            .binary(ScalarType::Bits(64), super::super::Binary::And, input, mask)
+            .unwrap();
+        block.entry_scalars.push(index);
+        for _ in 0..2 {
+            assert!(prune(&mut block).is_empty());
+            assert_eq!(block.entry_scalars, vec![2]);
+            assert_eq!(block.graph.scalars.len(), 3);
+            assert!(matches!(
+                block.graph.scalars[0].operation,
+                Operation::Input(0)
+            ));
+            assert!(matches!(
+                block.graph.scalars[2].operation,
+                Operation::Binary(super::super::Binary::And, 0, 1)
+            ));
+        }
+    }
 
     #[test]
     fn discarded_snapshots_do_not_retain_values_but_ordered_reads_survive() {

@@ -342,7 +342,6 @@ fn paged_data_loads_specialize_and_revalidate_the_tlb_index() {
     };
     let mut reference = make();
     let mut specialized = make();
-    specialized.set_trace_cache_limit(64_000_000).unwrap();
     specialized.specialize = true;
     for page in 0..8 {
         let address = 0x10000 + page * 4096;

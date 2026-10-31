@@ -126,6 +126,8 @@ pub enum Event {
 #[derive(Clone, Debug, Default)]
 pub struct Block {
     pub graph: Graph,
+    /// Entry-only computations used to capture projected frontend inputs.
+    pub entry_scalars: Vec<ScalarId>,
     pub values: Vec<Recipe>,
     pub events: Vec<Event>,
     pub exits: Vec<Exit>,

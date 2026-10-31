@@ -109,6 +109,13 @@ traces now use the configured metadata budget to bound variants. After
 warming the complete page set, the revisit regression requires no Sail
 operations or new recordings and checks that usage stays within that budget.
 
+Entry-computable vector reads now project the runtime-selected element,
+instead of specializing its index. A single trace reads all 64 TLB-style
+indices without retraining. Projected-input dependencies survive scalar
+pruning and renumbering. Memory-derived indices keep ordered guards, and
+vector updates retain their existing index guards. The paged-load revisit
+regression also passes with the interpreter's default metadata budget.
+
 edk2 boot, Linux hardware capture, booted-guest snapshot restoration, and
 boot-to-agent-ready timing are pending. This reference does not establish
 a phase-3b parity pass.

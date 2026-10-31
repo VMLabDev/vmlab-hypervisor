@@ -14,6 +14,7 @@ mod lower;
 pub(crate) enum Projection {
     Field(String),
     Index(usize),
+    EntryIndex(usize),
     Payload(String),
 }
 
@@ -23,6 +24,17 @@ pub(crate) enum InputSource {
     Global(String, Vec<Projection>),
     Local(usize, String, Vec<Projection>),
     FetchAddress,
+}
+
+impl InputSource {
+    pub fn has_entry_index(&self) -> bool {
+        match self {
+            Self::Global(_, path) | Self::Local(_, _, path) => path
+                .iter()
+                .any(|projection| matches!(projection, Projection::EntryIndex(_))),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -887,6 +899,13 @@ impl Recorder {
                     {
                         let index = interpreter.eval(actual, &exprs[1]).ok()?.index().ok()?;
                         let (value, ty) = self.scalar(args[1])?;
+                        if name == "vector_access"
+                            && let Some(selected) = self.entry_vector_element(args[0], value, index)
+                        {
+                            self.assign_symbol(interpreter, location, selected)?;
+                            self.frames.last_mut()?.pending = Pending::Value(selected);
+                            return Some(());
+                        }
                         let expected = self.block.graph.constant(ty, index as u128);
                         let condition = self.block.graph.binary(
                             ScalarType::Bool,

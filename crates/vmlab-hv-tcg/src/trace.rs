@@ -1012,6 +1012,14 @@ impl Trace {
         }
         self.begin_capture();
         for id in 0..self.recorded.inputs.len() {
+            let resolved = if self.recorded.inputs[id].source.has_entry_index() {
+                let Some(source) = self.resolve_source(id)? else {
+                    return Ok(Outcome::Miss);
+                };
+                Some(source)
+            } else {
+                None
+            };
             let descriptor = &self.recorded.inputs[id];
             if let Some(steps) = steps
                 && matches!(descriptor.source, InputSource::Argument(0))
@@ -1033,7 +1041,11 @@ impl Trace {
                 self.bind_capture(id, value);
                 continue;
             }
-            let Some(value) = input(&descriptor.source, interpreter, args) else {
+            let Some(value) = input(
+                resolved.as_ref().unwrap_or(&descriptor.source),
+                interpreter,
+                args,
+            ) else {
                 return Ok(Outcome::Miss);
             };
             let Some(value) = capture_value(descriptor, value, self.input_values[id]) else {
@@ -1106,6 +1118,9 @@ impl Trace {
                 .iter()
                 .enumerate()
                 .all(|(id, descriptor)| {
+                    if descriptor.source.has_entry_index() {
+                        return false;
+                    }
                     if let Some(word) =
                         self.input_slots[id].and_then(|slot| interpreter.globals.native_slot(slot))
                     {
@@ -1117,11 +1132,10 @@ impl Trace {
                 })
     }
 
-    fn run_captured<M: Memory>(
+    fn evaluate<R>(
         &mut self,
-        interpreter: &mut Interpreter<'_, M>,
-        limit: u32,
-    ) -> Result<Outcome> {
+        run: impl FnOnce(&Self, &mut Evaluation<'_>) -> Result<R>,
+    ) -> (Result<R>, u32, bool) {
         let mut evaluation = Evaluation {
             recorded: &self.recorded,
             wide_inputs: std::mem::take(&mut self.wide_inputs),
@@ -1134,21 +1148,50 @@ impl Trace {
             binding_slots: &self.binding_slots,
             slots: &self.slots,
         };
-        let outcome = (|| {
-            for &(condition, expected) in &self.entry_guards {
+        let result = run(self, &mut evaluation);
+        self.scratch = evaluation.scalars;
+        self.stamps = evaluation.stamps;
+        self.wide_inputs = evaluation.wide_inputs;
+        (result, evaluation.completed_steps, evaluation.complete_path)
+    }
+
+    fn resolve_source(&mut self, id: usize) -> Result<Option<InputSource>> {
+        let mut source = self.recorded.inputs[id].source.clone();
+        let (InputSource::Global(_, path) | InputSource::Local(_, _, path)) = &mut source else {
+            return Ok(Some(source));
+        };
+        for projection in path {
+            if let Projection::EntryIndex(index) = *projection {
+                let index = self.recorded.block.entry_scalars[index];
+                let index = self
+                    .evaluate(|_, evaluation| Ok(usize::try_from(evaluation.scalar(index)?).ok()))
+                    .0?;
+                let Some(index) = index else {
+                    return Ok(None);
+                };
+                *projection = Projection::Index(index);
+            }
+        }
+        Ok(Some(source))
+    }
+
+    fn run_captured<M: Memory>(
+        &mut self,
+        interpreter: &mut Interpreter<'_, M>,
+        limit: u32,
+    ) -> Result<Outcome> {
+        let (outcome, steps, complete) = self.evaluate(|trace, evaluation| {
+            for &(condition, expected) in &trace.entry_guards {
                 if (evaluation.scalar(condition)? != 0) != expected {
                     return Ok(Outcome::Miss);
                 }
             }
-            self.execute(interpreter, &mut evaluation, limit)
-        })();
-        interpreter.trace_completed = evaluation.completed_steps;
-        self.scratch = evaluation.scalars;
-        self.stamps = evaluation.stamps;
-        self.wide_inputs = evaluation.wide_inputs;
+            trace.execute(interpreter, evaluation, limit)
+        });
+        interpreter.trace_completed = steps;
         if matches!(outcome, Ok(Outcome::Returned(_, _))) {
             self.returned_runs = self.returned_runs.saturating_add(1);
-            if evaluation.complete_path {
+            if complete {
                 self.successful_runs = self.successful_runs.saturating_add(1);
             }
         }
@@ -1166,8 +1209,17 @@ impl Trace {
         }
         self.begin_capture();
         for id in 0..self.recorded.inputs.len() {
+            let resolved = if self.recorded.inputs[id].source.has_entry_index() {
+                let Some(source) = self.resolve_source(id)? else {
+                    return Ok(Outcome::Miss);
+                };
+                Some(source)
+            } else {
+                None
+            };
             let descriptor = &self.recorded.inputs[id];
-            let value = match &descriptor.source {
+            let source = resolved.as_ref().unwrap_or(&descriptor.source);
+            let value = match source {
                 InputSource::Local(frame, name, path) => {
                     let symbol = parent.recorded.block.exits[exit]
                         .frames
@@ -1217,7 +1269,7 @@ impl Trace {
                             .unwrap(),
                     )
                 }
-                _ => input(&descriptor.source, interpreter, &[])
+                _ => input(source, interpreter, &[])
                     .and_then(|value| capture_value(descriptor, value, self.input_values[id])),
             };
             let Some(value) = value else {
@@ -1725,6 +1777,7 @@ impl Trace {
         let block = &self.recorded.block;
         let breakdown = self.cache_breakdown();
         block.graph.scalars.len()
+            + block.entry_scalars.len()
             + self
                 .binding_slots
                 .values()
@@ -1763,6 +1816,67 @@ mod tests {
     use crate::FlatMemory;
     use std::collections::{BTreeMap, BTreeSet};
     use vmlab_hv_tcg_ir::{Expr, Location, Op, Program, Target, Type};
+
+    #[test]
+    fn vector_entry_index_selects_live_values_without_retraining() {
+        let function = Function {
+            name: "indexed_input".into(),
+            args: vec![],
+            result: Type::Integer(None),
+            locals: BTreeMap::new(),
+            code: vec![
+                Op::Call(
+                    Location::Id("return".into()),
+                    Target::Intrinsic("vector_access".into()),
+                    vec![Expr::Id("items".into()), Expr::Id("index".into())],
+                ),
+                Op::Return,
+            ],
+        };
+        let program = Program {
+            globals: BTreeMap::from([
+                ("index".into(), Type::Integer(None)),
+                ("items".into(), Type::Vector(Box::new(Type::Integer(None)))),
+            ]),
+            ..Program::default()
+        };
+        let mut interpreter = Interpreter::new(&program, FlatMemory::new(0, vec![]));
+        interpreter.initialize().unwrap();
+        interpreter.globals.insert("index".into(), Value::int(0));
+        interpreter.globals.insert(
+            "items".into(),
+            Value::Vector((0..64).map(Value::int).collect()),
+        );
+        let options = Options {
+            dynamic_globals: BTreeSet::from(["index".into(), "items".into()]),
+            ..Options::default()
+        };
+        let (mut trace, first) =
+            Trace::record(&mut interpreter, &function, vec![], options).unwrap();
+        assert_eq!(first, Value::int(0));
+        let operations = interpreter.operations;
+        for index in (0..64).rev() {
+            interpreter
+                .globals
+                .insert("index".into(), Value::int(index));
+            let outcome = trace.run(&mut interpreter, &[], 1).unwrap();
+            assert!(
+                matches!(outcome, Outcome::Returned(value, 1) if value == Value::int(index)),
+                "index {index}"
+            );
+            assert_eq!(interpreter.operations, operations);
+        }
+        for index in [64, -1] {
+            interpreter
+                .globals
+                .insert("index".into(), Value::int(index));
+            assert!(matches!(
+                trace.run(&mut interpreter, &[], 1).unwrap(),
+                Outcome::Miss
+            ));
+            assert_eq!(interpreter.operations, operations);
+        }
+    }
 
     #[test]
     fn vector_fragments_guard_only_the_selected_entry_and_index() {
@@ -1873,8 +1987,9 @@ mod tests {
         }
         interpreter.globals.insert("index".into(), Value::int(1));
         assert!(
-            matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Resumed(value, 1) if value == Value::int(99))
+            matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(value, 1) if value == Value::int(99))
         );
+        assert_eq!(interpreter.operations, operations);
         interpreter
             .globals
             .insert("items".into(), Value::Vector(vec![none(), some(99)]));
@@ -1931,7 +2046,9 @@ mod tests {
                 self.ram.store_conditional(address, bytes, generation)
             }
         }
-        for memory_index in [false, true] {
+        for mode in 0..3 {
+            let memory_index = mode == 1;
+            let update = mode == 2;
             let mut code = vec![store()];
             if memory_index {
                 code.extend([
@@ -1957,21 +2074,36 @@ mod tests {
                     ),
                 ]);
             }
+            let mut args = vec![
+                Expr::Id("items".into()),
+                Expr::Id(if memory_index { "selected" } else { "index" }.into()),
+            ];
+            if update {
+                args.push(Expr::Integer("77".into(), None));
+            }
             code.extend([
                 Op::Call(
                     Location::Id("return".into()),
-                    Target::Intrinsic("vector_access".into()),
-                    vec![
-                        Expr::Id("items".into()),
-                        Expr::Id(if memory_index { "selected" } else { "index" }.into()),
-                    ],
+                    Target::Intrinsic(
+                        if update {
+                            "vector_update"
+                        } else {
+                            "vector_access"
+                        }
+                        .into(),
+                    ),
+                    args,
                 ),
                 Op::Return,
             ]);
             let function = Function {
                 name: "ordered_selection".into(),
                 args: vec![],
-                result: Type::Integer(None),
+                result: if update {
+                    Type::Vector(Box::new(Type::Integer(None)))
+                } else {
+                    Type::Integer(None)
+                },
                 locals: BTreeMap::new(),
                 code,
             };
@@ -2003,28 +2135,43 @@ mod tests {
             };
             let (mut trace, first) =
                 Trace::record(&mut interpreter, &function, vec![], options.clone()).unwrap();
-            assert_eq!(first, Value::int(42));
+            assert_eq!(
+                first,
+                if update {
+                    Value::Vector(vec![Value::int(77), Value::int(99)])
+                } else {
+                    Value::int(42)
+                }
+            );
             assert_eq!(interpreter.memory.writes, 1);
             interpreter.globals.insert("index".into(), Value::int(1));
             interpreter.memory.index = 1;
+            let expected = if update {
+                Value::Vector(vec![Value::int(42), Value::int(77)])
+            } else {
+                Value::int(99)
+            };
             let outcome = trace.run(&mut interpreter, &[], 1).unwrap();
             if memory_index {
                 assert!(trace.entry_guards.is_empty());
                 assert!(matches!(outcome, Outcome::Resumed(value, 1) if value == Value::int(99)));
                 assert_eq!(interpreter.memory.reads, 2);
-            } else {
+            } else if update {
                 assert!(!trace.entry_guards.is_empty());
                 assert!(matches!(outcome, Outcome::Miss));
                 assert_eq!(interpreter.memory.writes, 1);
                 let (next, value) =
                     Trace::record(&mut interpreter, &function, vec![], options).unwrap();
-                assert_eq!(value, Value::int(99));
+                assert_eq!(value, expected);
                 trace = next;
+            } else {
+                assert!(trace.entry_guards.is_empty());
+                assert!(matches!(outcome, Outcome::Returned(value, 1) if value == expected));
             }
             assert_eq!(interpreter.memory.writes, 2);
             let operations = interpreter.operations;
             assert!(
-                matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(value, 1) if value == Value::int(99))
+                matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(value, 1) if value == expected)
             );
             assert_eq!(interpreter.operations, operations);
             assert_eq!(interpreter.memory.writes, 3);

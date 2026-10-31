@@ -4,6 +4,60 @@ use vmlab_hv_tcg_ir::native::Unary;
 use vmlab_hv_tcg_ir::native::block::{DeferredOperation, Recipe};
 
 impl Recorder {
+    pub(super) fn entry_vector_element(
+        &mut self,
+        vector: ValueId,
+        index: ScalarId,
+        sample_index: usize,
+    ) -> Option<ValueId> {
+        fn available(graph: &vmlab_hv_tcg_ir::native::Graph, id: ScalarId) -> bool {
+            use vmlab_hv_tcg_ir::native::Operation;
+            match graph.scalars[id].operation {
+                Operation::Constant(_) | Operation::Input(_) => true,
+                Operation::Effect(_) => false,
+                Operation::Refine(value)
+                | Operation::Unary(_, value)
+                | Operation::Slice { value, .. } => available(graph, value),
+                Operation::Binary(_, a, b) => available(graph, a) && available(graph, b),
+                Operation::Concat { high, low, .. } => {
+                    available(graph, high) && available(graph, low)
+                }
+            }
+        }
+        let Recipe::Input(id) = self.block.values[vector] else {
+            return None;
+        };
+        if !available(&self.block.graph, index) {
+            return None;
+        }
+        let index = self
+            .block
+            .entry_scalars
+            .iter()
+            .position(|id| *id == index)
+            .unwrap_or_else(|| {
+                let id = self.block.entry_scalars.len();
+                self.block.entry_scalars.push(index);
+                id
+            });
+        let source = match self.inputs[id].source.clone() {
+            InputSource::Global(name, mut path) => {
+                path.push(Projection::EntryIndex(index));
+                InputSource::Global(name, path)
+            }
+            InputSource::Local(frame, name, mut path) => {
+                path.push(Projection::EntryIndex(index));
+                InputSource::Local(frame, name, path)
+            }
+            _ => return None,
+        };
+        let Value::Vector(values) = &self.input_samples[id] else {
+            return None;
+        };
+        let sample = values.get(sample_index)?.clone();
+        Some(self.input(source, &sample))
+    }
+
     pub(super) fn vector_length(&self, value: ValueId) -> Option<usize> {
         match &self.block.values[value] {
             Recipe::Vector(values) => Some(values.len()),
