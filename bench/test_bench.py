@@ -13,12 +13,85 @@ import json
 import os
 import socket
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
 
 import lib
 from backends import hv_machine_description, qemu_vm_argv
+
+
+class QmpTests(unittest.TestCase):
+    def release(self, error=None, running=True):
+        client, peer = socket.socketpair()
+        client.settimeout(0.5)
+        peer.settimeout(2)
+        requests = []
+        failures = []
+
+        def serve():
+            pending = ""
+            decoder = json.JSONDecoder()
+            try:
+                peer.sendall(b'{"QMP":{"version":{},"capabilities":[]}}\r\n')
+                for command in ["qmp_capabilities", "cont", "query-status"]:
+                    while True:
+                        try:
+                            request, end = decoder.raw_decode(pending.lstrip())
+                            pending = pending.lstrip()[end:]
+                            break
+                        except json.JSONDecodeError:
+                            data = peer.recv(4096)
+                            if not data:
+                                return
+                            pending += data.decode()
+                    requests.append(request)
+                    self.assertEqual(request["execute"], command)
+                    reply = {"id": request.get("id")}
+                    if error == command:
+                        reply["error"] = {"class": "GenericError", "desc": "resume refused"}
+                    else:
+                        reply["return"] = {"running": running} if command == "query-status" else {}
+                    event = {"event": "RESUME"}
+                    peer.sendall((json.dumps(event) + "\r\n" + json.dumps(reply) + "\r\n").encode())
+                    if error == command:
+                        return
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                peer.close()
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        connected = mock.Mock(wraps=client)
+        connected.connect = mock.Mock()
+        try:
+            with mock.patch.object(lib.socket, "socket", return_value=connected):
+                if error:
+                    with self.assertRaisesRegex(lib.BenchError, "resume refused"):
+                        lib.qmp_cont("unused", timeout=0.5)
+                elif not running:
+                    with self.assertRaisesRegex(lib.BenchError, "not running"):
+                        lib.qmp_cont("unused", timeout=0.5)
+                else:
+                    lib.qmp_cont("unused", timeout=0.5)
+        finally:
+            client.close()
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        return requests
+
+    def test_release_handles_coalesced_events_and_matches_command_replies(self):
+        requests = self.release()
+        self.assertEqual([r["id"] for r in requests], [1, 2, 3])
+
+    def test_release_reports_qmp_errors(self):
+        self.release(error="cont")
+
+    def test_release_checks_running_state(self):
+        self.release(running=False)
 
 
 class StatsTests(unittest.TestCase):

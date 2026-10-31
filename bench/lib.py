@@ -403,24 +403,41 @@ def wait_for_agent(path, deadline_seconds, vm_exited=None):
 def qmp_cont(path, timeout=60):
     """Release the vCPUs: greeting, capabilities, cont (vmlab's sequence)."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(path)
-    s.settimeout(timeout)
+    stream = None
+    try:
+        s.connect(path)
+        s.settimeout(timeout)
+        stream = s.makefile("rwb")
 
-    def rd():
-        buf = b""
-        while True:
-            buf += s.recv(65536)
-            try:
-                return json.loads(buf.decode())
-            except Exception:
-                continue
+        def rd():
+            line = stream.readline()
+            if not line:
+                raise BenchError("QMP connection closed before its reply")
+            return json.loads(line)
 
-    rd()  # greeting
-    s.sendall(b'{"execute":"qmp_capabilities"}')
-    rd()
-    s.sendall(b'{"execute":"cont"}')
-    rd()
-    s.close()
+        if "QMP" not in rd():
+            raise BenchError("QMP greeting is missing")
+        for request_id, command in enumerate(
+            ("qmp_capabilities", "cont", "query-status"), start=1
+        ):
+            request = {"execute": command, "id": request_id}
+            stream.write((json.dumps(request) + "\n").encode())
+            stream.flush()
+            while True:
+                reply = rd()
+                if reply.get("id") != request_id:
+                    continue
+                if "error" in reply:
+                    raise BenchError(f"QMP {command}: {reply['error']}")
+                if "return" not in reply:
+                    raise BenchError(f"QMP {command}: reply has no result")
+                if command == "query-status" and not reply["return"].get("running"):
+                    raise BenchError(f"QMP guest is not running: {reply['return']}")
+                break
+    finally:
+        if stream is not None:
+            stream.close()
+        s.close()
 
 
 # ---------------------------------------------------------------------------
