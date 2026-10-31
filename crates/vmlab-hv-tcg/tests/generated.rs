@@ -402,6 +402,55 @@ fn paged_data_loads_specialize_and_revalidate_the_tlb_index() {
 }
 
 #[test]
+fn conflicting_code_and_data_tlb_entries_remain_native() {
+    let make = || {
+        let mut cpu = paged(8, true);
+        for (index, instruction) in [0x00013183u32, 0x00108093, 0xff9ff06f]
+            .into_iter()
+            .enumerate()
+        {
+            cpu.interpreter
+                .memory
+                .write(0x8000_0000 + index as u64 * 4, &instruction.to_le_bytes())
+                .unwrap();
+        }
+        let pte = (0x80008u64 << 10) | 0xdf;
+        cpu.interpreter
+            .memory
+            .write(0x8000_3000 + 68 * 8, &pte.to_le_bytes())
+            .unwrap();
+        cpu.interpreter
+            .memory
+            .write(0x8000_8000, &42u64.to_le_bytes())
+            .unwrap();
+        cpu.set_gpr(2, 0x44000).unwrap();
+        cpu.use_external_clock().unwrap();
+        cpu.interpreter.operation_limit = u64::MAX;
+        cpu
+    };
+    let mut reference = make();
+    let mut specialized = make();
+    specialized.specialize = true;
+    for _ in 0..4 {
+        reference.run(96).unwrap();
+        specialized.run(96).unwrap();
+    }
+    let operations = specialized.interpreter.operations;
+    let recordings = specialized.specialization_stats.recordings;
+    for _ in 0..4 {
+        reference.run(96).unwrap();
+        specialized.run(96).unwrap();
+        assert_eq!(
+            *specialized.interpreter.globals,
+            *reference.interpreter.globals
+        );
+        assert_eq!(specialized.gpr(3).unwrap(), 42);
+        assert_eq!(specialized.interpreter.operations, operations);
+        assert_eq!(specialized.specialization_stats.recordings, recordings);
+    }
+}
+
+#[test]
 fn sail_user_fetch_permission_fault() {
     let mut cpu = paged(8, false);
     cpu.step().unwrap();

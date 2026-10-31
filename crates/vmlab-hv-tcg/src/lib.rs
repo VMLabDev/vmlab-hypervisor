@@ -184,7 +184,42 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             .ok_or_else(|| Error::Undefined(name.into()))
     }
 
+    fn borrowed_expr<'b>(&'b self, frame: &'b Frame, expr: &Expr) -> Result<Option<&'b Value>> {
+        Ok(match expr {
+            Expr::Id(name) => Some(self.lookup(frame, name)?),
+            Expr::Field(base, field) => match self.borrowed_expr(frame, base)? {
+                Some(value) => Some(value.field(field)?),
+                None => None,
+            },
+            Expr::As(base, tag) => match self.borrowed_expr(frame, base)? {
+                Some(Value::Union(actual, value)) if actual == tag => Some(value),
+                Some(_) => return Err(Error::Type(format!("expected constructor {tag}"))),
+                None => None,
+            },
+            _ => None,
+        })
+    }
+
+    fn borrowed_intrinsic(
+        &self,
+        frame: &Frame,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<Option<Value>> {
+        if matches!(name, "vector_access" | "@bvaccess")
+            && args.len() == 2
+            && let Some(vector) = self.borrowed_expr(frame, &args[0])?
+            && let Some(index) = self.borrowed_expr(frame, &args[1])?
+        {
+            return intrinsics::vector_access(vector, index.index()?).map(Some);
+        }
+        Ok(None)
+    }
+
     fn eval(&mut self, frame: &Frame, expr: &Expr) -> Result<Value> {
+        if let Some(value) = self.borrowed_expr(frame, expr)? {
+            return Ok(value.clone());
+        }
         Ok(match expr {
             Expr::Id(name) => self.lookup(frame, name)?.clone(),
             Expr::Integer(n, _) => Value::int(
@@ -217,14 +252,20 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             ),
             Expr::Field(e, field) => self.eval(frame, e)?.field(field)?.clone(),
             // Jib's `is` is a constructor mismatch test, used to skip a case.
-            Expr::Is(e, tag) => Value::Bool(
-                !matches!(self.eval(frame, e)?, Value::Union(ref actual, _) if actual == tag),
-            ),
+            Expr::Is(e, tag) => Value::Bool(match self.borrowed_expr(frame, e)? {
+                Some(value) => !matches!(value, Value::Union(actual, _) if actual == tag),
+                None => {
+                    !matches!(self.eval(frame, e)?, Value::Union(ref actual, _) if actual == tag)
+                }
+            }),
             Expr::As(e, tag) => match self.eval(frame, e)? {
                 Value::Union(actual, value) if actual == *tag => *value,
                 _ => return Err(Error::Type(format!("expected constructor {tag}"))),
             },
             Expr::Op(name, width, args) => {
+                if let Some(value) = self.borrowed_intrinsic(frame, name, args)? {
+                    return Ok(value);
+                }
                 let args = args
                     .iter()
                     .map(|e| self.eval(frame, e))
@@ -517,6 +558,12 @@ impl<'a, M: Memory> Interpreter<'a, M> {
                         self.assign(frame, loc, v)?;
                     }
                     Op::Call(loc, target, args) => {
+                        if let Target::Intrinsic(name) = target
+                            && let Some(value) = self.borrowed_intrinsic(frame, name, args)?
+                        {
+                            self.assign(frame, loc, value)?;
+                            return Ok(Some(pc + 1));
+                        }
                         let args = args
                             .iter()
                             .map(|e| self.eval(frame, e))

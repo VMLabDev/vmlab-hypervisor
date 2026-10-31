@@ -264,6 +264,16 @@ impl<M: Memory> Interpreter<'_, M> {
                         self.assign_slot(compiled, slots, place, value)?;
                     }
                     IndexedOp::Call(place, target, operands) => {
+                        if let Target::Intrinsic(name) = target
+                            && matches!(name.as_str(), "vector_access" | "@bvaccess")
+                            && operands.len() == 2
+                            && let Some(vector) = self.borrowed(compiled, slots, &operands[0])?
+                            && let Some(index) = self.borrowed(compiled, slots, &operands[1])?
+                        {
+                            let value = crate::intrinsics::vector_access(vector, index.index()?)?;
+                            self.assign_slot(compiled, slots, place, value)?;
+                            return Ok(Some(pc + 1));
+                        }
                         let args = self.operands(compiled, slots, operands)?;
                         let value = match target {
                             Target::Function(name) => self.call(name, args)?,

@@ -4,6 +4,19 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::{Signed, ToPrimitive, Zero};
 use vmlab_hv_tcg_ir::NativeOperation;
 
+pub(crate) fn vector_access(value: &Value, index: usize) -> Result<Value> {
+    match value {
+        Value::Vector(values) => values
+            .get(index)
+            .cloned()
+            .ok_or_else(|| Error::Type("vector index".into())),
+        Value::Bits { width, value } if index < *width as usize => {
+            Ok(Value::bits(1, u8::from(value.bit(index as u64))))
+        }
+        _ => Err(Error::Type("vector access".into())),
+    }
+}
+
 impl<M: Memory> Interpreter<'_, M> {
     pub(crate) fn native(
         &mut self,
@@ -167,16 +180,7 @@ impl<M: Memory> Interpreter<'_, M> {
             "zinternal_vector_init" => Value::Vector(vec![Value::Undefined; index(0)?]),
             "vector_access" | "@bvaccess" => {
                 let i = index(1)?;
-                match a(0)? {
-                    Value::Vector(v) => v
-                        .get(i)
-                        .cloned()
-                        .ok_or_else(|| Error::Type("vector index".into()))?,
-                    Value::Bits { width, value } if i < *width as usize => {
-                        Value::bits(1, u8::from(value.bit(i as u64)))
-                    }
-                    _ => return Err(Error::Type("vector access".into())),
-                }
+                vector_access(a(0)?, i)?
             }
             "vector_update" | "zinternal_vector_update" => {
                 let i = index(1)?;
