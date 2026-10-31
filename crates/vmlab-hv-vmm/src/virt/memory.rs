@@ -7,7 +7,8 @@ use vmlab_hv_tcg::{CodeStamp, Error, Memory, Result};
 use super::RAM_BASE;
 use crate::{bus::MmioBus, pci::PciRoot};
 
-const MAX_CODE_PAGES: usize = 4096;
+const MAX_CODE_WINDOWS: usize = 262144;
+const WINDOW_MAPPING: u64 = 1 << 63;
 
 #[derive(Clone)]
 struct ReadObservation {
@@ -17,9 +18,15 @@ struct ReadObservation {
     bytes: [u8; 16],
 }
 
-struct CodePage {
-    bytes: Box<[u8; 4096]>,
+struct CodeWindow {
+    bytes: [u8; 16],
     generation: u64,
+}
+
+#[derive(Default)]
+struct CodeWindows {
+    entries: std::collections::BTreeMap<(u64, usize), CodeWindow>,
+    clock: u64,
 }
 
 #[derive(Clone)]
@@ -35,7 +42,7 @@ pub struct PhysicalMemory {
     cache_safe: Arc<std::sync::atomic::AtomicBool>,
     flash: Vec<(u64, Arc<Mutex<super::flash::Flash>>)>,
     last_read: Option<ReadObservation>,
-    code_pages: Arc<Mutex<std::collections::BTreeMap<u64, CodePage>>>,
+    code_windows: Arc<Mutex<CodeWindows>>,
 }
 
 impl PhysicalMemory {
@@ -57,7 +64,7 @@ impl PhysicalMemory {
             cache_safe: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             flash: Vec::new(),
             last_read: None,
-            code_pages: Arc::default(),
+            code_windows: Arc::default(),
         }
     }
 
@@ -96,55 +103,44 @@ impl PhysicalMemory {
 }
 
 impl PhysicalMemory {
-    /// Device DMA bypasses CPU write epochs. Validate code pages by exact
-    /// comparison, including the bytes the recorder actually fetched.
+    /// Validate precisely the fetched bytes. Firmware often keeps writable
+    /// data beside code; changing that data must not invalidate the code.
     fn dma_code_generation(&self, address: u64, len: usize) -> Option<u64> {
-        let first = (address - RAM_BASE) / 4096;
-        let last = (address - RAM_BASE + len as u64 - 1) / 4096;
-        if last - first >= MAX_CODE_PAGES as u64 {
+        if len > 16 {
             return None;
         }
-        let mut pages = self.code_pages.lock();
-        let mut generation = 0;
-        for index in first..=last {
-            let base = RAM_BASE + index * 4096;
-            let mut actual = [0; 4096];
-            self.ram.read_slice(&mut actual, GuestAddress(base)).ok()?;
-            if let Some(read) = &self.last_read
-                && (read.address, read.len) == (address, len)
-            {
-                let start = address.max(base);
-                let end = (address + len as u64).min(base + 4096);
-                let offset = (start - address) as usize;
-                let count = (end - start) as usize;
-                if actual[(start - base) as usize..(end - base) as usize]
-                    != read.bytes[offset..offset + count]
-                {
-                    return None;
-                }
-            }
-            if pages.len() == MAX_CODE_PAGES
-                && !pages.contains_key(&index)
-                && let Some(evict) = pages
-                    .keys()
-                    .copied()
-                    .find(|page| *page < first || *page > last)
-            {
-                pages.remove(&evict);
-            }
-            let page = pages.entry(index).or_insert_with(|| CodePage {
-                bytes: Box::new([0; 4096]),
-                generation: 0,
-            });
-            if page.generation == 0 || *page.bytes != actual {
-                page.bytes.copy_from_slice(&actual);
-                page.generation = self
-                    .generation
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    .wrapping_add(1);
-            }
-            generation = generation.max(page.generation);
+        let mut actual = [0; 16];
+        self.ram
+            .read_slice(&mut actual[..len], GuestAddress(address))
+            .ok()?;
+        if let Some(read) = &self.last_read
+            && (read.address, read.len) == (address, len)
+            && actual[..len] != read.bytes[..len]
+        {
+            return None;
         }
+        let mut windows = self.code_windows.lock();
+        let key = (address, len);
+        if let Some(window) = windows.entries.get(&key)
+            && window.bytes == actual
+        {
+            return Some(window.generation);
+        }
+        if windows.entries.len() == MAX_CODE_WINDOWS && !windows.entries.contains_key(&key) {
+            windows.entries.pop_first();
+        }
+        windows.clock = windows
+            .clock
+            .checked_add(1)
+            .expect("code window epoch exhausted");
+        let generation = windows.clock;
+        windows.entries.insert(
+            key,
+            CodeWindow {
+                bytes: actual,
+                generation,
+            },
+        );
         Some(generation)
     }
 }
@@ -185,7 +181,7 @@ impl Memory for PhysicalMemory {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .wrapping_add(1);
         // These platform registers cannot initiate DMA. Any other MMIO write
-        // switches RAM stamps to exact code-page validation before firmware can
+        // switches RAM stamps to exact code-window validation before firmware can
         // start PCI or fw_cfg DMA. Device writes bypass this CPU memory adapter.
         if !self.is_ram(address, bytes.len())
             && !matches!(address,
@@ -233,6 +229,17 @@ impl Memory for PhysicalMemory {
         if len == 0 {
             return None;
         }
+        if !self.cache_safe.load(std::sync::atomic::Ordering::SeqCst) && self.is_ram(address, len) {
+            return Some(CodeStamp {
+                identity: self.identity,
+                // Distinct windows must not coalesce into one page guard. The
+                // high bit also separates this namespace from pre-DMA stamps.
+                mapping: address | WINDOW_MAPPING,
+                first_page: 0,
+                last_page: 0,
+                generation: self.dma_code_generation(address, len)?,
+            });
+        }
         let generation = self.access_generation(address, len)?;
         // The recorder asks for a stamp after its fetch. Do not attach a newer
         // generation to bytes read before another hart's intervening store.
@@ -259,11 +266,6 @@ impl Memory for PhysicalMemory {
         if !self.is_ram(address, len) {
             return None;
         }
-        let generation = if self.cache_safe.load(std::sync::atomic::Ordering::SeqCst) {
-            generation
-        } else {
-            self.dma_code_generation(address, len)?
-        };
         let first = (address - RAM_BASE) / 4096;
         let last = (address - RAM_BASE + len as u64 - 1) / 4096;
         Some(CodeStamp {
@@ -382,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn possible_dma_switches_to_exact_code_page_validation() {
+    fn possible_dma_switches_to_exact_instruction_validation() {
         let mut memory = memory();
         let other = memory.clone();
         memory.write(0x2000000, &1u32.to_le_bytes()).unwrap();
@@ -399,6 +401,71 @@ mod tests {
         assert_eq!(other.code_stamp(RAM_BASE, 4), Some(changed));
         memory.write(RAM_BASE, &[1]).unwrap();
         assert_ne!(other.code_stamp(RAM_BASE, 4), Some(changed));
+    }
+
+    #[test]
+    fn nearby_data_stores_do_not_retrain_a_warm_instruction_loop() {
+        let mut memory = memory();
+        for (index, word) in [0x00000117u32, 0x00108093, 0x08113023, 0xff9ff06f]
+            .into_iter()
+            .enumerate()
+        {
+            memory
+                .write(RAM_BASE + index as u64 * 4, &word.to_le_bytes())
+                .unwrap();
+        }
+        memory.write(0x30008004, &[7]).unwrap();
+        let mut cpu = vmlab_hv_tcg::Riscv64::new(memory).unwrap();
+        cpu.specialize = true;
+        cpu.interpreter.operation_limit = u64::MAX;
+        cpu.set_pc(RAM_BASE);
+        cpu.run(1).unwrap();
+        cpu.run(192).unwrap();
+        let trained = cpu.specialization_stats.recordings;
+        cpu.run(192).unwrap();
+        assert_eq!(cpu.gpr(1).unwrap(), 128);
+        let retrained = cpu.specialization_stats.recordings - trained;
+        eprintln!("unchanged warm loop: {retrained} retrainings over 64 iterations");
+        assert!(
+            retrained < 16,
+            "unchanged instructions retrained {retrained} times"
+        );
+    }
+
+    #[test]
+    fn overlapping_instruction_windows_have_independent_guards() {
+        let mut memory = memory();
+        memory.write(RAM_BASE, &[1, 2, 3, 4]).unwrap();
+        let page = memory.code_stamp(RAM_BASE, 4).unwrap();
+        memory.write(0x30008004, &[7]).unwrap();
+        let prefix = memory.code_stamp(RAM_BASE, 2).unwrap();
+        let whole = memory.code_stamp(RAM_BASE, 4).unwrap();
+        let suffix = memory.code_stamp(RAM_BASE + 2, 2).unwrap();
+        assert_ne!(page.mapping, whole.mapping);
+        assert_ne!(prefix.generation, whole.generation);
+        assert_ne!(prefix.mapping, suffix.mapping);
+        memory
+            .ram
+            .write_slice(&[5, 6], GuestAddress(RAM_BASE + 2))
+            .unwrap();
+        assert_eq!(memory.code_stamp(RAM_BASE, 2), Some(prefix));
+        assert_ne!(memory.code_stamp(RAM_BASE, 4), Some(whole));
+        assert_ne!(memory.code_stamp(RAM_BASE + 2, 2), Some(suffix));
+    }
+
+    #[test]
+    fn dma_to_data_near_code_does_not_invalidate_unchanged_instructions() {
+        let mut memory = memory();
+        memory
+            .write(RAM_BASE, &0x00108093u32.to_le_bytes())
+            .unwrap();
+        memory.write(0x30008004, &[7]).unwrap();
+        let instruction = memory.code_stamp(RAM_BASE, 4).unwrap();
+        memory
+            .ram
+            .write_slice(&[1], GuestAddress(RAM_BASE + 128))
+            .unwrap();
+        assert_eq!(memory.code_stamp(RAM_BASE, 4), Some(instruction));
     }
 
     #[test]
@@ -421,15 +488,15 @@ mod tests {
 
     #[test]
     fn dma_code_tracking_is_bounded_and_eviction_changes_the_stamp() {
-        let mut memory = memory_with_pages(MAX_CODE_PAGES + 1);
+        let mut memory = memory_with_pages((MAX_CODE_WINDOWS * 2).div_ceil(4096) + 1);
         memory.write(0x30008004, &[7]).unwrap();
-        let first = memory.code_stamp(RAM_BASE, 4).unwrap();
-        for page in 1..=MAX_CODE_PAGES {
-            memory.code_stamp(RAM_BASE + page as u64 * 4096, 4).unwrap();
+        let first = memory.code_stamp(RAM_BASE, 2).unwrap();
+        for window in 1..=MAX_CODE_WINDOWS {
+            memory.code_stamp(RAM_BASE + window as u64 * 2, 2).unwrap();
         }
-        assert_eq!(memory.code_pages.lock().len(), MAX_CODE_PAGES);
-        assert_ne!(memory.code_stamp(RAM_BASE, 4), Some(first));
-        assert_eq!(memory.code_pages.lock().len(), MAX_CODE_PAGES);
+        assert_eq!(memory.code_windows.lock().entries.len(), MAX_CODE_WINDOWS);
+        assert_ne!(memory.code_stamp(RAM_BASE, 2), Some(first));
+        assert_eq!(memory.code_windows.lock().entries.len(), MAX_CODE_WINDOWS);
     }
 
     #[test]
