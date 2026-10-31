@@ -699,3 +699,312 @@ fn ubuntu_26_04_first_screenshot_after_unobserved_boot() {
         );
     }
 }
+
+/// Host facts about the one device `VMLAB_HV_TEST_USB_DEVICE` names.
+struct UsbDeviceFacts {
+    bus: u32,
+    devnum: u32,
+    port_path: String,
+    vendor: String,
+    product: String,
+    /// The host drivers bound per interface before the attach, as symlink
+    /// targets; the detach must put them back.
+    drivers: Vec<String>,
+}
+
+/// Resolve `VMLAB_HV_TEST_USB_DEVICE` (`<bus>-<port path>`, e.g. `3-2.4`)
+/// against sysfs. Never picks a device by itself (host-hardware safety).
+fn usb_test_device() -> Option<UsbDeviceFacts> {
+    let selector = std::env::var("VMLAB_HV_TEST_USB_DEVICE").ok()?;
+    let root = Path::new("/sys/bus/usb/devices").join(&selector);
+    if !root.is_dir() {
+        eprintln!(
+            "skipping: VMLAB_HV_TEST_USB_DEVICE={selector} names no device in sysfs \
+             (expected <bus>-<port path>, e.g. 3-2.4)"
+        );
+        return None;
+    }
+    let read = |name: &str| {
+        std::fs::read_to_string(root.join(name))
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+    let bus: u32 = read("busnum").parse().ok()?;
+    let devnum: u32 = read("devnum").parse().ok()?;
+    // The port path below the bus: `1-2.4` -> `2.4`, as usb-host's
+    // hostport carries it.
+    let port_path = selector
+        .split_once('-')
+        .map(|(_, rest)| rest.to_owned())
+        .unwrap_or_default();
+    let mut drivers = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !name.contains(':') {
+                continue; // interface directories carry a colon
+            }
+            match std::fs::read_link(entry.path().join("driver")) {
+                Ok(driver) => drivers.push(driver.to_string_lossy().into_owned()),
+                Err(_) => drivers.push(String::new()),
+            }
+        }
+    }
+    drivers.sort();
+    Some(UsbDeviceFacts {
+        bus,
+        devnum,
+        port_path,
+        vendor: read("idVendor"),
+        product: read("idProduct"),
+        drivers,
+    })
+}
+
+/// S1: the host device `VMLAB_HV_TEST_USB_DEVICE` names is passed through
+/// to the ubuntu-26.04 template, shows up inside the guest, detaches with
+/// a `device_deleted` event, and the host kernel driver rebinds.
+#[test]
+fn usb_host_passthrough_real_device() {
+    if !Path::new("/dev/kvm").exists() {
+        eprintln!("skipping: /dev/kvm is unavailable");
+        return;
+    }
+    if !Path::new("/usr/share/qemu/bios-256k.bin").is_file()
+        || !Path::new("/usr/share/qemu/vgabios-virtio.bin").is_file()
+    {
+        eprintln!("skipping: SeaBIOS or SeaVGABIOS is not installed");
+        return;
+    }
+    let Some(facts) = usb_test_device() else {
+        eprintln!(
+            "skipping: set VMLAB_HV_TEST_USB_DEVICE=<bus>-<port path> to a device the owner \
+             designated for testing; nothing is picked automatically"
+        );
+        return;
+    };
+    let Some(template) = template("ubuntu-26.04", "VMLAB_HV_TEST_TEMPLATE") else {
+        eprintln!("skipping: ubuntu-26.04 template is absent");
+        return;
+    };
+    let mut dir = tempfile::Builder::new()
+        .prefix("hv-usb-")
+        .tempdir()
+        .unwrap();
+    if std::env::var_os("VMLAB_HV_ACCEPTANCE_KEEP").is_some() {
+        dir.disable_cleanup(true);
+        eprintln!("usb acceptance artifacts: {}", dir.path().display());
+    }
+    let disk = dir.path().join("disk.qcow2");
+    vmlab_disk::ops::create_linked_clone(&template, &disk).unwrap();
+    let control = dir.path().join("control.sock");
+    let agent = dir.path().join("agent.sock");
+    let serial = dir.path().join("serial.log");
+    let stderr = dir.path().join("stderr.log");
+    let description = serde_json::json!({
+        "machine": "q35", "name": "usb", "arch": "x86_64", "accel": "kvm",
+        "vcpus": 2, "memory_mib": 4096,
+        "boot": {"kind":"firmware","firmware":"seabios","code":"/usr/share/qemu/bios-256k.bin"},
+        "disks":[{"id":"disk0", "pci":{"bus":0,"device":2,"function":0},
+                   "path":disk, "format":"qcow2","read_only":false,"vmstate":true}],
+        "console_pci":{"bus":0,"device":1,"function":0},
+        "ahci_pci":{"bus":0,"device":31,"function":2},
+        "display":{"device":"std-vga","pci":{"bus":0,"device":4,"function":0},"rom":null},
+        "tablet":{"bus":0,"device":5,"function":0},
+        "usb":{"bus":0,"device":5,"function":0},
+        "ports":[{"name":"vmlab.agent.0", "socket":agent}], "nics":[], "serial_log":serial
+    });
+    let machine = dir.path().join("machine.json");
+    std::fs::write(&machine, serde_json::to_vec(&description).unwrap()).unwrap();
+    let binary = std::env::var_os("VMLAB_HV_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("vmlab-hv")
+        });
+    let mut process = Process(
+        ManagedChild::spawn(
+            Command::new(&binary)
+                .arg("--machine")
+                .arg(&machine)
+                .arg("--control")
+                .arg(&control)
+                .arg("--paused")
+                .stdout(Stdio::null())
+                .stderr(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&stderr)
+                        .unwrap(),
+                ),
+        )
+        .unwrap(),
+    );
+    let diagnostics = || {
+        format!(
+            "stderr: {}\nserial: {}",
+            std::fs::read_to_string(&stderr).unwrap_or_default(),
+            std::fs::read_to_string(&serial).unwrap_or_default(),
+        )
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut client = loop {
+        if let Ok(client) = Client::connect(&control) {
+            break client;
+        }
+        assert!(
+            process.0.try_wait().unwrap().is_none(),
+            "usb: exited before control ready: {}",
+            diagnostics()
+        );
+        assert!(Instant::now() < deadline, "usb: control timeout");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        client.has_capability(vmlab_hv_proto::control::Capability::Hotplug),
+        "the hotplug capability must be advertised with usb = true"
+    );
+    assert!(matches!(
+        client.call(Control::Resume).unwrap(),
+        Outcome::Ok { .. }
+    ));
+    let deadline = Instant::now() + Duration::from_secs(
+        std::env::var("VMLAB_HV_TEMPLATE_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(180),
+    );
+    let mut guest = loop {
+        if let Ok(guest) = AgentClient::connect(&agent, Duration::from_secs(3)) {
+            break guest;
+        }
+        assert!(
+            process.0.try_wait().unwrap().is_none() && Instant::now() < deadline,
+            "usb: agent timeout: {}",
+            diagnostics()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    // Attach the designated host device.
+    let id = format!("usbhost-{}-{}", facts.bus, facts.devnum);
+    let added = client
+        .call(Control::DeviceAdd {
+            id: id.clone(),
+            driver: "usb-host".into(),
+            bus: Some("usbx.0".into()),
+            hostbus: facts.bus,
+            hostaddr: facts.devnum,
+            hostport: facts.port_path.clone(),
+        })
+        .unwrap();
+    assert!(matches!(added, Outcome::Ok { .. }), "device_add: {added:?}");
+    // The guest enumerates it: lsusb, or the sysfs walk when lsusb is
+    // absent from the template.
+    let expected = format!("{}:{}", facts.vendor, facts.product).to_lowercase();
+    let seen = loop {
+        let output = guest
+            .exec(
+                &[
+                    "/bin/sh",
+                    "-c",
+                    "if command -v lsusb >/dev/null 2>&1; then lsusb; \
+                     else for d in /sys/bus/usb/devices/*; do \
+                     [ -f \"$d/idVendor\" ] && \
+                     echo \"$(cat \"$d/idVendor\"):$(cat \"$d/idProduct\")\"; \
+                     done; fi",
+                ],
+                Duration::from_secs(20),
+            )
+            .unwrap();
+        assert_eq!(output.exit_code, 0, "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+        if stdout.contains(&expected) {
+            break stdout;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "usb: the guest never saw {expected}: {stdout}{}",
+            diagnostics()
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    eprintln!("usb: the guest reports the device: {}", seen.trim());
+    // Detach: the reply is ok and a device_deleted event follows.
+    assert!(matches!(
+        client.call(Control::DeviceDel { id: id.clone() }).unwrap(),
+        Outcome::Ok { .. }
+    ));
+    let mut deleted = false;
+    let event_deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < event_deadline {
+        match client.wait_event().unwrap() {
+            Some(vmlab_hv_proto::control::Event::DeviceDeleted { id: gone })
+                if gone == id =>
+            {
+                deleted = true;
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert!(deleted, "usb: no device_deleted event for {id}");
+    // The host kernel driver rebound: the interface drivers are back to
+    // what they were before the attach.
+    let rebound = {
+        let root = Path::new("/sys/bus/usb/devices")
+            .join(format!("{}-{}", facts.bus, facts.port_path));
+        let mut drivers = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                let Some(name) = file_name.to_str() else {
+                    continue;
+                };
+                if !name.contains(':') {
+                    continue;
+                }
+                match std::fs::read_link(entry.path().join("driver")) {
+                    Ok(driver) => drivers.push(driver.to_string_lossy().into_owned()),
+                    Err(_) => drivers.push(String::new()),
+                }
+            }
+        }
+        drivers.sort();
+        drivers
+    };
+    assert!(
+        !facts.drivers.is_empty() || rebound.is_empty(),
+        "driver sets changed meaning: before {:?} after {:?}",
+        facts.drivers,
+        rebound
+    );
+    // Every interface that had a driver before has the same driver again.
+    for (before, after) in facts.drivers.iter().zip(&rebound) {
+        assert_eq!(
+            before, after,
+            "the host driver did not rebind: before {before:?}, after {after:?}"
+        );
+    }
+    assert!(matches!(
+        client.call(Control::Quit).unwrap(),
+        Outcome::Ok { .. }
+    ));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = process.0.try_wait().unwrap() {
+            assert!(status.success(), "usb: exit: {}", diagnostics());
+            break;
+        }
+        assert!(Instant::now() < deadline, "usb: did not exit after quit");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

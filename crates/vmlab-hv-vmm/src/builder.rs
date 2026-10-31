@@ -205,6 +205,16 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
     if let Some(tablet) = desc.tablet {
         add(Some(tablet), "tablet")?;
     }
+    // The tablet and the passthrough controller are one xHCI function.
+    match (desc.tablet, desc.usb) {
+        (Some(tablet), Some(usb)) if tablet != usb => {
+            return Err(VmmError::InvalidMachine(
+                "the tablet and usb functions must share one xHCI controller".into(),
+            ));
+        }
+        (None, Some(usb)) => add(Some(usb), "usb")?,
+        _ => {}
+    }
     if let Some(audio) = &desc.audio {
         add(audio.pci, "audio")?;
     }
@@ -1206,4 +1216,35 @@ mod tests {
         let err = err.to_string();
         assert!(err.contains("serial") && err.contains("COM1"), "{err}");
     }
+#[test]
+fn usb_and_tablet_must_share_one_controller() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut machine = desc();
+    machine.machine = Machine::Q35;
+    machine.boot = Boot::Firmware {
+        firmware: FirmwareKind::Seabios,
+        code: tiny_bzimage(dir.path()),
+        vars: None,
+        secure_boot: false,
+        bootorder: vec![],
+    };
+    machine.tablet = Some(PciAddress {
+        bus: 0,
+        device: 5,
+        function: 0,
+    });
+    machine.usb = Some(PciAddress {
+        bus: 0,
+        device: 6,
+        function: 0,
+    });
+    assert!(
+        validate(&machine)
+            .unwrap_err()
+            .to_string()
+            .contains("one xHCI controller")
+    );
+    machine.usb = machine.tablet;
+    validate(&machine).unwrap();
+}
 }
