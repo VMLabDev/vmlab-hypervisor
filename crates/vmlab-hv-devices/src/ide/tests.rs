@@ -553,3 +553,98 @@ fn pc_capture_ide_pci_programming_replays_without_lost_bits() {
         );
     }
 }
+
+#[test]
+fn templeos_initialization_and_multiple_io_do_not_require_set_multiple() {
+    fn select(d: &mut Driver, lba: u64, count: u16) {
+        d.ide.write_control(0, &[8]);
+        for (reg, value) in [
+            (2, (count >> 8) as u8),
+            (3, (lba >> 24) as u8),
+            (4, (lba >> 32) as u8),
+            (5, (lba >> 40) as u8),
+            (2, count as u8),
+            (3, lba as u8),
+            (4, (lba >> 8) as u8),
+            (5, (lba >> 16) as u8),
+            (6, 0xef),
+        ] {
+            d.w(0, reg, value);
+        }
+    }
+    fn command(d: &mut Driver, opcode: u8) {
+        d.w(0, 1, 0);
+        d.w(0, 7, opcode);
+    }
+
+    let data: Vec<_> = (0..16384).map(|i| (i / 32) as u8).collect();
+    let mut d = Driver::new();
+    d.attach(0, 0, &data);
+    d.ide.write_control(0, &[8]);
+    d.w(0, 6, 0xef);
+    command(&mut d, 0xec);
+    assert_eq!(d.r(0, 7), READY | DRQ);
+    let identify = d.bytes(0, 512);
+    assert_ne!(
+        u16::from_le_bytes(identify[172..174].try_into().unwrap()) & 0x400,
+        0
+    );
+    command(&mut d, 0x27);
+    assert_eq!(d.r(0, 7), READY);
+    let mut native = u64::from(d.r(0, 3)) | u64::from(d.r(0, 4)) << 8 | u64::from(d.r(0, 5)) << 16;
+    d.ide.write_control(0, &[0x80]);
+    native |= u64::from(d.r(0, 3)) << 24 | u64::from(d.r(0, 4)) << 32 | u64::from(d.r(0, 5)) << 40;
+    assert_eq!(native, data.len() as u64 / 512 - 1);
+    select(&mut d, native, 0);
+    command(&mut d, 0x37);
+    assert_eq!(d.r(0, 7), READY);
+
+    select(&mut d, 1, 4);
+    command(&mut d, 0x29);
+    let mut read = Vec::new();
+    for _ in 0..4 {
+        assert_eq!(
+            d.r(0, 7),
+            READY | DRQ,
+            "TempleOS ATAWaitDRQ after READ MULTIPLE EXT"
+        );
+        for _ in 0..128 {
+            let mut word = [0; 4];
+            d.ide.read_taskfile(0, 0, &mut word);
+            read.extend(word);
+        }
+    }
+    assert_eq!(d.r(0, 7), READY);
+    assert_eq!(read, data[512..2560]);
+    assert_eq!(
+        u16::from_le_bytes(identify[118..120].try_into().unwrap()),
+        0x110
+    );
+
+    select(&mut d, 2, 4);
+    command(&mut d, 0x39);
+    for sector in 0..4u8 {
+        assert_eq!(d.r(0, 7), READY | DRQ);
+        for _ in 0..128 {
+            d.ide.write_taskfile(0, 0, &[sector; 4]);
+        }
+    }
+    assert_eq!(d.r(0, 7), READY);
+    select(&mut d, 2, 4);
+    command(&mut d, 0x29);
+    for sector in 0..4u8 {
+        assert_eq!(d.bytes(0, 512), vec![sector; 512]);
+    }
+
+    d.w(0, 2, 0);
+    command(&mut d, 0xc6);
+    select(&mut d, 0, 1);
+    command(&mut d, 0x29);
+    assert_eq!(d.r(0, 7), 0x41);
+    d.ide.write_control(0, &[4]);
+    d.ide.write_control(0, &[0]);
+    select(&mut d, 0, 1);
+    command(&mut d, 0x29);
+    assert_eq!(d.r(0, 7), READY | DRQ);
+    assert_eq!(d.bytes(0, 512), data[..512]);
+}

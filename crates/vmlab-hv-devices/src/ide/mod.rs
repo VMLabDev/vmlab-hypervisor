@@ -234,6 +234,7 @@ impl Ide {
             match drive {
                 Drive::Disk(disk) => {
                     state.limit = disk.image.size() / 512;
+                    state.multiple = 16;
                     disk.transfer_mode = 0x22;
                     disk.write_cache = true;
                 }
