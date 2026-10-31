@@ -1,0 +1,5 @@
+{
+  "code": 0,
+  "stderr": "",
+  "stdout": "first-boot: provisioning mac...\nfirst-boot: hostname mac\nfirst-boot: mac ready\nlab \"hwref-macos-capture\" is up\n"
+}

@@ -1,0 +1,52 @@
+  Bus  0, device   0, function 0:
+    Host bridge: PCI device 8086:29c0
+      PCI subsystem 1af4:1100
+      id ""
+  Bus  0, device   1, function 0:
+    Class 1920: PCI device 1af4:1003
+      PCI subsystem 1af4:0003
+      IRQ 10, pin A
+      BAR0: I/O at 0x6040 [0x607f]
+      BAR1: 32 bit memory at 0x81052000 [0x81052fff]
+      BAR4: 64 bit prefetchable memory at 0x81000000 [0x81003fff]
+      id ""
+  Bus  0, device   2, function 0:
+    Ethernet controller: PCI device 1af4:1000
+      PCI subsystem 1af4:0001
+      IRQ 11, pin A
+      BAR0: I/O at 0x60a0 [0x60bf]
+      BAR1: 32 bit memory at 0x81051000 [0x81051fff]
+      BAR4: 64 bit prefetchable memory at 0x81004000 [0x81007fff]
+      BAR6: 32 bit memory (not mapped)
+      id ""
+  Bus  0, device   3, function 0:
+    VGA controller: PCI device 15ad:0405
+      PCI subsystem 15ad:0405
+      BAR0: I/O at 0x60c0 [0x60cf]
+      BAR1: 32 bit prefetchable memory at 0x80000000 [0x80ffffff]
+      BAR2: 32 bit prefetchable memory at 0x81040000 [0x8104ffff]
+      BAR6: 32 bit memory (not mapped)
+      id ""
+  Bus  0, device   4, function 0:
+    USB controller: PCI device 1b36:000d
+      PCI subsystem 1af4:1100
+      IRQ 20, pin A
+      BAR0: 64 bit memory at 0x81008000 [0x8100bfff]
+      id "xhci"
+  Bus  0, device  31, function 0:
+    ISA bridge: PCI device 8086:2918
+      PCI subsystem 1af4:1100
+      id ""
+  Bus  0, device  31, function 2:
+    SATA controller: PCI device 8086:2922
+      PCI subsystem 1af4:1100
+      IRQ 10, pin A
+      BAR4: I/O at 0x6080 [0x609f]
+      BAR5: 32 bit memory at 0x81050000 [0x81050fff]
+      id ""
+  Bus  0, device  31, function 3:
+    SMBus: PCI device 8086:2930
+      PCI subsystem 1af4:1100
+      IRQ 10, pin A
+      BAR4: I/O at 0x6000 [0x603f]
+      id ""

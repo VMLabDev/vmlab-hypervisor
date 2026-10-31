@@ -1,0 +1,295 @@
+address-space: virtio-pci-cfg-mem-as
+  0000000081004000-0000000081007fff (prio 1, i/o): virtio-pci
+    0000000081004000-0000000081004fff (prio 0, i/o): virtio-pci-common-virtio-net
+    0000000081005000-0000000081005fff (prio 0, i/o): virtio-pci-isr-virtio-net
+    0000000081006000-0000000081006fff (prio 0, i/o): virtio-pci-device-virtio-net
+    0000000081007000-0000000081007fff (prio 0, i/o): virtio-pci-notify-virtio-net
+
+address-space: virtio-pci-cfg-mem-as
+  0000000081000000-0000000081003fff (prio 1, i/o): virtio-pci
+    0000000081000000-0000000081000fff (prio 0, i/o): virtio-pci-common-virtio-serial
+    0000000081001000-0000000081001fff (prio 0, i/o): virtio-pci-isr-virtio-serial
+    0000000081002000-0000000081002fff (prio 0, i/o): virtio-pci-device-virtio-serial
+    0000000081003000-0000000081003fff (prio 0, i/o): virtio-pci-notify-virtio-serial
+
+address-space: vmware-svga
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+    0000000000000000-ffffffffffffffff (prio 0, container): alias bus master @system 0000000000000000-ffffffffffffffff
+
+address-space: I/O
+  0000000000000000-000000000000ffff (prio 0, container): io
+    0000000000000000-0000000000000007 (prio 0, i/o): dma-chan
+    0000000000000008-000000000000000f (prio 0, i/o): dma-cont
+    0000000000000020-0000000000000021 (prio 0, i/o): kvm-pic
+    0000000000000040-0000000000000043 (prio 0, i/o): kvm-pit
+    0000000000000060-0000000000000060 (prio 0, i/o): i8042-data
+    0000000000000061-0000000000000061 (prio 0, i/o): pcspk
+    0000000000000064-0000000000000064 (prio 0, i/o): i8042-cmd
+    0000000000000070-0000000000000071 (prio 0, i/o): rtc
+      0000000000000070-0000000000000070 (prio 0, i/o): rtc-index
+    000000000000007e-000000000000007f (prio 0, i/o): kvmvapic
+    0000000000000080-0000000000000080 (prio 0, i/o): ioport80
+    0000000000000081-0000000000000083 (prio 0, i/o): dma-page
+    0000000000000087-0000000000000087 (prio 0, i/o): dma-page
+    0000000000000089-000000000000008b (prio 0, i/o): dma-page
+    000000000000008f-000000000000008f (prio 0, i/o): dma-page
+    0000000000000092-0000000000000092 (prio 0, i/o): port92
+    00000000000000a0-00000000000000a1 (prio 0, i/o): kvm-pic
+    00000000000000b2-00000000000000b3 (prio 0, i/o): apm-io
+    00000000000000c0-00000000000000cf (prio 0, i/o): dma-chan
+    00000000000000d0-00000000000000df (prio 0, i/o): dma-cont
+    00000000000000f0-00000000000000f0 (prio 0, i/o): ioportF0
+    00000000000001ce-00000000000001d1 (prio 0, i/o): vbe
+    0000000000000300-0000000000000300 (prio 0, i/o): applesmc-data
+    0000000000000304-0000000000000304 (prio 0, i/o): applesmc-cmd
+    000000000000031e-000000000000031e (prio 0, i/o): applesmc-err
+    0000000000000378-000000000000037f (prio 0, i/o): parallel
+    00000000000003b4-00000000000003b5 (prio 0, i/o): vga
+    00000000000003ba-00000000000003ba (prio 0, i/o): vga
+    00000000000003c0-00000000000003cf (prio 0, i/o): vga
+    00000000000003d4-00000000000003d5 (prio 0, i/o): vga
+    00000000000003da-00000000000003da (prio 0, i/o): vga
+    00000000000003f8-00000000000003ff (prio 0, i/o): serial
+    00000000000004d0-00000000000004d0 (prio 0, i/o): kvm-elcr
+    00000000000004d1-00000000000004d1 (prio 0, i/o): kvm-elcr
+    0000000000000510-0000000000000511 (prio 0, i/o): fwcfg
+    0000000000000514-000000000000051b (prio 0, i/o): fwcfg.dma
+    0000000000000600-000000000000067f (prio 0, i/o): ich9-pm
+      0000000000000600-0000000000000603 (prio 0, i/o): acpi-evt
+      0000000000000604-0000000000000605 (prio 0, i/o): acpi-cnt
+      0000000000000608-000000000000060b (prio 0, i/o): acpi-tmr
+      0000000000000620-000000000000062f (prio 0, i/o): acpi-gpe0
+      0000000000000630-0000000000000637 (prio 0, i/o): acpi-smi
+      0000000000000660-000000000000067f (prio 0, i/o): sm-tco
+    0000000000000cc0-0000000000000cd7 (prio 0, i/o): acpi-pci-hotplug
+    0000000000000cd8-0000000000000ce3 (prio 0, i/o): acpi-cpu-hotplug
+    0000000000000cf8-0000000000000cfb (prio 0, i/o): pci-conf-idx
+    0000000000000cf9-0000000000000cf9 (prio 1, i/o): lpc-reset-control
+    0000000000000cfc-0000000000000cff (prio 0, i/o): pci-conf-data
+    0000000000005658-0000000000005658 (prio 0, i/o): vmport
+    0000000000006000-000000000000603f (prio 1, i/o): pm-smbus
+    0000000000006040-000000000000607f (prio 1, i/o): virtio-pci
+    0000000000006080-000000000000609f (prio 1, i/o): ahci-idp
+    00000000000060a0-00000000000060bf (prio 1, i/o): virtio-pci
+    00000000000060c0-00000000000060cf (prio 1, i/o): vmsvga-io
+
+address-space: KVM-SMRAM
+address-space: cpu-smm-0
+address-space: cpu-smm-1
+address-space: cpu-smm-2
+address-space: cpu-smm-3
+  0000000000000000-ffffffffffffffff (prio 0, container): mem-container-smram
+    0000000000000000-00000000ffffffff (prio 10, i/o): smram
+    0000000000000000-ffffffffffffffff (prio 0, container): alias mem-smram @system 0000000000000000-ffffffffffffffff
+
+address-space: cpu-memory-0
+address-space: cpu-memory-1
+address-space: cpu-memory-2
+address-space: cpu-memory-3
+address-space: memory
+  0000000000000000-ffffffffffffffff (prio 0, container): system
+    0000000000000000-000000007fffffff (prio 0, ram): alias ram-below-4g @pc.ram 0000000000000000-000000007fffffff
+    0000000000000000-ffffffffffffffff (prio -1, i/o): pci
+      00000000000a0000-00000000000affff (prio 2, ram): alias vga.chain4 @vga.vram 0000000000000000-000000000000ffff
+      00000000000a0000-00000000000bffff (prio 1, i/o): vga-lowmem
+      00000000000c0000-00000000000dffff (prio 1, rom): pc.rom
+      00000000000e0000-00000000000fffff (prio 1, romd): alias isa-bios @system.flash0 000000000035c000-000000000037bfff
+      0000000080000000-0000000080ffffff (prio 1, ram): vga.vram
+      0000000081000000-0000000081003fff (prio 1, i/o): virtio-pci
+        0000000081000000-0000000081000fff (prio 0, i/o): virtio-pci-common-virtio-serial
+        0000000081001000-0000000081001fff (prio 0, i/o): virtio-pci-isr-virtio-serial
+        0000000081002000-0000000081002fff (prio 0, i/o): virtio-pci-device-virtio-serial
+        0000000081003000-0000000081003fff (prio 0, i/o): virtio-pci-notify-virtio-serial
+      0000000081004000-0000000081007fff (prio 1, i/o): virtio-pci
+        0000000081004000-0000000081004fff (prio 0, i/o): virtio-pci-common-virtio-net
+        0000000081005000-0000000081005fff (prio 0, i/o): virtio-pci-isr-virtio-net
+        0000000081006000-0000000081006fff (prio 0, i/o): virtio-pci-device-virtio-net
+        0000000081007000-0000000081007fff (prio 0, i/o): virtio-pci-notify-virtio-net
+      0000000081008000-000000008100bfff (prio 1, i/o): xhci
+        0000000081008000-000000008100803f (prio 0, i/o): capabilities
+        0000000081008040-000000008100843f (prio 0, i/o): operational
+        0000000081008440-000000008100844f (prio 0, i/o): usb3 port #1
+        0000000081008450-000000008100845f (prio 0, i/o): usb3 port #2
+        0000000081008460-000000008100846f (prio 0, i/o): usb3 port #3
+        0000000081008470-000000008100847f (prio 0, i/o): usb3 port #4
+        0000000081008480-000000008100848f (prio 0, i/o): usb2 port #1
+        0000000081008490-000000008100849f (prio 0, i/o): usb2 port #2
+        00000000810084a0-00000000810084af (prio 0, i/o): usb2 port #3
+        00000000810084b0-00000000810084bf (prio 0, i/o): usb2 port #4
+        0000000081009000-000000008100921f (prio 0, i/o): runtime
+        000000008100a000-000000008100a81f (prio 0, i/o): doorbell
+        000000008100b000-000000008100b0ff (prio 0, i/o): msix-table
+        000000008100b800-000000008100b807 (prio 0, i/o): msix-pba
+      0000000081040000-000000008104ffff (prio 1, ram): vmsvga.fifo
+      0000000081050000-0000000081050fff (prio 1, i/o): ahci
+      0000000081051000-0000000081051fff (prio 1, i/o): virtio-net-pci-msix
+        0000000081051000-000000008105103f (prio 0, i/o): msix-table
+        0000000081051800-0000000081051807 (prio 0, i/o): msix-pba
+      0000000081052000-0000000081052fff (prio 1, i/o): virtio-serial-pci-msix
+        0000000081052000-000000008105201f (prio 0, i/o): msix-table
+        0000000081052800-0000000081052807 (prio 0, i/o): msix-pba
+    00000000000a0000-00000000000bffff (prio 1, i/o): alias smram-region @pci 00000000000a0000-00000000000bffff
+    00000000000c0000-00000000000c3fff (prio 1, i/o): alias pam-pci @pci 00000000000c0000-00000000000c3fff
+    00000000000c4000-00000000000c7fff (prio 1, i/o): alias pam-pci @pci 00000000000c4000-00000000000c7fff
+    00000000000c8000-00000000000cbfff (prio 1, i/o): alias pam-pci @pci 00000000000c8000-00000000000cbfff
+    00000000000cc000-00000000000cffff (prio 1, i/o): alias pam-pci @pci 00000000000cc000-00000000000cffff
+    00000000000d0000-00000000000d3fff (prio 1, i/o): alias pam-pci @pci 00000000000d0000-00000000000d3fff
+    00000000000d4000-00000000000d7fff (prio 1, i/o): alias pam-pci @pci 00000000000d4000-00000000000d7fff
+    00000000000d8000-00000000000dbfff (prio 1, i/o): alias pam-pci @pci 00000000000d8000-00000000000dbfff
+    00000000000dc000-00000000000dffff (prio 1, i/o): alias pam-pci @pci 00000000000dc000-00000000000dffff
+    00000000000e0000-00000000000e3fff (prio 1, i/o): alias pam-pci @pci 00000000000e0000-00000000000e3fff
+    00000000000e4000-00000000000e7fff (prio 1, i/o): alias pam-pci @pci 00000000000e4000-00000000000e7fff
+    00000000000e8000-00000000000ebfff (prio 1, i/o): alias pam-pci @pci 00000000000e8000-00000000000ebfff
+    00000000000ec000-00000000000effff (prio 1, i/o): alias pam-pci @pci 00000000000ec000-00000000000effff
+    00000000000f0000-00000000000fffff (prio 1, i/o): alias pam-pci @pci 00000000000f0000-00000000000fffff
+    00000000e0000000-00000000efffffff (prio 0, i/o): pcie-mmcfg-mmio
+    00000000fec00000-00000000fec00fff (prio 0, i/o): kvm-ioapic
+    00000000fed00000-00000000fed003ff (prio 0, i/o): hpet
+    00000000fed1c000-00000000fed1ffff (prio 1, i/o): lpc-rcrb-mmio
+    00000000fee00000-00000000feefffff (prio 4096, i/o): kvm-apic-msi
+    00000000ffc00000-00000000ffc83fff (prio 0, romd): system.flash1
+    00000000ffc84000-00000000ffffffff (prio 0, romd): system.flash0
+    0000000100000000-000000027fffffff (prio 0, ram): alias ram-above-4g @pc.ram 0000000080000000-00000001ffffffff
+
+address-space: mch
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+    0000000000000000-ffffffffffffffff (prio 0, container): alias bus master @system 0000000000000000-ffffffffffffffff
+
+address-space: virtio-serial-pci
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+    0000000000000000-ffffffffffffffff (prio 0, container): alias bus master @system 0000000000000000-ffffffffffffffff
+
+address-space: ich9-ahci
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+    0000000000000000-ffffffffffffffff (prio 0, container): alias bus master @system 0000000000000000-ffffffffffffffff
+
+address-space: ICH9-SMB
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+    0000000000000000-ffffffffffffffff (prio 0, container): alias bus master @system 0000000000000000-ffffffffffffffff
+
+address-space: ICH9-LPC
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+    0000000000000000-ffffffffffffffff (prio 0, container): alias bus master @system 0000000000000000-ffffffffffffffff
+
+address-space: virtio-net-pci
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+    0000000000000000-ffffffffffffffff (prio 0, container): alias bus master @system 0000000000000000-ffffffffffffffff
+
+address-space: qemu-xhci
+  0000000000000000-ffffffffffffffff (prio 0, container): bus master container
+    0000000000000000-ffffffffffffffff (prio 0, container): alias bus master @system 0000000000000000-ffffffffffffffff
+
+memory-region: system
+  0000000000000000-ffffffffffffffff (prio 0, container): system
+    0000000000000000-000000007fffffff (prio 0, ram): alias ram-below-4g @pc.ram 0000000000000000-000000007fffffff
+    0000000000000000-ffffffffffffffff (prio -1, i/o): pci
+      00000000000a0000-00000000000affff (prio 2, ram): alias vga.chain4 @vga.vram 0000000000000000-000000000000ffff
+      00000000000a0000-00000000000bffff (prio 1, i/o): vga-lowmem
+      00000000000c0000-00000000000dffff (prio 1, rom): pc.rom
+      00000000000e0000-00000000000fffff (prio 1, romd): alias isa-bios @system.flash0 000000000035c000-000000000037bfff
+      0000000080000000-0000000080ffffff (prio 1, ram): vga.vram
+      0000000081000000-0000000081003fff (prio 1, i/o): virtio-pci
+        0000000081000000-0000000081000fff (prio 0, i/o): virtio-pci-common-virtio-serial
+        0000000081001000-0000000081001fff (prio 0, i/o): virtio-pci-isr-virtio-serial
+        0000000081002000-0000000081002fff (prio 0, i/o): virtio-pci-device-virtio-serial
+        0000000081003000-0000000081003fff (prio 0, i/o): virtio-pci-notify-virtio-serial
+      0000000081004000-0000000081007fff (prio 1, i/o): virtio-pci
+        0000000081004000-0000000081004fff (prio 0, i/o): virtio-pci-common-virtio-net
+        0000000081005000-0000000081005fff (prio 0, i/o): virtio-pci-isr-virtio-net
+        0000000081006000-0000000081006fff (prio 0, i/o): virtio-pci-device-virtio-net
+        0000000081007000-0000000081007fff (prio 0, i/o): virtio-pci-notify-virtio-net
+      0000000081008000-000000008100bfff (prio 1, i/o): xhci
+        0000000081008000-000000008100803f (prio 0, i/o): capabilities
+        0000000081008040-000000008100843f (prio 0, i/o): operational
+        0000000081008440-000000008100844f (prio 0, i/o): usb3 port #1
+        0000000081008450-000000008100845f (prio 0, i/o): usb3 port #2
+        0000000081008460-000000008100846f (prio 0, i/o): usb3 port #3
+        0000000081008470-000000008100847f (prio 0, i/o): usb3 port #4
+        0000000081008480-000000008100848f (prio 0, i/o): usb2 port #1
+        0000000081008490-000000008100849f (prio 0, i/o): usb2 port #2
+        00000000810084a0-00000000810084af (prio 0, i/o): usb2 port #3
+        00000000810084b0-00000000810084bf (prio 0, i/o): usb2 port #4
+        0000000081009000-000000008100921f (prio 0, i/o): runtime
+        000000008100a000-000000008100a81f (prio 0, i/o): doorbell
+        000000008100b000-000000008100b0ff (prio 0, i/o): msix-table
+        000000008100b800-000000008100b807 (prio 0, i/o): msix-pba
+      0000000081040000-000000008104ffff (prio 1, ram): vmsvga.fifo
+      0000000081050000-0000000081050fff (prio 1, i/o): ahci
+      0000000081051000-0000000081051fff (prio 1, i/o): virtio-net-pci-msix
+        0000000081051000-000000008105103f (prio 0, i/o): msix-table
+        0000000081051800-0000000081051807 (prio 0, i/o): msix-pba
+      0000000081052000-0000000081052fff (prio 1, i/o): virtio-serial-pci-msix
+        0000000081052000-000000008105201f (prio 0, i/o): msix-table
+        0000000081052800-0000000081052807 (prio 0, i/o): msix-pba
+    00000000000a0000-00000000000bffff (prio 1, i/o): alias smram-region @pci 00000000000a0000-00000000000bffff
+    00000000000c0000-00000000000c3fff (prio 1, i/o): alias pam-pci @pci 00000000000c0000-00000000000c3fff
+    00000000000c4000-00000000000c7fff (prio 1, i/o): alias pam-pci @pci 00000000000c4000-00000000000c7fff
+    00000000000c8000-00000000000cbfff (prio 1, i/o): alias pam-pci @pci 00000000000c8000-00000000000cbfff
+    00000000000cc000-00000000000cffff (prio 1, i/o): alias pam-pci @pci 00000000000cc000-00000000000cffff
+    00000000000d0000-00000000000d3fff (prio 1, i/o): alias pam-pci @pci 00000000000d0000-00000000000d3fff
+    00000000000d4000-00000000000d7fff (prio 1, i/o): alias pam-pci @pci 00000000000d4000-00000000000d7fff
+    00000000000d8000-00000000000dbfff (prio 1, i/o): alias pam-pci @pci 00000000000d8000-00000000000dbfff
+    00000000000dc000-00000000000dffff (prio 1, i/o): alias pam-pci @pci 00000000000dc000-00000000000dffff
+    00000000000e0000-00000000000e3fff (prio 1, i/o): alias pam-pci @pci 00000000000e0000-00000000000e3fff
+    00000000000e4000-00000000000e7fff (prio 1, i/o): alias pam-pci @pci 00000000000e4000-00000000000e7fff
+    00000000000e8000-00000000000ebfff (prio 1, i/o): alias pam-pci @pci 00000000000e8000-00000000000ebfff
+    00000000000ec000-00000000000effff (prio 1, i/o): alias pam-pci @pci 00000000000ec000-00000000000effff
+    00000000000f0000-00000000000fffff (prio 1, i/o): alias pam-pci @pci 00000000000f0000-00000000000fffff
+    00000000e0000000-00000000efffffff (prio 0, i/o): pcie-mmcfg-mmio
+    00000000fec00000-00000000fec00fff (prio 0, i/o): kvm-ioapic
+    00000000fed00000-00000000fed003ff (prio 0, i/o): hpet
+    00000000fed1c000-00000000fed1ffff (prio 1, i/o): lpc-rcrb-mmio
+    00000000fee00000-00000000feefffff (prio 4096, i/o): kvm-apic-msi
+    00000000ffc00000-00000000ffc83fff (prio 0, romd): system.flash1
+    00000000ffc84000-00000000ffffffff (prio 0, romd): system.flash0
+    0000000100000000-000000027fffffff (prio 0, ram): alias ram-above-4g @pc.ram 0000000080000000-00000001ffffffff
+
+memory-region: pc.ram
+  0000000000000000-00000001ffffffff (prio 0, ram): pc.ram
+
+memory-region: vga.vram
+  0000000080000000-0000000080ffffff (prio 1, ram): vga.vram
+
+memory-region: system.flash0
+  00000000ffc84000-00000000ffffffff (prio 0, romd): system.flash0
+
+memory-region: pci
+  0000000000000000-ffffffffffffffff (prio -1, i/o): pci
+    00000000000a0000-00000000000affff (prio 2, ram): alias vga.chain4 @vga.vram 0000000000000000-000000000000ffff
+    00000000000a0000-00000000000bffff (prio 1, i/o): vga-lowmem
+    00000000000c0000-00000000000dffff (prio 1, rom): pc.rom
+    00000000000e0000-00000000000fffff (prio 1, romd): alias isa-bios @system.flash0 000000000035c000-000000000037bfff
+    0000000080000000-0000000080ffffff (prio 1, ram): vga.vram
+    0000000081000000-0000000081003fff (prio 1, i/o): virtio-pci
+      0000000081000000-0000000081000fff (prio 0, i/o): virtio-pci-common-virtio-serial
+      0000000081001000-0000000081001fff (prio 0, i/o): virtio-pci-isr-virtio-serial
+      0000000081002000-0000000081002fff (prio 0, i/o): virtio-pci-device-virtio-serial
+      0000000081003000-0000000081003fff (prio 0, i/o): virtio-pci-notify-virtio-serial
+    0000000081004000-0000000081007fff (prio 1, i/o): virtio-pci
+      0000000081004000-0000000081004fff (prio 0, i/o): virtio-pci-common-virtio-net
+      0000000081005000-0000000081005fff (prio 0, i/o): virtio-pci-isr-virtio-net
+      0000000081006000-0000000081006fff (prio 0, i/o): virtio-pci-device-virtio-net
+      0000000081007000-0000000081007fff (prio 0, i/o): virtio-pci-notify-virtio-net
+    0000000081008000-000000008100bfff (prio 1, i/o): xhci
+      0000000081008000-000000008100803f (prio 0, i/o): capabilities
+      0000000081008040-000000008100843f (prio 0, i/o): operational
+      0000000081008440-000000008100844f (prio 0, i/o): usb3 port #1
+      0000000081008450-000000008100845f (prio 0, i/o): usb3 port #2
+      0000000081008460-000000008100846f (prio 0, i/o): usb3 port #3
+      0000000081008470-000000008100847f (prio 0, i/o): usb3 port #4
+      0000000081008480-000000008100848f (prio 0, i/o): usb2 port #1
+      0000000081008490-000000008100849f (prio 0, i/o): usb2 port #2
+      00000000810084a0-00000000810084af (prio 0, i/o): usb2 port #3
+      00000000810084b0-00000000810084bf (prio 0, i/o): usb2 port #4
+      0000000081009000-000000008100921f (prio 0, i/o): runtime
+      000000008100a000-000000008100a81f (prio 0, i/o): doorbell
+      000000008100b000-000000008100b0ff (prio 0, i/o): msix-table
+      000000008100b800-000000008100b807 (prio 0, i/o): msix-pba
+    0000000081040000-000000008104ffff (prio 1, ram): vmsvga.fifo
+    0000000081050000-0000000081050fff (prio 1, i/o): ahci
+    0000000081051000-0000000081051fff (prio 1, i/o): virtio-net-pci-msix
+      0000000081051000-000000008105103f (prio 0, i/o): msix-table
+      0000000081051800-0000000081051807 (prio 0, i/o): msix-pba
+    0000000081052000-0000000081052fff (prio 1, i/o): virtio-serial-pci-msix
+      0000000081052000-000000008105201f (prio 0, i/o): msix-table
+      0000000081052800-0000000081052807 (prio 0, i/o): msix-pba

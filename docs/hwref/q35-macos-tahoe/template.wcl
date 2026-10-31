@@ -1,0 +1,13 @@
+import <vmlab-meta.wcl>
+
+template_meta "macos-tahoe" {
+  arch = "x86_64"
+  version = "26.7.0"
+  profile = "macos"
+  disk = 80GiB
+  created = "2026-10-30T12:35:12.685606255+00:00"
+  sha256 = "9e25b1caf3d5297f4125b79a6ccfc0a5422b33c6c5a98fedcb3c01dd5efe5f64"
+  first_boot_script = "// First-boot provision for macos-tahoe clones: give the clone its own\n// identity before it turns ready. macOS has no sysprep; what a clone shares\n// with the template and must not keep is its name. Every clone gets its VM's\n// name as ComputerName, LocalHostName (Bonjour) and HostName.\n//\n// SSH is off in the template, which carries no host keys. If sshd is enabled\n// here anyway (a clone of a clone, or a lab that turned it on before the\n// first boot ran), the host keys are regenerated so no two clones share them.\n\nuse vmlab\n\nfn sh(vm: Machine, cmd: string) -> Result[string, string] {\n    let r = vm.exec_timeout(\"/bin/sh\", [\"-c\", cmd], 120)?\n    if r.exit_code != 0 {\n        return Err(fmt(\"`{}` exited {}: {}{}\", cmd, r.exit_code, r.stdout, r.stderr))\n    }\n    Ok(r.stdout.trim())\n}\n\nfn identity(lab: Lab, vm: Machine) -> Result[unit, string] {\n    vm.wait_ready(900)?\n    // A VM name is a DNS label, which every one of the three names accepts.\n    let name = vm.name()\n    let set = sh(vm, \"scutil --set ComputerName '\" + name + \"' && scutil --set LocalHostName '\" + name + \"' && scutil --set HostName '\" + name + \"'\")?\n    lab.log(\"first-boot: hostname \" + name)\n\n    let ssh = sh(vm, \"if launchctl print system/com.openssh.sshd >/dev/null 2>&1; then rm -f /etc/ssh/ssh_host_* && ssh-keygen -A >/dev/null && launchctl kickstart -k system/com.openssh.sshd && echo regenerated; else echo off; fi\")?\n    if ssh == \"regenerated\" {\n        lab.log(\"first-boot: sshd is on; regenerated its host keys\")\n    }\n    Ok(())\n}\n\nfn main(lab: Lab) {\n    let vm = lab.this_vm().expect(\"first-boot: no target VM\")\n    identity(lab, vm).expect(\"macos-tahoe first boot failed\")\n}\n"
+  agent_version = "agent=cebad00"
+  wscript_surface = 4
+}

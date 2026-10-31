@@ -1,0 +1,77 @@
+[
+  {
+    "name": "bios-geometry",
+    "selector": 32,
+    "size": 0
+  },
+  {
+    "name": "bootorder",
+    "selector": 33,
+    "size": 0
+  },
+  {
+    "name": "etc/acpi/rsdp",
+    "selector": 34,
+    "size": 20
+  },
+  {
+    "name": "etc/acpi/tables",
+    "selector": 35,
+    "size": 131072
+  },
+  {
+    "name": "etc/boot-fail-wait",
+    "selector": 36,
+    "size": 4
+  },
+  {
+    "name": "etc/e820",
+    "selector": 37,
+    "size": 60
+  },
+  {
+    "name": "etc/smbios/smbios-anchor",
+    "selector": 38,
+    "size": 31
+  },
+  {
+    "name": "etc/smbios/smbios-tables",
+    "selector": 39,
+    "size": 409
+  },
+  {
+    "name": "etc/smi/features-ok",
+    "selector": 40,
+    "size": 1
+  },
+  {
+    "name": "etc/smi/requested-features",
+    "selector": 41,
+    "size": 8
+  },
+  {
+    "name": "etc/smi/supported-features",
+    "selector": 42,
+    "size": 8
+  },
+  {
+    "name": "etc/system-states",
+    "selector": 43,
+    "size": 6
+  },
+  {
+    "name": "etc/table-loader",
+    "selector": 44,
+    "size": 4096
+  },
+  {
+    "name": "etc/tpm/log",
+    "selector": 45,
+    "size": 0
+  },
+  {
+    "name": "genroms/kvmvapic.bin",
+    "selector": 46,
+    "size": 9216
+  }
+]

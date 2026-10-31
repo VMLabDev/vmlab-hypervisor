@@ -1,0 +1,24 @@
+{
+  "command_keys": {
+    "0x10:BEMB": 1,
+    "0x10:MSSD": 1,
+    "0x10:MSSW": 1,
+    "0x10:NATJ": 1,
+    "0x10:OSK0": 1,
+    "0x10:OSK1": 1,
+    "0x10:OSWD": 1
+  },
+  "commands": {
+    "0x10": 7,
+    "0x11": 8,
+    "0x13": 64
+  },
+  "policy": "SMC values discarded before persistence; only command and key names retained",
+  "port_counts": {
+    "read:0x300": 66,
+    "read:0x304": 445,
+    "read:0x31e": 79,
+    "write:0x300": 35,
+    "write:0x304": 79
+  }
+}

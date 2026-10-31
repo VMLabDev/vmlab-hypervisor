@@ -1,0 +1,483 @@
+bus: main-system-bus
+  type System
+  dev: ps2-mouse, id ""
+    gpio-out "" 1
+  dev: ps2-kbd, id ""
+    gpio-out "" 1
+  dev: hpet, id ""
+    gpio-in "" 2
+    gpio-out "" 1
+    gpio-out "sysbus-irq" 32
+    timers = 3 (0x3)
+    msi = false
+    hpet-intcap = 16711940 (0xff0104)
+    mmio 00000000fed00000/0000000000000400
+  dev: kvm-ioapic, id ""
+    gpio-in "" 24
+    gsi_base = 0 (0x0)
+    mmio 00000000fec00000/0000000000001000
+  dev: q35-pcihost, id ""
+    MCFG = 3758096384 (0xe0000000)
+    pci-hole64-size = 34359738368 (32 GiB)
+    below-4g-mem-size = 2147483648 (2 GiB)
+    above-4g-mem-size = 6442450944 (6 GiB)
+    smm-ranges = true
+    x-pci-hole64-fix = true
+    x-config-reg-migration-enabled = true
+    bypass-iommu = false
+    bus: pcie.0
+      type PCIE
+      dev: qemu-xhci, id "xhci"
+        msi = "off"
+        msix = "auto"
+        conditional-intr-mapping = false
+        addr = 04.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class USB controller, addr 00:04.0, pci id 1b36:000d (sub 1af4:1100)
+        bar 0: mem at 0x81008000 [0x8100bfff]
+        bus: xhci.0
+          type usb-bus
+          dev: usb-tablet, id ""
+            usb_version = 2 (0x2)
+            display = ""
+            head = 0 (0x0)
+            port = ""
+            serial = ""
+            msos-desc = true
+            pcap = ""
+            addr 0.1, port 2, speed 480, name QEMU USB Tablet, attached
+          dev: usb-kbd, id ""
+            usb_version = 2 (0x2)
+            display = ""
+            port = ""
+            serial = ""
+            msos-desc = true
+            pcap = ""
+            addr 0.2, port 1, speed 480, name QEMU USB Keyboard, attached
+      dev: vmware-svga, id ""
+        vgamem_mb = 16 (0x10)
+        addr = 03.0
+        romfile = "vgabios-vmware.bin"
+        romsize = 65536 (0x10000)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class VGA controller, addr 00:03.0, pci id 15ad:0405 (sub 15ad:0405)
+        bar 0: i/o at 0x60c0 [0x60cf]
+        bar 1: mem at 0x80000000 [0x80ffffff]
+        bar 2: mem at 0x81040000 [0x8104ffff]
+        bar 6: mem at 0xffffffffffffffff [0xfffe]
+      dev: virtio-net-pci, id ""
+        disable-legacy = "off"
+        disable-modern = false
+        ioeventfd = true
+        vectors = 4 (0x4)
+        virtio-pci-bus-master-bug-migration = false
+        modern-pio-notify = false
+        page-per-vq = false
+        ats = false
+        x-ats-page-aligned = true
+        x-pcie-pm-no-soft-reset = false
+        x-pcie-flr-init = true
+        aer = false
+        addr = 02.0
+        romfile = "efi-virtio.rom"
+        romsize = 262144 (0x40000)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class Ethernet controller, addr 00:02.0, pci id 1af4:1000 (sub 1af4:0001)
+        bar 0: i/o at 0x60a0 [0x60bf]
+        bar 1: mem at 0x81051000 [0x81051fff]
+        bar 4: mem at 0x81004000 [0x81007fff]
+        bar 6: mem at 0xffffffffffffffff [0x3fffe]
+        bus: virtio-bus
+          type virtio-pci-bus
+          dev: virtio-net-device, id ""
+            csum = true
+            guest_csum = true
+            gso = true
+            guest_tso4 = true
+            guest_tso6 = true
+            guest_ecn = true
+            guest_ufo = true
+            guest_announce = true
+            host_tso4 = true
+            host_tso6 = true
+            host_ecn = true
+            host_ufo = true
+            mrg_rxbuf = true
+            status = true
+            ctrl_vq = true
+            ctrl_rx = true
+            ctrl_vlan = true
+            ctrl_rx_extra = true
+            ctrl_mac_addr = true
+            ctrl_guest_offloads = true
+            mq = false
+            rss = false
+            hash = false
+            ebpf-rss-fds = <null>
+            guest_rsc_ext = false
+            rsc_interval = 300000 (0x493e0)
+            mac = "52:54:00:f8:d6:a9"
+            netdev = "net0"
+            x-txtimer = 150000 (0x249f0)
+            x-txburst = 256 (0x100)
+            tx = ""
+            rx_queue_size = 256 (0x100)
+            tx_queue_size = 256 (0x100)
+            host_mtu = 0 (0x0)
+            speed = -1 (0xffffffffffffffff)
+            duplex = ""
+            failover = false
+            guest_uso4 = true
+            guest_uso6 = true
+            host_uso = true
+            hash-ipv4 = "auto"
+            hash-tcp4 = "auto"
+            hash-udp4 = "auto"
+            hash-ipv6 = "auto"
+            hash-tcp6 = "auto"
+            hash-udp6 = "auto"
+            hash-ipv6ex = "auto"
+            hash-tcp6ex = "auto"
+            hash-udp6ex = "auto"
+            host_tunnel = true
+            host_tunnel_csum = true
+            guest_tunnel = true
+            guest_tunnel_csum = true
+            indirect_desc = true
+            event_idx = true
+            notify_on_empty = true
+            any_layout = true
+            iommu_platform = false
+            packed = false
+            queue_reset = true
+            in_order = false
+            use-started = true
+            use-disabled-flag = true
+            x-disable-legacy-check = false
+      dev: virtio-serial-pci, id ""
+        disable-legacy = "off"
+        disable-modern = false
+        ioeventfd = true
+        vectors = 2 (0x2)
+        class = 1920 (0x780)
+        virtio-pci-bus-master-bug-migration = false
+        modern-pio-notify = false
+        page-per-vq = false
+        ats = false
+        x-ats-page-aligned = true
+        x-pcie-pm-no-soft-reset = false
+        x-pcie-flr-init = true
+        aer = false
+        addr = 01.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class Class 0780, addr 00:01.0, pci id 1af4:1003 (sub 1af4:0003)
+        bar 0: i/o at 0x6040 [0x607f]
+        bar 1: mem at 0x81052000 [0x81052fff]
+        bar 4: mem at 0x81000000 [0x81003fff]
+        bus: virtio-bus
+          type virtio-pci-bus
+          dev: virtio-serial-device, id ""
+            max_ports = 31 (0x1f)
+            indirect_desc = true
+            event_idx = true
+            notify_on_empty = true
+            any_layout = true
+            iommu_platform = false
+            packed = false
+            queue_reset = true
+            in_order = false
+            use-started = true
+            use-disabled-flag = true
+            x-disable-legacy-check = false
+            bus: virtio-serial-bus.0
+              type virtio-serial-bus
+              dev: virtserialport, id ""
+                chardev = "vagent0"
+                nr = 1 (0x1)
+                name = "vmlab.agent.0"
+                port 1, guest on, host on, throttle off
+      dev: ICH9-SMB, id ""
+        addr = 1f.3
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = true
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class SMBus, addr 00:1f.3, pci id 8086:2930 (sub 1af4:1100)
+        bar 4: i/o at 0x6000 [0x603f]
+        bus: i2c
+          type i2c-bus
+          dev: smbus-eeprom, id ""
+            address = 87 (0x57)
+          dev: smbus-eeprom, id ""
+            address = 86 (0x56)
+          dev: smbus-eeprom, id ""
+            address = 85 (0x55)
+          dev: smbus-eeprom, id ""
+            address = 84 (0x54)
+          dev: smbus-eeprom, id ""
+            address = 83 (0x53)
+          dev: smbus-eeprom, id ""
+            address = 82 (0x52)
+          dev: smbus-eeprom, id ""
+            address = 81 (0x51)
+          dev: smbus-eeprom, id ""
+            address = 80 (0x50)
+      dev: ich9-ahci, id ""
+        addr = 1f.2
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = true
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class SATA controller, addr 00:1f.2, pci id 8086:2922 (sub 1af4:1100)
+        bar 4: i/o at 0x6080 [0x609f]
+        bar 5: mem at 0x81050000 [0x81050fff]
+        bus: ide.5
+          type IDE
+        bus: ide.4
+          type IDE
+        bus: ide.3
+          type IDE
+        bus: ide.2
+          type IDE
+        bus: ide.1
+          type IDE
+        bus: ide.0
+          type IDE
+          dev: ide-hd, id ""
+            drive = "disk0"
+            backend_defaults = "auto"
+            logical_block_size = 512 (512 B)
+            physical_block_size = 512 (512 B)
+            min_io_size = 0 (0 B)
+            opt_io_size = 0 (0 B)
+            discard_granularity = 512 (512 B)
+            write-cache = "auto"
+            share-rw = false
+            account-invalid = "auto"
+            account-failed = "auto"
+            stats-intervals = <null>
+            rerror = "auto"
+            werror = "auto"
+            ver = "2.5+"
+            wwn = 0 (0x0)
+            serial = "QM00001"
+            model = ""
+            cyls = 16383 (0x3fff)
+            heads = 16 (0x10)
+            secs = 63 (0x3f)
+            lcyls = 0 (0x0)
+            lheads = 0 (0x0)
+            lsecs = 0 (0x0)
+            bios-chs-trans = "lba"
+            rotation_rate = 0 (0x0)
+            unit = 0 (0x0)
+            win2k-install-hack = false
+      dev: ICH9-LPC, id ""
+        gpio-out "gsi" 24
+        noreboot = false
+        smm-compat = false
+        smm-enabled = true
+        x-smi-broadcast = true
+        x-smi-cpu-hotplug = true
+        x-smi-cpu-hotunplug = true
+        x-smi-swsmi-timer = true
+        x-smi-periodic-timer = true
+        addr = 1f.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = true
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class ISA bridge, addr 00:1f.0, pci id 8086:2918 (sub 1af4:1100)
+        bus: isa.0
+          type ISA
+          dev: isa-applesmc, id ""
+            iobase = 768 (0x300)
+            osk = "[REDACTED]"
+          dev: port92, id ""
+            gpio-out "a20" 1
+          dev: vmmouse, id ""
+            i8042 = "/machine/unattached/device[14]"
+          dev: vmport, id ""
+            x-read-set-eax = true
+            x-signal-unsupported-cmd = true
+            x-report-vmx-type = true
+            x-cmds-v2 = true
+            vmware-vmx-version = 6 (0x6)
+            vmware-vmx-type = 2 (0x2)
+          dev: i8042, id ""
+            gpio-in "ps2-mouse-input-irq" 1
+            gpio-in "ps2-kbd-input-irq" 1
+            gpio-out "" 2
+            gpio-out "a20" 1
+            extended-state = true
+            kbd-throttle = false
+            kbd-irq = 1 (0x1)
+            mouse-irq = 12 (0xc)
+          dev: isa-parallel, id ""
+            index = 0 (0x0)
+            iobase = 888 (0x378)
+            irq = 7 (0x7)
+            chardev = "parallel0"
+          dev: isa-serial, id ""
+            index = 0 (0x0)
+            iobase = 1016 (0x3f8)
+            irq = 4 (0x4)
+          dev: isa-pcspk, id ""
+            audiodev = ""
+            iobase = 97 (0x61)
+            pit = "/machine/unattached/device[10]"
+          dev: kvm-pit, id ""
+            gpio-in "" 1
+            lost_tick_policy = "delay"
+            iobase = 64 (0x40)
+          dev: kvm-i8259, id ""
+            iobase = 160 (0xa0)
+            elcr_addr = 1233 (0x4d1)
+            elcr_mask = 222 (0xde)
+            master = false
+          dev: kvm-i8259, id ""
+            iobase = 32 (0x20)
+            elcr_addr = 1232 (0x4d0)
+            elcr_mask = 248 (0xf8)
+            master = true
+          dev: mc146818rtc, id ""
+            gpio-out "" 1
+            base_year = 0 (0x0)
+            iobase = 112 (0x70)
+            irq = 8 (0x8)
+            lost_tick_policy = "discard"
+          dev: i8257, id ""
+            base = 192 (0xc0)
+            page-base = 136 (0x88)
+            pageh-base = -1 (0xffffffffffffffff)
+            dshift = 1 (0x1)
+          dev: i8257, id ""
+            base = 0 (0x0)
+            page-base = 128 (0x80)
+            pageh-base = -1 (0xffffffffffffffff)
+            dshift = 0 (0x0)
+      dev: mch, id ""
+        extended-tseg-mbytes = 64 (0x40)
+        smbase-smram = true
+        addr = 00.0
+        romfile = ""
+        romsize = 4294967295 (0xffffffff)
+        rombar = -1 (0xffffffffffffffff)
+        multifunction = false
+        x-pcie-lnksta-dllla = true
+        failover_pair_id = ""
+        acpi-index = 0 (0x0)
+        x-pcie-err-unc-mask = true
+        x-pcie-ari-nextfn-1 = false
+        x-max-bounce-buffer-size = 4096 (4 KiB)
+        sriov-pf = ""
+        x-pcie-ext-tag = true
+        busnr = 0 (0x0)
+        class Host bridge, addr 00:00.0, pci id 8086:29c0 (sub 1af4:1100)
+  dev: fw_cfg_io, id ""
+    dma_enabled = true
+    x-file-slots = 32 (0x20)
+    acpi-mr-restore = true
+  dev: cfi.pflash01, id ""
+    drive = "pflash1"
+    num-blocks = 132 (0x84)
+    sector-length = 4096 (0x1000)
+    width = 1 (0x1)
+    device-width = 0 (0x0)
+    max-device-width = 0 (0x0)
+    big-endian = false
+    secure = false
+    id0 = 0 (0x0)
+    id1 = 0 (0x0)
+    id2 = 0 (0x0)
+    id3 = 0 (0x0)
+    name = "system.flash1"
+    mmio 00000000ffc00000/0000000000084000
+  dev: cfi.pflash01, id ""
+    drive = "pflash0"
+    num-blocks = 892 (0x37c)
+    sector-length = 4096 (0x1000)
+    width = 1 (0x1)
+    device-width = 0 (0x0)
+    max-device-width = 0 (0x0)
+    big-endian = false
+    secure = false
+    id0 = 0 (0x0)
+    id1 = 0 (0x0)
+    id2 = 0 (0x0)
+    id3 = 0 (0x0)
+    name = "system.flash0"
+    mmio 00000000ffc84000/000000000037c000
+  dev: kvmclock, id ""
+  dev: kvmvapic, id ""
