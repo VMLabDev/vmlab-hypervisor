@@ -2,11 +2,11 @@
 
 ## Result and target
 
-Exploratory warm runs reach 1,167.63 MIPS on the scalar loop and 51.13 MIPS
-on the longer CoreMark mix. These single trials meet 50 MIPS, but repeated
-pinned benchmark medians and workspace CI are still pending at this checkpoint.
-They do not establish that Linux can boot in minutes. The pruned-interpreter
-checkpoint below predates whole-block specialization.
+Three-repeat pinned medians reach 1,594.32 MIPS on the scalar loop and
+51.06 MIPS on the longer CoreMark mix, meeting the package's 50 MIPS target.
+Workspace CI is still pending. These warm measurements do not establish that
+Linux can boot in minutes. The pruned-interpreter checkpoint below predates
+whole-block specialization.
 
 All results below use release builds on helios. Model initialization is
 outside the timed region; fetch, protection checks, translation, decode,
@@ -604,3 +604,27 @@ passes 134/134 cases, including 8,576 native instructions
 verifies unchanged 81,607 Rust bytes and 2,085,721 compressed IR bytes. Workspace
 format and all-target clippy pass after merging current main. Benchmark harness
 tests pass 34/34. Workspace CI and repeated timing remain pending here.
+
+### Pinned benchmark medians
+
+`python3 bench/run.py --backend interpreter-specialized --arch riscv64
+--vcpus 1 --repeats 3 --cpus 16` measures clean commit `f94bcc5` with the
+performance governor and the 24 GiB memory cap. Results are recorded in
+`bench/history/riscv64.jsonl`.
+
+| Workload | Guest instructions | Median seconds | Spread seconds | Median MIPS |
+| --- | ---: | ---: | ---: | ---: |
+| Scalar loop | 30,000,000 | 0.018816802 | 0.000096882 | 1,594.32 |
+| CoreMark algorithms, 1,000 iterations | 304,258,499 | 5.959282923 | 0.224212349 | 51.06 |
+
+CoreMark samples are 49.28, 51.14, and 51.06 MIPS. Warmup takes 34.54–35.03
+seconds, outside each timed pass; scalar warmup takes 1.48 seconds. Native,
+training, and slow instruction counts match the exploratory trials. The scalar
+loop benefits from algebraic combination across bounded loop blocks; it is
+not representative of arbitrary guest code. CoreMark retains its CRC checks.
+
+`just bench-report riscv64 interpreter-specialized` and
+`just bench-check riscv64 interpreter-specialized` pass. Each new workload key
+has one three-repeat history entry, so the latter has no prior entry against
+which to detect a regression. A separate JSON-parsing check asserts three
+repeats, a clean source commit, and at least 50 median MIPS for both workloads.

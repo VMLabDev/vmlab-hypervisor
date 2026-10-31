@@ -186,10 +186,12 @@ physical-memory contract above.
 ### Record generated execution and residualize its dynamic work
 
 The named interpreter supplies the concrete execution while a recorder
-tracks symbolic values beside its frames. Recording disables memoization,
-indexed execution, and decoder memoization so every generated call and
-architectural effect is visible. Constants, decoded instruction operands,
-and guarded configuration values fold through all calls. GPRs, FPRs,
+tracks symbolic values beside its frames. Recording disables indexed execution
+and decoder memoization so generated calls and architectural effects are visible.
+It may reuse a constant helper only when its arguments and global dependencies
+are guarded and a completed call proved its writes unchanged. Constants,
+decoded instruction operands, and guarded configuration values fold through all
+calls. GPRs, FPRs,
 architectural counters, and data-memory results remain dynamic.
 
 The residual representation has two parts:
@@ -251,6 +253,18 @@ updates their existing model containers in place and reuses bignum capacity.
 Scalar globals remain in native slots across blocks inside one API call;
 return, error, or source execution publishes pending values. No recipe points
 at another block's reusable scratch storage.
+
+Publication plans prebind scalar destinations and intern constants with their
+logical types. The first pending write invalidates source memo dependencies;
+later unwatched writes can share that version until a flush. Watched context
+slots invalidate on every change. Source execution flushes before memo lookup.
+
+Hot scalar operations use packed, 16-byte instructions with width-specific
+16-, 32-, and 64-bit arithmetic and immediate operands where proven safe.
+Trace construction validates scratch indices for every stage before using
+unchecked host-array access. Guest memory still uses the checked memory seam,
+and unsupported widths retain generic arithmetic. Cold exits can evaluate
+the original scalar DAG lazily.
 
 Per-step execution records at most one instruction and publishes every model
 value before returning to its observer. Batched execution records bounded
