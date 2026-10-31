@@ -14,6 +14,7 @@ from pathlib import Path
 
 from aml import omit_pci_functions, omit_asl_functions, relocate_loader
 import d6
+import fdt
 
 DEFAULT_ALLOW = Path(__file__).with_name("approved-differences.json")
 BDF = r"(?:[0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]"
@@ -222,6 +223,8 @@ def pci_rom_identity(data: bytes) -> str:
 
 
 def normalize_artifact(name: str, data: bytes) -> str:
+    if name.endswith(".dtb") or name in ("fdt", "devicetree"):
+        return fdt.normalize(data)
     if name.startswith("drm/") and name.endswith(".edid"):
         return hex_dump(data)
     if name.startswith("pci-roms/") and name.endswith(".rom"):
