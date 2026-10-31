@@ -27,6 +27,7 @@ pub mod smm;
 pub mod snapshot;
 pub mod vcpu;
 mod vfio;
+pub mod virt;
 pub mod vm;
 
 #[cfg(test)]

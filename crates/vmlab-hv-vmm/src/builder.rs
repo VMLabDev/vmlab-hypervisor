@@ -24,6 +24,9 @@ use crate::vm::{Vm, VmShared};
 
 /// Static checks that do not need KVM; each error names what is wrong.
 pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
+    if desc.machine == Machine::Virt {
+        return crate::virt::validate(desc).map_err(VmmError::InvalidMachine);
+    }
     let mut hosts = std::collections::BTreeSet::new();
     for device in &desc.vfio {
         crate::vfio::validate_address(&device.host).map_err(VmmError::InvalidMachine)?;
@@ -113,6 +116,11 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
                 ..
             },
         ) => {
+            if *firmware == FirmwareKind::Edk2Riscv {
+                return Err(VmmError::InvalidMachine(
+                    "edk2_riscv requires machine=virt and arch=riscv64".into(),
+                ));
+            }
             if *firmware == FirmwareKind::Seabios && (vars.is_some() || *secure_boot) {
                 return Err(VmmError::InvalidMachine(
                     "SeaBIOS does not support vars or secure_boot".into(),
@@ -150,6 +158,15 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
 }
 
 fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
+    if desc
+        .display
+        .as_ref()
+        .is_some_and(|display| display.device == vmlab_hv_proto::machine::DisplayDevice::VirtioGpu)
+    {
+        return Err(VmmError::InvalidMachine(
+            "virtio-gpu requires machine=virt; q35 uses virtio-vga".into(),
+        ));
+    }
     let mut used = std::collections::BTreeSet::from([(0, 0)]);
     let mut add = |address: Option<PciAddress>, name: &str| -> Result<(), VmmError> {
         let a = address.ok_or_else(|| {
@@ -265,20 +282,26 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
     Ok(())
 }
 
-fn tablet_serial(address: PciAddress) -> String {
+pub(crate) fn tablet_serial(address: PciAddress) -> String {
     format!(
         "28754-0000:{:02x}:{:02x}.{}-1",
         address.bus, address.device, address.function
     )
 }
 
-/// Build the whole machine. With `paused`, the vCPUs stay parked until the
+/// Build a KVM machine. RISC-V callers use [`crate::virt::build`].
+/// With `paused`, the vCPUs stay parked until the
 /// `resume` command (`--paused`, the `-S` equivalent).
 pub fn build(
     desc: &MachineDescription,
     factory: &dyn DeviceFactory,
     paused: bool,
 ) -> Result<Vm, VmmError> {
+    if desc.machine == Machine::Virt {
+        return Err(VmmError::InvalidMachine(
+            "RISC-V virt must be built with virt::build".into(),
+        ));
+    }
     validate(desc)?;
     crate::vfio::preflight_machine(desc).map_err(VmmError::InvalidMachine)?;
     let kvm = KvmVm::new()?;
@@ -1407,6 +1430,16 @@ mod tests {
         let path = dir.join("vmlinuz");
         std::fs::write(&path, image).unwrap();
         path
+    }
+
+    #[test]
+    fn kvm_builder_does_not_open_kvm_for_virt() {
+        let mut machine = desc();
+        machine.machine = Machine::Virt;
+        let Err(error) = build(&machine, &crate::factory::NoDevices, true) else {
+            panic!("virt must not enter the KVM builder");
+        };
+        assert!(error.to_string().contains("virt::build"));
     }
 
     #[test]

@@ -56,6 +56,8 @@ mod acceptance;
 mod devices;
 #[cfg(test)]
 mod display_acceptance;
+#[cfg(test)]
+mod riscv_acceptance;
 
 fn main() -> ExitCode {
     let args = match parse_args() {
@@ -99,13 +101,50 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
     // block before the vCPU threads exist.
     block_termination_signals();
 
-    // Refuse an occupied control path before doing any work, so a stale
-    // socket or a second launch fails fast and leaves the path alone.
     if args.control.exists() {
         return Err(format!(
             "control socket: {} already exists",
             args.control.display()
         ));
+    }
+
+    if desc.machine == vmlab_hv_proto::machine::Machine::Virt {
+        let mut vm = vmlab_hv_vmm::virt::build(&desc, &DeviceSet)?;
+        if let Some(display) = &desc.display {
+            let directory = args.control.parent().unwrap_or(std::path::Path::new("."));
+            vm.serve_display(
+                &display
+                    .socket
+                    .clone()
+                    .unwrap_or_else(|| directory.join("display.sock")),
+                &display
+                    .vnc_socket
+                    .clone()
+                    .unwrap_or_else(|| directory.join("vnc.sock")),
+            )?;
+        }
+        vm.serve(&args.control)?;
+        let handle = vm.handle();
+        std::thread::Builder::new()
+            .name("riscv-signal-wait".into())
+            .spawn(move || {
+                // SAFETY: this signal set is blocked before any machine thread starts.
+                unsafe {
+                    let mut set: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut set);
+                    libc::sigaddset(&mut set, libc::SIGTERM);
+                    libc::sigaddset(&mut set, libc::SIGQUIT);
+                    let mut signal = 0;
+                    if libc::sigwait(&set, &mut signal) == 0 {
+                        handle.quit();
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        if !args.paused {
+            vm.start();
+        }
+        return vm.wait();
     }
 
     let mut vm = builder::build(&desc, &DeviceSet, true)

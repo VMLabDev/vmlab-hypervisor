@@ -154,8 +154,18 @@ impl ManagedChild {
     }
 
     pub fn spawn(command: &mut Command) -> io::Result<Self> {
+        Self::spawn_with_timeout(command, Self::timeout()?)
+    }
+
+    pub fn spawn_with_timeout(command: &mut Command, timeout: Duration) -> io::Result<Self> {
+        if timeout.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "VM process timeout must be positive",
+            ));
+        }
         let permit = VmPermit::acquire()?;
-        Self::start(command, Some(permit), Self::timeout()?)
+        Self::start(command, Some(permit), timeout)
     }
 
     pub fn helper(command: &mut Command) -> io::Result<Self> {
@@ -335,6 +345,14 @@ mod tests {
         }));
         assert!(result.is_err());
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[test]
+    fn explicit_vm_deadline_must_be_positive() {
+        let error = ManagedChild::spawn_with_timeout(Command::new("true").arg(""), Duration::ZERO)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

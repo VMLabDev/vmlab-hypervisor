@@ -254,7 +254,7 @@ struct Input {
     pointer: Mutex<vmlab_hv_devices::usb::PointerEvent>,
 }
 
-fn pointer_message(pointer: &mut vmlab_hv_devices::usb::PointerEvent, message: Message) {
+pub(crate) fn pointer_message(pointer: &mut vmlab_hv_devices::usb::PointerEvent, message: Message) {
     pointer.wheel = 0;
     match message {
         Message::PointerAbs {
@@ -409,7 +409,7 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
     Ok(())
 }
 
-fn placeholder_pixels() -> Vec<u8> {
+pub(crate) fn placeholder_pixels() -> Vec<u8> {
     const TEXT: &[u8] = b"Display output is not active.";
     let mut pixels = [0x18, 0x18, 0x18, 0].repeat(640 * 480);
     let left = (640 - TEXT.len() * 16) / 2;
