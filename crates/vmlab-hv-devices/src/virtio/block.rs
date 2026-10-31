@@ -109,6 +109,8 @@ pub struct Block {
     queue_sizes: Vec<u16>,
     /// Queue states restored before activation, applied by `activate`.
     pending_queues: Option<Vec<virtio_queue::QueueState>>,
+    /// Host scratch, overwritten by each request and never snapshotted.
+    io_buffer: Vec<u8>,
 }
 
 impl Block {
@@ -149,6 +151,7 @@ impl Block {
             queues: Vec::new(),
             queue_sizes: vec![QUEUE_MAX_SIZE],
             pending_queues: None,
+            io_buffer: Vec::new(),
         }
     }
 
@@ -288,17 +291,23 @@ impl Block {
         if data_len == 0 {
             return S_IOERR;
         }
-        let mut buf = vec![0u8; data_len];
         let Some(end) = offset.checked_add(data_len as u64) else {
             return S_IOERR;
         };
         if end > self.disk.size() {
             return S_IOERR; // out of range
         }
-        if self.disk.read_at(offset, &mut buf).is_err() {
+        if self.io_buffer.len() < data_len {
+            self.io_buffer.resize(data_len, 0);
+        }
+        if self
+            .disk
+            .read_at(offset, &mut self.io_buffer[..data_len])
+            .is_err()
+        {
             return S_IOERR;
         }
-        match writer.write_all(&buf) {
+        match writer.write_all(&self.io_buffer[..data_len]) {
             Ok(()) => S_OK,
             Err(_) => S_IOERR,
         }
@@ -319,8 +328,10 @@ impl Block {
             return S_IOERR;
         };
         let data_len = reader.available_bytes();
-        let mut buf = vec![0u8; data_len];
-        if reader.read_exact(&mut buf).is_err() {
+        if self.io_buffer.len() < data_len {
+            self.io_buffer.resize(data_len, 0);
+        }
+        if reader.read_exact(&mut self.io_buffer[..data_len]).is_err() {
             return S_IOERR;
         }
         if let Some(end) = offset.checked_add(data_len as u64) {
@@ -330,7 +341,11 @@ impl Block {
         } else {
             return S_IOERR;
         }
-        if self.disk.write_at(offset, &buf).is_err() {
+        if self
+            .disk
+            .write_at(offset, &self.io_buffer[..data_len])
+            .is_err()
+        {
             return S_IOERR;
         }
         // The response consumes no writable bytes beyond the status.
@@ -723,8 +738,12 @@ mod tests {
             if kind == T_IN {
                 content.lock()[1024..1024 + payload.len()].copy_from_slice(&payload);
             } else {
-                f.mem.write_slice(&payload[..8192], GuestAddress(0x10000)).unwrap();
-                f.mem.write_slice(&payload[8192..], GuestAddress(0x30000)).unwrap();
+                f.mem
+                    .write_slice(&payload[..8192], GuestAddress(0x10000))
+                    .unwrap();
+                f.mem
+                    .write_slice(&payload[8192..], GuestAddress(0x30000))
+                    .unwrap();
             }
             f.put_header(kind, 2);
             let flags = NEXT | if kind == T_IN { WRITE } else { 0 };
@@ -736,8 +755,12 @@ mod tests {
             assert_eq!(f.status(), S_OK);
             if kind == T_IN {
                 let mut received = vec![0; payload.len()];
-                f.mem.read_slice(&mut received[..8192], GuestAddress(0x10000)).unwrap();
-                f.mem.read_slice(&mut received[8192..], GuestAddress(0x30000)).unwrap();
+                f.mem
+                    .read_slice(&mut received[..8192], GuestAddress(0x10000))
+                    .unwrap();
+                f.mem
+                    .read_slice(&mut received[8192..], GuestAddress(0x30000))
+                    .unwrap();
                 assert_eq!(received, payload);
                 assert_eq!(f.used_slot(0), (1, 0, 12289));
             } else {
@@ -745,6 +768,27 @@ mod tests {
                 assert_eq!(f.used_slot(0), (1, 0, 1));
             }
         }
+    }
+
+    #[test]
+    fn requests_reuse_host_scratch_without_exposing_previous_data() {
+        let mut f = Fixture::new(Box::new(MemDisk::new(64 * 1024)));
+        f.put_header(T_IN, 2);
+        f.chain_hdr_data_status(1024, true);
+        f.submit(0);
+        let allocation = f.block.io_buffer.as_ptr();
+        f.block.io_buffer.fill(0xff);
+        f.put_header(T_IN, 3);
+        f.chain_hdr_data_status(512, true);
+        f.submit_at(0, 1, 2);
+        assert_eq!(f.status(), S_OK);
+        assert_eq!(f.block.io_buffer.as_ptr(), allocation);
+        assert_eq!(f.block.io_buffer.len(), 1024);
+        let mut received = [0; 512];
+        f.mem
+            .read_slice(&mut received, GuestAddress(f.buf))
+            .unwrap();
+        assert_eq!(&received, sector_content(3).as_slice());
     }
 
     #[test]
