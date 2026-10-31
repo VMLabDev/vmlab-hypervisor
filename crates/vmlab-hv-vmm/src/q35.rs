@@ -430,12 +430,8 @@ impl PciDevice for Mch {
             let mask = if self.pc {
                 match pos {
                     4 => 0x07,
-                    5 => 0x01,
-                    0x0c | 0x0d | 0x3c => 0xff,
-                    0x57 => 0xff,
-                    0x59 => 0x30,
-                    0x5a..=0x5f => 0x33,
-                    0x72 if self.config[0x72] & 0x10 == 0 => 0x78,
+                    5 => 0x05,
+                    0x0c | 0x3c | 0x40..=0xff => 0xff,
                     _ => 0,
                 }
             } else {
@@ -457,9 +453,6 @@ impl PciDevice for Mch {
             };
             if pos < self.config.len() {
                 self.config[pos] = (self.config[pos] & !mask) | (byte & mask);
-                if self.pc && pos == 0x72 && self.config[pos] & 0x10 != 0 {
-                    self.config[pos] &= !0x40;
-                }
             }
         }
         if let Err(e) = self.update_pam() {
@@ -668,8 +661,91 @@ mod tests {
         Mch::new(Arc::new(Mutex::new(pam)))
     }
 
+    fn captured_i440fx_config() -> Vec<u8> {
+        let capture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/hwref/pc-chipset-reset.json"))
+                .unwrap();
+        let hex = capture["chipset_reset_config_hex"]["00.0"]
+            .as_str()
+            .unwrap();
+        decode_config(hex)
+    }
+
+    fn decode_config(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len(), 512);
+        hex.as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|byte| u8::from_str_radix(std::str::from_utf8(byte).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn assert_i440fx_config(bridge: &mut Mch, expected: &[u8]) {
+        for (reg, bytes) in expected.as_chunks::<4>().0.iter().enumerate() {
+            assert_eq!(
+                bridge.config_read(reg),
+                u32::from_le_bytes(*bytes),
+                "i440fx configuration offset {:#04x}",
+                reg * 4
+            );
+        }
+    }
+
     #[test]
-    fn i440fx_has_legacy_pam_offsets_and_locked_smram() {
+    fn i440fx_complete_reset_config_matches_qtest_and_restores() {
+        let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
+        let mut bridge = Mch::i440fx(Arc::new(Mutex::new(pam)), 128 << 20);
+        let expected = captured_i440fx_config();
+        assert_i440fx_config(&mut bridge, &expected);
+        let reset_state = bridge.save_state().unwrap();
+        for reg in 0..64 {
+            bridge.config_write(reg, 0, &[0xff; 4]);
+        }
+        assert_ne!(bridge.config[..256], expected);
+        assert!(bridge.error.is_none());
+        bridge.restore_state(&reset_state).unwrap();
+        assert_i440fx_config(&mut bridge, &expected);
+        assert!(bridge.error.is_none());
+        assert_eq!(bridge.ecam_window(), None);
+    }
+
+    #[test]
+    fn i440fx_complete_config_write_replay_matches_qtest() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/hwref/pc-chipset-write-masks.json"
+        ))
+        .unwrap();
+        let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
+        let mut bridge = Mch::i440fx(Arc::new(Mutex::new(pam)), 128 << 20);
+        let mut phases = 0;
+        let mut differences = Vec::new();
+        for phase in capture["chipset_config_write_replay"].as_array().unwrap() {
+            if phase["bdf"] != "00.0" {
+                continue;
+            }
+            let value = u32::try_from(phase["written_dword"].as_u64().unwrap()).unwrap();
+            for reg in 0..64 {
+                bridge.config_write(reg, 0, &value.to_le_bytes());
+            }
+            let expected = decode_config(phase["config_hex"].as_str().unwrap());
+            for (offset, expected) in expected.iter().enumerate() {
+                let actual = (bridge.config_read(offset / 4) >> (offset % 4 * 8)) as u8;
+                if actual != *expected {
+                    differences.push(format!(
+                        "written {value:08x}, offset {offset:02x}: {actual:02x} != {expected:02x}"
+                    ));
+                }
+            }
+            assert!(bridge.error.is_none());
+            phases += 1;
+        }
+        assert_eq!(phases, 2);
+        assert!(differences.is_empty(), "{}", differences.join("\n"));
+    }
+
+    #[test]
+    fn i440fx_has_legacy_pam_offsets_and_writable_smram() {
         let pam = Pam::new(&vec![0x5a; 0x40000], None, 0).unwrap();
         let mut bridge = Mch::i440fx(Arc::new(Mutex::new(pam)), 256 << 20);
         assert_eq!(bridge.config_read(0), 0x1237_8086);
@@ -683,11 +759,14 @@ mod tests {
         assert_eq!(byte, [0x42]);
         let state = bridge.save_state().unwrap();
         bridge.config_write(0x70 / 4, 2, &[0x58]);
-        assert_eq!(bridge.config[0x72] & 0x50, 0x10);
+        assert_eq!(bridge.config[0x72], 0x58);
+        assert!(bridge.pam.lock().smram_open);
         bridge.config_write(0x70 / 4, 2, &[0x40]);
-        assert_eq!(bridge.config[0x72] & 0x50, 0x10);
+        assert_eq!(bridge.config[0x72], 0x40);
+        assert!(bridge.pam.lock().smram_open);
         bridge.restore_state(&state).unwrap();
         assert_eq!(bridge.config[0x72], 2);
+        assert!(!bridge.pam.lock().smram_open);
         assert_eq!(bridge.ecam_window(), None);
     }
 

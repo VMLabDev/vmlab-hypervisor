@@ -401,6 +401,12 @@ pub fn build(
 
     let q35 = desc.machine == Machine::Q35;
     let pc = desc.machine == Machine::Pc;
+    let pc_com2 = pc
+        && (!desc.serial_log_port.is_com1()
+            || desc
+                .ports
+                .iter()
+                .any(|port| port.transport == vmlab_hv_proto::machine::SerialTransport::Com2));
     let firmware_machine = q35 || pc;
     let ovmf = matches!(
         desc.boot,
@@ -526,6 +532,9 @@ pub fn build(
         None
     };
     if let Some(chipset) = &chipset {
+        if pc {
+            chipset.lpc.lock().configure_piix4_legacy_io(pc_com2, false);
+        }
         chipset
             .rtc
             .lock()
@@ -1233,10 +1242,7 @@ pub fn build(
                 } else {
                     None
                 },
-                com2: !desc.serial_log_port.is_com1()
-                    || desc.ports.iter().any(|port| {
-                        port.transport == vmlab_hv_proto::machine::SerialTransport::Com2
-                    }),
+                com2: pc_com2,
                 physical_address_bits: kvm.physical_address_bits(desc.cpu_model.as_deref()),
             };
             vmlab_hv_firmware::FwCfg::for_pc(ram.mem.clone(), &platform, &options)

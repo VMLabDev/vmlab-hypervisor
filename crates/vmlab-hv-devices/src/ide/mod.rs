@@ -1039,11 +1039,11 @@ impl PciDevice for Ide {
             };
             let mask = match pos {
                 4 => 7,
-                5 => 1,
+                5 => 5,
+                0x0c | 0x3c => 0xff,
                 0x20 => 0xf0,
                 0x21..=0x23 => 0xff,
-                0x40 | 0x42 | 0x44 => 0xff,
-                0x41 | 0x43 => 0xf3,
+                0x40..=0xff => 0xff,
                 _ => 0,
             };
             if pos < 256 {
@@ -1290,5 +1290,119 @@ impl BusDevice for IdePorts {
         } else if !self.control {
             controller.write_taskfile(self.channel, offset, data);
         }
+    }
+}
+
+#[cfg(test)]
+mod config_oracle_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Default)]
+    struct Level(AtomicBool);
+    impl IrqLine for Level {
+        fn set_level(&self, high: bool) {
+            self.0.store(high, Ordering::SeqCst);
+        }
+    }
+
+    fn reset_config() -> [u8; 256] {
+        let oracle: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../docs/hwref/pc-chipset-reset.json"))
+                .unwrap();
+        let hex = oracle["chipset_reset_config_hex"]["01.1"].as_str().unwrap();
+        decode_config(hex)
+    }
+
+    fn decode_config(hex: &str) -> [u8; 256] {
+        assert_eq!(hex.len(), 512);
+        hex.as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap()
+    }
+
+    fn assert_config(ide: &mut Ide, expected: &[u8; 256]) {
+        let actual: Vec<_> = (0..64)
+            .flat_map(|reg| ide.config_read(reg).to_le_bytes())
+            .collect();
+        let differences: Vec<_> = actual
+            .iter()
+            .zip(expected)
+            .enumerate()
+            .filter_map(|(offset, (&actual, &expected))| {
+                (actual != expected).then_some((offset, actual, expected))
+            })
+            .collect();
+        assert!(
+            differences.is_empty(),
+            "IDE PCI bytes (offset, actual, QEMU): {differences:#x?}"
+        );
+    }
+
+    #[test]
+    fn all_ide_pci_reset_bytes_match_the_qemu_oracle() {
+        let lines: [Arc<Level>; 2] = std::array::from_fn(|_| Arc::new(Level::default()));
+        let mut ide = Ide::new(
+            "ide-reset",
+            GuestMemory::new(),
+            [lines[0].clone(), lines[1].clone()],
+        );
+        let expected = reset_config();
+        assert_config(&mut ide, &expected);
+        for reg in 0..64 {
+            ide.config_write(reg, 0, &[0xff; 4]);
+        }
+        ide.reset().unwrap();
+        assert_config(&mut ide, &expected);
+        assert!(lines.iter().all(|line| !line.0.load(Ordering::SeqCst)));
+    }
+
+    #[test]
+    fn all_ide_pci_write_masks_match_the_qemu_oracle() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/hwref/pc-chipset-write-masks.json"
+        ))
+        .unwrap();
+        let cases: Vec<_> = oracle["chipset_config_write_replay"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| case["bdf"] == "01.1")
+            .collect();
+        assert_eq!(cases.len(), 2);
+        let level = Arc::new(Level::default());
+        let mut ide = Ide::new(
+            "ide-write-masks",
+            GuestMemory::new(),
+            [level.clone(), level],
+        );
+        let mut differences = Vec::new();
+        for (case, expected_write) in cases.into_iter().zip([u32::MAX, 0]) {
+            let value = u32::try_from(case["written_dword"].as_u64().unwrap()).unwrap();
+            assert_eq!(value, expected_write);
+            for reg in 0..64 {
+                ide.config_write(reg, 0, &value.to_le_bytes());
+            }
+            let expected = decode_config(case["config_hex"].as_str().unwrap());
+            for (reg, expected) in expected.as_chunks::<4>().0.iter().enumerate() {
+                let actual = ide.config_read(reg).to_le_bytes();
+                for i in 0..4 {
+                    if actual[i] != expected[i] {
+                        differences.push((value, reg * 4 + i, actual[i], expected[i]));
+                    }
+                }
+            }
+        }
+        assert!(
+            differences.is_empty(),
+            "{} IDE PCI differences (written, offset, actual, QEMU), first 16: {:x?}",
+            differences.len(),
+            &differences[..differences.len().min(16)]
+        );
     }
 }

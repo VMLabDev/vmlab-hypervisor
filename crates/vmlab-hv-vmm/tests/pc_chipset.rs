@@ -149,21 +149,21 @@ fn piix4_identity_and_write_masks_do_not_expose_ich9_registers() {
     assert_eq!(f.device.config_read(1), 0x0280_0000);
     assert_eq!(f.device.config_read(2), 0x0680_0003);
     assert_eq!(f.device.config_read(0x2c / 4), 0x1100_1af4);
-    assert_eq!(f.device.config_read(0x3c / 4), 0x0109);
+    assert_eq!(f.device.config_read(0x3c / 4), 0x0100);
     assert!(f.device.bars().is_empty());
     pci_write(&mut f.device, 0, &[0xff; 12]);
     pci_write(&mut f.device, 0x2c, &[0xff; 4]);
     assert_eq!(f.device.config_read(0), 0x7113_8086);
-    assert_eq!(f.device.config_read(1), 0x0280_010f);
+    assert_eq!(f.device.config_read(1), 0x0280_0507);
     assert_eq!(f.device.config_read(2), 0x0680_0003);
     assert_eq!(f.device.config_read(0x2c / 4), 0x1100_1af4);
     pci_write(&mut f.device, 0x40, &[0xff; 4]);
-    assert_eq!(f.device.config_read(0x40 / 4), 0xffc1);
+    assert_eq!(f.device.config_read(0x40 / 4), u32::MAX);
     pci_write(&mut f.device, 0x44, &[0xff]);
     assert!(!f.device.pm_enabled());
     pci_write(&mut f.device, 0x80, &[0xff]);
     assert!(f.device.pm_enabled());
-    assert_eq!(pci_byte(&mut f.device, 0x80), 1);
+    assert_eq!(pci_byte(&mut f.device, 0x80), 0xff);
     pci_write(&mut f.device, 0x90, &[0xff; 2]);
     assert_eq!(f.device.smbus_base(), Some(0xfff0));
     pci_write(&mut f.device, 0xd2, &[0]);
@@ -427,8 +427,9 @@ fn i440fx_pam_offsets_shadow_each_bank_and_restore_state_without_q35_aliases() {
     let state = bridge.save_state().unwrap();
     pci_write(&mut bridge, 0x90, &[0x30]);
     pci_write(&mut bridge, 0x9d, &[0x40]);
-    assert_eq!(pci_byte(&mut bridge, 0x90), 0);
-    assert_eq!(pci_byte(&mut bridge, 0x9d), 0);
+    assert_eq!(pci_byte(&mut bridge, 0x90), 0x30);
+    assert_eq!(pci_byte(&mut bridge, 0x9d), 0x40);
+    assert_eq!(bridge.ecam_window(), None);
     pci_write(&mut bridge, 0x59, &[0x30]);
     pam.lock().write(0x30000, &[0xfe]);
     bridge.restore_state(&state).unwrap();
@@ -440,20 +441,20 @@ fn i440fx_pam_offsets_shadow_each_bank_and_restore_state_without_q35_aliases() {
 }
 
 #[test]
-fn i440fx_smram_uses_72h_and_lock_closes_the_open_bit() {
+fn i440fx_smram_uses_72h_and_preserves_qemu_register_writes() {
     let pam = Arc::new(Mutex::new(Pam::new(&[0; 0x40000], None, 0).unwrap()));
     let mut bridge = Mch::i440fx(pam, 512 << 20);
     assert_eq!(pci_byte(&mut bridge, 0x72), 2);
     pci_write(&mut bridge, 0x72, &[0x4a]);
     assert_eq!(pci_byte(&mut bridge, 0x72), 0x4a);
     pci_write(&mut bridge, 0x72, &[0x5a]);
-    assert_eq!(pci_byte(&mut bridge, 0x72), 0x1a);
+    assert_eq!(pci_byte(&mut bridge, 0x72), 0x5a);
     pci_write(&mut bridge, 0x72, &[0x4a]);
-    assert_eq!(pci_byte(&mut bridge, 0x72), 0x1a);
+    assert_eq!(pci_byte(&mut bridge, 0x72), 0x4a);
     let state = bridge.save_state().unwrap();
     bridge.restore_state(&state).unwrap();
     pci_write(&mut bridge, 0x72, &[2]);
-    assert_eq!(pci_byte(&mut bridge, 0x72), 0x1a);
+    assert_eq!(pci_byte(&mut bridge, 0x72), 2);
     assert!(bridge.error.is_none());
 }
 

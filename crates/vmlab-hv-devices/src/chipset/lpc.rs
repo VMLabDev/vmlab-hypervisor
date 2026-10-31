@@ -1,4 +1,4 @@
-//! ICH9 LPC function (00:1f.0), ACPI PM registers and legacy reset ports.
+//! ICH9 LPC, PIIX4 ACPI/PM, and legacy reset ports.
 //!
 //! Register definitions follow Intel's ICH9 Family Datasheet, sections 13/14,
 //! and ACPI's fixed hardware registers. Sleep encodings follow the captured
@@ -23,7 +23,7 @@ pub enum PowerAction {
 
 /// PCI config and the PMBASE-relative I/O window share one device instance.
 /// Route ports b2/b3/cf9 through [`Self::read_port`]/[`Self::write_port`].
-/// The PM window is 128 bytes; its base/enable may change after config writes.
+/// The PM window is 64 bytes on PIIX4 and 128 on ICH9; config writes can relocate it.
 pub struct Lpc {
     piix4: bool,
     config: [u8; 256],
@@ -78,18 +78,25 @@ impl Lpc {
         device.config[6..8].copy_from_slice(&0x0280u16.to_le_bytes());
         device.config[8..12].copy_from_slice(&[3, 0, 0x80, 6]);
         device.config[0x2c..0x30].copy_from_slice(&0x1100_1af4u32.to_le_bytes());
-        device.config[0x3c..0x3e].copy_from_slice(&[9, 1]);
+        device.config[0x3d] = 1;
         device.config[0x40] = 1;
-        device.config[0x5f] = 0x90;
+        device.config[0x5f] = 0x10;
         device.config[0x63] = 0x60;
-        device.config[0x67] = 0x98;
-        device.config[0x90] = 1;
+        device.config[0x67] = 0x08;
+        device.config[0x90..0x92].copy_from_slice(&0xb101u16.to_le_bytes());
         device.config[0xd2] = 9;
         device
     }
 
     pub fn piix4_smi_enabled(&self) -> bool {
         self.piix4 && self.config[0x5b] & 2 != 0
+    }
+
+    /// Initialize resource-decode hints for the attached ISA ports before boot.
+    pub fn configure_piix4_legacy_io(&mut self, com2: bool, parallel: bool) {
+        assert!(self.piix4);
+        self.config[0x5f] = 0x10 | if parallel { 0x80 } else { 0 };
+        self.config[0x67] = 0x08 | if com2 { 0x90 } else { 0 };
     }
 
     pub fn smbus_base(&self) -> Option<u16> {
@@ -318,16 +325,9 @@ impl PciDevice for Lpc {
             };
             let mask = if self.piix4 {
                 match index {
-                    4 => 0x0f,
-                    5 => 1,
-                    0x0c | 0x0d | 0x3c => 0xff,
-                    0x40 => 0xc0,
-                    0x41 => 0xff,
-                    0x80 => 1,
-                    0x90 => 0xf0,
-                    0x91 => 0xff,
-                    0xd2 => 0x0f,
-                    0x58..=0x5b => 0xff,
+                    4 => 0x07,
+                    5 => 0x05,
+                    0x0c | 0x3c | 0x40..=0xff => 0xff,
                     _ => 0,
                 }
             } else {
@@ -434,6 +434,123 @@ mod tests {
             irq,
             actions,
         )
+    }
+
+    fn config_differences(lpc: &mut Lpc, hex: &str) -> Vec<String> {
+        assert_eq!(hex.len(), 512);
+        let expected: Vec<u8> = hex
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        let actual: Vec<_> = (0..64)
+            .flat_map(|reg| lpc.config_read(reg).to_le_bytes())
+            .collect();
+        actual
+            .iter()
+            .zip(&expected)
+            .enumerate()
+            .filter(|(_, (actual, expected))| actual != expected)
+            .map(|(offset, (actual, expected))| {
+                format!("{offset:#04x}: {actual:#04x} != {expected:#04x}")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn piix4_legacy_port_inventory_matches_qemu_and_restores() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/hwref/pc-chipset-legacy-io.json"
+        )))
+        .unwrap();
+        let mut lpc = Lpc::piix4(Arc::new(Irq::default()), Arc::new(|_| {}));
+        lpc.configure_piix4_legacy_io(true, true);
+        assert!(
+            config_differences(
+                &mut lpc,
+                capture["chipset_reset_config_hex"]["01.3"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .is_empty()
+        );
+        let state = lpc.save_state().unwrap();
+        lpc.configure_piix4_legacy_io(false, false);
+        assert_eq!(lpc.config[0x5f], 0x10);
+        assert_eq!(lpc.config[0x67], 0x08);
+        lpc.restore_state(&state).unwrap();
+        assert_eq!(lpc.save_state().unwrap(), state);
+        lpc.configure_piix4_legacy_io(true, false);
+        assert_eq!(lpc.config[0x5f], 0x10);
+        assert_eq!(lpc.config[0x67], 0x98);
+    }
+
+    #[test]
+    fn piix4_complete_config_matches_qemu_all_ones_then_all_zeroes_replay() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/hwref/pc-chipset-write-masks.json"
+        )))
+        .unwrap();
+        let phases: Vec<_> = capture["chipset_config_write_replay"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|phase| phase["bdf"] == "01.3")
+            .collect();
+        assert_eq!(phases.len(), 2);
+        let mut lpc = Lpc::piix4(Arc::new(Irq::default()), Arc::new(|_| {}));
+        let mut failures = Vec::new();
+        for (phase, expected_write) in phases.into_iter().zip([u32::MAX, 0]) {
+            let written = u32::try_from(phase["written_dword"].as_u64().unwrap()).unwrap();
+            assert_eq!(written, expected_write);
+            for reg in 0..64 {
+                lpc.config_write(reg, 0, &written.to_le_bytes());
+            }
+            let differences = config_differences(&mut lpc, phase["config_hex"].as_str().unwrap());
+            if !differences.is_empty() {
+                failures.push(format!(
+                    "write {written:#010x}: {} differing bytes; {}",
+                    differences.len(),
+                    differences
+                        .iter()
+                        .take(12)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "PIIX4 write replay differences: {}",
+            failures.join("; ")
+        );
+    }
+
+    #[test]
+    fn piix4_complete_reset_config_matches_qemu_qtest_capture() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/hwref/pc-chipset-reset.json"
+        )))
+        .unwrap();
+        let hex = capture["chipset_reset_config_hex"]["01.3"]
+            .as_str()
+            .unwrap();
+        let mut lpc = Lpc::piix4(Arc::new(Irq::default()), Arc::new(|_| {}));
+        let differences = config_differences(&mut lpc, hex);
+        assert!(
+            differences.is_empty(),
+            "PIIX4 reset differences: {}",
+            differences.join(", ")
+        );
+        assert_eq!(lpc.pm_base(), 0);
+        assert!(!lpc.pm_enabled());
+        assert_eq!(lpc.smbus_base(), Some(0xb100));
     }
 
     #[test]

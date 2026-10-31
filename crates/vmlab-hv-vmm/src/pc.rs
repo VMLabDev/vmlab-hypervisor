@@ -29,7 +29,7 @@ impl Default for Piix3 {
     fn default() -> Self {
         let mut config = [0; 256];
         config[..4].copy_from_slice(&0x7000_8086u32.to_le_bytes());
-        config[4..8].copy_from_slice(&[7, 0, 0, 2]);
+        config[4..8].copy_from_slice(&[0, 0, 0, 2]);
         config[0xa..0xc].copy_from_slice(&[1, 6]);
         config[0xe] = 0x80;
         config[0x2c..0x30].copy_from_slice(&0x1100_1af4u32.to_le_bytes());
@@ -40,7 +40,6 @@ impl Default for Piix3 {
         config[0x70] = 0x80;
         config[0x76..0x78].fill(0x0c);
         config[0x78] = 2;
-        config[0x82] = 2;
         config[0xa0] = 8;
         config[0xa8] = 0x0f;
         Self { config }
@@ -81,22 +80,9 @@ impl PciDevice for Piix3 {
                 break;
             };
             let mask = match pos {
-                4 => 0x0f,
-                5 => 1,
-                0x0c
-                | 0x0d
-                | 0x3c
-                | 0x4c
-                | 0x4e..=0x4f
-                | 0x69..=0x6b
-                | 0x70
-                | 0x76..=0x79
-                | 0x80
-                | 0x82
-                | 0xa0
-                | 0xa2..=0xab
-                | 0xae => 0xff,
-                0x60..=0x63 => 0x8f,
+                4 => 7,
+                5 => 5,
+                0x0c | 0x3c | 0x40..=0xff => 0xff,
                 _ => 0,
             };
             self.config[pos] = (self.config[pos] & !mask) | (byte & mask);
@@ -132,6 +118,17 @@ impl Snapshot for Piix3 {
 mod tests {
     use super::*;
 
+    fn config_bytes(encoded: &str) -> Vec<u8> {
+        assert_eq!(encoded.len(), 512);
+        encoded
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
     #[test]
     fn default_boot_order_places_cds_before_disks_at_their_ide_paths() {
         let disks=serde_json::from_value::<Vec<vmlab_hv_proto::machine::Disk>>(serde_json::json!([
@@ -150,14 +147,66 @@ mod tests {
     }
 
     #[test]
+    fn piix3_reset_config_matches_qemu_qtest() {
+        let oracle: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/hwref/pc-chipset-reset.json"))
+                .unwrap();
+        let encoded = oracle["chipset_reset_config_hex"]["01.0"].as_str().unwrap();
+        let expected = config_bytes(encoded);
+        let mut bridge = Piix3::default();
+        for offset in (0..256).step_by(4) {
+            assert_eq!(
+                bridge.config_read(offset / 4).to_le_bytes(),
+                expected[offset..offset + 4],
+                "reset config at {offset:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn piix3_config_write_replay_matches_qemu_qtest() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/hwref/pc-chipset-write-masks.json"
+        ))
+        .unwrap();
+        let mut bridge = Piix3::default();
+        for step in oracle["chipset_config_write_replay"].as_array().unwrap() {
+            if step["bdf"] != "01.0" {
+                continue;
+            }
+            let written = step["written_dword"].as_u64().unwrap() as u32;
+            for reg in 0..64 {
+                bridge.config_write(reg, 0, &written.to_le_bytes());
+            }
+            let expected = config_bytes(step["config_hex"].as_str().unwrap());
+            let differences: Vec<_> = (0..256)
+                .filter_map(|offset| {
+                    let actual = bridge.config_read(offset / 4).to_le_bytes()[offset % 4];
+                    (actual != expected[offset])
+                        .then(|| format!("{offset:#x}: {actual:#x} != {:#x}", expected[offset]))
+                })
+                .collect();
+            assert!(
+                differences.is_empty(),
+                "write {written:#x}: {differences:?}"
+            );
+        }
+    }
+
+    #[test]
     fn piix3_identity_write_masks_and_snapshot() {
         let mut bridge = Piix3::default();
         assert_eq!(bridge.config_read(0), 0x7000_8086);
         assert_eq!(bridge.config_read(2), 0x0601_0000);
+        assert_eq!(bridge.config_read(1), 0x0200_0000);
+        bridge.config_write(1, 0, &[0xff; 2]);
+        assert_eq!(bridge.config_read(1), 0x0200_0507);
+        bridge.config_write(1, 0, &[0; 2]);
+        assert_eq!(bridge.config_read(1), 0x0200_0000);
         bridge.config_write(0, 0, &[0xff; 4]);
         assert_eq!(bridge.config_read(0), 0x7000_8086);
         bridge.config_write(0x60 / 4, 0, &[0xff, 11, 10, 9]);
-        assert_eq!(bridge.route(0), 0x8f);
+        assert_eq!(bridge.route(0), 0xff);
         let state = bridge.save_state().unwrap();
         bridge.config_write(0x60 / 4, 0, &[0; 4]);
         bridge.restore_state(&state).unwrap();

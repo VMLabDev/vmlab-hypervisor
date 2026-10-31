@@ -124,9 +124,9 @@ fn pci_identity_masks_and_legacy_decode() {
     d.ide.config_write(0, 0, &[0xff; 4]);
     assert_eq!(d.ide.config_read(0), 0x7010_8086);
     d.ide.config_write(1, 0, &[0xff; 4]);
-    assert_eq!(d.ide.config_read(1), 0x0280_0107);
+    assert_eq!(d.ide.config_read(1), 0x0280_0507);
     d.ide.config_write(0x40 / 4, 0, &[0xff; 4]);
-    assert_eq!(d.ide.config_read(0x40 / 4), 0xf3ff_f3ff);
+    assert_eq!(d.ide.config_read(0x40 / 4), u32::MAX);
     d.ide.config_write(0x20 / 4, 0, &[0xff; 4]);
     assert_eq!(d.ide.config_read(0x20 / 4), 0xffff_fff1);
     d.attach(0, 0, &vec![0; 2048]);
@@ -647,4 +647,91 @@ fn templeos_initialization_and_multiple_io_do_not_require_set_multiple() {
     command(&mut d, 0x29);
     assert_eq!(d.r(0, 7), READY | DRQ);
     assert_eq!(d.bytes(0, 512), data[..512]);
+}
+
+#[test]
+fn templeos_dword_and_batched_pio_cross_multiple_mode_boundaries() {
+    let original: Vec<u8> = (0..67 * 512)
+        .map(|index| ((index * 17 / 251) ^ ((index >> 9) * 31)) as u8)
+        .collect();
+    for batch in [4, 512, 3072, 4096] {
+        let mut d = Driver::new();
+        d.attach(0, 0, &original);
+        d.ide.write_control(0, &[8]);
+        d.address(0, 0, 1, 65, true);
+        d.w(0, 6, 0xef);
+        d.w(0, 1, 0);
+        d.w(0, 7, 0x29);
+        let controller = Arc::new(Mutex::new(d.ide));
+        let mut ports = IdePorts::new(controller.clone(), 0, false);
+        let mut read = vec![0; 65 * 512];
+        let started = std::time::Instant::now();
+        for chunk in read.chunks_mut(batch) {
+            let mut status = [0];
+            ports.read(7, &mut status);
+            assert_eq!(status[0], READY | DRQ, "DRQ before {batch}-byte PIO read");
+            ports.read(0, chunk);
+        }
+        assert_eq!(read, original[512..66 * 512], "{batch}-byte PIO payload");
+        let mut status = [0];
+        ports.read(7, &mut status);
+        assert_eq!(status[0], READY);
+        let mut count = [0];
+        ports.read(2, &mut count);
+        assert_eq!(count[0], 0);
+        let mut lba = [0];
+        ports.read(3, &mut lba);
+        assert_eq!(lba[0], 66);
+        eprintln!("IDE 65-sector PIO, batch={batch}: {:?}", started.elapsed());
+
+        {
+            let mut ide = controller.lock();
+            for (reg, value) in [
+                (2, 0),
+                (3, 0),
+                (4, 0),
+                (5, 0),
+                (2, 65),
+                (3, 1),
+                (4, 0),
+                (5, 0),
+                (6, 0xef),
+                (1, 0),
+                (7, 0x39),
+            ] {
+                ide.write_taskfile(0, reg, &[value]);
+            }
+        }
+        let replacement: Vec<u8> = read.iter().map(|byte| byte ^ 0xa5).collect();
+        for chunk in replacement.chunks(batch) {
+            ports.read(7, &mut status);
+            assert_eq!(status[0], READY | DRQ);
+            ports.write(0, chunk);
+        }
+        ports.read(7, &mut status);
+        assert_eq!(status[0], READY);
+        {
+            let mut ide = controller.lock();
+            for (reg, value) in [
+                (2, 0),
+                (3, 0),
+                (4, 0),
+                (5, 0),
+                (2, 65),
+                (3, 1),
+                (4, 0),
+                (5, 0),
+                (6, 0xef),
+                (1, 0),
+                (7, 0x29),
+            ] {
+                ide.write_taskfile(0, reg, &[value]);
+            }
+        }
+        let mut after_write = vec![0; replacement.len()];
+        for chunk in after_write.chunks_mut(batch) {
+            ports.read(0, chunk);
+        }
+        assert_eq!(after_write, replacement, "{batch}-byte PIO write/read");
+    }
 }

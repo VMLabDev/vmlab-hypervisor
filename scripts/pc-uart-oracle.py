@@ -279,11 +279,49 @@ def observe(qtest, uart, result):
     result["rx_nonfifo"]["complete_delivery"] = received == b"1234"
 
 
+def observe_chipset_reset(qtest, result):
+    def select(bdf, offset):
+        qtest.command(f"outl 0xcf8 {0x80000000 | bdf << 8 | offset:#x}")
+
+    configs = {}
+    for bdf in [0, 8, 9, 11]:
+        config = bytearray()
+        for offset in range(0, 256, 4):
+            select(bdf, offset)
+            config.extend(qtest.command("inl 0xcfc").to_bytes(4, "little"))
+        configs[f"{bdf // 8:02x}.{bdf % 8}"] = config.hex()
+    result["chipset_reset_config_hex"] = configs
+    result["piix3_command_writes"] = []
+    for value in [0, 3, 7, 0xffff]:
+        select(8, 4)
+        qtest.command(f"outw 0xcfc {value:#x}")
+        result["piix3_command_writes"].append({"written": value, "read": qtest.command("inw 0xcfc")})
+    select(8, 4)
+    qtest.command(f"outw 0xcfc {int.from_bytes(bytes.fromhex(configs['01.0'])[4:6], 'little'):#x}")
+    result["chipset_config_write_replay"] = []
+    for bdf in [0, 8, 9, 11]:
+        for value in [0xffffffff, 0]:
+            for offset in range(0, 256, 4):
+                select(bdf, offset)
+                qtest.command(f"outl 0xcfc {value:#x}")
+            config = bytearray()
+            for offset in range(0, 256, 4):
+                select(bdf, offset)
+                config.extend(qtest.command("inl 0xcfc").to_bytes(4, "little"))
+            result["chipset_config_write_replay"].append({
+                "bdf": f"{bdf // 8:02x}.{bdf % 8}",
+                "written_dword": value, "config_hex": config.hex(),
+            })
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=600, help="seconds to wait for host VM capacity")
     parser.add_argument("--qemu", default="qemu-system-x86_64")
+    parser.add_argument("--chipset-reset", action="store_true", help="observe chipset reset config and PIIX3 command masks instead of the UART")
+    parser.add_argument("--com2", action="store_true", help="include a second UART in the chipset inventory")
+    parser.add_argument("--parallel", action="store_true", help="include a parallel port in the chipset inventory")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -305,6 +343,10 @@ def main():
                     "-qtest", f"unix:{qtest_path},server=on,wait=off", "-qtest-log", "/dev/null",
                     "-chardev", f"socket,id=uart,path={uart_path},server=on,wait=off",
                     "-device", "isa-serial,chardev=uart,index=0"]
+            if args.com2:
+                argv.extend(["-chardev", "null,id=com2", "-device", "isa-serial,chardev=com2,index=1"])
+            if args.parallel:
+                argv.extend(["-parallel", "null"])
             result["argv"] = argv
             result["project_vm_pids_before_launch"] = project_vms()
             if len(result["project_vm_pids_before_launch"]) >= 2:
@@ -322,7 +364,10 @@ def main():
                                                start_new_session=True, preexec_fn=parent_death)
                     with connect(qtest_path, process) as qtest_socket, connect(uart_path, process) as uart:
                         uart.setblocking(False)
-                        observe(Qtest(qtest_socket), uart, result)
+                        if args.chipset_reset:
+                            observe_chipset_reset(Qtest(qtest_socket), result)
+                        else:
+                            observe(Qtest(qtest_socket), uart, result)
                 finally:
                     if process is not None:
                         if process.poll() is None:
