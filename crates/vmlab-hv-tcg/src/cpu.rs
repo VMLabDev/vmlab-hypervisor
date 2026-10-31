@@ -84,6 +84,14 @@ pub enum Privilege {
     Machine,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct CpuState {
+    globals: BTreeMap<String, Value>,
+    steps: u64,
+    reservation: Option<(u64, u64)>,
+    external_clock: bool,
+}
+
 /// One hart owns its architectural state and reservation. RAM sharing belongs
 /// to the Memory implementation; no CPU state is stored in process globals.
 pub struct Riscv64<M> {
@@ -94,9 +102,54 @@ pub struct Riscv64<M> {
     traces: BTreeMap<u64, Vec<crate::trace::Trace>>,
     cache_units: usize,
     cache_clock: u64,
+    external_clock: bool,
 }
 
 impl<M: Memory> Riscv64<M> {
+    pub fn save_state(&self) -> CpuState {
+        CpuState {
+            globals: (*self.interpreter.globals).clone(),
+            steps: self.steps,
+            reservation: self.interpreter.reservation,
+            external_clock: self.external_clock,
+        }
+    }
+
+    /// Restore architecture state into a fresh runtime, discarding translation,
+    /// memoization, and source-continuation caches.
+    pub fn restore_state(&mut self, state: &CpuState) -> Result<()>
+    where
+        M: Clone,
+    {
+        let mut restored = Self::new(self.interpreter.memory.clone())?;
+        if state.external_clock != self.external_clock {
+            return Err(crate::Error::Type(
+                "CPU snapshot uses a different platform clock".into(),
+            ));
+        }
+        if self.external_clock {
+            restored.use_external_clock()?;
+        }
+        if !restored.interpreter.globals.keys().eq(state.globals.keys()) {
+            return Err(crate::Error::Type(
+                "CPU snapshot has a different Sail model".into(),
+            ));
+        }
+        for (name, value) in &state.globals {
+            restored
+                .interpreter
+                .globals
+                .insert(name.clone(), value.clone());
+        }
+        restored.steps = state.steps;
+        restored.interpreter.reservation = state.reservation;
+        restored.specialize = self.specialize;
+        restored.interpreter.memoize = self.interpreter.memoize;
+        restored.interpreter.indexed = self.interpreter.indexed;
+        *self = restored;
+        Ok(())
+    }
+
     pub fn trace_profile(&self) -> Vec<TraceProfile> {
         let mut profiles: Vec<_> = self
             .traces
@@ -120,10 +173,45 @@ impl<M: Memory> Riscv64<M> {
             traces: BTreeMap::new(),
             cache_units: 0,
             cache_clock: 0,
+            external_clock: false,
         })
     }
     pub fn pc(&self) -> Result<u64> {
         self.interpreter.globals["zPC"].u64()
+    }
+
+    /// Let the machine supply MTIME. The generated cycle counter still ticks,
+    /// but instruction retirement no longer advances the platform's timer.
+    /// Configure this before executing any guest instructions.
+    pub fn use_external_clock(&mut self) -> Result<()> {
+        if self.steps != 0 {
+            return Err(crate::Error::Type(
+                "platform clock must be configured before execution".into(),
+            ));
+        }
+        let mut function = self
+            .interpreter
+            .program
+            .functions
+            .get("zclint_tick_clock")
+            .ok_or_else(|| crate::Error::Undefined("Sail platform clock".into()))?
+            .clone();
+        let mut replaced = false;
+        for operation in &mut function.code {
+            if matches!(operation, Op::Assign(Location::Id(name), _) if name == "zmtime") {
+                *operation = Op::Assign(Location::Id("return".into()), Expr::Unit);
+                replaced = true;
+            }
+        }
+        if !replaced {
+            return Err(crate::Error::Type(
+                "Sail model has no replaceable MTIME tick".into(),
+            ));
+        }
+        function.name = "__vmlab_platform_tick_clock".into();
+        self.interpreter.platform_tick = Some(std::sync::Arc::new(function));
+        self.external_clock = true;
+        Ok(())
     }
     pub fn set_pc(&mut self, pc: u64) {
         self.interpreter

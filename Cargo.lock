@@ -578,6 +578,7 @@ checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
 dependencies = [
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -1286,6 +1287,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "parking_lot",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "vmlab-hv-lockstep",
@@ -1365,6 +1367,7 @@ dependencies = [
  "vmlab-hv-display",
  "vmlab-hv-firmware",
  "vmlab-hv-proto",
+ "vmlab-hv-tcg",
  "vmm-sys-util",
  "zerocopy",
 ]

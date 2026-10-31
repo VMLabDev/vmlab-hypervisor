@@ -15,7 +15,7 @@ pub mod lockstep;
 mod memory;
 mod softfloat;
 mod value;
-pub use cpu::{Privilege, Riscv64, SpecializationStats, TraceProfile};
+pub use cpu::{CpuState, Privilege, Riscv64, SpecializationStats, TraceProfile};
 pub use memory::{CodeStamp, FlatMemory, Memory, SharedMemory};
 use num_bigint::BigUint;
 use std::collections::BTreeMap;
@@ -81,6 +81,7 @@ pub struct Interpreter<'a, M> {
     source_cache: BTreeMap<String, std::sync::Arc<record::Source>>,
     trace_completed: u32,
     address_arguments: BTreeMap<String, std::collections::BTreeSet<usize>>,
+    platform_tick: Option<std::sync::Arc<Function>>,
 }
 
 impl<'a, M: Memory> Interpreter<'a, M> {
@@ -111,6 +112,7 @@ impl<'a, M: Memory> Interpreter<'a, M> {
             source_cache: BTreeMap::new(),
             trace_completed: 0,
             address_arguments: vmlab_hv_tcg_ir::address_arguments(program),
+            platform_tick: None,
         }
     }
 
@@ -282,6 +284,11 @@ impl<'a, M: Memory> Interpreter<'a, M> {
     }
 
     pub fn call(&mut self, name: &str, args: Vec<Value>) -> Result<Value> {
+        if name == "zclint_tick_clock"
+            && let Some(function) = self.platform_tick.clone()
+        {
+            return self.run_cached(&function, args);
+        }
         if name == "zplat_term_write" {
             let byte = args
                 .first()
