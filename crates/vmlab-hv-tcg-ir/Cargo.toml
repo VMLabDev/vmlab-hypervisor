@@ -1,0 +1,15 @@
+[package]
+name = "vmlab-hv-tcg-ir"
+description = "Typed emulation IR shared by the interpreter and trace compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vmlab-hv-sail-ir = { path = "../vmlab-hv-sail-ir" }
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
