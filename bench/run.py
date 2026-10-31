@@ -297,6 +297,8 @@ def must_sh(agent, cmd, what, timeout=X86_EXEC_TIMEOUT, stdin_data=None):
     code, out, err = sh(agent, cmd, timeout, stdin_data)
     if code != 0:
         raise lib.BenchError(f"{what} exited {code}: {err[-400:]}")
+    return out
+
 
 def respawn_hv(backend, run_dir):
     """vmlab-hv exits 0 on a guest reset (triple fault); vmlab restarts the
@@ -1009,6 +1011,20 @@ def g2g_run_config(args, guest, smp, pin_a, pin_b, version, commit, dirty, host)
 # ---------------------------------------------------------------------------
 
 
+def sweep_stale_vms():
+    """Kill leftover VMs of this suite's own runs (their argv names a bench
+    run path that exists nowhere else). A driver killed mid-run — a timeout,
+    a Ctrl-C — can leave its systemd-run scope children alive, squatting on
+    the pin window and poisoning every later measurement."""
+    subprocess.run(
+        ["pkill", "-TERM", "-f", f"{lib.RUN_DIR}/"],
+        check=False, stdout=subprocess.DEVNULL)
+    time.sleep(1)
+    subprocess.run(
+        ["pkill", "-KILL", "-f", f"{lib.RUN_DIR}/"],
+        check=False, stdout=subprocess.DEVNULL)
+
+
 def main(argv=None):
     args = parse_args(argv)
     if args.repeats < 2:
@@ -1020,6 +1036,7 @@ def main(argv=None):
     host = os.uname().nodename
     if "x86_64" in arches:
         netpeer.compile_tools(log)
+        sweep_stale_vms()
 
     for arch in arches:
         if arch == "x86_64":
