@@ -535,7 +535,6 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
 /// to the switch — or drop it while the link is down.
 fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_len: usize) {
     loop {
-        let mut out = Vec::new();
         let mut blocked = false;
         let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
         {
@@ -545,7 +544,6 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             if sh.snapshot_paused {
                 return;
             }
-            let pending = sh.tx_out.len();
             let Some(mem) = sh.mem.as_ref() else {
                 return;
             };
@@ -554,7 +552,7 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             };
             let mut used_any = false;
             while let Some(chain) = q.pop_descriptor_chain(mem) {
-                if stream.is_some() && pending + out.len() >= MAX_TX_STAGE {
+                if stream.is_some() && sh.tx_out.len() >= MAX_TX_STAGE {
                     q.go_to_previous_position();
                     blocked = true;
                     break;
@@ -569,13 +567,13 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
                             consumed = (header_len + reader.available_bytes()) as u32;
                         } else {
                             let len = reader.available_bytes();
-                            let start = out.len();
-                            out.extend_from_slice(&(len as u32).to_be_bytes());
-                            out.resize(start + 4 + len, 0);
-                            if reader.read_exact(&mut out[start + 4..]).is_ok() {
+                            let start = sh.tx_out.len();
+                            sh.tx_out.extend_from_slice(&(len as u32).to_be_bytes());
+                            sh.tx_out.resize(start + 4 + len, 0);
+                            if reader.read_exact(&mut sh.tx_out[start + 4..]).is_ok() {
                                 consumed = (header_len + len) as u32;
                             } else {
-                                out.truncate(start);
+                                sh.tx_out.truncate(start);
                             }
                         }
                     }
@@ -587,9 +585,6 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             }
             if used_any && q.needs_notification(mem).unwrap_or(false) {
                 irq = sh.interrupt.clone().map(|irq| (irq, TXQ));
-            }
-            if stream.is_some() {
-                sh.tx_out.extend_from_slice(&out);
             }
         }
         if let Some((irq, queue)) = irq {
@@ -609,22 +604,27 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
 /// Push framed bytes into the switch socket; keeps the remainder when the
 /// socket would block. `Err(())` means the connection is gone.
 fn flush_tx(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(), ()> {
-    loop {
-        let mut sh = lock(shared);
-        if sh.tx_out.is_empty() {
-            return Ok(());
+    let mut sh = lock(shared);
+    let mut sent = 0;
+    let result = loop {
+        if sent == sh.tx_out.len() {
+            break Ok(());
         }
-        let take = sh.tx_out.len().min(READ_CHUNK);
-        match stream.write(&sh.tx_out[..take]) {
-            Ok(0) => return Err(()),
-            Ok(n) => {
-                sh.tx_out.drain(..n);
-            }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+        let end = sh.tx_out.len().min(sent + READ_CHUNK);
+        match stream.write(&sh.tx_out[sent..end]) {
+            Ok(0) => break Err(()),
+            Ok(n) => sent += n,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break Ok(()),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => return Err(()),
+            Err(_) => break Err(()),
         }
+    };
+    if sent == sh.tx_out.len() {
+        sh.tx_out.clear();
+    } else if sent != 0 {
+        sh.tx_out.drain(..sent);
     }
+    result
 }
 
 // ---- VirtioDevice -----------------------------------------------------------
@@ -1304,6 +1304,65 @@ mod tests {
         let mut config = [0u8; 12];
         normal.read_config(0, &mut config);
         assert_eq!(&config[10..12], &[0, 0]);
+    }
+
+    #[test]
+    fn partial_transmit_writes_and_snapshot_retain_exactly_the_unsent_suffix() {
+        let expected: Vec<_> = (0..MAX_TX_STAGE).map(|index| (index % 251) as u8).collect();
+        let directory = TempDir::new();
+        let mut device = Net::new(NetConfig {
+            id: "partial-transmit".into(),
+            mac: [0x52, 0x54, 0, 1, 2, 3],
+            mtu: DEFAULT_MTU,
+            switch: directory.0.join("absent.sock"),
+        })
+        .unwrap();
+        device.quiesce();
+        let shared = device.shared.clone();
+        lock(&shared).tx_out = expected.clone();
+        let (mut producer, mut receiver) = UnixStream::pair().unwrap();
+        producer.set_nonblocking(true).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let size: libc::c_int = 4096;
+        assert_eq!(
+            // SAFETY: the socket is live and size is a valid integer option value.
+            unsafe {
+                libc::setsockopt(
+                    producer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    std::ptr::from_ref(&size).cast(),
+                    std::mem::size_of_val(&size) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        flush_tx(&shared, &mut producer).unwrap();
+        assert!(!lock(&shared).tx_out.is_empty());
+        let snapshot = device.save_state().unwrap();
+        lock(&shared).tx_out.clear();
+        device.restore_state(&snapshot).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut received = Vec::new();
+        loop {
+            let mut bytes = [0; 4096];
+            loop {
+                match receiver.read(&mut bytes) {
+                    Ok(0) => panic!("transmit socket closed"),
+                    Ok(count) => received.extend_from_slice(&bytes[..count]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("read transmitted bytes: {error}"),
+                }
+            }
+            assert_eq!(lock(&shared).tx_out.as_slice(), &expected[received.len()..]);
+            if received.len() == expected.len() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "transmit made no progress");
+            flush_tx(&shared, &mut producer).unwrap();
+        }
+        assert_eq!(received, expected);
     }
 
     #[test]
