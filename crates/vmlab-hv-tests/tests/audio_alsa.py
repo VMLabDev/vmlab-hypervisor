@@ -242,11 +242,12 @@ class ElemValue(ctypes.Structure):
 
 
 def unmute():
-    """Turn every writable playback control on, volume near maximum.
+    """Turn every playback and capture control on, volume at maximum.
 
     The kernel boots the generic codec with its amplifiers muted, exactly
     as a desktop session's mixer finds it; PipeWire unmutes at login. This
-    walks the same SNDRV_CTL_IOCTL_* interface a mixer uses.
+    walks the same SNDRV_CTL_IOCTL_* interface a mixer uses. Maximum is
+    0 dB on this codec, so PCM crosses the device untouched.
     """
     ctl = os.open("/dev/snd/controlC0", os.O_RDWR)
     try:
@@ -255,20 +256,14 @@ def unmute():
         ids = (ElemId * listing.items)()
         request = ElemList(0, listing.items, 0, listing.items, ids,
                            (ctypes.c_ubyte * 50)())
-        print(f"mixer-list: items {listing.items} used {request.used}",
-              file=sys.stderr)
         fcntl.ioctl(ctl, _iowr("U", 0x10, ctypes.sizeof(ElemList)), request)
         for ident in ids[: request.used]:
+            if b"Playback" not in ident.name and b"Capture" not in ident.name:
+                continue
             info = ElemInfo(ident)
             try:
                 fcntl.ioctl(ctl, _iowr("U", 0x11, ctypes.sizeof(ElemInfo)), info)
             except OSError:
-                continue
-            if os.environ.get("ALSA_DEBUG_ANY"):
-                print(f"mixer-id: {ident.name.decode(errors='replace')!r} "
-                      f"iface {ident.iface} type {info.type} "
-                      f"access {info.access:#x}", file=sys.stderr)
-            if b"Playback" not in ident.name:
                 continue
             if not info.access & 2:  # SNDRV_CTL_ELEM_ACCESS_WRITE
                 continue
@@ -276,7 +271,7 @@ def unmute():
                 target = 1
             elif info.type == 2:  # integer: the volume
                 lo, hi = struct.unpack_from("lll", info.value, 0)[:2]
-                target = lo + (hi - lo) * 3 // 4
+                target = hi
             else:
                 continue
             value = ElemValue(ident)
