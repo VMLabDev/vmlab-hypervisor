@@ -4,8 +4,8 @@ import argparse
 import concurrent.futures
 import json
 import pathlib
-import shlex
 import subprocess
+from compile_database import compile_command, select_entries
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("build", type=pathlib.Path)
@@ -15,19 +15,11 @@ build = args.build.resolve()
 output = args.output.resolve()
 output.mkdir(parents=True, exist_ok=True)
 entries = json.loads((build / "compile_commands.json").read_text())
-selected = []
-for entry in entries:
-    name = pathlib.Path(entry["file"]).name
-    if (name in {"sail_riscv_model.cpp", "riscv_platform_if.cpp", "riscv_softfloat.cpp"}
-            or "/softfloat.dir/" in entry["command"]):
-        selected.append(entry)
-for entry in entries:
-    if entry["output"].startswith("sail_runtime/") and entry not in selected:
-        selected.append(entry)
+selected = select_entries(entries)
 
 def compile_one(pair):
     index, entry = pair
-    command = shlex.split(entry["command"])
+    command = compile_command(entry)
     dest = output / f"{index}.o"
     command[command.index("-o") + 1] = str(dest)
     command = [arg for arg in command if not arg.startswith("-O")]
@@ -38,7 +30,7 @@ def compile_one(pair):
 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
     objects = list(pool.map(compile_one, enumerate(selected)))
 model_entry = next(e for e in selected if pathlib.Path(e["file"]).name == "sail_riscv_model.cpp")
-flags = shlex.split(model_entry["command"])
+flags = compile_command(model_entry)
 includes = []
 for index, flag in enumerate(flags):
     if flag.startswith("-I"):
