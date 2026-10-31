@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{
-    Arc,
+    Arc, Weak,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -24,18 +24,24 @@ use crate::{error::VmmError, layout::MemLayout, q35::PirqRouter};
 struct IrqHub {
     deliver: Box<dyn Fn(u32, bool) + Send + Sync>,
     sources: Mutex<BTreeMap<(u32, u32), bool>>,
+    lines: Mutex<BTreeMap<(u32, u32), Weak<Source>>>,
 }
 
 struct Source {
     hub: Arc<IrqHub>,
     id: u32,
     gsi: u32,
+    level: AtomicBool,
 }
 
 impl IrqLine for Source {
     fn set_level(&self, high: bool) {
+        if self.level.load(Ordering::Acquire) == high {
+            return;
+        }
         let mut sources = self.hub.sources.lock();
         if sources.get(&(self.id, self.gsi)).copied().unwrap_or(false) == high {
+            self.level.store(high, Ordering::Release);
             return;
         }
         let previous = sources
@@ -48,16 +54,32 @@ impl IrqLine for Source {
         if previous != level {
             (self.hub.deliver)(self.gsi, level);
         }
+        // Publish only after the wired-OR output has been delivered. A
+        // repeated level can then return without taking the shared lock.
+        self.level.store(high, Ordering::Release);
     }
 }
 
 impl IrqHub {
     fn line(self: &Arc<Self>, id: u32, gsi: u32) -> Arc<dyn IrqLine> {
-        Arc::new(Source {
+        let mut lines = self.lines.lock();
+        if let Some(line) = lines.get(&(id, gsi)).and_then(Weak::upgrade) {
+            return line;
+        }
+        let level = self
+            .sources
+            .lock()
+            .get(&(id, gsi))
+            .copied()
+            .unwrap_or(false);
+        let line = Arc::new(Source {
             hub: self.clone(),
             id,
             gsi,
-        })
+            level: AtomicBool::new(level),
+        });
+        lines.insert((id, gsi), Arc::downgrade(&line));
+        line
     }
 }
 
@@ -127,6 +149,7 @@ impl Chipset {
                 }
             }),
             sources: Mutex::new(BTreeMap::new()),
+            lines: Mutex::new(BTreeMap::new()),
         });
         let pirqs = PirqRouter::new(std::array::from_fn(|gsi| hub.line(0, gsi as u32)));
         let power = Arc::new(Mutex::new(None));
@@ -440,6 +463,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unchanged_irq_levels_do_not_take_the_hub_lock() {
+        let hub = Arc::new(IrqHub {
+            deliver: Box::new(|_, _| {}),
+            sources: Mutex::new(BTreeMap::new()),
+            lines: Mutex::new(BTreeMap::new()),
+        });
+        let line = hub.line(1, 9);
+        for level in [false, true] {
+            line.set_level(level);
+            let guard = hub.sources.lock();
+            let sender = line.clone();
+            let (sent, received) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                sender.set_level(level);
+                sent.send(()).unwrap();
+            });
+            let completed = received.recv_timeout(Duration::from_millis(100)).is_ok();
+            drop(guard);
+            thread.join().unwrap();
+            assert!(completed, "unchanged IRQ level waited for the hub lock");
+        }
+    }
+
+    #[test]
     fn apmc_enables_acpi_without_smm() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("skipping APMC routing test: /dev/kvm is unavailable");
@@ -589,18 +636,26 @@ mod tests {
         let hub = Arc::new(IrqHub {
             deliver: Box::new(move |gsi, level| output.lock().push((gsi, level))),
             sources: Mutex::new(BTreeMap::new()),
+            lines: Mutex::new(BTreeMap::new()),
         });
         let first = hub.line(1, 9);
+        let alias = hub.line(1, 9);
+        assert!(Arc::ptr_eq(&first, &alias));
         let second = hub.line(2, 9);
         for _ in 0..65536 {
             first.set_level(false);
         }
         assert!(hub.sources.lock().is_empty());
         first.set_level(true);
+        alias.set_level(false);
+        alias.set_level(true);
         second.set_level(true);
         first.set_level(false);
         second.set_level(false);
-        assert_eq!(*events.lock(), [(9, true), (9, false)]);
+        assert_eq!(
+            *events.lock(),
+            [(9, true), (9, false), (9, true), (9, false)]
+        );
     }
     #[test]
     fn platform_timers_freeze_between_pause_and_resume() {
