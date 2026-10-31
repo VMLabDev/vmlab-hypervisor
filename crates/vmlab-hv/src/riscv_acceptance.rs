@@ -26,6 +26,116 @@ fn riscv_paused_control_snapshot_round_trip() {
     boot(false, true);
 }
 
+#[test]
+fn riscv_direct_kernel_receives_hart_and_device_tree_and_powers_off() {
+    if !Path::new("/usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin").is_file() {
+        eprintln!("skipping RISC-V direct boot: OpenSBI fw_dynamic is unavailable");
+        return;
+    }
+    let directory = tempfile::Builder::new()
+        .prefix("hv-riscv-direct-")
+        .tempdir()
+        .unwrap();
+    let kernel = directory.path().join("kernel.bin");
+    let serial = directory.path().join("serial.log");
+    let stderr = directory.path().join("stderr.log");
+    let control = directory.path().join("control.sock");
+    let machine = directory.path().join("machine.json");
+    // Reject a nonzero hart ID or an a1 pointer that does not address an FDT.
+    let mut words = vec![0, 0x0005a303, 0xedfe13b7, 0xdd038393, 0, 0x100002b7];
+    for byte in b"direct-kernel-ok\n" {
+        words.extend([
+            (*byte as u32) << 20 | 6 << 7 | 0x13,
+            6 << 20 | 5 << 15 | 0x23,
+        ]);
+    }
+    words.extend([0x001002b7, 0x00005337, 0x55530313, 0x0062a023, 0x0000006f]);
+    let failure = words.len();
+    words.extend([0x001002b7, 0x00003337, 0x33330313, 0x0062a023, 0x0000006f]);
+    for (index, first, second) in [(0, 10, 0), (4, 6, 7)] {
+        let offset = ((failure - index) * 4) as u32;
+        words[index] = (offset >> 12 & 1) << 31
+            | (offset >> 5 & 0x3f) << 25
+            | second << 20
+            | first << 15
+            | 1 << 12
+            | (offset >> 1 & 15) << 8
+            | (offset >> 11 & 1) << 7
+            | 0x63;
+    }
+    std::fs::write(
+        &kernel,
+        words
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    std::fs::write(
+        &machine,
+        serde_json::to_vec(&serde_json::json!({
+            "name": "vmlab:p3b/direct", "arch": "riscv64", "machine": "virt", "accel": "tcg",
+            "vcpus": 1, "memory_mib": 128,
+            "boot": { "kind": "kernel", "kernel": kernel, "cmdline": "console=ttyS0" },
+            "disks": [], "nics": [], "ports": [], "serial_log": serial,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let timeout = Duration::from_secs(1200);
+    let mut process = ManagedChild::spawn_with_timeout(
+        Command::new("systemd-run")
+            .args([
+                "--user",
+                "--scope",
+                "-q",
+                "-p",
+                "MemoryMax=24G",
+                "-p",
+                "MemorySwapMax=0",
+                "--",
+            ])
+            .arg(vmlab_hv_tests::hv_binary())
+            .arg("--machine")
+            .arg(machine)
+            .arg("--control")
+            .arg(&control)
+            .arg("--paused")
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&stderr).unwrap()),
+        timeout,
+    )
+    .unwrap();
+    let start = Instant::now();
+    while !control.exists() {
+        assert!(process.try_wait().unwrap().is_none());
+        assert!(start.elapsed() < timeout);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(matches!(
+        Client::connect(control)
+            .unwrap()
+            .call(Control::Resume)
+            .unwrap(),
+        Outcome::Ok {
+            status: Some(RunState::Running)
+        }
+    ));
+    let status = loop {
+        if let Some(status) = process.try_wait().unwrap() {
+            break status;
+        }
+        assert!(start.elapsed() < timeout);
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let text = std::fs::read_to_string(serial).unwrap_or_default();
+    let errors = std::fs::read_to_string(stderr).unwrap_or_default();
+    assert!(
+        status.success() && text.contains("direct-kernel-ok"),
+        "{status}\n{text}\n{errors}"
+    );
+}
+
 fn template() -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("VMLAB_HV_RISCV_TEMPLATE") {
         return Some(path.into());
@@ -216,6 +326,26 @@ fn boot(linux: bool, paused_snapshot: bool) {
             "RISC-V boot to agent-ready: {:.3}s",
             start.elapsed().as_secs_f64()
         );
+        for (name, command) in [
+            ("linux.dtb", "cat /sys/firmware/fdt"),
+            (
+                "pci-config.txt",
+                "for d in /sys/bus/pci/devices/*; do printf '\\n--- %s\\n' \"$d\"; od -Ax -tx1z -v -N 256 \"$d/config\" || exit; done",
+            ),
+            ("interrupts.txt", "cat /proc/interrupts"),
+            ("iomem.txt", "cat /proc/iomem"),
+            ("cpuinfo.txt", "cat /proc/cpuinfo"),
+        ] {
+            let captured = agent
+                .exec(&["/bin/sh", "-c", command], Duration::from_secs(120))
+                .unwrap();
+            assert_eq!(captured.exit_code, 0, "{name}: {:?}", captured.stderr);
+            assert!(
+                !captured.stdout.is_empty(),
+                "empty hardware artifact {name}"
+            );
+            std::fs::write(directory.path().join(name), captured.stdout).unwrap();
+        }
         let before = agent
             .exec(
                 &["/bin/sh", "-c", "printf before >/run/p3b-snapshot"],

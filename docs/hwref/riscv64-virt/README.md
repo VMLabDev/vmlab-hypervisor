@@ -9,6 +9,12 @@ The original artifact is
 Its SHA-256 is recorded by `sha256sum qemu.dtb`; the captured DTB includes a
 per-boot entropy seed, so another capture need not have the same digest.
 
+`qemu-linux.dtb` is the same capture's `guest-fdt.dtb`, the tree Linux
+consumed after OpenSBI, edk2, and the EFI loader modified it. Keep it separate
+from the initial tree: it adds UEFI memory-map addresses, boot arguments,
+OpenSBI reserved-memory nodes, and M-mode PLIC context masking, disables
+the flash node, and removes the PMU event map.
+
 ## Normalization
 
 `scripts/hwref/fdt.py` parses DTB v17. It normalizes node and property order,
@@ -46,6 +52,11 @@ The comparison reports ten D7 differences: `riscv,isa`,
 The block-size properties belong to Zicbo extensions that this subset does
 not advertise. All other normalized properties, nodes, reservations, and
 the boot hart match. The command fails on any unexplained difference.
+
+The Linux S1 test collects `linux.dtb`, `pci-config.txt`, `interrupts.txt`,
+`iomem.txt`, and `cpuinfo.txt` through the guest agent before its snapshot
+round trip. Set `VMLAB_HV_ACCEPTANCE_KEEP=1` to retain those artifacts in
+the test's reported temporary directory.
 
 The S1 path has reached the OpenSBI banner. A subsequent instruction-access
 fault on the jump to pflash exposed the standalone Sail platform's PMA map;
