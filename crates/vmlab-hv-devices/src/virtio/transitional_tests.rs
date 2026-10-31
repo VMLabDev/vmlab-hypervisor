@@ -60,7 +60,7 @@ fn modern_default_queue_size_activates_and_resets() {
         driver.pci.bar_write(4, 8, &1u32.to_le_bytes());
         driver.pci.bar_write(4, 12, &1u32.to_le_bytes());
         driver.pci.bar_write(4, 0x14, &[11]);
-        assert_eq!(read::<2>(&mut driver.pci, 4, 0x18), 128u16.to_le_bytes());
+        assert_eq!(read::<2>(&mut driver.pci, 4, 0x18), 256u16.to_le_bytes());
         driver.avail = 0x11000;
         driver.used = 0x12000;
         for (off, addr) in [(0x20, DESC), (0x28, driver.avail), (0x30, driver.used)] {
@@ -237,7 +237,7 @@ impl Driver {
         self.pci.bar_write(0, 4, &features.to_le_bytes());
         assert_eq!(read::<4>(&mut self.pci, 0, 4), features.to_le_bytes());
         let size = u16::from_le_bytes(read(&mut self.pci, 0, 12));
-        assert_eq!(size, 128);
+        assert_eq!(size, 256);
         self.pci.bar_write(0, 14, &0u16.to_le_bytes());
         self.pci
             .bar_write(0, 8, &((DESC >> 12) as u32).to_le_bytes());
