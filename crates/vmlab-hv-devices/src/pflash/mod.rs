@@ -72,8 +72,9 @@ impl Pflash {
 
     /// Intel commands use the low byte of a byte/word/dword bus transaction.
     /// File writes complete before ready status is returned. Durability is
-    /// batched by `flush_if_due`; reset, snapshot and shutdown call `flush`.
-    /// Host I/O failures are returned to the VMM and latched in flash status.
+    /// batched off the issuing vCPU through `take_due_sync`; reset, snapshot
+    /// and shutdown call `flush`. Host I/O failures are returned to the VMM
+    /// and latched in flash status.
     pub fn write_access(
         &mut self,
         offset: u64,
@@ -149,16 +150,29 @@ impl Pflash {
         }
         self.bytes[start..start + data.len()].copy_from_slice(&data);
         self.dirty = true;
-        self.flush_if_due()?;
         Ok(())
     }
 
-    /// Bound the durability window without an fdatasync for each NOR word.
-    pub fn flush_if_due(&mut self) -> Result<(), DeviceError> {
-        if self.dirty && self.last_sync.elapsed() >= Duration::from_millis(16) {
-            self.flush()?;
+    /// Bound the durability window without an fdatasync for each NOR word,
+    /// and without holding the device while the host syncs. When the batch
+    /// interval has passed, hand back a handle to the VARS file for the
+    /// caller to `sync_data` with the device unlocked. Writes made during
+    /// that sync mark the device dirty again for the next batch. A failed
+    /// sync must be reported through `sync_failed`.
+    pub fn take_due_sync(&mut self) -> Result<Option<File>, DeviceError> {
+        if !self.dirty || self.last_sync.elapsed() < Duration::from_millis(16) {
+            return Ok(None);
         }
-        Ok(())
+        let handle = self.vars.try_clone()?;
+        self.dirty = false;
+        self.last_sync = Instant::now();
+        Ok(Some(handle))
+    }
+
+    /// Latch a failed batched sync: the writes it covered are not durable.
+    pub fn sync_failed(&mut self) {
+        self.status |= PROGRAM_ERROR;
+        self.dirty = true;
     }
 
     pub fn flush(&mut self) -> Result<(), DeviceError> {

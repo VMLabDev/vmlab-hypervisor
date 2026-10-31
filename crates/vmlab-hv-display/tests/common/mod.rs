@@ -26,6 +26,7 @@ impl InputSink for Sink {
 }
 pub fn frame(value: u8, width: u32, height: u32) -> Frame {
     Frame {
+        flags: Default::default(),
         generation: 0,
         width,
         height,

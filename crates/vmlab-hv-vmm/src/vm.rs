@@ -958,16 +958,29 @@ impl VmShared {
         *last = std::time::Instant::now();
     }
 
-    fn poll_chipset(&self) {
-        self.poll_display();
-        let flash_error = self
-            .pflash
-            .lock()
-            .as_ref()
-            .and_then(|flash| flash.lock().flush_if_due().err());
-        if let Some(error) = flash_error {
+    /// Make batched flash writes durable outside the vCPUs and the event
+    /// loop: a host sync can take tens of milliseconds under I/O load, and
+    /// firmware programs thousands of NOR words while it boots.
+    fn sync_flash_batch(&self) {
+        let Some(flash) = self.pflash.lock().clone() else {
+            return;
+        };
+        let handle = flash.lock().take_due_sync();
+        let result = match handle {
+            Ok(Some(file)) => file.sync_data().map_err(|error| {
+                flash.lock().sync_failed();
+                error.to_string()
+            }),
+            Ok(None) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = result {
             self.request_exit(ExitReason::Error(format!("pflash flush: {error}")));
         }
+    }
+
+    fn poll_chipset(&self) {
+        self.poll_display();
         if self.status() == RunState::Running
             && let Some(xhci) = self.xhci.lock().as_ref()
         {
@@ -1162,6 +1175,22 @@ impl Vm {
                     .map_err(|e| VmmError::Other(format!("spawning chipset timer: {e}")))?,
             )
         };
+        if machine.shared.pflash.lock().is_some() {
+            let weak = Arc::downgrade(&machine.shared);
+            std::thread::Builder::new()
+                .name("pflash-sync".into())
+                .spawn(move || {
+                    while let Some(shared) = weak.upgrade() {
+                        if shared.exited() {
+                            break;
+                        }
+                        shared.sync_flash_batch();
+                        drop(shared);
+                        std::thread::sleep(std::time::Duration::from_millis(4));
+                    }
+                })
+                .map_err(|e| VmmError::Other(format!("spawning flash sync: {e}")))?;
+        }
         Ok(machine)
     }
 
@@ -1215,29 +1244,13 @@ impl Vm {
                         sregs.cs.base, regs.rip, regs.rax, regs.rdx, sregs.cr0
                     );
                     eprintln!("vcpu {id} MP state: {:?}", fd.get_mp_state());
-                    if let Ok(address) = fd.translate_gva(sregs.cs.base.wrapping_add(regs.rip))
-                        && address.valid != 0
-                    {
-                        use vm_memory::Bytes;
-                        let mut code = [0; 64];
-                        if self
-                            .ram
-                            .mem
-                            .read_slice(
-                                &mut code,
-                                vm_memory::GuestAddress(address.physical_address),
-                            )
-                            .is_ok()
-                        {
-                            eprintln!("vcpu {id} instructions: {code:02x?}");
-                        }
-                    }
                 }
                 eprintln!(
                     "vcpu {id} SMI state: {:?}",
                     fd.get_vcpu_events().map(|e| e.smi)
                 );
             }
+            crate::diagnostics::dump_timer_state(&self.shared, &self.ram.mem);
             if let Some(trace) = &self.shared.io_trace {
                 eprintln!("last IO: {:?}", trace.lock());
             }
@@ -1554,6 +1567,7 @@ mod tests {
             fn frame(&self) -> std::io::Result<Frame> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(Frame {
+                    flags: Default::default(),
                     generation: 0,
                     width: 1,
                     height: 1,

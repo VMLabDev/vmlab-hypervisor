@@ -176,6 +176,10 @@ pub fn compose_cpuid(
     if has(HyperV::Reenlightenment) {
         access |= 1 << 13;
     }
+    // Diagnostics only: the guest reports bugchecks through the crash MSRs.
+    if std::env::var_os("VMLAB_HV_GUEST_CRASH_MSRS").is_some() {
+        misc |= 1 << 10;
+    }
     if has(HyperV::Relaxed) {
         recommendations |= 1 << 5;
     }

@@ -31,6 +31,7 @@ fn every_message_has_a_pinned_wire_layout() {
         ),
         (
             Message::FrameReady {
+                flags: Default::default(),
                 surface_id: 1,
                 buffer: 2,
                 seq: 3,
@@ -122,8 +123,36 @@ fn every_message_has_a_pinned_wire_layout() {
         assert!(Message::decode(&trailing).is_err());
         let mut flags = bytes;
         flags[6] = 1;
-        assert!(Message::decode(&flags).is_err());
+        if matches!(message, Message::FrameReady { .. }) {
+            assert!(
+                matches!(Message::decode(&flags).unwrap(), Message::FrameReady { flags, .. } if flags.has(vmlab_hv_display::FrameFlags::PLACEHOLDER))
+            );
+        } else {
+            assert!(Message::decode(&flags).is_err());
+        }
     }
+}
+
+#[test]
+fn placeholder_flag_has_a_pinned_wire_layout() {
+    let frame = Message::FrameReady {
+        flags: vmlab_hv_display::FrameFlags(vmlab_hv_display::FrameFlags::PLACEHOLDER),
+        surface_id: 1,
+        buffer: 0,
+        seq: 2,
+        timestamp_ns: 3,
+        damage: Vec::new(),
+    };
+    let bytes = hex(
+        "28 00 00 00 03 00 01 00 01 00 00 00 00 00 00 00 00 00 00 00 02 00 00 00 00 00 00 00 03 00 00 00 00 00 00 00 00 00 00 00",
+    );
+    assert_eq!(frame.encode().unwrap(), bytes);
+    assert_eq!(Message::decode(&bytes).unwrap(), frame);
+    let mut future = bytes;
+    future[7] = 0x80;
+    assert!(
+        matches!(Message::decode(&future).unwrap(), Message::FrameReady { flags, .. } if flags.0 == 0x8001)
+    );
 }
 
 #[test]

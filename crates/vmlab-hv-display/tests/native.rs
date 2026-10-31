@@ -9,6 +9,45 @@ use vmlab_hv_display::{
     Capabilities as C, Cursor, Message as M, Pixels, Rect, SurfaceKind, receive, send,
 };
 
+#[test]
+fn frame_flags_are_negotiated_and_flag_changes_publish() {
+    use vmlab_hv_display::FrameFlags;
+    let (server, source, _) = server();
+    let (modern, modern_worker) = client(&server, C::FRAMES | C::FRAME_FLAGS);
+    configure(&modern);
+    let (surface, buffer, seq, _) = ready(&modern);
+    modern.release(surface, buffer, seq).unwrap();
+    {
+        let mut frame = source.0.lock().unwrap();
+        frame.flags = FrameFlags(FrameFlags::PLACEHOLDER);
+        frame.damage.clear();
+    }
+    server.publish().unwrap();
+    let M::FrameReady {
+        flags,
+        surface_id,
+        buffer,
+        seq,
+        ..
+    } = modern.receive().unwrap().message
+    else {
+        panic!("expected flag update")
+    };
+    assert!(flags.has(FrameFlags::PLACEHOLDER));
+    modern.release(surface_id, buffer, seq).unwrap();
+    let (legacy, legacy_worker) = client(&server, C::FRAMES);
+    configure(&legacy);
+    let M::FrameReady { flags, .. } = legacy.receive().unwrap().message else {
+        panic!("expected legacy frame")
+    };
+    assert_eq!(flags, FrameFlags::default());
+    drop(modern);
+    drop(legacy);
+    server.shutdown();
+    let _ = modern_worker.join().unwrap();
+    let _ = legacy_worker.join().unwrap();
+}
+
 fn ready(c: &vmlab_hv_display::Client) -> (u64, u32, u64, Vec<Rect>) {
     let M::FrameReady {
         surface_id,

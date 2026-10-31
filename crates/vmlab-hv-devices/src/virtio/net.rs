@@ -97,6 +97,8 @@ enum RxRead {
 
 /// Everything the device and its worker thread share.
 struct Shared {
+    snapshot_paused: bool,
+    config_pending: bool,
     mem: Option<GuestMemory>,
     interrupt: Option<Arc<dyn VirtioInterrupt>>,
     queues: Vec<Option<Queue>>,
@@ -113,6 +115,7 @@ struct Shared {
 enum Cmd {
     /// The driver kicked the queue with this index.
     Kick(u16),
+    Barrier(Sender<()>),
     Shutdown,
 }
 
@@ -157,6 +160,8 @@ impl Net {
         wake_worker.set_nonblocking(true)?;
         let (kicks, rx) = mpsc::channel();
         let shared = Arc::new(Mutex::new(Shared {
+            snapshot_paused: false,
+            config_pending: false,
             mem: None,
             interrupt: None,
             queues: (0..2).map(|_| None).collect(),
@@ -270,6 +275,9 @@ fn run(
                     Cmd::Kick(RXQ) => place_rx_frames(&shared, hdr),
                     Cmd::Kick(TXQ) => process_tx(&shared, &mut stream, hdr),
                     Cmd::Kick(_) => {}
+                    Cmd::Barrier(done) => {
+                        let _ = done.send(());
+                    }
                     Cmd::Shutdown => shutdown = true,
                 }
             }
@@ -363,7 +371,13 @@ fn set_link(shared: &Arc<Mutex<Shared>>, up: bool) -> bool {
 
 /// Deliver a config-change interrupt for a link transition.
 fn fire_config(shared: &Arc<Mutex<Shared>>) {
-    let irq = lock(shared).interrupt.clone();
+    let mut state = lock(shared);
+    if state.snapshot_paused {
+        state.config_pending = true;
+        return;
+    }
+    let irq = state.interrupt.clone();
+    drop(state);
     if let Some(irq) = irq {
         irq.notify_config();
     }
@@ -451,6 +465,9 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
         let mut guard = lock(shared);
         // A plain reborrow lets the field borrows below stay disjoint.
         let sh = &mut *guard;
+        if sh.snapshot_paused {
+            return;
+        }
         if sh.rx_pending.is_empty() {
             return;
         }
@@ -510,6 +527,9 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             let mut guard = lock(shared);
             // A plain reborrow lets the field borrows below stay disjoint.
             let sh = &mut *guard;
+            if sh.snapshot_paused {
+                return;
+            }
             let pending = sh.tx_out.len();
             let Some(mem) = sh.mem.as_ref() else {
                 return;
@@ -692,6 +712,29 @@ const SNAPSHOT_MAGIC: &[u8; 5] = b"VLNET";
 const SNAPSHOT_VERSION: u16 = 1;
 
 impl Snapshot for Net {
+    fn quiesce(&mut self) {
+        lock(&self.shared).snapshot_paused = true;
+        let (done, wait) = mpsc::channel();
+        if self.kicks.send(Cmd::Barrier(done)).is_ok() {
+            self.wake_worker();
+            let _ = wait.recv();
+        }
+    }
+
+    fn resume_snapshot(&mut self) {
+        let pending = {
+            let mut state = lock(&self.shared);
+            state.snapshot_paused = false;
+            std::mem::take(&mut state.config_pending)
+        };
+        if pending {
+            fire_config(&self.shared);
+        }
+        for queue in 0..2 {
+            self.queue_notify(queue);
+        }
+    }
+
     fn state_id(&self) -> String {
         self.config.id.clone()
     }
@@ -1226,6 +1269,8 @@ mod tests {
     fn transmit_staging_is_bounded_when_switch_stops_reading() {
         let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 2 << 20)]).unwrap();
         let shared = Arc::new(Mutex::new(Shared {
+            snapshot_paused: false,
+            config_pending: false,
             mem: Some(mem.clone()),
             interrupt: None,
             queues: vec![None, None],
@@ -1305,6 +1350,32 @@ mod tests {
         assert!(
             matches!(f.switch.as_ref().unwrap().accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
         );
+    }
+
+    #[test]
+    fn snapshot_quiesce_defers_rx_dma_until_resume() {
+        let mut f = Fixture::new();
+        let mut switch = f.take_switch_side();
+        let addr = f.data(2);
+        f.vqs[0].add_chain(&f.mem, &[(addr, 128, true)]);
+        f.dev.quiesce();
+        let frame = b"snapshot-rx";
+        switch
+            .write_all(&(frame.len() as u32).to_be_bytes())
+            .unwrap();
+        switch.write_all(frame).unwrap();
+        wait_for("staged frame", || {
+            !lock(&f.dev.shared).rx_pending.is_empty()
+        });
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
+        assert_eq!(f.mem.read_obj::<u8>(GuestAddress(addr)).unwrap(), 0);
+        f.dev.resume_snapshot();
+        wait_for("resumed RX DMA", || f.vqs[0].used_idx(&f.mem) == 1);
+        let mut received = vec![0; frame.len()];
+        f.mem
+            .read_slice(&mut received, GuestAddress(addr + 12))
+            .unwrap();
+        assert_eq!(received, frame);
     }
 
     #[test]

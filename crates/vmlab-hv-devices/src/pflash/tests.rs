@@ -40,6 +40,15 @@ fn word_programming_batches_durability_and_reports_flush_failures() {
             "each word must not issue its own durability barrier"
         );
     }
+    assert!(f.take_due_sync().unwrap().is_none(), "the batch is not due");
+    f.last_sync = Instant::now() - Duration::from_millis(16);
+    let handle = f.take_due_sync().unwrap().expect("a due batch");
+    assert!(!f.dirty, "writes during the host sync start the next batch");
+    handle.sync_data().unwrap();
+    f.sync_failed();
+    assert!(f.dirty);
+    assert_ne!(f.status & PROGRAM_ERROR, 0);
+    f.status = READY;
     f.flush().unwrap();
     assert!(!f.dirty);
     f.dirty = true;

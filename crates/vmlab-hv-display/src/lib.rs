@@ -10,7 +10,7 @@ mod transport;
 
 pub use client::Client;
 pub use core::{Cursor, DisplayServer, Frame, FrameSource, InputSink, Pixels};
-pub use protocol::{Capabilities, Message, Rect, SurfaceKind};
+pub use protocol::{Capabilities, FrameFlags, Message, Rect, SurfaceKind};
 pub use transport::{Packet, receive, send};
 
 use std::io;

@@ -84,7 +84,8 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
     let mut pending_completion = false;
     loop {
         let running = shared.should_run();
-        // KVM_EXIT_IO/MMIO finish on the next KVM_RUN. Their pending state
+        // I/O, MMIO and Hyper-V hypercalls finish on the next KVM_RUN.
+        // Their pending state
         // is not included in GET_REGS or migration state (KVM API section 5).
         // Complete before parking, without executing another instruction.
         // A split MMIO access can exit again, so keep dispatching until done.
@@ -191,6 +192,11 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             }
             Ok(VcpuExit::IrqWindowOpen) => {}
             Ok(VcpuExit::Hyperv) => {
+                // SAFETY: KVM_EXIT_HYPERV selects this union member.
+                pending_completion = unsafe {
+                    guard.get_kvm_run().__bindgen_anon_1.hyperv.type_
+                        == kvm_bindings::KVM_EXIT_HYPERV_HCALL
+                };
                 let Some(ram) = shared.ram() else {
                     shared.request_exit(crate::vm::ExitReason::Error(
                         "Hyper-V exit without guest RAM".into(),
@@ -201,6 +207,22 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                     shared.request_exit(crate::vm::ExitReason::Error(e.to_string()));
                     return;
                 }
+            }
+            Ok(VcpuExit::SystemEvent(kvm_bindings::KVM_SYSTEM_EVENT_CRASH, _)) => {
+                // Only exposed with VMLAB_HV_GUEST_CRASH_MSRS: report the
+                // guest's crash parameters and let it continue its halt path.
+                let mut msrs = kvm_bindings::Msrs::from_entries(
+                    &(0x4000_0100..=0x4000_0104)
+                        .map(|index| kvm_bindings::kvm_msr_entry {
+                            index,
+                            ..Default::default()
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("five MSRs");
+                let _ = guard.get_msrs(&mut msrs);
+                let values: Vec<_> = msrs.as_slice().iter().map(|e| e.data).collect();
+                eprintln!("vcpu {id}: guest crash {values:#x?}");
             }
             Ok(VcpuExit::SystemEvent(kvm_bindings::KVM_SYSTEM_EVENT_RESET, _)) => {
                 shared.request_reset();

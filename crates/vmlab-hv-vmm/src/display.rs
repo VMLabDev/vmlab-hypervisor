@@ -6,7 +6,9 @@ use std::path::Path;
 use std::sync::{Arc, Weak, atomic::Ordering};
 
 use parking_lot::Mutex;
-use vmlab_hv_display::{DisplayServer, Frame, FrameSource, InputSink, Message, Pixels, Rect};
+use vmlab_hv_display::{
+    DisplayServer, Frame, FrameFlags, FrameSource, InputSink, Message, Pixels, Rect,
+};
 
 use crate::{error::VmmError, vm::VmShared};
 
@@ -17,6 +19,12 @@ pub(crate) enum Video {
 }
 
 impl Video {
+    pub(crate) fn scanout_active(&self) -> bool {
+        match self {
+            Self::Standard(device) => device.lock().scanout_active(),
+            Self::Virtio(device) => device.lock().scanout_active(),
+        }
+    }
     pub(crate) fn accelerated(&self) -> bool {
         matches!(self, Self::Virtio(device) if device.lock().accelerated())
     }
@@ -93,6 +101,9 @@ impl Video {
         }
     }
     pub(crate) fn cursor(&self) -> vmlab_hv_display::Cursor {
+        if !self.scanout_active() {
+            return Default::default();
+        }
         let Self::Virtio(device) = self else {
             return Default::default();
         };
@@ -119,6 +130,7 @@ struct Source {
     shared: Weak<VmShared>,
     generation: Mutex<((u64, u64), u64)>,
     readbacks: Mutex<Vec<Readback>>,
+    placeholder: Arc<Vec<u8>>,
 }
 struct Readback {
     fd: Weak<std::os::fd::OwnedFd>,
@@ -138,6 +150,24 @@ impl FrameSource for Source {
             .lock()
             .clone()
             .ok_or_else(|| io::Error::other("machine has no VGA"))?;
+        let dirty = shared.vga_framebuffer_dirty();
+        if dirty {
+            vga.mark_framebuffer_dirty();
+        }
+        if !vga.scanout_active() {
+            return Ok(Frame {
+                flags: FrameFlags(FrameFlags::PLACEHOLDER),
+                generation: shared.display_generation.load(Ordering::SeqCst),
+                width: 640,
+                height: 480,
+                stride: 640 * 4,
+                drm_fourcc: vmlab_hv_display::protocol::XRGB8888,
+                modifier: 0,
+                timestamp_ns: crate::chipset::host_monotonic_ns(),
+                damage: Vec::new(),
+                pixels: Pixels::Shm(self.placeholder.clone()),
+            });
+        }
         if let Some(dma) = vga.dma_frame()? {
             let mut readbacks = self.readbacks.lock();
             readbacks.push(Readback {
@@ -149,6 +179,7 @@ impl FrameSource for Source {
                 _ => 0,
             };
             return Ok(Frame {
+                flags: Default::default(),
                 generation: generation
                     .wrapping_add(shared.display_generation.load(Ordering::SeqCst)),
                 width: dma.width,
@@ -169,13 +200,7 @@ impl FrameSource for Source {
                 },
             });
         }
-        let dirty = shared.vga_framebuffer_dirty();
-        let (scanout_generation, frame) = {
-            if dirty {
-                vga.mark_framebuffer_dirty();
-            }
-            vga.frame()
-        };
+        let (scanout_generation, frame) = vga.frame();
         let generation = {
             let mut state = self.generation.lock();
             let key = (
@@ -189,6 +214,7 @@ impl FrameSource for Source {
             state.1
         };
         Ok(Frame {
+            flags: Default::default(),
             generation,
             width: frame.mode.width,
             height: frame.mode.height,
@@ -323,6 +349,7 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
                 shared: Arc::downgrade(shared),
                 generation: Mutex::new(((0, 0), 0)),
                 readbacks: Mutex::new(Vec::new()),
+                placeholder: Arc::new(placeholder_pixels()),
             }),
             Arc::new(Input {
                 shared: Arc::downgrade(shared),
@@ -380,6 +407,30 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
     }
     *shared.display.lock() = Some(server);
     Ok(())
+}
+
+fn placeholder_pixels() -> Vec<u8> {
+    const TEXT: &[u8] = b"Display output is not active.";
+    let mut pixels = [0x18, 0x18, 0x18, 0].repeat(640 * 480);
+    let left = (640 - TEXT.len() * 16) / 2;
+    let top = (480 - 32) / 2;
+    for (i, &character) in TEXT.iter().enumerate() {
+        for y in 0..16 {
+            let row = vmlab_hv_devices::display::font::row(character, y);
+            for x in 0..8 {
+                if row & (0x80 >> x) != 0 {
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let offset =
+                                ((top + y * 2 + dy) * 640 + left + i * 16 + x * 2 + dx) * 4;
+                            pixels[offset..offset + 3].fill(0xb0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pixels
 }
 
 #[cfg(test)]

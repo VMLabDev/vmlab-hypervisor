@@ -221,6 +221,17 @@ impl Gpu {
         self.state.lock().mode()
     }
 
+    pub fn scanout_active(&self) -> Option<bool> {
+        let state = self.state.lock();
+        state.native.then(|| {
+            state.scanout.is_some()
+                || state
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|renderer| renderer.mode().is_some())
+        })
+    }
+
     pub fn frame(&self) -> Option<Frame> {
         let mut s = self.state.lock();
         if let Some(renderer) = &s.renderer {

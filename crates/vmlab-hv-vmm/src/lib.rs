@@ -8,6 +8,7 @@ pub mod bus;
 pub mod chipset;
 mod clock;
 pub mod control;
+mod diagnostics;
 mod display;
 pub mod e820;
 pub mod error;

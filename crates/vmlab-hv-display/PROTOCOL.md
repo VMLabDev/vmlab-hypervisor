@@ -22,12 +22,12 @@ The transport is an AF_UNIX stream. Each message starts with this header:
 |---|---|---|
 | 0 | u32 | Total length, including the 8-byte header |
 | 4 | u16 | Kind from the table below |
-| 6 | u16 | Flags, zero in version 1 |
+| 6 | u16 | Frame flags for FrameReady when negotiated, otherwise zero |
 
 All native integers are little-endian, without alignment or padding.
 Signed integers use two's complement. Booleans are u32, either zero or one.
 Offsets below are relative to the payload, after the header.
-The maximum total message size is 16 MiB. Unknown kinds, nonzero flags,
+The maximum total message size is 16 MiB. Unknown kinds, flags on other messages,
 invalid lengths, invalid booleans, and trailing bytes are errors.
 
 Descriptors accompany the first header byte as `SOL_SOCKET/SCM_RIGHTS`.
@@ -45,7 +45,8 @@ The client sends this first. Version must be 1. The server replies with the
 intersection of the requested capabilities and those it implements.
 Unknown capability bits are ignored. A version mismatch closes the connection.
 
-Capability bits are frames=1, cursor=2, input=4, dmabuf_ok=8, cpu_copy=16.
+Capability bits are frames=1, cursor=2, input=4, dmabuf_ok=8, cpu_copy=16,
+frame_flags=32.
 Frames gates surface and frame delivery. Cursor gates shape and state.
 Input gates input acceptance and LED delivery. Dma-buf delivery requires
 frames and dmabuf_ok. CpuCopy requires cpu_copy and a configured surface.
@@ -73,6 +74,19 @@ Payload: `surface_id: u64 @0`, `buffer: u32 @8`, `seq: u64 @12`,
 `timestamp_ns: u64 @20`, `damage_count: u32 @28`, then rectangles at @32.
 Each rectangle is `x: u32`, `y: u32`, `width: u32`, `height: u32`, 16 bytes.
 Total length is `40 + 16 * damage_count`.
+
+When frame_flags is negotiated, header flag bit 0 marks a host placeholder.
+It contains "Display output is not active." on a dark background. It is
+available before the first resume and replaces guest output when no active
+scanout exists, including after reset. A configured black guest scanout is
+not a placeholder. RFB clients receive the same image without flag metadata.
+
+Clients that distinguish guest paint from host output request frame_flags
+and exclude placeholder frames. Unknown FrameReady flag bits are ignored.
+The server sends zero header flags to clients without frame_flags. This
+preserves compatibility with older v1 decoders that require zero flags.
+The payload and protocol version are unchanged. A flag change publishes a
+frame with full damage even if geometry and pixel colour are unchanged.
 
 Buffer is a zero-based index in the current configure. Seq increases on each
 publication. Timestamp is the source's monotonic time in nanoseconds.
@@ -165,7 +179,7 @@ returns `io::Result<DisplayServer>` after capturing and validating the first
 frame. DisplayServer is cloneable. It has no KVM or device-crate dependency.
 
 `FrameSource::frame(&self) -> io::Result<Frame>` returns an immutable snapshot.
-`Frame` carries generation, dimensions, stride, format, modifier, timestamp,
+`Frame` carries flags, generation, dimensions, stride, format, modifier, timestamp,
 damage, and either `Pixels::Shm(Arc<Vec<u8>>)` or `Pixels::Dmabuf` descriptors.
 Generation changes on reset or same-sized scanout replacement. Geometry
 changes also force configure. The source increments generation before publishing

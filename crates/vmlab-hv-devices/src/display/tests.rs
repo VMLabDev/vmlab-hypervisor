@@ -6,6 +6,31 @@ fn device() -> StandardVga {
 }
 
 #[test]
+fn active_black_scanout_is_distinct_from_reset_and_blanking() {
+    use crate::Resettable;
+    let mut dev = device();
+    assert!(!dev.scanout_active());
+    let initial = dev.save_state().unwrap();
+    indexed(&mut dev, 0x3d4, 1, 79);
+    assert!(dev.scanout_active());
+    assert!(dev.frame().pixels.iter().all(|byte| *byte == 0));
+    let active = dev.save_state().unwrap();
+    indexed(&mut dev, 0x3c4, 1, 0x20);
+    assert!(!dev.scanout_active());
+    dev.restore_state(&active).unwrap();
+    assert!(dev.scanout_active());
+    dev.reset().unwrap();
+    assert!(!dev.scanout_active());
+    dev.restore_state(&initial).unwrap();
+    assert!(!dev.scanout_active());
+    vbe(&mut dev, 640, 480, 32);
+    assert!(dev.scanout_active());
+    dev.mark_framebuffer_dirty();
+    dispi(&mut dev, 4, 0);
+    assert!(!dev.scanout_active());
+}
+
+#[test]
 fn standard_vga_mmio_edid_matches_the_captured_default_monitor() {
     let mut dev = device();
     let mut bytes = [0xff; 1024];
