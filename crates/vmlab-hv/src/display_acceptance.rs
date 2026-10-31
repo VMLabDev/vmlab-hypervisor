@@ -131,6 +131,15 @@ fn screenshot(path: &Path) -> Image {
     }
 }
 
+pub(super) fn diagnostic_screenshot(path: &Path, destination: &Path) {
+    let image = screenshot(path);
+    let mut ppm = format!("P6\n{} {}\n255\n", image.width, image.height).into_bytes();
+    for pixel in image.pixels.as_chunks::<4>().0 {
+        ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+    }
+    std::fs::write(destination, ppm).unwrap();
+}
+
 pub(super) fn screenshots_after_unobserved_boot(path: &Path, agent: &mut AgentClient) {
     Observer::guest(
         agent,

@@ -410,6 +410,7 @@ impl DeviceFactory for TestFactory {
         _irq: Arc<dyn IrqLine>,
     ) -> Result<crate::factory::BuiltSerial, DeviceUnavailable> {
         Ok(crate::factory::BuiltSerial {
+            clock: None,
             device: Arc::new(parking_lot::Mutex::new(FakeSerial {
                 out: self.out.clone(),
             })),
@@ -1013,6 +1014,9 @@ fn real_kernel_boots_and_resets() {
         vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
+        cpu_model: None,
+        floppy: None,
+        serial_log_port: Default::default(),
         hyperv: vec![],
         display: None,
         tablet: None,

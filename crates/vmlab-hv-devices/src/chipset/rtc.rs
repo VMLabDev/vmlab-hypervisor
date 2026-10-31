@@ -64,6 +64,35 @@ impl Rtc {
         self.cmos[0x5b..0x5e].copy_from_slice(&high.to_le_bytes()[..3]);
     }
 
+    pub fn configure_pc(&mut self, disk_sectors: [Option<u64>; 4], _cd_first: bool, cpus: u8) {
+        self.cmos[0x10] = 0;
+        self.cmos[0x12] = 0;
+        self.cmos[0x14] = 0x06;
+        self.cmos[0x38] = 0x30;
+        self.cmos[0x3d] = 0x12;
+        self.cmos[0x5f] = cpus.saturating_sub(1);
+        for (unit, sectors) in disk_sectors[..2].iter().enumerate() {
+            let Some(sectors) = sectors else {
+                continue;
+            };
+            let cylinders = (sectors / (16 * 63)).clamp(1, 16383) as u16;
+            self.cmos[0x12] |= 0xf << (4 * (1 - unit));
+            self.cmos[0x19 + unit] = 47;
+            let base = 0x1b + unit * 9;
+            self.cmos[base..base + 2].copy_from_slice(&cylinders.to_le_bytes());
+            self.cmos[base + 2] = 16;
+            self.cmos[base + 3..base + 5].fill(0xff);
+            self.cmos[base + 5] = 0xc8;
+            self.cmos[base + 6..base + 8].copy_from_slice(&cylinders.to_le_bytes());
+            self.cmos[base + 8] = 63;
+        }
+        let checksum: u16 = self.cmos[0x10..0x2e]
+            .iter()
+            .map(|byte| u16::from(*byte))
+            .sum();
+        self.cmos[0x2e..0x30].copy_from_slice(&checksum.to_be_bytes());
+    }
+
     /// Progress calendar and interrupt sources using the VMM's running clock.
     pub fn advance(&mut self, ns: u64) {
         if self.cmos[0x0a] & 0x70 != 0x20 {

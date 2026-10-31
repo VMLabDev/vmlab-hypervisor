@@ -97,6 +97,7 @@ impl DeviceFactory for TestFactory {
             irq,
         )));
         Ok(vmlab_hv_vmm::factory::BuiltSerial {
+            clock: Some(dev.clone()),
             device: dev.clone(),
             snapshot: Some(dev),
         })
@@ -253,6 +254,9 @@ fn machine(dir: &Dir, share: &Path, initrd: &Path, read_only: bool) -> MachineDe
         vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
+        cpu_model: None,
+        floppy: None,
+        serial_log_port: Default::default(),
         hyperv: vec![],
         display: None,
         tablet: None,
@@ -272,6 +276,8 @@ fn machine(dir: &Dir, share: &Path, initrd: &Path, read_only: bool) -> MachineDe
             cmdline: "console=ttyS0 loglevel=7 panic=-1 reboot=t".into(),
         },
         disks: vec![vmlab_hv_proto::machine::Disk {
+            channel: None,
+            unit: None,
             id: "vmstate".into(),
             path: Some(dir.path.join("vmstate.qcow2")),
             format: vmlab_hv_proto::machine::DiskFormat::Qcow2,

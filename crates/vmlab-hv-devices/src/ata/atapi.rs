@@ -4,7 +4,15 @@ use vmlab_disk::DiskImage;
 
 use super::Payload;
 
-pub(super) struct Optical {
+/// Guest-visible state of an optical drive's medium and tray.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaState {
+    pub present: bool,
+    pub tray_open: bool,
+    pub locked: bool,
+}
+
+pub(crate) struct Optical {
     pub image: Option<Box<dyn DiskImage>>,
     pub tray_open: bool,
     pub locked: bool,
@@ -16,6 +24,47 @@ pub(super) struct Optical {
 }
 
 impl Optical {
+    pub fn validate_media(image: Option<&dyn DiskImage>) -> Result<(), crate::DeviceError> {
+        if image.is_some_and(|image| {
+            !image.read_only() || image.size() < 2048 || !image.size().is_multiple_of(2048)
+        }) {
+            return Err(crate::DeviceError::Other(
+                "CD-ROM media must be read-only, nonempty and 2048-byte aligned".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn insert_media(&mut self, image: Box<dyn DiskImage>) -> Result<(), crate::DeviceError> {
+        Self::validate_media(Some(image.as_ref()))?;
+        if self.locked {
+            return Err(crate::DeviceError::Other("CD-ROM medium is locked".into()));
+        }
+        self.image = Some(image);
+        self.tray_open = false;
+        self.generation = self.generation.wrapping_add(1);
+        self.changed(2);
+        Ok(())
+    }
+
+    pub fn eject_media(&mut self) -> Result<Option<Box<dyn DiskImage>>, crate::DeviceError> {
+        if self.locked {
+            return Err(crate::DeviceError::Other("CD-ROM medium is locked".into()));
+        }
+        self.tray_open = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.changed(3);
+        Ok(self.image.take())
+    }
+
+    pub fn media_state(&self) -> MediaState {
+        MediaState {
+            present: self.present(),
+            tray_open: self.tray_open,
+            locked: self.locked,
+        }
+    }
+
     pub fn new(image: Option<Box<dyn DiskImage>>) -> Self {
         Self {
             image,

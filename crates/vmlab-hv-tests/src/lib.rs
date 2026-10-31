@@ -390,6 +390,9 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
+        cpu_model: None,
+        floppy: None,
+        serial_log_port: Default::default(),
         hyperv: vec![],
         display: None,
         tablet: None,
@@ -409,6 +412,8 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         },
         disks: vec![
             Disk {
+                channel: None,
+                unit: None,
                 pci: None,
                 bus: Default::default(),
                 port: None,
@@ -420,6 +425,8 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
                 vmstate: false,
             },
             Disk {
+                channel: None,
+                unit: None,
                 pci: None,
                 bus: Default::default(),
                 port: None,
@@ -433,6 +440,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         ],
         nics: if spec.nics > 0 {
             vec![Nic {
+                model: Default::default(),
                 rom: None,
                 pci: None,
                 mac: mac_string(TEST_MAC),
@@ -447,10 +455,12 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         serial_log: dir.join("serial.log"),
         ports: vec![
             SerialPort {
+                transport: Default::default(),
                 name: "vmlab.ctl.0".to_string(),
                 socket: dir.join("ctl.sock"),
             },
             SerialPort {
+                transport: Default::default(),
                 name: "vmlab.agent.0".to_string(),
                 socket: dir.join("agent.sock"),
             },
@@ -461,6 +471,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
     };
     for (index, name) in spec.extra_ports.iter().enumerate() {
         desc.ports.push(SerialPort {
+            transport: Default::default(),
             name: name.clone(),
             socket: dir.join(format!("extra-{index}.sock")),
         });

@@ -34,6 +34,7 @@ fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(val
 #[test]
 fn nic_option_rom_wire() {
     let mut nic = Nic {
+        model: Default::default(),
         rom: Some("/firmware/virtio-net.rom".into()),
         pci: None,
         mac: "52:54:00:12:34:56".into(),
@@ -112,6 +113,9 @@ fn sample_machine() -> MachineDescription {
         vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
+        cpu_model: None,
+        floppy: None,
+        serial_log_port: Default::default(),
         hyperv: vec![],
         display: None,
         tablet: None,
@@ -131,6 +135,8 @@ fn sample_machine() -> MachineDescription {
         },
         disks: vec![
             Disk {
+                channel: None,
+                unit: None,
                 pci: None,
                 bus: Default::default(),
                 port: None,
@@ -142,6 +148,8 @@ fn sample_machine() -> MachineDescription {
                 vmstate: false,
             },
             Disk {
+                channel: None,
+                unit: None,
                 pci: None,
                 bus: Default::default(),
                 port: None,
@@ -154,6 +162,7 @@ fn sample_machine() -> MachineDescription {
             },
         ],
         nics: vec![Nic {
+            model: Default::default(),
             rom: None,
             pci: None,
             mac: "52:54:00:12:34:56".to_owned(),
@@ -164,6 +173,7 @@ fn sample_machine() -> MachineDescription {
         }],
         serial_log: PathBuf::from("/var/log/vmlab/web-1.serial.log"),
         ports: vec![SerialPort {
+            transport: Default::default(),
             name: "vmlab.agent.0".to_owned(),
             socket: PathBuf::from("/run/vmlab/web-1/agent.sock"),
         }],
@@ -309,6 +319,8 @@ fn pinned_firmware_boot() {
 fn q35_devices_and_policy_wire_contract() {
     wire(
         &Disk {
+            channel: None,
+            unit: None,
             pci: None,
             bus: DiskBus::Ahci,
             port: Some(2),
@@ -332,6 +344,8 @@ fn q35_devices_and_policy_wire_contract() {
     );
     wire(
         &Disk {
+            channel: None,
+            unit: None,
             pci: None,
             bus: DiskBus::Ahci,
             port: Some(3),

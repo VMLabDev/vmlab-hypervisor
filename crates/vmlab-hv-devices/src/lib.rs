@@ -10,10 +10,12 @@
 use std::sync::Arc;
 
 pub mod ahci;
+pub mod ata;
 pub mod audio;
 pub mod chipset;
 pub mod display;
 pub mod hda;
+pub mod ide;
 pub mod pflash;
 pub mod serial;
 pub mod tpm;
