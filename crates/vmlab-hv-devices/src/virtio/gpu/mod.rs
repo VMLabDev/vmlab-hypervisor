@@ -1,9 +1,13 @@
-//! Synchronous 2D virtio-gpu, VIRTIO 1.2 section 5.7.
+//! Virtio-gpu, VIRTIO 1.2 section 5.7, with optional virglrenderer acceleration.
 //!
 //! `Gpu` clones share state. Keep a clone for frame and cursor publication
-//! while the PCI transport owns another clone. No host GPU is required.
+//! while the PCI transport owns another clone. The default 2D mode needs no GPU.
 
+mod renderer;
+mod scanout;
+pub use scanout::DmaFrame;
 mod snapshot;
+pub use renderer::{APERTURE_SIZE, BlobMapper, GpuMode};
 #[cfg(test)]
 mod tests;
 
@@ -91,6 +95,9 @@ impl Resource {
 }
 
 struct State {
+    renderer: Option<renderer::Renderer>,
+    fences: Vec<PendingFence>,
+    current_fence: Option<(u32, u64, u32, u8)>,
     acked: u64,
     preferred: (u32, u32),
     events: u32,
@@ -99,6 +106,8 @@ struct State {
     native: bool,
     scanout_generation: u64,
     dirty: bool,
+    cached_frame: Option<Frame>,
+    flushes: Vec<Rect>,
     cursor: Cursor,
     mem: Option<GuestMemory>,
     interrupt: Option<Arc<dyn VirtioInterrupt>>,
@@ -106,7 +115,7 @@ struct State {
     pending: Vec<Queue>,
 }
 
-/// One output, two queues, no virgl, blobs or capability sets.
+/// One output and two queues. `enable_3d` adds virgl, Venus and blob resources.
 #[derive(Clone)]
 pub struct Gpu {
     id: String,
@@ -118,14 +127,19 @@ impl Gpu {
         Self {
             id: id.into(),
             state: Arc::new(Mutex::new(State {
+                renderer: None,
+                fences: Vec::new(),
+                current_fence: None,
                 acked: 0,
-                preferred: (1024, 768),
+                preferred: (1280, 800),
                 events: 0,
                 resources: BTreeMap::new(),
                 scanout: None,
                 native: false,
                 scanout_generation: 0,
                 dirty: true,
+                cached_frame: None,
+                flushes: Vec::new(),
                 cursor: Cursor::default(),
                 mem: None,
                 interrupt: None,
@@ -137,6 +151,49 @@ impl Gpu {
 
     pub fn native(&self) -> bool {
         self.state.lock().native
+    }
+
+    pub fn enable_3d(
+        &self,
+        mode: GpuMode,
+        node: std::path::PathBuf,
+        mapper: Arc<dyn BlobMapper>,
+    ) -> Result<(), DeviceError> {
+        let renderer = renderer::Renderer::new(mode, node, mapper)?;
+        self.state.lock().renderer = Some(renderer);
+        let state = Arc::downgrade(&self.state);
+        std::thread::Builder::new()
+            .name("gpu-fence-completion".into())
+            .spawn(move || {
+                while let Some(state) = state.upgrade() {
+                    state.lock().complete_fences();
+                    drop(state);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            })?;
+        Ok(())
+    }
+
+    pub fn has_3d_contexts(&self) -> bool {
+        self.state
+            .lock()
+            .renderer
+            .as_ref()
+            .is_some_and(|r| r.has_contexts())
+    }
+
+    pub fn dma_frame(&self) -> Result<Option<DmaFrame>, DeviceError> {
+        self.state.lock().renderer.as_ref().map_or(Ok(None), |r| {
+            r.dma_frame()
+                .map_err(|e| DeviceError::Other(format!("GPU scanout capture failed: {e:#x}")))
+        })
+    }
+
+    pub fn set_aperture_base(&self, base: Option<u64>) -> Result<(), DeviceError> {
+        if let Some(renderer) = &self.state.lock().renderer {
+            renderer.set_base(base)?;
+        }
+        Ok(())
     }
 
     pub fn cursor(&self) -> Cursor {
@@ -166,12 +223,42 @@ impl Gpu {
 
     pub fn frame(&self) -> Option<Frame> {
         let mut s = self.state.lock();
+        if let Some(renderer) = &s.renderer {
+            match renderer.frame() {
+                Ok(Some(frame)) => return Some(frame),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("GPU readback failed: {error:#x}");
+                    return None;
+                }
+            }
+        }
         let mode = s.mode()?;
-        let mut pixels = vec![0; mode.stride as usize * mode.height as usize];
+        if !s.dirty
+            && let Some(frame) = &s.cached_frame
+            && frame.mode == mode
+        {
+            return Some(frame.unchanged());
+        }
+        let previous = s.cached_frame.as_ref().filter(|f| f.mode == mode);
+        let mut pixels = previous
+            .map(|f| f.pixels.clone())
+            .unwrap_or_else(|| vec![0; mode.stride as usize * mode.height as usize]);
         if let Some((id, r)) = s.scanout {
             let resource = &s.resources[&id];
+            let full = previous.is_none() || s.flushes.is_empty();
             for y in 0..r.h {
                 for x in 0..r.w {
+                    if !full
+                        && !s.flushes.iter().any(|f| {
+                            x + r.x >= f.x
+                                && x + r.x < f.x + f.w
+                                && y + r.y >= f.y
+                                && y + r.y < f.y + f.h
+                        })
+                    {
+                        continue;
+                    }
                     let src = ((y + r.y) * resource.width + x + r.x) as usize * 4;
                     let dst = (y * r.w + x) as usize * 4;
                     let p = resource.pixel(src);
@@ -179,11 +266,11 @@ impl Gpu {
                 }
             }
         }
-        Some(Frame {
-            mode,
-            pixels,
-            dirty: std::mem::replace(&mut s.dirty, false),
-        })
+        let frame = Frame::compare(mode, pixels, previous, (16, 16));
+        s.cached_frame = Some(frame.clone());
+        s.flushes.clear();
+        s.dirty = false;
+        Some(frame)
     }
 
     /// Runtime surface generation, including same-size replacement and reset.
@@ -200,9 +287,34 @@ fn valid_format(f: u32) -> bool {
 }
 
 impl State {
+    fn complete_fences(&mut self) {
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        let Some(mem) = &self.mem else { return };
+        self.fences.retain(|fence| {
+            if !renderer.complete(fence.flags, fence.id, fence.ctx, fence.ring) {
+                return true;
+            }
+            let queue = &mut self.queues[fence.queue as usize];
+            if queue.add_used(mem, fence.head, fence.len).is_ok()
+                && queue.needs_notification(mem).unwrap_or(false)
+                && let Some(irq) = &self.interrupt
+            {
+                irq.notify_queue(fence.queue);
+            }
+            false
+        });
+    }
+
     fn mode(&self) -> Option<Mode> {
         if !self.native {
             return None;
+        }
+        if let Some(renderer) = &self.renderer
+            && let Some(mode) = renderer.mode()
+        {
+            return Some(mode);
         }
         let (width, height) = self
             .scanout
@@ -225,6 +337,17 @@ impl State {
         let mut d = Decoder::new(request);
         let kind = d.u32()?;
         d.take(20)?;
+        if q == 0
+            && !matches!(kind, 0x100 | 0x10a)
+            && let Some(renderer) = &self.renderer
+        {
+            let result = renderer.command(mem, request)?;
+            if matches!(kind, 0x103 | 0x10d) {
+                self.native = true;
+                self.scanout_generation = self.scanout_generation.wrapping_add(1);
+            }
+            return Ok(result);
+        }
         if q == 1 {
             if !matches!(kind, 0x300 | 0x301) {
                 return Err(INVALID);
@@ -251,8 +374,9 @@ impl State {
                 }
                 d.u32()?;
                 out.resize(1032, 0);
-                out[..4].copy_from_slice(&128u32.to_le_bytes());
-                out[8..136].copy_from_slice(&edid(self.preferred.0, self.preferred.1));
+                let edid = edid(self.preferred.0, self.preferred.1);
+                out[..4].copy_from_slice(&(edid.len() as u32).to_le_bytes());
+                out[8..8 + edid.len()].copy_from_slice(&edid);
                 0x1104
             }
             0x101 => {
@@ -299,6 +423,8 @@ impl State {
                     self.scanout = None;
                     self.scanout_generation = self.scanout_generation.wrapping_add(1);
                     self.dirty = true;
+                    self.cached_frame = None;
+                    self.flushes.clear();
                 }
                 NODATA
             }
@@ -321,6 +447,8 @@ impl State {
                 self.native = true;
                 if previous != (self.native, self.scanout) {
                     self.scanout_generation = self.scanout_generation.wrapping_add(1);
+                    self.cached_frame = None;
+                    self.flushes.clear();
                 }
                 self.dirty = true;
                 NODATA
@@ -338,6 +466,14 @@ impl State {
                     .is_some_and(|(i, s)| i == id && rect.overlaps(s))
                 {
                     self.dirty = true;
+                    // Bound queued damage even if the guest flushes faster than
+                    // the host samples. A full update includes all pending pixels.
+                    if self.flushes.len() < 256 {
+                        self.flushes.push(rect);
+                    } else if let Some((_, scanout)) = self.scanout {
+                        self.flushes.clear();
+                        self.flushes.push(scanout);
+                    }
                 }
                 NODATA
             }
@@ -421,7 +557,15 @@ impl State {
             if id == 0 {
                 self.cursor.visible = false;
             } else {
-                let r = self.resources.get(&id).ok_or(RESOURCE)?;
+                let accelerated = self
+                    .renderer
+                    .as_ref()
+                    .map(|renderer| renderer.cursor_resource(id))
+                    .transpose()?;
+                let r = accelerated
+                    .as_ref()
+                    .or_else(|| self.resources.get(&id))
+                    .ok_or(RESOURCE)?;
                 if r.width != 64 || r.height != 64 || hot_x >= 64 || hot_y >= 64 {
                     return Err(INVALID);
                 }
@@ -448,11 +592,12 @@ impl State {
     }
 
     fn chain(&mut self, mem: &GuestMemory, q: usize, chain: DescriptorChain<&GuestMemory>) -> u32 {
+        self.current_fence = None;
         let Ok(mut reader) = chain.clone().reader(mem) else {
             return 0;
         };
         let len = reader.available_bytes();
-        if !(24..=32 + MAX_ENTRIES * 16).contains(&len) {
+        if !(24..=16 * 1024 * 1024 + 32).contains(&len) {
             return 0;
         }
         let mut request = vec![0; len];
@@ -466,16 +611,25 @@ impl State {
         if q == 0 && writer.available_bytes() < 24 {
             return 0;
         }
-        let (kind, payload) = match self.command(mem, q, &request) {
+        let (mut kind, payload) = match self.command(mem, q, &request) {
             Ok(response) => response,
             Err(error) => (error, Vec::new()),
         };
         let mut response = vec![0; 24];
         response[..4].copy_from_slice(&kind.to_le_bytes());
         if request[4] & 1 != 0 {
-            response[4] = 1;
-            response[8..20].copy_from_slice(&request[8..20]);
+            response[4..24].copy_from_slice(&request[4..24]);
+            if let Some(renderer) = &self.renderer {
+                let flags = u32::from_le_bytes(request[4..8].try_into().unwrap());
+                let id = u64::from_le_bytes(request[8..16].try_into().unwrap());
+                let ctx = u32::from_le_bytes(request[16..20].try_into().unwrap());
+                match renderer.fence(flags, id, ctx, request[20]) {
+                    Err(error) => kind = error,
+                    Ok(()) => self.current_fence = Some((flags, id, ctx, request[20])),
+                }
+            }
         }
+        response[..4].copy_from_slice(&kind.to_le_bytes());
         response.extend_from_slice(&payload);
         if writer.available_bytes() < response.len() {
             return 0;
@@ -522,9 +676,15 @@ impl VirtioDevice for Gpu {
     }
     fn features(&self) -> u64 {
         FEATURES
+            | if self.state.lock().renderer.is_some() {
+                1 | (1 << 3) | (1 << 4)
+            } else {
+                0
+            }
     }
     fn ack_features(&mut self, features: u64) {
-        self.state.lock().acked = features & FEATURES;
+        let supported = self.features();
+        self.state.lock().acked = features & supported;
     }
     fn config_len(&self) -> u64 {
         16
@@ -534,6 +694,9 @@ impl VirtioDevice for Gpu {
         let mut config = [0; 16];
         config[..4].copy_from_slice(&s.events.to_le_bytes());
         config[8..12].copy_from_slice(&1u32.to_le_bytes());
+        if let Some(renderer) = &s.renderer {
+            config[12..16].copy_from_slice(&renderer.capsets.to_le_bytes());
+        }
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = offset
                 .checked_add(i as u64)
@@ -594,6 +757,18 @@ impl VirtioDevice for Gpu {
             while let Some(chain) = s.queues[index].pop_descriptor_chain(&mem) {
                 let head = chain.head_index();
                 let len = s.chain(&mem, index, chain);
+                if let Some((flags, id, ctx, ring)) = s.current_fence.take() {
+                    s.fences.push(PendingFence {
+                        queue: index as u16,
+                        head,
+                        len,
+                        flags,
+                        id,
+                        ctx,
+                        ring,
+                    });
+                    continue;
+                }
                 if s.queues[index].add_used(&mem, head, len).is_err() {
                     return;
                 }
@@ -612,6 +787,12 @@ impl VirtioDevice for Gpu {
     }
     fn reset(&mut self) {
         let mut s = self.state.lock();
+        if let Some(renderer) = &s.renderer
+            && let Err(error) = renderer.reset()
+        {
+            eprintln!("GPU reset failed: {error:#x}");
+        }
+        s.fences.clear();
         s.acked = 0;
         s.events = 0;
         s.resources.clear();
@@ -619,6 +800,8 @@ impl VirtioDevice for Gpu {
         s.native = false;
         s.scanout_generation = s.scanout_generation.wrapping_add(1);
         s.dirty = true;
+        s.cached_frame = None;
+        s.flushes.clear();
         let generation = s.cursor.generation.wrapping_add(1);
         s.cursor = Cursor {
             generation,
@@ -629,6 +812,16 @@ impl VirtioDevice for Gpu {
         s.queues.clear();
         s.pending.clear();
     }
+}
+
+struct PendingFence {
+    queue: u16,
+    head: u16,
+    len: u32,
+    flags: u32,
+    id: u64,
+    ctx: u32,
+    ring: u8,
 }
 
 struct Decoder<'a> {
@@ -662,19 +855,15 @@ impl<'a> Decoder<'a> {
     }
 }
 
-/// EDID 1.4 with a preferred 60 Hz detailed timing and no extensions.
-fn edid(w: u32, h: u32) -> [u8; 128] {
-    let mut e = [0; 128];
-    e[..8].copy_from_slice(&[0, 255, 255, 255, 255, 255, 255, 0]);
-    e[8..18].copy_from_slice(&[0x59, 0xac, 1, 0, 0, 0, 0, 0, 1, 36]);
-    e[18..25].copy_from_slice(&[1, 4, 0x80, 0, 0, 120, 0x06]);
-    // sRGB chromaticities, in EDID's 10-bit fixed-point representation.
-    let chroma = [655u16, 338, 307, 614, 154, 61, 320, 337];
-    for (i, value) in chroma.iter().enumerate() {
-        e[25 + i / 4] |= ((value & 3) as u8) << (6 - (i % 4) * 2);
-        e[27 + i] = (value >> 2) as u8;
+/// QEMU's default monitor, captured through the Ubuntu guest's DRM connector.
+pub(crate) fn edid(w: u32, h: u32) -> [u8; 256] {
+    let mut e =
+        *include_bytes!("../../../../../docs/hwref/ubuntu-26.04-display/guest/drm/Virtual-1.edid");
+    if (w, h) == (1280, 800) {
+        return e;
     }
-    e[38..54].fill(1);
+    // Size requests replace the preferred detailed timing; the monitor identity
+    // and secondary modes remain those of the captured monitor.
     let hb = 160u32;
     let vb = 35u32;
     let clock = ((w + hb) * (h + vb) * 60 / 10000) as u16;
@@ -687,9 +876,6 @@ fn edid(w: u32, h: u32) -> [u8; 128] {
     e[61] = ((h >> 8) << 4) as u8;
     e[62..66].copy_from_slice(&[48, 32, 0x35, 0]);
     e[71] = 0x1a;
-    e[72..90].copy_from_slice(b"\0\0\0\xfc\0vmlab screen\n");
-    e[90..108].copy_from_slice(b"\0\0\0\xff\0vmlab-hv\n    ");
-    e[108..113].copy_from_slice(&[0, 0, 0, 0x10, 0]);
     e[127] = 0u8.wrapping_sub(e[..127].iter().fold(0u8, |a, b| a.wrapping_add(*b)));
     e
 }

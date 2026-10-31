@@ -572,7 +572,17 @@ impl VmShared {
                 })
                 .map(|(base, _)| base)
         });
+        let blob_base = address.and_then(|(slot, function)| {
+            let decoded = root.config_read(0, slot, function, 1) & 2 != 0;
+            root.save_bar_states()
+                .into_iter()
+                .find(|(devfn, _)| *devfn == (slot << 3 | function))
+                .and_then(|(_, bars)| bars.get(2).copied())
+                .filter(|(base, sizing)| decoded && !sizing && *base >= (1 << 32))
+                .map(|(base, _)| base)
+        });
         drop(root);
+        vga.set_aperture_base(blob_base)?;
         let base = base.filter(|base| {
             self.ecam_offset(*base).is_none()
                 && self

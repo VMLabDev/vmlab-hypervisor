@@ -23,6 +23,13 @@ vm-memory.workspace = true
 vm-superio = "0.8"
 vmm-sys-util = "0.15"
 vmlab-disk.workspace = true
+rutabaga_gfx = { version = "=0.1.80", features = ["virgl_renderer"] }
+# rutabaga 0.1.80 requires the MesaMapping API removed by magma-gpu 0.1.85.
+magma-gpu = "=0.1.80"
+glow = "0.16"
+
+[build-dependencies]
+pkg-config = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

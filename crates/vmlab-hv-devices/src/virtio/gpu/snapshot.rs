@@ -8,6 +8,11 @@ impl Snapshot for Gpu {
 
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
         let s = self.state.lock();
+        if s.renderer.is_some() {
+            return Err(DeviceError::State(
+                "online snapshots are unavailable with an accelerated GPU".into(),
+            ));
+        }
         let mut out = b"GPU2\x01\0\0\0".to_vec();
         out.extend_from_slice(&s.acked.to_le_bytes());
         put(
@@ -244,6 +249,8 @@ impl Gpu {
         s.resources = resources;
         s.cursor = cursor;
         s.dirty = true;
+        s.cached_frame = None;
+        s.flushes.clear();
         if s.mem.is_some() {
             s.queues = queues;
         } else {

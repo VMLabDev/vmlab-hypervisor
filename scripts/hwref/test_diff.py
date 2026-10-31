@@ -25,6 +25,37 @@ REFERENCE = ROOT / "docs/hwref/q35-seabios-linux-generic"
 
 
 class NormalizeTests(unittest.TestCase):
+    def test_display_only_capture_requires_its_artifacts_and_matching_scope(self):
+        reference = ROOT / "docs/hwref/ubuntu-26.04-display"
+        with tempfile.TemporaryDirectory(prefix="hwref-display-") as tmp:
+            candidate = Path(tmp) / "capture"
+            shutil.copytree(reference, candidate)
+            self.assertEqual(diff.compare(reference, candidate, None), "")
+            with self.assertRaisesRegex(ValueError, "display-only and full"):
+                diff.compare(reference, REFERENCE, None)
+            (candidate / "guest/drm/Virtual-1.edid").unlink()
+            with self.assertRaisesRegex(ValueError, "required display artefact"):
+                diff.compare(reference, candidate, None)
+
+    def test_edid_comparison_preserves_every_byte_and_missing_connectors(self):
+        with tempfile.TemporaryDirectory(prefix="hwref-edid-") as tmp:
+            reference, candidate = Path(tmp) / "reference", Path(tmp) / "candidate"
+            for root in (reference, candidate):
+                shutil.copytree(REFERENCE, root)
+                (root / "guest/drm").mkdir(exist_ok=True)
+                (root / "guest/drm/Virtual-1.edid").write_bytes(bytes(range(256)))
+            self.assertEqual(diff.compare(reference, candidate, None), "")
+            path = candidate / "guest/drm/Virtual-1.edid"
+            original = diff.normalize_artifact("drm/Virtual-1.edid", bytes(range(256)))
+            for index in range(256):
+                data = bytearray(range(256))
+                data[index] ^= 1
+                self.assertNotEqual(original, diff.normalize_artifact("drm/Virtual-1.edid", data))
+            path.write_bytes(data)
+            self.assertIn("=== drm/Virtual-1.edid ===", diff.compare(reference, candidate, None))
+            path.unlink()
+            self.assertIn("drm/Virtual-1.edid: reference only", diff.compare(reference, candidate, None))
+
     def test_delay_loop_calibration_is_run_dependent(self):
         line = "Calibrating delay loop (skipped) preset value.. 8583.91 BogoMIPS (lpj=4291956)\n"
         original = diff.normalize_text("dmesg.txt", line)

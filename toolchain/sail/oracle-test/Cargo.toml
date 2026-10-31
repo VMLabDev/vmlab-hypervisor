@@ -1,0 +1,11 @@
+[package]
+name = "vmlab-hv-oracle-test"
+description = "Links the Sail C++ oracle built by tcg-oracle-build and steps a hand-assembled RV64 program"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Deliberately outside the main workspace: the oracle library is a build
+# artefact under target/tcg/oracle, not something ci::check can assume.
+[workspace]

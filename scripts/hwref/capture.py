@@ -80,7 +80,7 @@ MODULES = [
     "efivarfs",       # /sys/firmware/efi/efivars (OVMF)
     "virtio_blk", "virtio_net",
     "e1000",
-    "drm_kms_helper", "cirrus",
+    "drm_kms_helper", "cirrus", "virtio_gpu",
     "xhci-pci", "ehci-pci", "uhci-hcd", "usbhid", "usbmouse", "hid-generic",
     "psmouse", "evdev",
 ]
@@ -133,6 +133,18 @@ done
 [ "$ready" = yes ] || echo 'USB tablet did not bind before capture' >>/out/modprobe.log
 
 cd /out
+# Keep connector names stable across DRM card enumeration order. An empty EDID
+# remains an artifact, so a disconnected or unsupported output is distinguishable.
+mkdir -p drm
+for connector in /sys/class/drm/card*-*; do
+  [ -f "$connector/edid" ] || continue
+  name=${connector##*/}
+  name=${name#*-}
+  cat "$connector/edid" >"drm/$name.edid"
+done
+if [ -f /sys/class/graphics/fb0/virtual_size ]; then
+  cat /sys/class/graphics/fb0/virtual_size >drm/framebuffer-size.txt
+fi
 { uname -a; cat /proc/version; cat /proc/cmdline; } > uname.txt 2>&1
 cat /proc/cpuinfo > cpuinfo.txt 2>&1
 

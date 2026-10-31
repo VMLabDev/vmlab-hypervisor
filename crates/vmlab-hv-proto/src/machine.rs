@@ -287,6 +287,10 @@ impl DiskBus {
 #[serde(deny_unknown_fields)]
 pub struct Display {
     pub device: DisplayDevice,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_node: Option<PathBuf>,
     pub pci: PciAddress,
     pub rom: Option<PathBuf>,
     /// Native display socket; absent uses display.sock beside the control socket.
@@ -302,6 +306,13 @@ pub struct Display {
 pub enum DisplayDevice {
     StdVga,
     VirtioVga,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuMode {
+    Virgl,
+    Venus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

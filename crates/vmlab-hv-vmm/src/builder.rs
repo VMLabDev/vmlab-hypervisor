@@ -41,6 +41,20 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
             "vcpus must be in 1..=255 (xAPIC topology)".into(),
         ));
     }
+    if let Some(display) = &desc.display {
+        if display.device != vmlab_hv_proto::machine::DisplayDevice::VirtioVga
+            && (display.gpu.is_some() || display.render_node.is_some())
+        {
+            return Err(VmmError::InvalidMachine(
+                "GPU acceleration requires virtio-vga".into(),
+            ));
+        }
+        if display.gpu.is_some() != display.render_node.is_some() {
+            return Err(VmmError::InvalidMachine(
+                "gpu and render_node must be specified together".into(),
+            ));
+        }
+    }
     MemLayout::new(desc.memory_mib).map_err(VmmError::InvalidMachine)?;
     crate::clock::rtc_base(desc.rtc_base.as_deref())?;
     for disk in &desc.disks {
@@ -584,6 +598,26 @@ pub fn build(
                 )
                 .map_err(|e| VmmError::Other(e.to_string()))?,
             ));
+            if let Some(mode) = display.gpu {
+                let mode = match mode {
+                    vmlab_hv_proto::machine::GpuMode::Virgl => {
+                        vmlab_hv_devices::virtio::gpu::GpuMode::Virgl
+                    }
+                    vmlab_hv_proto::machine::GpuMode::Venus => {
+                        vmlab_hv_devices::virtio::gpu::GpuMode::Venus
+                    }
+                };
+                let node = display.render_node.clone().ok_or_else(|| {
+                    VmmError::Other("GPU acceleration requires render_node".into())
+                })?;
+                let mapper = Arc::new(crate::gpu::Aperture::new(
+                    vm_fd.clone(),
+                    kvm.kvm.get_nr_memslots() as u32,
+                ));
+                vga.lock()
+                    .enable_3d(mode, node, mapper)
+                    .map_err(|e| VmmError::Other(e.to_string()))?;
+            }
             place(vga.clone(), Some(display.pci))?;
             snap_nodes.push(DeviceNode::Plain(vga.clone()));
             crate::display::Video::Virtio(vga)
@@ -951,6 +985,42 @@ mod tests {
             audio: None,
             rtc_base: None,
         }
+    }
+
+    #[test]
+    fn gpu_configuration_requires_virtio_vga_and_a_render_node() {
+        let mut machine = desc();
+        machine.display = Some(
+            serde_json::from_value(serde_json::json!({
+                "device": "std-vga", "gpu": "virgl", "render_node": "/dev/dri/renderD130",
+                "pci": {"bus": 0, "device": 4, "function": 0}, "rom": null,
+            }))
+            .unwrap(),
+        );
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("requires virtio-vga")
+        );
+        let display = machine.display.as_mut().unwrap();
+        display.device = vmlab_hv_proto::machine::DisplayDevice::VirtioVga;
+        display.render_node = None;
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("specified together")
+        );
+        let display = machine.display.as_mut().unwrap();
+        display.gpu = None;
+        display.render_node = Some("/dev/dri/renderD130".into());
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("specified together")
+        );
     }
 
     #[test]

@@ -17,6 +17,24 @@ pub(crate) enum Video {
 }
 
 impl Video {
+    pub(crate) fn accelerated(&self) -> bool {
+        matches!(self, Self::Virtio(device) if device.lock().accelerated())
+    }
+    fn dma_frame(&self) -> io::Result<Option<vmlab_hv_devices::virtio::gpu::DmaFrame>> {
+        match self {
+            Self::Standard(_) => Ok(None),
+            Self::Virtio(device) => device.lock().dma_frame().map_err(io::Error::other),
+        }
+    }
+    pub(crate) fn set_aperture_base(&self, base: Option<u64>) -> Result<(), VmmError> {
+        if let Self::Virtio(device) = self {
+            device
+                .lock()
+                .set_aperture_base(base)
+                .map_err(|e| VmmError::Other(e.to_string()))?;
+        }
+        Ok(())
+    }
     pub(crate) fn io_read(&self, port: u16, data: &mut [u8]) {
         match self {
             Self::Standard(device) => device.lock().io_read(port, data),
@@ -100,9 +118,17 @@ impl Video {
 struct Source {
     shared: Weak<VmShared>,
     generation: Mutex<((u64, u64), u64)>,
+    readbacks: Mutex<Vec<Readback>>,
+}
+struct Readback {
+    fd: Weak<std::os::fd::OwnedFd>,
+    pixels: Arc<Vec<u8>>,
 }
 impl FrameSource for Source {
     fn frame(&self) -> io::Result<Frame> {
+        self.readbacks
+            .lock()
+            .retain(|entry| entry.fd.strong_count() != 0);
         let shared = self
             .shared
             .upgrade()
@@ -112,6 +138,37 @@ impl FrameSource for Source {
             .lock()
             .clone()
             .ok_or_else(|| io::Error::other("machine has no VGA"))?;
+        if let Some(dma) = vga.dma_frame()? {
+            let mut readbacks = self.readbacks.lock();
+            readbacks.push(Readback {
+                fd: Arc::downgrade(&dma.fd),
+                pixels: dma.pixels,
+            });
+            let generation = match &vga {
+                Video::Virtio(device) => device.lock().scanout_generation(),
+                _ => 0,
+            };
+            return Ok(Frame {
+                generation: generation
+                    .wrapping_add(shared.display_generation.load(Ordering::SeqCst)),
+                width: dma.width,
+                height: dma.height,
+                stride: dma.stride,
+                drm_fourcc: dma.fourcc,
+                modifier: dma.modifier,
+                timestamp_ns: crate::chipset::host_monotonic_ns(),
+                damage: vec![Rect {
+                    x: 0,
+                    y: 0,
+                    width: dma.width,
+                    height: dma.height,
+                }],
+                pixels: Pixels::Dmabuf {
+                    fd: dma.fd,
+                    acquire: dma.acquire,
+                },
+            });
+        }
         let dirty = shared.vga_framebuffer_dirty();
         let (scanout_generation, frame) = {
             if dirty {
@@ -139,23 +196,29 @@ impl FrameSource for Source {
             drm_fourcc: vmlab_hv_display::protocol::XRGB8888,
             modifier: 0,
             timestamp_ns: crate::chipset::host_monotonic_ns(),
-            damage: if frame.dirty {
-                vec![Rect {
-                    x: 0,
-                    y: 0,
-                    width: frame.mode.width,
-                    height: frame.mode.height,
-                }]
-            } else {
-                vec![]
-            },
+            damage: frame
+                .damage
+                .into_iter()
+                .map(|r| Rect {
+                    x: r.x,
+                    y: r.y,
+                    width: r.width,
+                    height: r.height,
+                })
+                .collect(),
             pixels: Pixels::Shm(Arc::new(frame.pixels)),
         })
     }
     fn readback(&self, frame: &Frame) -> io::Result<Vec<u8>> {
         match &frame.pixels {
             Pixels::Shm(bytes) => Ok(bytes.as_ref().clone()),
-            _ => Err(io::Error::other("VGA source only exports shm")),
+            Pixels::Dmabuf { fd, .. } => self
+                .readbacks
+                .lock()
+                .iter()
+                .find(|entry| entry.fd.ptr_eq(&Arc::downgrade(fd)))
+                .map(|entry| entry.pixels.as_ref().clone())
+                .ok_or_else(|| io::Error::other("GPU readback no longer available")),
         }
     }
 }
@@ -259,6 +322,7 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
             Arc::new(Source {
                 shared: Arc::downgrade(shared),
                 generation: Mutex::new(((0, 0), 0)),
+                readbacks: Mutex::new(Vec::new()),
             }),
             Arc::new(Input {
                 shared: Arc::downgrade(shared),

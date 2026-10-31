@@ -188,6 +188,8 @@ fn display_socket_paths_are_optional_and_pinned() {
     wire(
         &Display {
             device: DisplayDevice::VirtioVga,
+            gpu: None,
+            render_node: None,
             pci: PciAddress {
                 bus: 0,
                 device: 4,
@@ -204,6 +206,26 @@ fn display_socket_paths_are_optional_and_pinned() {
     )
     .unwrap();
     assert!(old.socket.is_none() && old.vnc_socket.is_none());
+}
+
+#[test]
+fn accelerated_display_wire_is_explicit_and_backward_compatible() {
+    use vmlab_hv_proto::machine::{Display, GpuMode};
+    for mode in ["virgl", "venus"] {
+        let json = format!(
+            r#"{{"device":"virtio-vga","gpu":"{mode}","render_node":"/dev/dri/renderD130","pci":{{"bus":0,"device":4,"function":0}},"rom":null}}"#
+        );
+        let display: Display = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            display.gpu,
+            Some(if mode == "virgl" {
+                GpuMode::Virgl
+            } else {
+                GpuMode::Venus
+            })
+        );
+        wire(&display, &json);
+    }
 }
 
 #[test]
@@ -273,6 +295,8 @@ fn q35_devices_and_policy_wire_contract() {
     wire(
         &Display {
             device: DisplayDevice::StdVga,
+            gpu: None,
+            render_node: None,
             pci: PciAddress {
                 bus: 0,
                 device: 4,

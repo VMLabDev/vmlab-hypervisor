@@ -1,0 +1,47 @@
+--- a/lib/rts.c
++++ b/lib/rts.c
+@@ -382,7 +382,7 @@
+     return UNIT;
+ }
+ 
+-void emulator_read_mem(lbits *data,
++__attribute__((weak)) void emulator_read_mem(lbits *data,
+                        const uint64_t addr_size,
+                        const sbits addr,
+                        const mpz_t n)
+@@ -390,7 +390,7 @@
+   platform_read_mem(data, 0, addr_size, addr, n);
+ }
+ 
+-void emulator_read_mem_ifetch(lbits *data,
++__attribute__((weak)) void emulator_read_mem_ifetch(lbits *data,
+                               const uint64_t addr_size,
+                               const sbits addr,
+                               const mpz_t n)
+@@ -398,7 +398,7 @@
+   platform_read_mem(data, 0, addr_size, addr, n);
+ }
+ 
+-void emulator_read_mem_exclusive(lbits *data,
++__attribute__((weak)) void emulator_read_mem_exclusive(lbits *data,
+                                  const uint64_t addr_size,
+                                  const sbits addr,
+                                  const mpz_t n)
+@@ -406,7 +406,7 @@
+   platform_read_mem(data, 0, addr_size, addr, n);
+ }
+ 
+-bool emulator_write_mem(const uint64_t addr_size,
++__attribute__((weak)) bool emulator_write_mem(const uint64_t addr_size,
+                         const sbits addr,
+                         const mpz_t n,
+                         const lbits data)
+@@ -414,7 +414,7 @@
+   return platform_write_mem(0, addr_size, addr, n, data);
+ }
+ 
+-bool emulator_write_mem_exclusive(const uint64_t addr_size,
++__attribute__((weak)) bool emulator_write_mem_exclusive(const uint64_t addr_size,
+                                   const sbits addr,
+                                   const mpz_t n,
+                                   const lbits data)
