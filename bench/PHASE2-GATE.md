@@ -3,7 +3,92 @@
 **Verdict: NOT passed. Eight of ten bars meet D28; G1 and G3 fail.**
 The VM default must remain unchanged.
 
-## Final full run
+## Round 2 diagnostics
+
+The initial round-2 CI run failed waiting 600 seconds for a shared VM slot
+in Windows Server TPM acceptance. The VMM never launched for that test.
+The swtpm helper's watchdog also expired during the wait. Ubuntu snapshot
+and in-process reset acceptance, and Windows 10 snapshot and reset
+acceptance, passed earlier in that run. Full CI must be rerun on the final
+code; the failed run stopped before the remaining test crates.
+
+The round-2 changes have not had a final quiet-host gate run. The full-run
+table below remains the round-1 result. No diagnostic appends benchmark
+history or changes a D28 bar. Raw timings, samples, and load averages are in
+`bench/profiles/phase2-round2-20261031.json`.
+
+The Ubuntu 26.04.3 template explicitly selects SeaBIOS. File observations
+at 2 ms intervals give this process-spawn timeline. Process exec was
+observed after 20-26 ms, and both backends acknowledged resume after
+about 0.12 seconds.
+
+| Diagnostic | First kernel message (s) | Agent ready (s) |
+|---|---|---|
+| QEMU baseline | 1.60 | 6.69 |
+| vmlab-hv baseline | 6.40 | 12.31 |
+| vmlab-hv with the iPXE POST delay removed | 2.51 | 8.19 |
+
+The installed firmware emits no debugcon output. A separate SeaBIOS
+rel-1.17.0 build with DEBUG_LEVEL=8 and DEBUG_IO enabled, used identically
+on both backends, isolates a 3.92-second pause in the legacy iPXE POST
+handler. Its default ROM_BANNER_TIMEOUT is four seconds. The firmware fix
+sets that POST timeout to zero, while retaining the network-boot shell
+timeout and EFI_DOWNGRADE_UX for OVMF's native network-boot entries.
+It does not remove the NIC ROM or skip device initialization.
+
+Restricting PCI quiescence did not improve agent readiness in its isolated
+diagnostic, so that candidate was removed. Existing PAM, SMM, framebuffer,
+and snapshot synchronization remains in place. A thin-LTO probe also
+showed no material gain and did not change the release profile.
+
+The block-read diagnostics moved from a 9583.51 MiB/s median to
+13998.15 MiB/s before the final descriptor-table cache. Coalescing alone
+reached about 10 GiB/s. Cached guest-region lookup reached about 11.6 GiB/s.
+The next gain came from reading file extents directly into validated
+guest buffers, with bounded descriptor walking and fixed-size preadv
+batches. These are shared-host samples, not a G3 pass verdict.
+
+The first 8 GiB contains 5.895 GiB of zero extents. Filling those validated
+guest spans in place raises the last diagnostic read median to
+14443.48 MiB/s. A separate 4 GiB guest-memory zero-fill probe measures
+18052.31 MiB/s through the buffered target and 47731.18 MiB/s in place,
+with every byte verified. Its test is normally ignored and was run
+explicitly as `zero_fill_throughput` in the devices crate's release tests.
+
+An IRQ-source cache avoids taking the shared hub lock for unchanged
+levels. Aliases share the cache, and transitions still perform serialized
+wired-OR delivery before publishing the cached level. Its regression
+fails before the change and passes afterward. The source's sampled share
+falls from 6.08% to 1.26%; differing host loads prevent an isolated
+throughput claim.
+
+The last diagnostic boot takes 12.23 seconds at a starting one-minute
+host load of 5.16. All samples are retained. Neither G1 nor G3 has a new
+gate verdict. The final comparison must rerun both backends on the quiet
+host, rather than compare these development samples with round 1.
+
+The disk seam adds `ReadTarget` and the default `DiskImage::read_into` method.
+Raw images, qcow2, and `SharedDisk` implement or forward the direct path.
+Buffered callers remain unchanged. S2 checks compare both read paths
+across backing, compressed, zero, unaligned, and snapshot reads. The
+normally ignored 1 GiB S2 test also passes. Guest writes and flush handling
+are unchanged. Full CI and the quiet-host gate are still pending.
+
+Final-code formatting, workspace clippy with `-D warnings`, all 24 active
+block tests, and all 67 benchmark tests pass. The zero-fill diagnostic
+passes when explicitly enabled. The benchmark tests still emit socket
+and file ResourceWarnings from unchanged test code. ELF sampler
+self-tests pass. No scoped `todo!()` or `unimplemented!()` remains.
+
+The benchmark's process-count check now includes `vmlab-hv-test-*`, the
+executables the Rust harness uses, matching its VM admission check. A
+regression reproduces the previous omission while retaining the Android
+emulator exclusion. Development diagnostics also held a shared test-slot
+lock, checked host capacity, and launched every VM in the 24 GiB scope
+with swap disabled. No host PCI or USB device was claimed. No merge,
+push, or default change was performed.
+
+## Round 1 full run
 
 These are medians of three repeats per configuration on 2026-10-31, from
 `bench/history/x86_64.jsonl`. Both backends ran the full Ubuntu suite,

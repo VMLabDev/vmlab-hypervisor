@@ -1,0 +1,486 @@
+{
+  "kind": "diagnostics, not final D28 gate results",
+  "baseline_commit": "8bcbf1b",
+  "scope": {
+    "memory_max": "24G",
+    "memory_swap_max": 0,
+    "vm_limit": 2,
+    "pin": "16-23",
+    "quiet_host": false
+  },
+  "guest": "ubuntu-26.04",
+  "version": "26.04.3",
+  "firmware": "SeaBIOS",
+  "runs": {
+    "base-qemu": {
+      "backend": "qemu",
+      "loadavg_start": [
+        2.8,
+        2.97,
+        2.74
+      ],
+      "boot_seconds": 6.692976204001752,
+      "seqread": [
+        17443.3,
+        17424.37,
+        19606.34
+      ],
+      "loadavg_end": [
+        2.83,
+        2.97,
+        2.75
+      ],
+      "timeline_seconds": {
+        "spawn": 0.000291,
+        "exec_observed": 0.025701,
+        "qmp.sock": 0.033656,
+        "agent.sock": 0.033668,
+        "resume_ack": 0.11888,
+        "first_kernel_message": 1.601145,
+        "agent_ready": 6.692967
+      },
+      "sequential_read_median_mib_s": 17443.3,
+      "stage": "Unchanged QEMU baseline"
+    },
+    "base-hv": {
+      "backend": "vmlab-hv",
+      "loadavg_start": [
+        2.52,
+        2.89,
+        2.72
+      ],
+      "boot_seconds": 12.306162501998188,
+      "seqread": [
+        8358.03,
+        10164.2,
+        9583.51,
+        9291.83,
+        9647.78,
+        9870.6,
+        9390.54,
+        9390.01,
+        9581.39,
+        9120.87,
+        9723.17,
+        10090.48,
+        9880.15
+      ],
+      "loadavg_end": [
+        2.98,
+        2.97,
+        2.75
+      ],
+      "timeline_seconds": {
+        "spawn": 0.000225,
+        "exec_observed": 0.019743,
+        "control.sock": 0.098417,
+        "agent.sock": 0.098434,
+        "resume_ack": 0.11834,
+        "first_kernel_message": 6.400865,
+        "agent_ready": 12.306147
+      },
+      "sequential_read_median_mib_s": 9583.51,
+      "stage": "Unchanged 8bcbf1b VMM and original iPXE ROM"
+    },
+    "pci-hv": {
+      "backend": "vmlab-hv",
+      "loadavg_start": [
+        2.75,
+        3.08,
+        2.88
+      ],
+      "boot_seconds": 12.331485274000443,
+      "seqread": [
+        10862.11,
+        9477.95,
+        9702.71
+      ],
+      "loadavg_end": [
+        2.66,
+        3.04,
+        2.87
+      ],
+      "timeline_seconds": {
+        "spawn": 0.000268,
+        "exec_observed": 0.027284,
+        "control.sock": 0.093074,
+        "agent.sock": 0.09309,
+        "resume_ack": 0.123246,
+        "first_kernel_message": 5.903739,
+        "agent_ready": 12.331476
+      },
+      "sequential_read_median_mib_s": 9702.71,
+      "stage": "Candidate narrowing of PCI mapping quiescence; subsequently removed"
+    },
+    "read-hv": {
+      "backend": "vmlab-hv",
+      "loadavg_start": [
+        2.78,
+        3.04,
+        2.87
+      ],
+      "boot_seconds": 12.249694967998948,
+      "seqread": [
+        10959.78,
+        10150.3,
+        10482.92,
+        10442.95,
+        10440.35,
+        10442.63,
+        10467.98,
+        10394.07,
+        9843.52,
+        9826.25,
+        9847.57,
+        9881.39,
+        9905.58,
+        10084.65
+      ],
+      "loadavg_end": [
+        2.75,
+        3,
+        2.87
+      ],
+      "timeline_seconds": {
+        "spawn": 0.00023,
+        "exec_observed": 0.031639,
+        "agent.sock": 0.124583,
+        "control.sock": 0.129786,
+        "resume_ack": 0.215512,
+        "first_kernel_message": 6.014671,
+        "agent_ready": 12.249686
+      },
+      "sequential_read_median_mib_s": 10272.185,
+      "stage": "Single descriptor walk and coalesced writable ranges"
+    },
+    "direct-hv": {
+      "backend": "vmlab-hv",
+      "loadavg_start": [
+        3.88,
+        3.2,
+        2.95
+      ],
+      "boot_seconds": 12.143161271000281,
+      "seqread": [
+        10659.23,
+        11068.27,
+        11035.78,
+        11792.26,
+        10999.41,
+        11003.31,
+        11125.7,
+        11125.98,
+        11111.13,
+        11138.46,
+        11084.4,
+        11128.47,
+        11400.93,
+        11132.02,
+        11107.51
+      ],
+      "loadavg_end": [
+        3.58,
+        3.18,
+        2.95
+      ],
+      "timeline_seconds": {
+        "spawn": 0.000216,
+        "exec_observed": 0.023151,
+        "control.sock": 0.082576,
+        "agent.sock": 0.082593,
+        "resume_ack": 0.109881,
+        "first_kernel_message": 5.871285,
+        "agent_ready": 12.143152
+      },
+      "sequential_read_median_mib_s": 11111.13,
+      "stage": "Bounded walker with direct guest-region access"
+    },
+    "cached-hv": {
+      "backend": "vmlab-hv",
+      "loadavg_start": [
+        2.87,
+        3.07,
+        2.93
+      ],
+      "boot_seconds": 12.199881902000925,
+      "seqread": [
+        11609.73,
+        11514.97,
+        11486.55,
+        11231.06,
+        11563.86,
+        11726.23,
+        11602.12,
+        11590.56,
+        11816.6,
+        11656.12,
+        11596.86,
+        11587.28,
+        11778.61,
+        11538.29,
+        11642.22,
+        11687.5
+      ],
+      "loadavg_end": [
+        2.8,
+        3.03,
+        2.93
+      ],
+      "timeline_seconds": {
+        "spawn": 0.000186,
+        "exec_observed": 0.02124,
+        "control.sock": 0.062169,
+        "agent.sock": 0.062201,
+        "resume_ack": 0.111848,
+        "first_kernel_message": 5.917267,
+        "agent_ready": 12.19987
+      },
+      "sequential_read_median_mib_s": 11599.490000000002,
+      "stage": "Request-scoped region cache"
+    },
+    "rom-hv": {
+      "backend": "vmlab-hv",
+      "loadavg_start": [
+        3.06,
+        3.17,
+        3
+      ],
+      "boot_seconds": 8.19075531999988,
+      "seqread": [],
+      "loadavg_end": [
+        2.98,
+        3.15,
+        3
+      ],
+      "timeline_seconds": {
+        "spawn": 0.000229,
+        "exec_observed": 0.019733,
+        "agent.sock": 0.098576,
+        "control.sock": 0.103431,
+        "resume_ack": 0.110375,
+        "first_kernel_message": 2.51094,
+        "agent_ready": 8.190744
+      },
+      "sequential_read_median_mib_s": null,
+      "stage": "Unchanged VMM with legacy iPXE POST delay disabled"
+    },
+    "into-hv": {
+      "backend": "vmlab-hv",
+      "loadavg_start": [
+        2.79,
+        3.1,
+        3.16
+      ],
+      "boot_seconds": 8.30958838800143,
+      "seqread": [
+        13865.85,
+        13998.15,
+        14065.6,
+        14052.93,
+        14016.81,
+        13957.87,
+        14906.96,
+        13856.52,
+        14551.35,
+        13879.99,
+        14459.42,
+        13895.16,
+        14594.2,
+        13862.45,
+        13745.8,
+        14651.46,
+        13857.38,
+        14545.33,
+        13964.65
+      ],
+      "loadavg_end": [
+        2.8,
+        3.08,
+        3.16
+      ],
+      "timeline_seconds": {
+        "spawn": 0.000242,
+        "exec_observed": 0.024197,
+        "control.sock": 0.103504,
+        "agent.sock": 0.10352,
+        "resume_ack": 0.111886,
+        "first_kernel_message": 2.502249,
+        "agent_ready": 8.30958
+      },
+      "sequential_read_median_mib_s": 13998.15,
+      "stage": "Direct file reads through ReadTarget, buffered zero filling, POST delay disabled"
+    },
+    "thin-hv": {
+      "backend": "vmlab-hv",
+      "loadavg_start": [
+        2.25,
+        2.86,
+        3.08
+      ],
+      "boot_seconds": 8.126037281996105,
+      "seqread": [
+        13742.82,
+        13747.85,
+        14082.33,
+        14954.69,
+        14231.46,
+        14130.52,
+        14916.54,
+        14175.36,
+        14916.16,
+        14183.1,
+        14011.37,
+        14775.67,
+        14003.18,
+        13945.92,
+        14347.77,
+        14144.33,
+        14159.61,
+        14283.37,
+        14094.78,
+        14113.33
+      ],
+      "loadavg_end": [
+        2.3,
+        2.84,
+        3.06
+      ],
+      "timeline_seconds": {
+        "spawn": 0.000226,
+        "exec_observed": 0.019542,
+        "control.sock": 0.104499,
+        "agent.sock": 0.104517,
+        "resume_ack": 0.113926,
+        "first_kernel_message": 2.520056,
+        "agent_ready": 8.126026
+      },
+      "sequential_read_median_mib_s": 14151.970000000001,
+      "stage": "Table-slice cache and thin LTO with one codegen unit; release-profile probe rejected"
+    },
+    "irq-hv": {
+      "backend": "vmlab-hv",
+      "loadavg_start": [
+        4.93,
+        4.21,
+        3.62
+      ],
+      "boot_seconds": 8.219196318998002,
+      "seqread": [
+        13075.82,
+        13814.83,
+        13460.22,
+        12839.8,
+        13068.62,
+        12878.15,
+        13865.94,
+        13869.4,
+        13944.42,
+        13523.62,
+        13933.16,
+        13743.14,
+        13352.24,
+        12024.9,
+        12722.47,
+        13245.85,
+        13411.28,
+        13335.37
+      ],
+      "loadavg_end": [
+        4.65,
+        4.19,
+        3.63
+      ],
+      "timeline_seconds": {
+        "spawn": 0.000241,
+        "exec_observed": 0.026881,
+        "control.sock": 0.103927,
+        "agent.sock": 0.103948,
+        "resume_ack": 0.121079,
+        "first_kernel_message": 2.587013,
+        "agent_ready": 8.219187
+      },
+      "sequential_read_median_mib_s": 13381.76,
+      "stage": "Table-slice and IRQ source caches, direct file reads, buffered zero filling"
+    },
+    "zero2-hv": {
+      "backend": "vmlab-hv",
+      "loadavg_start": [
+        5.16,
+        4.64,
+        4.06
+      ],
+      "boot_seconds": 12.232817928001168,
+      "seqread": [
+        13752.47,
+        14431,
+        14555.2,
+        14390.13,
+        14451.06,
+        14419.41,
+        14185.94,
+        14333.93,
+        14098.91,
+        15029.51,
+        14508.28,
+        14408.94,
+        14577.94,
+        14290.7,
+        14864.41,
+        14435.9,
+        14484.5,
+        14486.99,
+        14997.02,
+        14451.92
+      ],
+      "loadavg_end": [
+        5.54,
+        4.79,
+        4.12
+      ],
+      "timeline_seconds": {
+        "spawn": 0.00021,
+        "exec_observed": 0.036528,
+        "control.sock": 0.1275,
+        "agent.sock": 0.127523,
+        "resume_ack": 0.223726,
+        "first_kernel_message": 2.908964,
+        "agent_ready": 12.232808
+      },
+      "sequential_read_median_mib_s": 14443.48,
+      "stage": "IRQ and table-slice caches, direct file reads and direct zero filling; default release profile"
+    }
+  },
+  "debug_firmware": {
+    "source": "https://github.com/coreboot/seabios",
+    "tag": "rel-1.17.0",
+    "config": {
+      "CONFIG_QEMU": true,
+      "CONFIG_ROM_SIZE": 256,
+      "CONFIG_DEBUG_LEVEL": 8,
+      "CONFIG_DEBUG_IO": true
+    },
+    "sampling_interval_seconds": 0.002,
+    "qemu_disk_boot": 0.653604,
+    "hv_disk_boot": 4.695751,
+    "hv_ipxe_post_gap_start": 0.68936,
+    "hv_ipxe_post_gap_end": 4.612065,
+    "installed_firmware_debug_output": false
+  },
+  "zero_extent_gib_in_first_8_gib": 5.89520263671875,
+  "zero_microbenchmark": {
+    "guest_memory_mib": 256,
+    "repeats": 16,
+    "buffered_mib_s": 18052.31,
+    "direct_mib_s": 47731.18,
+    "buffered_seconds": 0.226896,
+    "direct_seconds": 0.085814,
+    "verified_all_bytes": true
+  },
+  "verification": {
+    "ci": "Initial full run failed waiting 600 seconds for a test VM slot in windows_server_2022_ovmf_tpm_agent, before VM launch; final full CI rerun pending",
+    "active_s2_tests_passed": 23,
+    "explicit_large_s2_passed": true,
+    "block_tests_passed": 24,
+    "benchmark_tests_passed": 67
+  }
+}
