@@ -4,9 +4,9 @@
 
 Three-repeat pinned medians reach 1,594.32 MIPS on the scalar loop and
 51.06 MIPS on the longer CoreMark mix, meeting the package's 50 MIPS target.
-Workspace CI is still pending. These warm measurements do not establish that
-Linux can boot in minutes. The pruned-interpreter checkpoint below predates
-whole-block specialization.
+Workspace CI passes. These warm measurements do not establish that Linux can
+boot in minutes. The pruned-interpreter checkpoint below predates whole-block
+specialization.
 
 All results below use release builds on helios. Model initialization is
 outside the timed region; fetch, protection checks, translation, decode,
@@ -628,3 +628,20 @@ not representative of arbitrary guest code. CoreMark retains its CRC checks.
 has one three-repeat history entry, so the latter has no prior entry against
 which to detect a regression. A separate JSON-parsing check asserts three
 repeats, a clean source commit, and at least 50 median MIPS for both workloads.
+
+### Completed workspace gate
+
+`systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 --
+env RUST_TEST_THREADS=1 just ci::check` exits zero after the main merge and
+the performance checkpoint. Format, all-target clippy with warnings denied,
+and workspace tests pass (`target/tcg/final-ci.log`). The standard suite
+explicitly ignores the slow 1 GiB disk throughput baseline and live PipeWire
+loopback test. All nine specialization regressions pass in this gate.
+
+The shared test launcher now checks actual host project-VM processes before
+each managed launch, excluding the owner's Android emulator. This separate
+safety fix follows an observed three-VM overlap: file permits alone did not
+count benchmark VMs. Its fake-process regression covers counts, exclusions,
+and capacity timeouts. CI runs serially and waits when two other project VMs
+are present. Owned validation jobs and guest processes are stopped at completion.
+Linux boot and JIT execution remain outside this package's validation.
