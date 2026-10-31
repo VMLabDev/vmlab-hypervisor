@@ -1,11 +1,163 @@
 # Windows timer and snapshot investigation
 
-This report records the 2026-10-31 follow-up to `wintimer-handoff.md`.
-Windows remains unresolved. The final full CI gate fails its Windows snapshot
-case, and the required 20-reset and 20-load proof is unmet.
+This report records the 2026-10-31 follow-ups to `wintimer-handoff.md`.
+Round 2 identifies lost user CET state as the cause of the reproduced Windows
+snapshot bugcheck `0x50`. Windows passes 20 consecutive loads and 20 consecutive
+resets. The final `just ci::check` passes 693 Rust tests with zero failures
+and two existing ignored benchmarks.
 The investigation uses VMM state, KVM tracing, guest agent commands, screenshots,
 and Windows event logs. No Windows binary disassembly, symbol analysis, or
-memory-dump analysis was performed. No QEMU source was read.
+memory-dump analysis was performed. No QEMU source files were opened or used.
+
+## Round 2: user shadow-stack state lost on load
+
+F5: Snapshot save used an architectural MSR whitelist. It omitted
+`IA32_U_CET` at `0x6a0` and `IA32_PL3_SSP` at `0x6a7`. Windows changes these
+registers during thread switches. Load restored the saved registers and RAM,
+but left CET control and the user shadow-stack pointer from the later thread.
+
+The stopped-state differential records a saved vCPU 1 with `U_CET=1` and
+`PL3_SSP=0x6aea5fef28`. Immediately after load, both read zero. Other vCPUs
+also retain a later thread's CET values. Main-RAM hashes match the saved RAM.
+The ordinary registers, special registers, FPU, XSAVE, XCRs, debug registers,
+CPUID, LAPIC, vCPU events, MP state, and nested-state header match too.
+The remaining non-clock difference is `IA32_SPEC_CTRL`, also absent from
+the whitelist.
+
+That unchanged binary fails on load 9. Windows event 1001 reports
+`0x50 (0xfffffffffffffff8, 0x44, 0xfffff8002848086f, 0xe)` and the strict
+acceptance check rejects its automatic reboot. AMD's page-fault error-code
+definition assigns bit 6 to shadow-stack access and bit 2 to user mode.
+A shadow-stack push with a zero pointer accesses `-8`. This explains the
+otherwise unusual fault address and error bits without inspecting Windows code
+or its memory dump. The register mismatch is directly observed. Its connection
+to the Windows fault follows the architectural error-code definition.
+
+The processor reference is AMD64 Architecture Programmer's Manual, Volume 2,
+revision 3.44, section 8.4.2:
+https://docs.amd.com/api/khub/documents/sD1_QL~h4Afq2_tvzxqqSQ/content
+
+Save now enumerates `KVM_GET_MSR_INDEX_LIST` and adds the expanded Hyper-V
+SynIC and STIMER ranges. It probes entries individually, so one MSR unavailable
+under a vCPU's CPUID policy cannot truncate the rest of the list. Required
+Hyper-V entries still fail explicitly if unreadable. Load restores every saved
+entry and checks the complete write count. The LAPIC still precedes the
+TSC-deadline MSR. XCRs and debug registers now have optional snapshot sections.
+Older snapshots remain readable but cannot recover CPU state they never saved.
+
+`control_snapshot_restores_cet_user_shadow_stack` fails against the original
+snapshot code with `(U_CET, PL3_SSP) = (0, 0)` instead of `(1, 0xa000)`.
+It passes with the fix, including guest `RDMSR` observations after resume and
+both enabled and disabled CET contexts. The separate extended-CPU regression
+first fails for DR0, XCR0, IA32_PAT, and IA32_SYSENTER_CS, then passes.
+
+The baseline evidence is retained in `.scratch/round2-windows-audit.log`,
+`.scratch/round2-audit/`, and `.scratch/round2-diff-before.log`.
+The CET reproduction is `.scratch/round2-cet-before.log`.
+The fixed 20-load soak is `.scratch/round2-snapshot20.log`.
+Its audit is `.scratch/round2-audit-fixed/`, with comparison results in
+`.scratch/round2-diff-after.log`. All 20 loads have zero non-clock differences.
+All tests use one VM at a time under the 24 GiB systemd cap with swap disabled.
+
+An earlier uninstrumented run of the unchanged binary passes 20 loads.
+That run is `.scratch/round2-baseline.log`. A passing soak alone did not
+exclude the state-loss defect.
+
+### Snapshot-state coverage
+
+`VMLAB_HV_SNAPSHOT_AUDIT` names an existing directory for stopped-state JSON
+records. Save records the source state. Load records RAM before kernel restore
+and the complete state after device restore, before any vCPU resumes.
+Audit errors are logged without interrupting snapshot save or load.
+`python scripts/snapshot-audit.py <directory>` compares each load with its save.
+Six Python tests check the comparator's clock exclusions.
+
+| State | Capture and restore | Audit result |
+| --- | --- | --- |
+| General and special registers | GET and SET_REGS, GET and SET_SREGS | Byte-identical |
+| FPU and XSAVE | GET and SET_FPU, GET and SET_XSAVE | Byte-identical; host XSAVE2 size is 4096 bytes |
+| XCRs and debug registers | New optional sections | Byte-identical; independently reproduced loss before the fix |
+| Architectural and Hyper-V MSRs | KVM index list plus expanded TLFS ranges | CET and SPEC_CTRL differ before the fix; only clock MSRs differ after it |
+| LAPIC and vCPU events | Existing sections, events last | Byte-identical, including pending exceptions, interrupts, and NMIs |
+| PIC and IOAPIC | Existing GET and SET_IRQCHIP sections | Byte-identical |
+| PIT and KVM clock | Existing GET and SET_PIT2 and CLOCK sections | Only documented host timestamps differ |
+| TSC frequency and offsets | Existing exact-offset restore | Frequency and inter-vCPU offset differences preserved |
+| CPUID | Fixed at construction; unchanged machine digest | Byte-identical without SET_CPUID after KVM_RUN |
+| Nested state | Nested VMX and SVM masked by the Windows CPU policy | Inactive 128-byte header remains byte-identical, including GIF |
+| SynIC, hypercall, reference-TSC, and VP-assist pages | Guest RAM plus their MSRs | RAM hashes and non-clock MSRs match before vCPU resume |
+| Hyper-V crash and invariant controls | Included in the full KVM MSR list | Byte-identical |
+
+The comparator excludes three running counters: IA32_TSC, Hyper-V VP_RUNTIME,
+and TIME_REF_COUNT. It also excludes KVM clock timestamps, the common host-TSC
+translation, PIT `count_load_time`, and the LAPIC timer's live current count.
+It still checks TSC frequency, relative vCPU offsets, timer configuration,
+pending interrupts, and all remaining bytes. The KVM API contract is at
+https://docs.kernel.org/virt/kvm/api.html.
+
+F6: RAM capture walked `MemLayout::regions`, which omits mappings firmware
+adds later. PAM shadow RAM already had a device snapshot, but non-secure
+SMRAM did not. Save now walks every region in `GuestRam.mem`. Load validates
+the complete stream before memory writes and clears only its recorded regions.
+The legacy boot-layout region list remains accepted for old snapshots.
+`control_snapshot_restores_ram_outside_the_boot_layout` fails before this
+change with `after!` instead of `before`, then passes through the control socket.
+Evidence is `.scratch/round2-memory-before.log` and
+`.scratch/round2-memory-after.log`. This is a separate omission, not the
+identified cause of the CET fault.
+
+VGA framebuffer memory remains owned by the VGA device snapshot. Writable
+pflash VARS remain in the pflash section. Immutable firmware ROM mappings do
+not need rollback. Secure SMRAM has its own `smm-ram` section, isolated from
+the DMA view. No dirty bitmap selects snapshot RAM pages. Every recorded page
+is captured under the existing device DMA barrier. Assigned VFIO and host USB
+devices, and accelerated GPUs, remain refused for online snapshots.
+
+The temporary periodic timer sampler and verbose Hyper-V exit tracing have
+been removed. The opt-in exit-state dump, crash report, strict reboot check,
+and acceptance cycle controls remain. The older findings below describe the
+state of the investigation before F5 and F6.
+
+### Round 2 validation
+
+The required Windows soaks pass. The reset soak verifies 20 consecutive
+reboots, an agent command after each, and preserved process, control, and display
+connections. Its log is `.scratch/round2-reset20.log`. The retained VMM log
+contains 22 reset requests, including setup and firmware reset, and no guest
+crash reports. The snapshot soak verifies 20 consecutive loads, correct file
+rollback, and no automatic reboot. The strict F4 check is unchanged.
+
+The first full `just ci::check` passes 693 Rust tests with zero failures and
+two existing ignored benchmarks. Those benchmarks measure 1 GiB sequential
+disk throughput and live PipeWire loopback latency. The log is
+`.scratch/round2-ci.log`. This includes the Linux fsync-heavy restore test,
+container snapshots and network traffic, firmware, display, and TPM checks.
+
+The final diagnostic change also passes all three control-socket regressions
+with an invalid audit destination. Twelve audit-file errors are logged without
+interrupting save or load. The log is `.scratch/round2-audit-errors.log`.
+The full gate also passes on that final code, again with 693 tests passed,
+zero failures, and the same two ignored benchmarks. Its log is
+`.scratch/round2-ci-final.log`. Both full gates use `RUST_TEST_THREADS=1`,
+`VMLAB_HV_SNAPSHOT_CYCLES=20`, the release binary, a short disk-backed TMPDIR,
+and `systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0`.
+The final gate therefore repeats the 20-load Windows proof without audit overhead.
+
+The six Python audit-comparator tests pass separately with
+`python -m unittest discover -s scripts -p 'test_snapshot_audit.py'`.
+Real USB and VFIO checks were not run because no device was designated through
+`VMLAB_HV_TEST_USB_DEVICE` or `VMLAB_HV_TEST_VFIO_DEVICE`. No host device was
+claimed, reset, or rebound.
+
+Round 2 changes no control-protocol types or device traits.
+`snapshot::format::Reader` gains `Clone` for validation before RAM writes.
+The `xcrs` and `debugregs` sections are optional. New RAM streams include the
+firmware-added regions. Old streams remain accepted, but snapshots predating
+F5 cannot reconstruct omitted CET state. Take new Windows snapshots to use
+the fix.
+
+The historical `0x5c` failure was not reproduced or independently attributed
+to CET. No root tracing, Windows disassembly, symbol analysis, or memory-dump
+analysis was needed for the reproduced `0x50`.
 
 ## Reproduced defects and fixes
 
@@ -134,7 +286,7 @@ implement them; VirtioPci forwards them. New snapshots can contain the optional
 the `FRAME_FLAGS` capability. VGA snapshot version 2 preserves whether the guest
 has programmed a legacy scanout and accepts version-1 snapshots.
 
-## Validation limits
+## Round 1 validation limits
 
 The required Windows proof is not complete. The latest instrumented reset soak
 passed four resets before an agent-command timeout. The snapshot soak passed

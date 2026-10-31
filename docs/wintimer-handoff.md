@@ -2,17 +2,20 @@
 
 ## Follow-up status, 2026-10-31
 
-For Windows investigation or display work, read `wintimer-investigation.md`
-before using the historical findings below. It records reproduced snapshot
-defects, their S1 regressions, retained trace windows, and current validation.
-The owner selected the placeholder, now implemented with negotiated native
+Read `wintimer-investigation.md` for the current findings and validation.
+Round 2 identifies omitted user CET MSRs as the cause of the reproduced
+Windows snapshot bugcheck `0x50`. The fixed differential, 20-load soak,
+20-reset soak, and final `just ci::check` pass. The gate passes 693 Rust tests
+with zero failures and two existing ignored benchmarks.
+The owner-selected display placeholder is implemented with negotiated native
 frame flags and guest-paint checks that exclude host output.
 
 The time-base conclusion below does not cover rapid loads. An exact-TSC-offset
 regression subsequently reproduced rollback failure. Console DMA barriers and
 deferred Hyper-V HCALL completion also have independently failing regressions
-and fixes. Windows still reproduced `0x50` with an automatic reboot after those
-fixes. The historical `0x5c` root cause remains open. Snapshot validation now
+and fixes. Windows still reproduced `0x50` after those three fixes. The CET
+finding explains that later failure. The historical `0x5c` was not reproduced
+in round 2. Snapshot validation now
 rejects automatic guest reboots even if the next agent command succeeds.
 
 ## Previous session record
@@ -20,8 +23,9 @@ rejects automatic guest reboots even if the next agent command succeeds.
 Branch `wp/p2-wintimer`. Commits:
 
 - `18732e6` perf(vmm): sync OVMF VARS batches off the vCPU threads. Finished.
-- `95fb43c` wip(vmm): diagnostics and soak harness. Investigation aids only;
-  prune before merge.
+- The original diagnostics and soak commit is rewritten as a conventional
+  diagnostics commit in round 2. Temporary periodic sampling and verbose
+  Hyper-V exit tracing are removed. Exit dumps and soak controls remain.
 
 ## Part 2: OVMF first paint (finished, apart from one decision)
 
