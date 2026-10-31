@@ -1208,6 +1208,7 @@ dependencies = [
  "vm-superio",
  "vmlab-disk",
  "vmm-sys-util 0.15.0",
+ "zerocopy 0.8.63",
 ]
 
 [[package]]
@@ -1311,6 +1312,7 @@ dependencies = [
  "vmlab-agent-proto",
  "vmlab-cinit-proto",
  "vmlab-disk",
+ "vmlab-hv-devices",
  "vmlab-hv-proto",
 ]
 
