@@ -96,6 +96,16 @@ pub fn validate(desc: &MachineDescription) -> Result<(), String> {
             "virt memory_mib must be in 128..=14336, below the captured PCI MMIO64 window".into(),
         );
     }
+    if desc.cpu_model.is_some()
+        || desc.floppy.is_some()
+        || !desc.serial_log_port.is_com1()
+        || desc.ports.iter().any(|port| !port.transport.is_virtio())
+    {
+        return Err(
+            "RISC-V virt does not expose PC CPU models, floppy, selectable UART logs, or ISA serial ports"
+                .into(),
+        );
+    }
     if !desc.vfio.is_empty()
         || desc.audio.is_some()
         || desc.tpm.is_some()
@@ -172,6 +182,8 @@ pub fn validate(desc: &MachineDescription) -> Result<(), String> {
     for disk in &desc.disks {
         if disk.bus != DiskBus::Virtio
             || disk.port.is_some()
+            || disk.channel.is_some()
+            || disk.unit.is_some()
             || disk.path.as_ref().is_none_or(|p| !p.is_file())
         {
             return Err(format!(
@@ -182,6 +194,9 @@ pub fn validate(desc: &MachineDescription) -> Result<(), String> {
         address(disk.pci)?;
     }
     for nic in &desc.nics {
+        if !nic.model.is_virtio() {
+            return Err("RISC-V virt requires virtio network devices".into());
+        }
         address(nic.pci)?;
     }
     for share in &desc.shares {
@@ -602,6 +617,43 @@ fn placement(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virt_rejects_pc_only_protocol_fields() {
+        let image = tempfile::NamedTempFile::new().unwrap();
+        let baseline = serde_json::json!({
+            "name": "virt-validation", "arch": "riscv64", "machine": "virt", "accel": "tcg",
+            "vcpus": 1, "memory_mib": 128,
+            "boot": { "kind": "kernel", "kernel": image.path(), "cmdline": "" },
+            "disks": [], "nics": [], "ports": [], "serial_log": "serial.log"
+        });
+        assert!(validate(&serde_json::from_value(baseline.clone()).unwrap()).is_ok());
+        for (field, value) in [
+            ("cpu_model", serde_json::json!("pentium3")),
+            ("floppy", serde_json::json!(image.path())),
+            ("serial_log_port", serde_json::json!("com2")),
+            (
+                "ports",
+                serde_json::json!([{ "name": "agent", "socket": "agent.sock", "transport": "com1" }]),
+            ),
+            (
+                "nics",
+                serde_json::json!([{ "model": "e1000", "mac": "52:54:00:12:34:56", "attachment": { "kind": "stream", "socket": "net.sock" } }]),
+            ),
+            (
+                "disks",
+                serde_json::json!([{ "id": "disk", "path": image.path(), "format": "raw", "read_only": false, "channel": 0, "unit": 0 }]),
+            ),
+        ] {
+            let mut description = baseline.clone();
+            description[field] = value;
+            let description: MachineDescription = serde_json::from_value(description).unwrap();
+            assert!(
+                validate(&description).is_err(),
+                "accepted PC-only field {field}"
+            );
+        }
+    }
 
     #[test]
     fn reset_boot_images_preserve_unrelated_ram() {
