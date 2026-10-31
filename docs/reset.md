@@ -129,3 +129,45 @@ The reset implementation uses the KVM API and documented swtpm control protocol:
 https://docs.kernel.org/virt/kvm/api.html
 https://man.archlinux.org/man/swtpm_ioctls.3.en
 No QEMU source was read.
+
+### Follow-up with vmlab's recording configuration
+
+The recording configuration uses one vCPU, 512 MiB, a linked Alpine disk and
+`/usr/share/qemu/vgabios-virtio.bin`. On the same OVMF build, the earlier
+p2-wintimer measurements found:
+
+| Executable | VARS on host disk | With concurrent fdatasync load |
+| --- | --- | --- |
+| Before reset batching, `1b75edf` | All five exceeded 30 s | Not measured |
+| Reset batching, `e740fb1` | 0.573-0.598 s | 0.640-0.724 s |
+| Background sync, `18732e6` | 0.511-0.542 s | 0.552-0.598 s |
+
+`18732e6` moves the batched fdatasync off the vCPU threads. Reset, snapshot
+and shutdown still wait for durable VARS. The previous agent's measurements
+are recorded in `wintimer-handoff.md`.
+
+A new five-pair verification on 2026-10-31 measured 0.491-0.531 s for
+vmlab-hv and 1.083-1.744 s for QEMU firmware paint. Raw samples are in
+`wintimer-first-frame.csv`. VARS and temporary overlays were on the host disk.
+The Alpine image was version 3.23.10. Other guests were running on the host.
+
+All five QEMU runs were already non-black while paused. In that measurement,
+all five vmlab-hv runs were black while paused. QEMU's paused text, "Display output is not
+active.", is host output. The probe excludes it from firmware-paint timing.
+A recording check that accepts that text measures a different event from
+the first guest-painted frame.
+
+The owner subsequently selected a host placeholder for vmlab-hv too.
+The display server now publishes "Display output is not active." on a dark
+background before the first resume and whenever the guest has no active
+scanout. It returns after reset. Native clients that negotiate `frame_flags`
+receive `FrameFlags::PLACEHOLDER`; older clients and RFB clients see the image
+without that metadata. Guest-paint checks exclude flagged frames. A configured
+black guest scanout remains a guest frame.
+
+The updated `first-frame.py` uses the native flag to exclude vmlab-hv's
+placeholder, and the paused-image hash to exclude QEMU's placeholder. A paired
+verification measured 0.513 s for vmlab-hv's first non-black guest frame and
+1.091 s for QEMU. Both were already non-black while paused. The native wire
+layout and capability negotiation are specified in
+`../crates/vmlab-hv-display/PROTOCOL.md`.

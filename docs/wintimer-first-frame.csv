@@ -1,0 +1,11 @@
+backend,run,seconds,lit_while_paused
+qemu,1,1.083242,true
+vmlab-hv,1,0.523402,false
+qemu,2,1.100981,true
+vmlab-hv,2,0.530783,false
+qemu,3,1.743773,true
+vmlab-hv,3,0.496726,false
+qemu,4,1.727321,true
+vmlab-hv,4,0.517835,false
+qemu,5,1.085972,true
+vmlab-hv,5,0.491197,false

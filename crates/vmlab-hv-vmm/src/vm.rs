@@ -1567,6 +1567,7 @@ mod tests {
             fn frame(&self) -> std::io::Result<Frame> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(Frame {
+                    flags: Default::default(),
                     generation: 0,
                     width: 1,
                     height: 1,

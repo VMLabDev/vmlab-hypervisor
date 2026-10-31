@@ -15,7 +15,7 @@
 //! and https://www.qemu.org/docs/master/specs/standard-vga.html, a specification
 //! document. PCI identity follows docs/hwref/q35-seabios-linux-generic.
 
-mod font;
+pub mod font;
 #[cfg(test)]
 mod tests;
 pub mod virtio_vga;
@@ -162,6 +162,7 @@ pub struct StandardVga {
     latch: [u8; 4],
     status: u8,
     big_endian: bool,
+    scanout_programmed: bool,
     dirty: bool,
     cached_frame: Option<Frame>,
     render_vram: Vec<u8>,
@@ -198,6 +199,7 @@ impl StandardVga {
             latch: [0; 4],
             status: 0,
             big_endian: false,
+            scanout_programmed: false,
             dirty: true,
             cached_frame: None,
             render_vram: Vec::new(),
@@ -239,6 +241,15 @@ impl StandardVga {
 
     fn enabled(&self) -> bool {
         self.dispi[4] & 1 != 0
+    }
+
+    /// A guest-configured, unblanked VGA or VBE scanout. Pixel colour does
+    /// not determine activity: a configured black framebuffer is active.
+    pub fn scanout_active(&self) -> bool {
+        self.enabled()
+            || (self.scanout_programmed
+                && self.regs[SEQ + 1] & 0x20 == 0
+                && self.attr_index & 0x20 != 0)
     }
 
     fn dispi_read(&self, index: usize) -> u16 {
@@ -387,6 +398,9 @@ impl StandardVga {
             return;
         }
         self.dirty = true;
+        if matches!(port, 0x3b5 | 0x3d5) {
+            self.scanout_programmed = true;
+        }
         match port {
             0x1ce => self.dispi_index = value as u16,
             0x1cf | 0x1d0 => self.dispi_write(self.dispi_index as usize, value as u16),
@@ -507,6 +521,9 @@ impl StandardVga {
     }
 
     pub fn legacy_write(&mut self, offset: u64, data: &[u8]) {
+        if !self.enabled() {
+            self.scanout_programmed = true;
+        }
         for (i, value) in data.iter().copied().enumerate() {
             let Some(off) = offset.checked_add(i as u64).filter(|v| *v < 0x20000) else {
                 continue;
@@ -640,6 +657,9 @@ impl StandardVga {
 
     /// Direct guest mappings bypass BAR callbacks; notify scanout of their writes.
     pub fn mark_framebuffer_dirty(&mut self) {
+        if !self.enabled() {
+            self.scanout_programmed = true;
+        }
         self.dirty = true;
     }
 
@@ -966,7 +986,7 @@ impl Snapshot for StandardVga {
     }
 
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
-        let mut state = b"VGA\0\x01\0\0\0".to_vec();
+        let mut state = b"VGA\0\x02\0\0\0".to_vec();
         state.extend_from_slice(&self.config);
         state.extend_from_slice(&self.regs);
         for value in self.dispi {
@@ -986,7 +1006,7 @@ impl Snapshot for StandardVga {
             self.dac_component,
             self.dac_state,
             self.status,
-            self.big_endian as u8,
+            self.big_endian as u8 | ((self.scanout_programmed as u8) << 1),
         ]);
         state.extend_from_slice(&self.dispi_index.to_le_bytes());
         state.extend_from_slice(&self.latch);
@@ -1000,7 +1020,9 @@ impl Snapshot for StandardVga {
 
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
         let header = 8 + 256 + REG_SIZE + 32;
-        if state.len() != header + 20 + VRAM_SIZE || &state[..8] != b"VGA\0\x01\0\0\0" {
+        if state.len() != header + 20 + VRAM_SIZE
+            || !matches!(&state[..8], b"VGA\0\x01\0\0\0" | b"VGA\0\x02\0\0\0")
+        {
             return Err(DeviceError::State(
                 "invalid VGA snapshot version or length".into(),
             ));
@@ -1013,7 +1035,7 @@ impl Snapshot for StandardVga {
         }
         if scalar[4] > 1
             || scalar[10] > 2
-            || scalar[13] > 1
+            || scalar[13] > if state[4] == 1 { 1 } else { 3 }
             || dispi[1] > 4096
             || dispi[2] > 2160
             || dispi[6] > 4096
@@ -1040,7 +1062,8 @@ impl Snapshot for StandardVga {
         self.dac_component = scalar[10];
         self.dac_state = scalar[11];
         self.status = scalar[12];
-        self.big_endian = scalar[13] != 0;
+        self.big_endian = scalar[13] & 1 != 0;
+        self.scanout_programmed = state[4] == 1 || scalar[13] & 2 != 0;
         self.dispi_index = u16::from_le_bytes([scalar[14], scalar[15]]);
         self.latch.copy_from_slice(&scalar[16..20]);
         self.vram

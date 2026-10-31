@@ -94,6 +94,7 @@ fn q35_seabios_banner_through_control_socket() {
             .capabilities()
             .contains(&vmlab_hv_proto::control::Capability::Input)
     );
+    check_native_placeholder(dir.path());
     assert!(matches!(
         client.call(Command::Resume).unwrap(),
         Outcome::Ok { .. }
@@ -123,6 +124,14 @@ fn q35_seabios_banner_through_control_socket() {
         .wait_quiesced(Duration::from_secs(2))
         .unwrap();
     check_native_display_and_keyboard(&handle, dir.path());
+    handle.shared().request_reset();
+    loop {
+        if client.wait_event().unwrap() == Some(vmlab_hv_proto::control::Event::Reset) {
+            break;
+        }
+    }
+    assert_eq!(handle.status(), vmlab_hv_proto::control::RunState::Paused);
+    check_native_placeholder(dir.path());
     for (id, fd) in handle.shared().vcpus.lock().iter() {
         let fd = fd.lock();
         let regs = fd.get_regs().unwrap();
@@ -170,12 +179,68 @@ fn q35_seabios_banner_through_control_socket() {
     );
 }
 
+fn check_native_placeholder(directory: &Path) {
+    use std::os::unix::fs::FileExt;
+    use vmlab_hv_display::{Capabilities, Client, FrameFlags, Message};
+    let client = Client::connect(
+        directory.join("display.sock"),
+        Capabilities(Capabilities::FRAMES | Capabilities::FRAME_FLAGS),
+    )
+    .unwrap();
+    client
+        .stream()
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let configure = client.receive().unwrap();
+    let Message::SurfaceConfigure {
+        width,
+        height,
+        stride,
+        ..
+    } = configure.message
+    else {
+        panic!("expected placeholder surface")
+    };
+    assert_eq!((width, height), (640, 480));
+    let Message::FrameReady {
+        flags,
+        surface_id,
+        buffer,
+        seq,
+        ..
+    } = client.receive().unwrap().message
+    else {
+        panic!("expected placeholder frame")
+    };
+    assert!(flags.has(FrameFlags::PLACEHOLDER));
+    let mut pixels = vec![0; (stride * height) as usize];
+    std::fs::File::from(configure.fds[buffer as usize].try_clone().unwrap())
+        .read_exact_at(&mut pixels, 0)
+        .unwrap();
+    assert!(
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[..3] != [0; 3])
+    );
+    assert!(
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[..3] == [0xb0; 3]),
+        "placeholder text is absent"
+    );
+    client.release(surface_id, buffer, seq).unwrap();
+}
+
 fn check_native_display_and_keyboard(handle: &VmHandle, directory: &Path) {
     use std::os::unix::fs::FileExt;
     use vmlab_hv_display::{Capabilities, Client, Message};
     let display = Client::connect(
         directory.join("display.sock"),
-        Capabilities(Capabilities::FRAMES | Capabilities::INPUT),
+        Capabilities(Capabilities::FRAMES | Capabilities::INPUT | Capabilities::FRAME_FLAGS),
     )
     .unwrap();
     display
@@ -203,6 +268,7 @@ fn check_native_display_and_keyboard(handle: &VmHandle, directory: &Path) {
                 buffers = packet.fds.into_iter().map(std::fs::File::from).collect();
             }
             Message::FrameReady {
+                flags,
                 surface_id,
                 buffer,
                 seq,
@@ -213,7 +279,9 @@ fn check_native_display_and_keyboard(handle: &VmHandle, directory: &Path) {
                     .read_exact_at(&mut pixels, 0)
                     .unwrap();
                 display.release(surface_id, buffer, seq).unwrap();
-                if pixels.iter().any(|pixel| *pixel != 0) {
+                if !flags.has(vmlab_hv_display::FrameFlags::PLACEHOLDER)
+                    && pixels.iter().any(|pixel| *pixel != 0)
+                {
                     break;
                 }
             }

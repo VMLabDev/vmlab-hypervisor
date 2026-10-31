@@ -25,6 +25,28 @@ fn handshake(s: &mut UnixStream) {
     s.read_exact(&mut name).unwrap();
     assert_eq!(name, b"vmlab-hv");
 }
+
+#[test]
+fn placeholder_flag_keeps_rfb_pixels_and_active_black_frames() {
+    let (server, source, _) = server();
+    source.0.lock().unwrap().flags =
+        vmlab_hv_display::FrameFlags(vmlab_hv_display::FrameFlags::PLACEHOLDER);
+    server.publish().unwrap();
+    let (a, mut b) = socket();
+    let publisher = server.clone();
+    let worker = std::thread::spawn(move || publisher.serve_rfb(a));
+    handshake(&mut b);
+    request(&mut b, false);
+    assert_eq!(update(&mut b)[0].p, [1, 1, 1, 0].repeat(12));
+    let mut black = frame(0, 4, 3);
+    black.damage.clear();
+    *source.0.lock().unwrap() = black;
+    server.publish().unwrap();
+    request(&mut b, true);
+    assert_eq!(update(&mut b)[0].p, vec![0; 4 * 3 * 4]);
+    drop(b);
+    assert!(worker.join().unwrap().is_ok());
+}
 fn encodings(s: &mut UnixStream, e: &[i32]) {
     let mut b = vec![2, 0];
     b.extend((e.len() as u16).to_be_bytes());

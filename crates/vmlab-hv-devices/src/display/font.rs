@@ -2,7 +2,7 @@
 //! Each hexadecimal byte describes one five-pixel row, doubled vertically.
 //! Firmware font uploads replace these glyphs in VGA plane 2.
 
-pub(super) fn row(ch: u8, y: usize) -> u8 {
+pub fn row(ch: u8, y: usize) -> u8 {
     if !(1..15).contains(&y) {
         return 0;
     }

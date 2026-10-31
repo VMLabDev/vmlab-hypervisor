@@ -8,8 +8,11 @@ option ROM, as vmlab does. Each run owns and reaps one VM. QEMU is used only thr
 """
 
 import argparse
+import array
+import contextlib
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -68,6 +71,57 @@ def frame(stream):
     return nonblack, digest.digest(), width, height
 
 
+class NativeFrames:
+    def __init__(self, stream):
+        self.stream = stream
+        self.buffers = []
+        stream.sendall(struct.pack("<IHHII", 16, 1, 0, 1, 33))
+        kind, flags, payload, fds = self.packet()
+        assert (kind, flags, fds) == (1, 0, [])
+        version, capabilities = struct.unpack("<II", payload)
+        assert version == 1 and capabilities & 33 == 33
+
+    def close(self):
+        for fd in self.buffers:
+            os.close(fd)
+        self.buffers = []
+
+    def packet(self):
+        header, ancillary, flags, _ = self.stream.recvmsg(8, socket.CMSG_SPACE(16 * 4))
+        if not header:
+            raise EOFError("native display closed")
+        assert not flags & socket.MSG_CTRUNC
+        header += read(self.stream, 8 - len(header))
+        length, kind, frame_flags = struct.unpack("<IHH", header)
+        assert 8 <= length <= 16 * 1024 * 1024
+        fds = array.array("i")
+        for level, kind_of_control, data in ancillary:
+            assert (level, kind_of_control) == (socket.SOL_SOCKET, socket.SCM_RIGHTS)
+            fds.frombytes(data)
+        return kind, frame_flags, read(self.stream, length - 8), list(fds)
+
+    def frame(self):
+        while True:
+            kind, flags, payload, fds = self.packet()
+            if kind == 2:
+                _, self.width, self.height, _, self.stride, _, surface_kind, count = struct.unpack("<QIIIIQII", payload)
+                assert surface_kind == 0 and count == len(fds)
+                self.close()
+                self.buffers = fds
+            elif kind == 3:
+                assert not fds
+                surface, buffer, seq, _, _ = struct.unpack("<QIQQI", payload[:32])
+                pixels = os.pread(self.buffers[buffer], self.stride * self.height, 0)
+                assert len(pixels) == self.stride * self.height
+                self.stream.sendall(struct.pack("<IHHQIQ", 28, 4, 0, surface, buffer, seq))
+                nonblack = any(pixels[0::4]) or any(pixels[1::4]) or any(pixels[2::4])
+                return nonblack, hashlib.sha256(pixels).digest(), self.width, self.height, bool(flags & 1)
+            else:
+                for fd in fds:
+                    os.close(fd)
+                raise ValueError(f"unexpected native display message {kind}")
+
+
 def first_frame(args, backend):
     with tempfile.TemporaryDirectory(prefix="hv-first-frame-") as temporary:
         root = Path(temporary)
@@ -122,7 +176,7 @@ def first_frame(args, backend):
                         send(ctrl, {"type": "hello", "proto_version": 1})
                     hello = json.loads(reader.readline())
                     assert "error" not in hello and hello.get("type") != "error", hello
-                    with connect(rfb, process) as stream:
+                    with connect(rfb, process) as stream, contextlib.ExitStack() as stack:
                         assert read(stream, 12) == b"RFB 003.008\n"
                         stream.sendall(b"RFB 003.008\n")
                         assert 1 in read(stream, read(stream, 1)[0])
@@ -137,14 +191,23 @@ def first_frame(args, backend):
                         # QEMU can supply a host-generated placeholder before
                         # the guest starts. It is not a firmware paint.
                         placeholder, initial, _, _ = frame(stream)
+                        native = None
+                        if backend == "vmlab-hv":
+                            native = NativeFrames(stack.enter_context(connect(root / "display.sock", process)))
+                            stack.callback(native.close)
+                            assert native.frame()[4], "paused VM did not publish a placeholder"
                         start = time.monotonic()
                         send(ctrl, {"execute": "cont"} if backend == "qemu" else {
                             "type": "request", "id": 1, "command": {"command": "resume"}})
                         frames = 0
                         while time.monotonic() - start < 30:
-                            nonblack, current, width, height = frame(stream)
+                            if native:
+                                nonblack, current, width, height, host_frame = native.frame()
+                            else:
+                                nonblack, current, width, height = frame(stream)
+                                host_frame = current == initial
                             frames += 1
-                            if nonblack and current != initial:
+                            if nonblack and not host_frame:
                                 return {"backend": backend, "seconds": round(time.monotonic() - start, 6),
                                         "frames": frames, "width": width, "height": height,
                                         "lit_while_paused": placeholder}

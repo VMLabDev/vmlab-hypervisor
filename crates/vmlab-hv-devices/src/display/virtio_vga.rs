@@ -147,6 +147,11 @@ impl VirtioVga {
     pub fn mode(&self) -> Mode {
         self.gpu.mode().unwrap_or_else(|| self.vga.mode())
     }
+    pub fn scanout_active(&self) -> bool {
+        self.gpu
+            .scanout_active()
+            .unwrap_or_else(|| self.vga.scanout_active())
+    }
     /// VGA framebuffer for direct, dirty-logged guest mappings of BAR0.
     pub fn linear_framebuffer(&self) -> GuestMemory {
         self.vga.linear_framebuffer()

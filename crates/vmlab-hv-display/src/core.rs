@@ -1,4 +1,6 @@
-use crate::{Capabilities, Message, Rect, SurfaceKind, invalid, protocol, receive, send};
+use crate::{
+    Capabilities, FrameFlags, Message, Rect, SurfaceKind, invalid, protocol, receive, send,
+};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
@@ -24,6 +26,7 @@ pub enum Pixels {
 
 #[derive(Clone)]
 pub struct Frame {
+    pub flags: FrameFlags,
     /// Increment on reset or same-sized scanout replacement to force configure.
     pub generation: u64,
     pub width: u32,
@@ -171,7 +174,7 @@ impl DisplayServer {
     fn capture(&self, force: bool) -> io::Result<()> {
         // Keep capture order and publication order identical for dirty sources.
         let _capture = self.shared.capture.lock().unwrap();
-        let frame = self.shared.source.frame()?;
+        let mut frame = self.shared.source.frame()?;
         frame.validate()?;
         let mut state = self.shared.state.lock().unwrap();
         let previous = &state.frame;
@@ -184,6 +187,7 @@ impl DisplayServer {
                 frame.stride,
                 frame.drm_fourcc,
                 frame.modifier,
+                frame.flags,
             ) == (
                 previous.generation,
                 previous.width,
@@ -191,10 +195,14 @@ impl DisplayServer {
                 previous.stride,
                 previous.drm_fourcc,
                 previous.modifier,
+                previous.flags,
             )
             && std::mem::discriminant(&frame.pixels) == std::mem::discriminant(&previous.pixels)
         {
             return Ok(());
+        }
+        if frame.flags != previous.flags {
+            frame.damage = vec![frame.full()];
         }
         state.frame = Arc::new(frame);
         state.seq += 1;
@@ -504,6 +512,11 @@ impl DisplayServer {
                         send(
                             stream,
                             &Message::FrameReady {
+                                flags: if caps.has(Capabilities::FRAME_FLAGS) {
+                                    frame.flags
+                                } else {
+                                    FrameFlags::default()
+                                },
                                 surface_id: surface,
                                 buffer: index,
                                 seq,

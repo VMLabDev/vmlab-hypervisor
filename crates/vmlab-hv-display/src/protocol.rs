@@ -16,8 +16,19 @@ impl Capabilities {
     pub const INPUT: u32 = 4;
     pub const DMABUF_OK: u32 = 8;
     pub const CPU_COPY: u32 = 16;
-    pub const ALL: Self = Self(31);
+    pub const FRAME_FLAGS: u32 = 32;
+    pub const ALL: Self = Self(63);
     pub fn has(self, bit: u32) -> bool {
+        self.0 & bit != 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameFlags(pub u16);
+
+impl FrameFlags {
+    pub const PLACEHOLDER: u16 = 1;
+    pub fn has(self, bit: u16) -> bool {
         self.0 & bit != 0
     }
 }
@@ -54,6 +65,7 @@ pub enum Message {
         buffers: u32,
     },
     FrameReady {
+        flags: FrameFlags,
         surface_id: u64,
         buffer: u32,
         seq: u64,
@@ -162,6 +174,7 @@ impl Message {
                 2
             }
             Self::FrameReady {
+                flags: _,
                 surface_id,
                 buffer,
                 seq,
@@ -258,7 +271,11 @@ impl Message {
         let mut out = Vec::with_capacity(p.len() + 8);
         u32put(&mut out, (p.len() + 8) as u32);
         out.extend(kind.to_le_bytes());
-        out.extend(0u16.to_le_bytes());
+        let flags = match self {
+            Self::FrameReady { flags, .. } => flags.0,
+            _ => 0,
+        };
+        out.extend(flags.to_le_bytes());
         out.extend(p);
         Ok(out)
     }
@@ -271,7 +288,12 @@ impl Message {
         if u32get(&mut p)? as usize != bytes.len() {
             return Err(invalid("length mismatch"));
         }
-        let kind = u32get(&mut p)?;
+        let envelope = u32get(&mut p)?;
+        let kind = envelope & 0xffff;
+        let flags = (envelope >> 16) as u16;
+        if kind != 3 && flags != 0 {
+            return Err(invalid("unexpected message flags"));
+        }
         let msg = match kind {
             1 => Self::Hello {
                 version: u32get(&mut p)?,
@@ -310,6 +332,7 @@ impl Message {
                     });
                 }
                 Self::FrameReady {
+                    flags: FrameFlags(flags),
                     surface_id,
                     buffer,
                     seq,

@@ -36,6 +36,7 @@ struct State {
 
 #[derive(Clone, Default)]
 struct Image {
+    flags: vmlab_hv_display::FrameFlags,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
@@ -80,7 +81,11 @@ fn recognize(image: &Image) -> String {
 }
 
 fn screenshot(path: &Path) -> Image {
-    let client = Client::connect(path, Capabilities(Capabilities::FRAMES)).unwrap();
+    let client = Client::connect(
+        path,
+        Capabilities(Capabilities::FRAMES | Capabilities::FRAME_FLAGS),
+    )
+    .unwrap();
     client
         .stream()
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -97,6 +102,7 @@ fn screenshot(path: &Path) -> Image {
         panic!("expected screenshot shm configure");
     };
     let Message::FrameReady {
+        flags,
         surface_id,
         buffer,
         seq,
@@ -118,6 +124,7 @@ fn screenshot(path: &Path) -> Image {
     assert_eq!(stride, width * 4);
     client.release(surface_id, buffer, seq).unwrap();
     Image {
+        flags,
         width,
         height,
         pixels,
@@ -189,6 +196,11 @@ impl Observer {
     pub(super) fn wait_after_reset(&self, before: u64) {
         self.wait("display after guest reset", |state| {
             state.frames > before
+                && !state
+                    .images
+                    .latest
+                    .flags
+                    .has(vmlab_hv_display::FrameFlags::PLACEHOLDER)
                 && state
                     .images
                     .latest
@@ -239,6 +251,7 @@ impl Observer {
                     state.0.lock().unwrap().configures += 1;
                 }
                 Message::FrameReady {
+                    flags,
                     surface_id,
                     buffer,
                     seq,
@@ -261,12 +274,14 @@ impl Observer {
                     s.height = height;
                     let next_hash = hash.finish();
                     if width == 720
+                        && !flags.has(vmlab_hv_display::FrameFlags::PLACEHOLDER)
                         && height == 400
                         && s.hash != next_hash
                         && pixels.iter().any(|b| *b != 0)
                         && s.images.firmware.len() < 12
                     {
                         s.images.firmware.push(Image {
+                            flags,
                             width,
                             height,
                             pixels: pixels.clone(),
@@ -279,8 +294,12 @@ impl Observer {
                         && damage.iter().any(|r| {
                             r.x == 0 && r.y == 0 && r.width == width && r.height == height
                         });
-                    s.firmware |= width == 720 && height == 400 && pixels.iter().any(|b| *b != 0);
+                    s.firmware |= !flags.has(vmlab_hv_display::FrameFlags::PLACEHOLDER)
+                        && width == 720
+                        && height == 400
+                        && pixels.iter().any(|b| *b != 0);
                     s.images.latest = Image {
+                        flags,
                         width,
                         height,
                         pixels,
