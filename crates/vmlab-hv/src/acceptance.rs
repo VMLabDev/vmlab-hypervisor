@@ -236,6 +236,9 @@ fn boot_template(
     if !matches!(display_test, DisplayTest::None) {
         description["display"]["socket"] = serde_json::to_value(&native).unwrap();
         description["display"]["vnc_socket"] = serde_json::to_value(&rfb).unwrap();
+    } else if std::env::var_os("VMLAB_HV_DIAG_SCREENSHOT").is_some() {
+        description["display"]["vnc_socket"] =
+            serde_json::to_value(dir.path().join("diag-rfb.sock")).unwrap();
     }
     if bus == vmlab_hv_proto::machine::DiskBus::Ahci {
         description["disks"][0]
@@ -322,6 +325,31 @@ fn boot_template(
         client.call(Control::Resume).unwrap(),
         Outcome::Ok { .. }
     ));
+    let fail = |client: &mut Client, process: &mut Process, message: String| -> ! {
+        if let Some(script) = std::env::var_os("VMLAB_HV_DIAG_SCREENSHOT") {
+            let _ = Command::new("python3")
+                .arg(script)
+                .arg(if matches!(display_test, DisplayTest::None) {
+                    dir.path().join("diag-rfb.sock")
+                } else {
+                    rfb.clone()
+                })
+                .arg(dir.path().join("failure.png"))
+                .status();
+        }
+        if std::env::var_os("VMLAB_HV_DIAG_RESUME_HOOK").is_some() {
+            // Investigation aid: see whether the resume hook revives a hung guest.
+            let _ = client.call(Control::Pause);
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = client.call(Control::Resume);
+            let revived = AgentClient::connect(&agent, Duration::from_secs(90)).is_ok();
+            eprintln!("{name}: resume hook revived the guest: {revived}");
+        }
+        // Quit rather than kill so diagnostics can report the halted state.
+        let _ = client.call(Control::Quit);
+        let _ = process.0.wait();
+        panic!("{message}; {}", diagnostics());
+    };
     let timeout = std::env::var("VMLAB_HV_TEMPLATE_TIMEOUT")
         .ok()
         .map(|v| v.parse().unwrap())
@@ -369,11 +397,10 @@ fn boot_template(
             }
         }
         if Instant::now() >= deadline {
-            let _ = client.call(Control::Quit);
-            let _ = process.0.wait();
-            panic!(
-                "{name} agent/setup timeout ({setup_status}): {}",
-                diagnostics()
+            fail(
+                &mut client,
+                &mut process,
+                format!("{name} agent/setup timeout ({setup_status})"),
             );
         }
         if windows_setup || requested_reboot {
@@ -401,9 +428,26 @@ fn boot_template(
         String::from_utf8_lossy(&result.stdout).trim(),
         "firmware-agent-ready"
     );
-    if matches!(display_test, DisplayTest::Reset) {
+    // Soak runs repeat the reset and snapshot-load cycles; one is the default.
+    let cycles = |variable: &str| -> usize {
+        std::env::var(variable)
+            .ok()
+            .map(|v| v.parse().unwrap())
+            .unwrap_or(1)
+    };
+    for cycle in 1..=if matches!(display_test, DisplayTest::Reset) {
+        cycles("VMLAB_HV_RESET_CYCLES")
+    } else {
+        0
+    } {
+        let started = Instant::now();
         let observer = crate::display_acceptance::Observer::connect(&native);
         let pid = process.0.id();
+        // Firmware can reset the machine again while it boots, and OVMF does
+        // so when its memory-type information changes. Discard those resets
+        // so the wait below observes the one this request causes.
+        client.call(Control::Status).unwrap();
+        client.take_events();
         let reboot = if windows {
             vec!["shutdown.exe", "/r", "/t", "2", "/f"]
         } else {
@@ -413,13 +457,19 @@ fn boot_template(
                 "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 </dev/null &",
             ]
         };
-        assert_eq!(
-            guest
-                .exec(&reboot, Duration::from_secs(20))
-                .unwrap()
-                .exit_code,
-            0
-        );
+        match guest.exec(&reboot, Duration::from_secs(20)) {
+            // 1115 is ERROR_SHUTDOWN_IN_PROGRESS: the guest is already
+            // restarting on its own, which the reset wait below observes.
+            Ok(output) => assert!(
+                output.exit_code == 0 || (windows && output.exit_code == 1115),
+                "{name} reboot request {cycle}: {output:?}"
+            ),
+            Err(error) => fail(
+                &mut client,
+                &mut process,
+                format!("{name} reboot request {cycle}: {error}"),
+            ),
+        }
         drop(guest);
         loop {
             match client
@@ -441,11 +491,22 @@ fn boot_template(
             diagnostics()
         );
         assert_eq!(process.0.id(), pid);
-        guest = AgentClient::connect(&agent, Duration::from_secs(timeout))
-            .unwrap_or_else(|error| panic!("{name} agent after reset: {error}; {}", diagnostics()));
-        let output = guest
-            .exec(&[shell, flag, "echo rebooted"], Duration::from_secs(20))
-            .unwrap();
+        guest = match AgentClient::connect(&agent, Duration::from_secs(timeout)) {
+            Ok(guest) => guest,
+            Err(error) => fail(
+                &mut client,
+                &mut process,
+                format!("{name} agent after reset {cycle}: {error}"),
+            ),
+        };
+        let output = match guest.exec(&[shell, flag, "echo rebooted"], Duration::from_secs(20)) {
+            Ok(output) => output,
+            Err(error) => fail(
+                &mut client,
+                &mut process,
+                format!("{name} exec after reset {cycle}: {error}"),
+            ),
+        };
         assert_eq!(output.exit_code, 0);
         assert!(String::from_utf8_lossy(&output.stdout).contains("rebooted"));
         observer.wait_after_reset(before);
@@ -454,7 +515,8 @@ fn boot_template(
             Outcome::Ok { .. }
         ));
         eprintln!(
-            "{name}: in-place reset retained PID {pid}, control and display; agent re-handshook"
+            "{name}: in-place reset {cycle} retained PID {pid}, control and display; agent re-handshook in {:.1?}",
+            started.elapsed()
         );
     }
     if firmware == Firmware::SecureOvmf {
@@ -510,6 +572,7 @@ fn boot_template(
         display.exercise(&mut guest, &rfb);
     }
     if snapshot {
+        let mut guest = guest;
         guest
             .exec(
                 &[
@@ -533,53 +596,66 @@ fn boot_template(
             matches!(saved, Outcome::Ok { .. }),
             "snapshot save: {saved:?}"
         );
-        guest
-            .exec(
-                &[
-                    shell,
-                    flag,
-                    if windows {
-                        "echo after>C:\\Windows\\Temp\\vmlab-hv-snapshot"
-                    } else {
-                        "printf after >/run/vmlab-hv-snapshot"
-                    },
-                ],
-                Duration::from_secs(20),
-            )
-            .unwrap();
-        let loaded = client
-            .call(Control::SnapshotLoad {
-                name: "firmware".into(),
-            })
-            .unwrap();
-        assert!(
-            matches!(loaded, Outcome::Ok { .. }),
-            "snapshot load: {loaded:?}"
-        );
-        drop(guest);
-        let mut guest = AgentClient::connect(&agent, Duration::from_secs(30)).unwrap();
-        let restored = guest
-            .exec(
-                &[
-                    shell,
-                    flag,
-                    if windows {
-                        "type C:\\Windows\\Temp\\vmlab-hv-snapshot"
-                    } else {
-                        "cat /run/vmlab-hv-snapshot"
-                    },
-                ],
-                Duration::from_secs(20),
-            )
-            .unwrap_or_else(|error| {
-                let _ = client.call(Control::Quit);
-                let _ = process.0.wait();
-                panic!(
-                    "{name} exec after snapshot load: {error}; {}",
-                    diagnostics()
-                );
-            });
-        assert_eq!(String::from_utf8_lossy(&restored.stdout).trim(), "before");
+        for cycle in 1..=cycles("VMLAB_HV_SNAPSHOT_CYCLES") {
+            let started = Instant::now();
+            guest
+                .exec(
+                    &[
+                        shell,
+                        flag,
+                        if windows {
+                            "echo after>C:\\Windows\\Temp\\vmlab-hv-snapshot"
+                        } else {
+                            "printf after >/run/vmlab-hv-snapshot"
+                        },
+                    ],
+                    Duration::from_secs(20),
+                )
+                .unwrap();
+            let loaded = client
+                .call(Control::SnapshotLoad {
+                    name: "firmware".into(),
+                })
+                .unwrap();
+            assert!(
+                matches!(loaded, Outcome::Ok { .. }),
+                "snapshot load: {loaded:?}"
+            );
+            drop(guest);
+            guest = match AgentClient::connect(&agent, Duration::from_secs(60)) {
+                Ok(guest) => guest,
+                Err(error) => fail(
+                    &mut client,
+                    &mut process,
+                    format!("{name} agent after snapshot load {cycle}: {error}"),
+                ),
+            };
+            let restored = guest
+                .exec(
+                    &[
+                        shell,
+                        flag,
+                        if windows {
+                            "type C:\\Windows\\Temp\\vmlab-hv-snapshot"
+                        } else {
+                            "cat /run/vmlab-hv-snapshot"
+                        },
+                    ],
+                    Duration::from_secs(20),
+                )
+                .unwrap_or_else(|error| {
+                    fail(
+                        &mut client,
+                        &mut process,
+                        format!("{name} exec after snapshot load {cycle}: {error}"),
+                    )
+                });
+            assert_eq!(String::from_utf8_lossy(&restored.stdout).trim(), "before");
+            eprintln!(
+                "{name}: snapshot load {cycle} answered in {:.1?}",
+                started.elapsed()
+            );
+        }
     }
     assert!(matches!(
         client.call(Control::Quit).unwrap(),

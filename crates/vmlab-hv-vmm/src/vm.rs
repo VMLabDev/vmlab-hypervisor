@@ -1267,6 +1267,7 @@ impl Vm {
                     fd.get_vcpu_events().map(|e| e.smi)
                 );
             }
+            crate::diagnostics::dump_timer_state(&self.shared, &self.ram.mem);
             if let Some(trace) = &self.shared.io_trace {
                 eprintln!("last IO: {:?}", trace.lock());
             }
@@ -1403,6 +1404,7 @@ impl VmHandle {
             RunState::Paused | RunState::Suspended => {
                 *state = RunState::Running;
                 drop(state);
+                crate::diagnostics::resume_hook(&self.0);
                 self.0.clock_running(true);
                 if was == RunState::Suspended
                     && let Some(chipset) = self.0.chipset.lock().as_ref()

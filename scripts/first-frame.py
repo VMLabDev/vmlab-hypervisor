@@ -2,8 +2,9 @@
 """Compare OVMF first non-black RFB frames after resume, using fresh VARS.
 
 Run inside systemd-run --user --scope -p MemoryMax=24G -p MemorySwapMax=0.
-No guest disk is attached; only firmware execution is measured. Each run owns
-and reaps one VM. QEMU is used only through its executable and socket protocols.
+By default no guest disk is attached and only firmware execution is measured.
+--disk boots a linked clone of an image, and --vga-rom loads the display
+option ROM, as vmlab does. Each run owns and reaps one VM. QEMU is used only through its executable and socket protocols.
 """
 
 import argparse
@@ -72,25 +73,40 @@ def first_frame(args, backend):
         root = Path(temporary)
         vars_path = root / "vars.fd"
         shutil.copyfile(args.vars, vars_path)
+        disk = None
+        if args.disk:
+            disk = root / "disk.qcow2"
+            subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2",
+                            "-b", str(args.disk.resolve()), str(disk)], check=True)
         rfb = root / "rfb.sock"
         control = root / "control.sock"
         if backend == "qemu":
             command = ["qemu-system-x86_64", "-S", "-nodefaults", "-machine", "q35",
-                       "-accel", "kvm", "-cpu", "host", "-smp", "2", "-m", "4096",
+                       "-accel", "kvm", "-cpu", "host", "-smp", str(args.vcpus),
+                       "-m", str(args.memory),
                        "-drive", f"if=pflash,format=raw,readonly=on,file={args.code}",
                        "-drive", f"if=pflash,format=raw,file={vars_path}",
-                       "-device", "virtio-vga,addr=4", "-display", "none",
+                       "-device", "virtio-vga,addr=4" + (
+                           f",romfile={args.vga_rom}" if args.vga_rom else ",romfile="),
+                       "-display", "none",
                        "-vnc", f"unix:{rfb}", "-qmp", f"unix:{control},server=on,wait=off"]
+            if disk:
+                command += ["-drive", f"if=none,id=disk0,format=qcow2,file={disk}",
+                            "-device", "virtio-blk-pci,drive=disk0,addr=2"]
         else:
             description = {
                 "machine": "q35", "name": "first-frame", "arch": "x86_64", "accel": "kvm",
-                "vcpus": 2, "memory_mib": 4096,
+                "vcpus": args.vcpus, "memory_mib": args.memory,
                 "boot": {"kind": "firmware", "firmware": "ovmf", "code": str(args.code),
                          "vars": str(vars_path)},
                 "display": {"device": "virtio-vga", "pci": {"bus": 0, "device": 4, "function": 0},
+                            "rom": str(args.vga_rom) if args.vga_rom else None,
                             "socket": str(root / "display.sock"), "vnc_socket": str(rfb)},
                 "disks": [], "nics": [], "ports": [], "serial_log": str(root / "serial.log"),
             }
+            if disk:
+                description["disks"] = [{"id": "disk0", "pci": {"bus": 0, "device": 2, "function": 0},
+                                         "path": str(disk), "format": "qcow2", "read_only": False}]
             machine = root / "machine.json"
             machine.write_text(json.dumps(description))
             command = [str(args.binary), "--machine", str(machine), "--control", str(control), "--paused"]
@@ -120,7 +136,7 @@ def first_frame(args, backend):
                         stream.sendall(struct.pack(">BBHii", 2, 0, 2, 0, -223))
                         # QEMU can supply a host-generated placeholder before
                         # the guest starts. It is not a firmware paint.
-                        _, initial, _, _ = frame(stream)
+                        placeholder, initial, _, _ = frame(stream)
                         start = time.monotonic()
                         send(ctrl, {"execute": "cont"} if backend == "qemu" else {
                             "type": "request", "id": 1, "command": {"command": "resume"}})
@@ -130,7 +146,8 @@ def first_frame(args, backend):
                             frames += 1
                             if nonblack and current != initial:
                                 return {"backend": backend, "seconds": round(time.monotonic() - start, 6),
-                                        "frames": frames, "width": width, "height": height}
+                                        "frames": frames, "width": width, "height": height,
+                                        "lit_while_paused": placeholder}
                             time.sleep(.01)
                         raise TimeoutError("no non-black frame in 30 seconds")
             except Exception:
@@ -145,6 +162,9 @@ def first_frame(args, backend):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+                if args.show_stderr:
+                    stderr.seek(0)
+                    print(stderr.read(), end="")
 
 
 if __name__ == "__main__":
@@ -154,6 +174,11 @@ if __name__ == "__main__":
     parser.add_argument("--vars", type=Path, default=Path("/usr/share/edk2/x64/OVMF_VARS.4m.fd"))
     parser.add_argument("--backend", choices=["both", "qemu", "vmlab-hv"], default="both")
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--vcpus", type=int, default=2)
+    parser.add_argument("--memory", type=int, default=4096, help="MiB")
+    parser.add_argument("--disk", type=Path, help="qcow2 image to boot through a linked clone")
+    parser.add_argument("--show-stderr", action="store_true", help="print the VM's stderr after each run")
+    parser.add_argument("--vga-rom", type=Path, help="display option ROM, as vmlab passes it")
     arguments = parser.parse_args()
     backends = ["qemu", "vmlab-hv"] if arguments.backend == "both" else [arguments.backend]
     for _ in range(arguments.runs):

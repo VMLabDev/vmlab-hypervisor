@@ -82,6 +82,9 @@ impl VcpuThread {
 /// the snapshot path can hold it while this thread is parked.
 fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
     let mut pending_completion = false;
+    let mut sampler = (id == 0)
+        .then(crate::diagnostics::TimeSampler::start)
+        .flatten();
     loop {
         let running = shared.should_run();
         // KVM_EXIT_IO/MMIO finish on the next KVM_RUN. Their pending state
@@ -133,13 +136,16 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             )));
             return;
         }
+        crate::diagnostics::exit_stats(id, &result);
         match result {
             Ok(VcpuExit::IoIn(port, data)) => {
                 for value in data.chunks_mut(width) {
                     shared.io_read(port, value);
                 }
+                crate::diagnostics::ps2_trace(port, data, false);
             }
             Ok(VcpuExit::IoOut(port, data)) => {
+                crate::diagnostics::ps2_trace(port, data, true);
                 for value in data.chunks(width) {
                     shared.io_write(port, value);
                 }
@@ -202,6 +208,22 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                     return;
                 }
             }
+            Ok(VcpuExit::SystemEvent(kvm_bindings::KVM_SYSTEM_EVENT_CRASH, _)) => {
+                // Only exposed with VMLAB_HV_GUEST_CRASH_MSRS: report the
+                // guest's crash parameters and let it continue its halt path.
+                let mut msrs = kvm_bindings::Msrs::from_entries(
+                    &(0x4000_0100..=0x4000_0104)
+                        .map(|index| kvm_bindings::kvm_msr_entry {
+                            index,
+                            ..Default::default()
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .expect("five MSRs");
+                let _ = guard.get_msrs(&mut msrs);
+                let values: Vec<_> = msrs.as_slice().iter().map(|e| e.data).collect();
+                eprintln!("vcpu {id}: guest crash {values:#x?}");
+            }
             Ok(VcpuExit::SystemEvent(kvm_bindings::KVM_SYSTEM_EVENT_RESET, _)) => {
                 shared.request_reset();
             }
@@ -228,6 +250,9 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                 return;
             }
             Err(e) if e.errno() == libc::EINTR || e.errno() == libc::EAGAIN => {
+                if let Some(sampler) = sampler.as_mut() {
+                    sampler.sample(&guard, shared);
+                }
                 // EINTR: kicked, re-check the machine state. EAGAIN: the
                 // vCPU is not runnable yet — an application processor parked
                 // before the kernel's INIT-SIPI-SIPI wakes it — retry.
