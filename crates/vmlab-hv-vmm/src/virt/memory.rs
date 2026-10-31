@@ -503,7 +503,12 @@ mod tests {
     }
 
     #[test]
-    fn execution_observes_dma_replacement_of_cached_instructions() {
+    fn execution_observes_cpu_and_dma_replacement_of_cached_instructions() {
+        instruction_replacement(false);
+        instruction_replacement(true);
+    }
+
+    fn instruction_replacement(dma: bool) {
         let mut memory = memory();
         memory
             .write(RAM_BASE, &0x00108093u32.to_le_bytes())
@@ -511,16 +516,23 @@ mod tests {
         memory
             .write(RAM_BASE + 4, &0xffdff06fu32.to_le_bytes())
             .unwrap();
-        memory.write(0x30008004, &[7]).unwrap();
-        let dma = memory.ram.clone();
+        if dma {
+            memory.write(0x30008004, &[7]).unwrap();
+        }
+        let mut peer = memory.clone();
         let mut cpu = vmlab_hv_tcg::Riscv64::new(memory).unwrap();
         cpu.specialize = true;
         cpu.set_pc(RAM_BASE);
         cpu.run(64).unwrap();
         assert_eq!(cpu.gpr(1).unwrap(), 32);
         assert!(cpu.specialization_stats.hits > 0);
-        dma.write_slice(&0x00208093u32.to_le_bytes(), GuestAddress(RAM_BASE))
-            .unwrap();
+        if dma {
+            peer.ram
+                .write_slice(&0x00208093u32.to_le_bytes(), GuestAddress(RAM_BASE))
+                .unwrap();
+        } else {
+            peer.write(RAM_BASE, &0x00208093u32.to_le_bytes()).unwrap();
+        }
         cpu.run(64).unwrap();
         assert_eq!(cpu.gpr(1).unwrap(), 96);
     }
