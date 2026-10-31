@@ -50,6 +50,7 @@ impl PciDevice for HostBridge {
             2 => 0x0600_0000,
             11 => 0x1100_1af4,
             15 => 0xff,
+            64.. => u32::MAX,
             _ => 0,
         }
     }
@@ -514,5 +515,27 @@ fn placement(
             device: next_slot(pci)?,
             function: 0,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_bridge_matches_captured_configuration_header() {
+        let mut bridge = HostBridge;
+        let mut expected = [0; 16];
+        expected[0] = 0x0008_1b36;
+        expected[2] = 0x0600_0000;
+        expected[11] = 0x1100_1af4;
+        expected[15] = 0xff;
+        for (reg, value) in expected.into_iter().enumerate() {
+            assert_eq!(bridge.config_read(reg), value, "configuration dword {reg}");
+        }
+        bridge.config_write(4, 0, &u32::MAX.to_le_bytes());
+        assert_eq!(bridge.config_read(4), 0);
+        assert!(bridge.bars().is_empty());
+        assert_eq!(bridge.config_read(64), u32::MAX);
     }
 }
