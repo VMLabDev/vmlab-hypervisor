@@ -105,10 +105,25 @@ tcg-oracle-build: tcg-image-build
 tcg-oracle-test: tcg-oracle-build
 	cargo test --manifest-path toolchain/sail/oracle-test/Cargo.toml
 
-# Run the D2 benchmark suite (bench/README.md); backend qemu|vmlab-hv
+# Run the D2 TCG benchmark suite (bench/README.md); backend qemu|vmlab-hv
 [group('bench')]
 bench-run backend="qemu" arch="all" vcpus="1,4" repeats="3" guest="debian-13": (bench-hv-binary backend)
 	python3 bench/run.py --backend {{backend}} --arch {{arch}} --vcpus {{vcpus}} --repeats {{repeats}} --guest {{guest}}
+
+# Run the phase-2 x86_64 KVM suite (HV-D28): guest ubuntu-26.04|windows-10;
+# vcpus left empty means the template's own count
+[group('bench')]
+bench-run-kvm backend="qemu" guest="ubuntu-26.04" repeats="3" vcpus="": (bench-hv-binary backend) (bench-ipxe-rom backend)
+	#!/usr/bin/env bash
+	set -eu
+	args=(--backend "{{backend}}" --arch x86_64 --guest "{{guest}}" --repeats "{{repeats}}")
+	if [ -n "{{vcpus}}" ]; then args+=(--vcpus "{{vcpus}}"); fi
+	python3 bench/run.py "${args[@]}"
+
+# Run the x86_64 guest-to-guest net pair (two VMs at once, HV-D28)
+[group('bench')]
+bench-run-g2g backend="qemu" guest="ubuntu-26.04" repeats="3": (bench-hv-binary backend) (bench-ipxe-rom backend)
+	python3 bench/run.py --backend {{backend}} --arch x86_64 --suite g2g --guest {{guest}} --repeats {{repeats}}
 
 # Print the per-workload trend from bench/history
 [group('bench')]
@@ -129,3 +144,8 @@ bench-test:
 [private]
 bench-hv-binary backend:
 	@if [ "{{backend}}" = "vmlab-hv" ]; then cargo build --release -p vmlab-hv; fi
+
+# Build the iPXE ROM the vmlab-hv x86_64 NIC carries (no-op for qemu)
+[private]
+bench-ipxe-rom backend:
+	@if [ "{{backend}}" = "vmlab-hv" ] && [ ! -f target/ipxe/virtio-net.rom ]; then uv run python firmware/ipxe/build.py; fi

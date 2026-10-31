@@ -326,3 +326,218 @@ class HvBackend:
             except Exception:
                 pass
             ctl.close()
+
+
+# ---------------------------------------------------------------------------
+# x86_64 KVM backends (phase 2, HV-D28)
+#
+# Same discipline, different machine: q35 + firmware boot, one qcow2 overlay
+# on virtio-blk, virtio-vga, a NIC attached to vmlab's switch framing. The
+# QEMU argv is vmlab's own builder output for the profile shape
+# (src/qemu/cmdline.rs build_args, captured black-box in docs/hwref); the
+# hv description names the same devices at QEMU's auto-assigned PCI
+# functions. The Hyper-V enlightenments below are shared by both: the
+# hv description names the same flags in the proto's spelling; the QEMU
+# -cpu string wants vmlab's hv- spelling, with spinlocks at 0x1fff.
+HYPERV_FLAGS = [
+    "relaxed", "vapic", "spinlocks", "vpindex", "runtime", "time",
+    "synic", "stimer", "frequencies", "reset", "tlbflush", "ipi",
+]
+
+
+def hyperv_cpu_flags():
+    flags = ["hv-spinlocks=0x1fff" if f == "spinlocks" else f"hv-{f}" for f in HYPERV_FLAGS]
+    if lib.host_apic_virtualization():
+        flags.append("hv-avic")
+    return ",".join(flags)
+
+
+
+def qemu_x86_vm_argv(guest, smp, overlay, code_fd, vars_fd, serial, agent_sock,
+                     qmp_sock, vnc_sock, switch_sock, nic_mac, host_mtu):
+    """vmlab's exact KVM argv for the guest's profile shape (docs/hwref).
+
+    One deviation, forced by the bench and applied to the hv backend too:
+    `host_mtu` on the NIC (jumbo frames keep the framing peer and the
+    stdlib guest tools off the net-workload ceiling). Nothing else differs
+    from what vmlab spawns for a VM with one network segment.
+    """
+    profile = lib.X86_GUESTS[guest]
+    windows = profile["hyperv"]
+    cpu = "host,vmx=off,svm=off"
+    argv = [
+        "qemu-system-x86_64",
+        "-name", f"vmlab:bench/{guest}",
+        "-machine", "q35",
+        "-accel", "kvm",
+    ]
+    if windows:
+        argv += ["-cpu", f"host,vmx=off,svm=off,{hyperv_cpu_flags()}"]
+    else:
+        argv += ["-cpu", cpu]
+    argv += [
+        "-smp", str(smp),
+        "-m", f"{profile['memory_mib']}M",
+        "-display", "none",
+        "-vnc", f"unix:{vnc_sock},share=ignore",
+        "-qmp", f"unix:{qmp_sock},server=on,wait=off",
+        "-monitor", "none",
+        "-serial", f"file:{serial}",
+    ]
+    if windows and lib.host_apic_virtualization():
+        argv += ["-global", "kvm-pit.lost_tick_policy=discard"]
+    if profile["firmware"] == "ovmf":
+        argv += [
+            "-drive", f"if=pflash,format=raw,readonly=on,file={code_fd}",
+            "-drive", f"if=pflash,format=raw,file={vars_fd}",
+        ]
+    argv += [
+        "-chardev", f"socket,id=vagent0,path={agent_sock},server=on,wait=off",
+        "-device", "virtio-serial-pci",
+        "-device", "virtserialport,chardev=vagent0,name=vmlab.agent.0",
+        "-blockdev",
+        f"driver=qcow2,node-name=disk0,file.driver=file,file.filename={overlay}",
+        "-device",
+        # SeaBIOS honours an explicit boot order; OVMF boots the disk alone.
+        "virtio-blk-pci,drive=disk0"
+        + (",bootindex=50" if profile["firmware"] == "seabios" else ""),
+    ]
+    mtu = f",host_mtu={host_mtu}" if host_mtu else ""
+    argv += [
+        "-netdev",
+        f"stream,id=net0,server=off,addr.type=unix,addr.path={switch_sock}",
+        "-device", f"virtio-net-pci,netdev=net0,mac={nic_mac}{mtu}",
+        "-device", "virtio-vga",
+        "-usb",
+        "-device", "usb-tablet",
+        "-S",
+    ]
+    return argv
+
+
+class X86QemuBackend(QemuBackend):
+    """vmlab's exact argv, x86_64 KVM profile shape."""
+
+    def __init__(self, run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
+                 switch_sock, nic_mac, host_mtu, log):
+        self.run_dir = run_dir
+        self.arch = "x86_64"
+        self.smp = smp
+        self.pin = pin
+        self.guest = guest
+        self.serial = os.path.join(run_dir, "serial.log")
+        self.agent_sock = os.path.join(run_dir, "agent.sock")
+        self.qmp_sock = os.path.join(run_dir, "qmp.sock")
+        self.vnc_sock = os.path.join(run_dir, "vnc.sock")
+        self.log = log
+        self.vm_argv = lib.taskset_prefix(pin) + qemu_x86_vm_argv(
+            guest, smp, overlay, code_fd, vars_fd, self.serial, self.agent_sock,
+            self.qmp_sock, self.vnc_sock, switch_sock, nic_mac, host_mtu,
+        )
+
+
+def hv_x86_machine_description(run_dir, guest, smp, overlay, code_fd, vars_fd,
+                               switch_sock, nic_mac, host_mtu, ipxe_rom):
+    """The MachineDescription for the machine the argv above builds.
+
+    Devices sit at QEMU's own auto-assigned functions for that argv, so the
+    guest sees the same PCI layout under either backend (D30). The NIC
+    carries the separately built iPXE ROM where QEMU loads its own combo
+    ROM (D16); SeaBIOS and the VGA ROM are the same bytes QEMU uses.
+    """
+    profile = lib.X86_GUESTS[guest]
+    pci = {"bus": 0, "device": 0, "function": 0}
+
+    def at(slot):
+        return {**pci, "device": slot}
+
+    if profile["firmware"] == "seabios":
+        boot = {
+            "kind": "firmware",
+            "firmware": "seabios",
+            "code": code_fd,
+            # QEMU's bootindex=50 on the disk, as the fw_cfg bootorder file
+            # QEMU writes for it (docs/hwref .../blobs/bootorder).
+            "bootorder": ["/pci@i0cf8/scsi@2/disk@0,0"],
+        }
+    else:
+        boot = {
+            "kind": "firmware",
+            "firmware": "ovmf",
+            "code": code_fd,
+            "vars": vars_fd,
+            "secure_boot": False,
+        }
+    nic = {
+        "pci": at(3),
+        "mac": nic_mac,
+        "attachment": {"kind": "stream", "socket": switch_sock},
+        "rom": ipxe_rom,
+    }
+    if host_mtu:
+        nic["mtu"] = host_mtu
+    desc = {
+        "machine": "q35",
+        "name": f"vmlab:bench/{guest}",
+        "arch": "x86_64",
+        "accel": "kvm",
+        "vcpus": smp,
+        "memory_mib": profile["memory_mib"],
+        "boot": boot,
+        "disks": [{
+            "id": "disk0",
+            "pci": at(2),
+            "path": overlay,
+            "format": "qcow2",
+            "read_only": False,
+            "vmstate": True,
+        }],
+        "console_pci": at(1),
+        "ahci_pci": {"bus": 0, "device": 31, "function": 2},
+        "nics": [nic],
+        "display": {
+            "device": "virtio-vga",
+            "pci": at(4),
+            "rom": None,
+            "socket": os.path.join(run_dir, "display.sock"),
+            "vnc_socket": os.path.join(run_dir, "vnc.sock"),
+        },
+        "tablet": at(5),
+        "usb": at(5),
+        "ports": [{"name": "vmlab.agent.0", "socket": os.path.join(run_dir, "agent.sock")}],
+        "serial_log": os.path.join(run_dir, "serial.log"),
+    }
+    if profile["hyperv"]:
+        desc["hyperv"] = HYPERV_FLAGS + (["avic"] if lib.host_apic_virtualization() else [])
+    return desc
+
+
+class X86HvBackend(HvBackend):
+    """The same machine as a vmlab-hv machine description."""
+
+    def __init__(self, run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
+                 switch_sock, nic_mac, host_mtu, log, hv_bin, ipxe_rom):
+        if not os.path.isfile(hv_bin):
+            raise lib.BenchError(
+                f"{hv_bin} not built; run `cargo build --release -p vmlab-hv`"
+            )
+        if ipxe_rom and not os.path.isfile(ipxe_rom):
+            raise lib.BenchError(f"{ipxe_rom} absent; run `just firmware-ipxe-build`")
+        self.run_dir = run_dir
+        self.arch = "x86_64"
+        self.pin = pin
+        self.guest = guest
+        self.control_sock = os.path.join(run_dir, "control.sock")
+        self.machine_path = os.path.join(run_dir, "machine.json")
+        self.hv_bin = hv_bin
+        self.log = log
+        desc = hv_x86_machine_description(
+            run_dir, guest, smp, overlay, code_fd, vars_fd,
+            switch_sock, nic_mac, host_mtu, ipxe_rom,
+        )
+        with open(self.machine_path, "w") as f:
+            json.dump(desc, f, indent=1)
+        self.vm_argv = lib.taskset_prefix(pin) + [
+            hv_bin, "--machine", self.machine_path,
+            "--control", self.control_sock, "--paused",
+        ]

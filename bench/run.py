@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Run the D2 benchmark suite: backend × arch × vcpus × N repeats → history.
+"""Run the benchmark suite: backend × arch × guest × N repeats → history.
 
 One VM at a time, each under the systemd-run memory cap and a taskset pin,
 release → agent ready → in-guest workloads, all timed host-side. After the
 repeats of one configuration, one JSON line per workload is appended to
 bench/history/<arch>.jsonl (format in bench/README.md).
+
+Two suites: the phase-3 TCG suites (aarch64/riscv64, seconds) and the
+phase-2 x86_64 KVM suite (HV-D28: boot to agent ready, virtio-blk and
+virtio-net throughput, idle host CPU; `--suite g2g` runs the guest-to-guest
+net pair). The x86_64 net workloads need the framing peer built from
+bench/netpeer.c; it is compiled on demand.
 
 Exit code: 0 on success and on a skipped backend (with the reason printed);
 1 on any measurement failure.
@@ -14,13 +20,15 @@ import argparse
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 
 import lib
-from backends import HvBackend, QemuBackend
+import netpeer
+from backends import HvBackend, QemuBackend, X86HvBackend, X86QemuBackend
 
 # Generous ceilings; a TCG riscv64 boot is ~1 min under QEMU and the guest
 # workloads run for minutes, so these only catch hangs. The future
@@ -32,14 +40,31 @@ VERIFY_TIMEOUT = 3600
 IDLE_TIMEOUT = 600
 SHUTDOWN_TIMEOUT = 300
 
+# x86_64 ceilings and workload sizes (phase 2). A windows sysprep first
+# boot runs several minutes; everything else is minutes at most.
+X86_BOOT_DEADLINE = {"windows-10": 900.0, "ubuntu-26.04": 300.0}
+X86_EXEC_TIMEOUT = 180
+X86_SHUTDOWN_TIMEOUT = 300
+X86_MAX_RESETS = 3
+NET_WINDOW = 12.0        # seconds of sustained blasting per net direction
+NET_SETTLE = 1.0
+BLK_SEQ_MIB = 512        # sequential read/write volume
+BLK_RAND_OPS = 20000     # 4-KiB O_DIRECT ops per random workload
+BLK_RAND_SPAN_MIB = 1024 # preallocated file size for random writes
+IDLE_WINDOW = 60.0       # idle host CPU sampling window
+
 
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--backend", choices=("qemu", "vmlab-hv"), default="qemu")
-    p.add_argument("--arch", default="all", help="all, or aarch64,riscv64")
-    p.add_argument("--vcpus", default="1,4", help="comma-separated vCPU counts")
+    p.add_argument("--arch", default="all", help="all, or x86_64,aarch64,riscv64")
+    p.add_argument("--vcpus", default=None,
+                   help="comma-separated vCPU counts (default: 1,4 TCG, "
+                        "the template's own for x86_64)")
     p.add_argument("--repeats", type=int, default=3, help="repeats per configuration")
     p.add_argument("--guest", default="debian-13", help="template name")
+    p.add_argument("--suite", choices=("full", "g2g"), default="full",
+                   help="x86_64: full single-VM set, or the guest-to-guest net pair")
     p.add_argument("--cpus", default=None, help="taskset window override (e.g. 16-19)")
     p.add_argument("--hv-bin", default=os.path.join(lib.REPO_DIR, "target/release/vmlab-hv"))
     p.add_argument("--timeout-scale", type=float, default=1.0)
@@ -49,12 +74,13 @@ def parse_args(argv):
 
 
 def resolve_arches(spec):
+    known = list(lib.FIRMWARE) + ["x86_64"]
     if spec == "all":
         return ["aarch64", "riscv64"]
     arches = [a.strip() for a in spec.split(",") if a.strip()]
     for a in arches:
-        if a not in lib.FIRMWARE:
-            raise lib.BenchError(f"unknown arch {a!r} (want aarch64 or riscv64)")
+        if a not in known:
+            raise lib.BenchError(f"unknown arch {a!r} (want x86_64, aarch64 or riscv64)")
     return arches
 
 
@@ -68,7 +94,6 @@ def git_commit():
         capture_output=True,
         text=True,
     ).stdout.strip()
-    return sha, bool(dirty)
     return sha, bool(dirty)
 
 
@@ -86,9 +111,8 @@ def make_backend(args, run_dir, arch, smp, pin, overlay, code_fd, vars_fd):
 
 def one_repeat(args, arch, smp, pin, version, index):
     """One VM: launch → ready → workloads → clean shutdown. Returns samples."""
-    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
     run_dir = os.path.join(
-        lib.RUN_DIR, f"{stamp}-{args.backend}-{arch}-smp{smp}-r{index}"
+        lib.RUN_DIR, lib.run_dir_name(args.backend, arch, args.guest, smp, index)
     )
     shutil.rmtree(run_dir, ignore_errors=True)
     os.makedirs(run_dir)
@@ -190,7 +214,7 @@ def one_repeat(args, arch, smp, pin, version, index):
 
 def run_config(args, arch, smp, pin, version, commit, dirty, host):
     """N repeats of one configuration → one history line per workload."""
-    all_samples = {w: [] for w in lib.WORKLOADS}
+    all_samples = {w: [] for w in lib.workloads(arch, args.guest, args.suite)}
     digests = set()
     env = {
         "governor": lib.read_governor(),
@@ -207,7 +231,7 @@ def run_config(args, arch, smp, pin, version, commit, dirty, host):
         )
         env["loadavg_end"] = lib.read_loadavg()
         env["backend_version"] = backend.backend_version()
-        for w in lib.WORKLOADS:
+        for w in lib.workloads(arch, args.guest, args.suite):
             all_samples[w].append(result["samples"][w])
         digests.add(digest)
         log(f"repeat {i}: {result['samples']}")
@@ -215,11 +239,19 @@ def run_config(args, arch, smp, pin, version, commit, dirty, host):
     if len(digests) != 1:
         raise lib.BenchError(f"sha256 digest changed across repeats: {digests}")
 
+    return finish_config(args, arch, smp, all_samples, env, commit, dirty, host)
+
+
+def finish_config(args, arch, smp, all_samples, env, commit, dirty, host):
+    """Median/spread per workload → one history line each."""
     recorded = datetime.datetime.now().isoformat(timespec="seconds")
     existing = lib.read_history(arch)
     appended = []
-    for w in lib.WORKLOADS:
-        median, spread = lib.median_and_spread(all_samples[w])
+    for w, samples in all_samples.items():
+        if not samples:
+            continue
+        unit = lib.UNIT[w]
+        median, spread = lib.median_and_spread(samples, unit)
         record = {
             "recorded": recorded,
             "commit": commit,
@@ -230,9 +262,10 @@ def run_config(args, arch, smp, pin, version, commit, dirty, host):
             "guest": args.guest,
             "vcpus": smp,
             "workload": w,
-            "unit": lib.UNIT,
+            "unit": unit,
+            "direction": lib.DIRECTION[w],
             "repeats": args.repeats,
-            "samples": all_samples[w],
+            "samples": samples,
             "median": median,
             "spread": spread,
             "qemu_baseline": None,
@@ -249,18 +282,599 @@ def run_config(args, arch, smp, pin, version, commit, dirty, host):
     return appended
 
 
+# ---------------------------------------------------------------------------
+# x86_64 KVM suite (phase 2, HV-D28)
+# ---------------------------------------------------------------------------
+
+
+def sh(agent, cmd, timeout=X86_EXEC_TIMEOUT, stdin_data=None):
+    """One `/bin/sh -c` exec; returns (code, stdout, stderr)."""
+    chan = agent.exec(["/bin/sh", "-c", cmd], timeout, timeout, stdin_data)
+    return (
+        chan["code"],
+        chan["data"].decode(errors="replace"),
+        chan["stderr"].decode(errors="replace"),
+    )
+
+
+def must_sh(agent, cmd, what, timeout=X86_EXEC_TIMEOUT, stdin_data=None):
+    code, out, err = sh(agent, cmd, timeout, stdin_data)
+    if code != 0:
+        raise lib.BenchError(f"{what} exited {code}: {err[-400:]}")
+    return out
+
+
+def windows_setup_done(agent):
+    """The sysprep gate vmlab's readiness uses: both setup phases at 0."""
+    probe = (
+        "powershell.exe -NoProfile -NonInteractive -Command "
+        "\"$s = Get-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\Setup' -ErrorAction Stop; "
+        "Write-Output ('setup=' + $s.SystemSetupInProgress + ', oobe=' + $s.OOBEInProgress); "
+        "if ($s.SystemSetupInProgress -eq 0 -and $s.OOBEInProgress -eq 0) { exit 0 }; exit 1\""
+    )
+    try:
+        chan = agent.exec(["cmd.exe", "/C", probe], 60, 60)
+    except (TimeoutError, ConnectionError, lib.BenchError):
+        return False, "agent unreachable during setup probe"
+    if chan["code"] == 0:
+        return True, ""
+    out = chan["data"].decode(errors="replace")
+    err = chan["stderr"].decode(errors="replace")
+    return False, out + err
+
+
+def respawn_hv(backend, run_dir):
+    """vmlab-hv exits 0 on a guest reset (triple fault); vmlab restarts the
+    process, so the bench does too — same machine description, same disks."""
+    for name in ("control.sock", "agent.sock", "display.sock", "vnc.sock"):
+        path = os.path.join(run_dir, name)
+        if os.path.exists(path):
+            os.remove(path)
+    backend.launch()
+    backend.release_cpus()
+
+
+def wait_x86_ready(backend, args, guest, run_dir, t0):
+    """Boot to agent ready, vmlab's readiness semantics.
+
+    Linux: the agent answers its Hello and runs an exec. Windows: the agent
+    answers during sysprep specialize long before the machine is usable, so
+    readiness additionally waits for both setup phases to clear, requests
+    the first-boot reboot vmlab's provision script performs, and waits for
+    the agent to answer again after it. vmlab-hv exits 0 on the guest reset
+    (triple fault = clean exit) and is respawned; QEMU reboots in-process.
+    The clock starts at the first spawn and never resets.
+    """
+    windows = guest == "windows-10"
+    deadline = t0 + X86_BOOT_DEADLINE[guest] * args.timeout_scale
+    resets = 0
+    reboot_requested = False
+    reboot_done = False
+    setup_status = ""
+    while time.monotonic() < deadline:
+        if backend.session.exited():
+            code = backend.session.exit_code()
+            if (windows and code == 0 and args.backend == "vmlab-hv"
+                    and resets < X86_MAX_RESETS):
+                resets += 1
+                log(f"guest reset {resets}: respawning vmlab-hv")
+                respawn_hv(backend, run_dir)
+                if reboot_requested:
+                    reboot_done = True
+                continue
+            raise lib.BenchError(
+                f"VM exited (code {code}) before agent ready: "
+                f"{backend.session.stderr_text()[-1500:]}"
+            )
+        cand = None
+        agent = None
+        try:
+            cand = lib.AgentClient(backend.agent_socket())
+            hello = cand.handshake(3)
+            agent = cand
+        except Exception:
+            if cand is not None:
+                cand.close()
+        if agent is None:
+            time.sleep(1)
+            continue
+        if not windows:
+            out = must_sh(agent, "printf hv-agent-ready", "ready echo")
+            if "hv-agent-ready" not in out:
+                raise lib.BenchError(f"guest agent echo failed: {out!r}")
+            return agent, hello, round(time.monotonic() - t0, 2)
+        if reboot_requested and reboot_done:
+            return agent, hello, round(time.monotonic() - t0, 2)
+        done, setup_status = windows_setup_done(agent)
+        if done and not reboot_requested:
+            log("windows setup finished; requesting the first-boot reboot")
+            chan = agent.exec(["cmd.exe", "/C", "shutdown.exe /r /t 5 /f"], 60, 60)
+            if chan["code"] != 0:
+                raise lib.BenchError(
+                    f"windows first-boot reboot failed: {chan['stderr'][-300:]!r}"
+                )
+            reboot_requested = True
+            agent.close()
+            time.sleep(6)  # /t 5 plus the shutdown grace
+            continue
+        if done and reboot_requested:
+            # QEMU rebooted in-process and the agent is back.
+            return agent, hello, round(time.monotonic() - t0, 2)
+        agent.close()
+        time.sleep(2)
+    raise TimeoutError(f"{guest} never reached agent ready (setup: {setup_status})")
+
+
+def guest_nic(agent):
+    out = must_sh(agent, "ls /sys/class/net | grep -v '^lo$' | head -1", "NIC name")
+    nic = out.strip().splitlines()[0]
+    if not nic:
+        raise lib.BenchError("no NIC visible in the guest")
+    return nic
+
+
+def copy_in_tools(agent, randblke_bin):
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "nettool.py"), "rb") as f:
+        nettool_src = f.read()
+    must_sh(agent, "cat > /tmp/vmlab-nettool.py", "nettool copy", stdin_data=nettool_src)
+    import base64
+    with open(randblke_bin, "rb") as f:
+        b64 = base64.b64encode(f.read())
+    must_sh(
+        agent,
+        "base64 -d > /tmp/randblke && chmod 755 /tmp/randblke",
+        "randblke copy",
+        stdin_data=b64,
+    )
+
+
+def allocated_span(template_disk):
+    out = subprocess.run(
+        ["qemu-img", "map", "--output=json", template_disk],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    end = 0
+    for entry in json.loads(out):
+        if entry.get("data") and not entry.get("zero", False):
+            end = max(end, entry["start"] + entry["length"])
+    return end
+
+
+def x86_one_repeat(args, guest, smp, pin, version, index):
+    """One x86_64 VM through the full workload set for its guest."""
+    run_dir = os.path.join(
+        lib.RUN_DIR, lib.run_dir_name(args.backend, "x86_64", guest, smp, index)
+    )
+    shutil.rmtree(run_dir, ignore_errors=True)
+    os.makedirs(run_dir)
+    overlay, code_fd, vars_fd = lib.prepare_run_dir(run_dir, "x86_64", guest, version)
+    net = lib.BENCH_NET
+    peer = netpeer.Peer(run_dir, net["guest_ip"], net["guest_mac"], net["port"], log)
+    windows = guest == "windows-10"
+    if args.backend == "qemu":
+        backend = X86QemuBackend(
+            run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
+            peer.switch_sock, net["guest_mac"], net["mtu"], log,
+        )
+    else:
+        backend = X86HvBackend(
+            run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
+            peer.switch_sock, net["guest_mac"], net["mtu"], log,
+            args.hv_bin, lib.IPXE_ROM,
+        )
+    result = {"run": run_dir, "arch": "x86_64", "guest": guest,
+              "vcpus": smp, "backend": args.backend}
+    agent = None
+    try:
+        session = backend.launch()
+        backend.release_cpus()
+        result["t_release"] = round(session.elapsed(), 2)
+        log(f"released CPUs after {result['t_release']}s; waiting for agent")
+
+        agent, hello, boot_secs = wait_x86_ready(backend, args, guest, run_dir, session.t0)
+        result["boot_to_agent_ready"] = boot_secs
+        result["agent_hello"] = {k: hello.get(k) for k in ("agent_version", "os")}
+        log(f"agent ready after {boot_secs}s")
+
+        samples = {"boot_to_agent_ready": boot_secs}
+        env_tool = {}
+
+        if not windows:
+            nic = guest_nic(agent)
+
+            def configure_nic():
+                must_sh(
+                    agent,
+                    f"ip addr replace {net['guest_ip']}/24 dev {nic} && "
+                    f"ip link set dev {nic} mtu {net['mtu']} && ip link set {nic} up",
+                    "NIC setup",
+                )
+
+            # cloud-init may still be reconfiguring interfaces right after
+            # the agent answers; a static address added too early can be
+            # flushed again. Let it finish, then prove the segment works
+            # before anything is measured on it.
+            sh(agent, "timeout 90 cloud-init status --wait >/dev/null 2>&1 || true")
+            configure_nic()
+            copy_in_tools(agent, netpeer.randblke_path())
+            for attempt in range(1, 4):
+                peer.report()  # reset
+                out = must_sh(
+                    agent,
+                    f"python3 /tmp/vmlab-nettool.py udp-blast {net['peer_ip']} "
+                    f"{net['port']} 4096 1",
+                    f"connectivity probe {attempt}",
+                )
+                time.sleep(0.3)
+                if peer.report()["rx_bytes"] > 0:
+                    break
+                configure_nic()
+            else:
+                raise lib.BenchError(
+                    f"guest never delivered a probe frame to the peer on {nic}"
+                )
+            fio = sh(agent, "command -v fio")[1].strip()
+            env_tool["blk_tool"] = "fio" if fio else "randblke"
+            span = min(allocated_span(lib.template_disk("x86_64", guest, version)),
+                       8 * 1024**3)
+            span_mib = max(span // 1024**2, 64)
+            seq_mib = min(BLK_SEQ_MIB, span_mib)
+
+            def randblke(args_str, what):
+                out = must_sh(agent, f"/tmp/randblke {args_str}", what,
+                              timeout=1800)
+                return json.loads(out.strip().splitlines()[-1])
+
+
+            # --- virtio-blk ------------------------------------------------
+            # All direct I/O: reads against the template-backed overlay's
+            # allocated extent, writes against a fresh file on it. (GNU dd's
+            # iflag=direct buffer is refused by the virtio-blk device, so the
+            # one tool covers every shape.)
+            j = randblke(f"seqread /dev/vda 1048576 0 {span_mib * 1024 * 1024}",
+                         "seq read")
+            samples["blk_seq_read_mbps"] = round(j["bytes"] / 1048576 / j["secs"], 2)
+
+            j = randblke(f"seqwrite /var/tmp/bench-seq.img {BLK_SEQ_MIB * 1048576}",
+                         "seq write")
+            samples["blk_seq_write_mbps"] = round(j["bytes"] / 1048576 / j["secs"], 2)
+            sh(agent, "rm -f /var/tmp/bench-seq.img")
+
+            j = randblke(f"randread /dev/vda {BLK_RAND_OPS} 42 0 {span}", "rand read")
+            samples["blk_rand_read_4k_iops"] = round(j["iops"], 1)
+
+            must_sh(agent, f"fallocate -l {BLK_RAND_SPAN_MIB}M /var/tmp/bench-rand.img",
+                    "rand write prep")
+            j = randblke(f"randwrite /var/tmp/bench-rand.img {BLK_RAND_OPS} 7",
+                         "rand write")
+            samples["blk_rand_write_4k_iops"] = round(j["iops"], 1)
+            sh(agent, "rm -f /var/tmp/bench-rand.img")
+
+
+            # --- virtio-net ------------------------------------------------
+            # TX: the guest blasts UDP at the peer; the peer counts the
+            # ethernet bytes that crossed the whole path (device, backend
+            # netdev, framing socket). A delivery below 90% of what the
+            # guest sent means the measurement is broken, not slow.
+            peer.report()  # reset counters
+            out = must_sh(
+                agent,
+                f"python3 /tmp/vmlab-nettool.py udp-blast {net['peer_ip']} {net['port']} "
+                f"{net['udp_payload']} {NET_WINDOW}",
+                "net tx", timeout=NET_WINDOW * 3,
+            )
+            blast = json.loads(out.strip().splitlines()[-1])
+            time.sleep(NET_SETTLE)
+            rx = peer.report()
+            if blast["bytes"] == 0:
+                raise lib.BenchError(f"net tx blasted nothing: {blast}")
+            delivery = rx["rx_bytes"] / blast["bytes"]
+            if delivery < 0.9:
+                raise lib.BenchError(
+                    f"net tx delivery {delivery:.0%}: guest sent {blast['bytes']}, "
+                    f"peer saw {rx['rx_bytes']} ({blast.get('last_error')})"
+                )
+            samples["net_tx_udp_mbps"] = round(
+                rx["rx_bytes"] * 8 / NET_WINDOW / 1e6, 2)
+
+            # RX: the peer blasts; the rate is read from the guest's own
+            # interface counter (kernel-counted, immune to userspace sink
+            # starvation under the flood). The sink only keeps the port
+            # open so the kernel answers nothing back.
+            def nic_rx_bytes():
+                out = must_sh(agent, f"cat /sys/class/net/{nic}/statistics/rx_bytes",
+                              "rx counter read")
+                return int(out.strip().splitlines()[-1])
+
+            must_sh(
+                agent,
+                f"rm -f /tmp/sink.json && nohup python3 /tmp/vmlab-nettool.py "
+                f"udp-sink {net['port']} {NET_WINDOW + 8} > /tmp/sink.json 2>&1 &",
+                "net rx sink start",
+            )
+            time.sleep(NET_SETTLE)
+            rx0 = nic_rx_bytes()
+            peer.blast(NET_WINDOW, net["udp_payload"])
+            # The ack returns at the blast's start; the window is timed
+            # guest-side between the two counter reads.
+            rx_mid = None
+            deadline = time.monotonic() + NET_WINDOW + 30
+            while time.monotonic() < deadline:
+                now_rx = nic_rx_bytes()
+                if rx_mid is not None and now_rx == rx_mid:
+                    break  # counter stopped moving: the flood has drained
+                rx_mid = now_rx
+                time.sleep(2)
+            rx1 = rx_mid if rx_mid is not None else nic_rx_bytes()
+            # Everything the counter gained belongs to this blast's window
+            # (the peer stops writing at NET_WINDOW; the tail is in-flight
+            # drain), so the rate is the whole delta over the window.
+            samples["net_rx_udp_mbps"] = round(
+                (rx1 - rx0) * 8 / NET_WINDOW / 1e6, 2)
+            sh(agent, "pkill -f vmlab-nettool || true")
+
+            # --- idle host CPU ---------------------------------------------
+            must_sh(agent, "sync", "idle sync")
+            time.sleep(3)
+            pid = backend.session.proc.pid
+            c0 = lib.process_cpu_seconds(pid)
+            time.sleep(IDLE_WINDOW)
+            c1 = lib.process_cpu_seconds(pid)
+            if c0 is None or c1 is None:
+                raise lib.BenchError("VM process vanished during idle sampling")
+            samples["idle_cpu_pct"] = round((c1 - c0) / IDLE_WINDOW * 100, 2)
+            log(f"idle host CPU over {IDLE_WINDOW:.0f}s: {samples['idle_cpu_pct']}%")
+
+        result["samples"] = samples
+        result["tools"] = env_tool
+        result["peer"] = peer.report()
+        return result, backend, agent
+    finally:
+        try:
+            if agent is not None:
+                agent.shutdown()
+                agent.close()
+            if args.backend == "vmlab-hv":
+                backend.quit()
+            code = backend.session.wait_exit(X86_SHUTDOWN_TIMEOUT)
+            if code is None:
+                log(f"VM did not exit within {X86_SHUTDOWN_TIMEOUT}s")
+        except Exception as e:  # noqa: BLE001 - cleanup must reach the kills
+            log(f"note: graceful shutdown failed ({e}); killing")
+        backend.session.kill()
+        result["vm_exit"] = backend.session.exit_code()
+        if result["vm_exit"] != 0:
+            log(f"warning: VM exit code {result['vm_exit']}")
+        peer.kill()
+        for name in ("overlay.qcow2", "vars.fd"):
+            path = os.path.join(run_dir, name)
+            if os.path.exists(path) and not args.keep:
+                os.remove(path)
+        with open(os.path.join(run_dir, "result.json"), "w") as f:
+            json.dump(result, f, indent=1)
+
+
+def x86_run_config(args, guest, smp, pin, version, commit, dirty, host):
+    all_samples = {w: [] for w in lib.workloads("x86_64", guest, args.suite)}
+    env = {
+        "governor": lib.read_governor(),
+        "loadavg_start": lib.read_loadavg(),
+        "pin": pin,
+        "memory_max": lib.MEMORY_MAX,
+        "template": version,
+        "host_cpus": os.cpu_count(),
+        "apic_virtualization": lib.host_apic_virtualization(),
+        "nic_mtu": lib.BENCH_NET["mtu"],
+        "net_peer": "bench/netpeer.c framing peer",
+        "tools": {},
+    }
+    for i in range(1, args.repeats + 1):
+        log(f"=== {args.backend} x86_64 {guest} smp={smp} repeat {i}/{args.repeats}")
+        result, backend, agent = x86_one_repeat(args, guest, smp, pin, version, i)
+        env["backend_version"] = backend.backend_version()
+        env["tools"] = result.get("tools", {})
+        for w, value in result["samples"].items():
+            all_samples.setdefault(w, []).append(value)
+        log(f"repeat {i}: {result['samples']}")
+    env["loadavg_end"] = lib.read_loadavg()
+    return finish_config(args, "x86_64", smp, all_samples, env, commit, dirty, host)
+
+
+# --- guest-to-guest net pair (two VMs, one two-port hub) -------------------
+
+
+def g2g_launch(args, tag, guest, smp, pin, hub_sock, mac, run_dir):
+    overlay, code_fd, vars_fd = lib.prepare_run_dir(run_dir, "x86_64", guest,
+                                                    lib.latest_template("x86_64", guest))
+    if args.backend == "qemu":
+        backend = X86QemuBackend(
+            run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
+            hub_sock, mac, lib.BENCH_NET["mtu"], log,
+        )
+    else:
+        backend = X86HvBackend(
+            run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
+            hub_sock, mac, lib.BENCH_NET["mtu"], log,
+            args.hv_bin, lib.IPXE_ROM,
+        )
+    backend.launch()
+    backend.release_cpus()
+    return backend
+
+
+def g2g_teardown(backends, agents):
+    for agent in agents:
+        if agent is None:
+            continue
+        try:
+            agent.shutdown()
+            agent.close()
+        except Exception:
+            pass
+    for backend in backends:
+        try:
+            if args_backend_quit(backend):
+                backend.quit()
+        except Exception:
+            pass
+        backend.session.kill()
+
+
+def args_backend_quit(backend):
+    return backend.name == "vmlab-hv"
+
+
+def g2g_setup_guest(agent, ip, mac_peer=None):
+    nic = guest_nic(agent)
+    must_sh(
+        agent,
+        f"ip link set dev {nic} mtu {lib.BENCH_NET['mtu']} && "
+        f"ip addr add {ip}/24 dev {nic} && ip link set {nic} up",
+        "g2g NIC setup",
+    )
+    copy_in_tools(agent, netpeer.randblke_path())
+
+
+def g2g_direction(sender, receiver, receiver_ip, port, window):
+    """One TCP transfer: receiver listens guest-side, sender blasts."""
+    must_sh(
+        receiver,
+        f"rm -f /tmp/sink.json && nohup python3 /tmp/vmlab-nettool.py tcp-sink {port} "
+        f"> /tmp/sink.json 2>&1 &",
+        "g2g sink start",
+    )
+    time.sleep(1)
+    out = must_sh(
+        sender,
+        f"python3 /tmp/vmlab-nettool.py tcp-blast {receiver_ip} {port} {window}",
+        "g2g blast", timeout=window * 4,
+    )
+    blast = json.loads(out.strip().splitlines()[-1])
+    time.sleep(1)
+    sink_out = must_sh(receiver, "cat /tmp/sink.json", "g2g sink read")
+    sink = json.loads(sink_out.strip().splitlines()[-1])
+    mbps = round(sink["bytes"] * 8 / window / 1e6, 2)
+    return mbps, blast, sink
+
+
+def g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, index):
+    root = os.path.join(
+        lib.RUN_DIR, lib.run_dir_name(args.backend, "x86_64", guest, smp, index, "g2g")
+    )
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root)
+    hub = netpeer.Hub(root)
+    net = lib.BENCH_NET
+    a_dir = os.path.join(root, "a")
+    b_dir = os.path.join(root, "b")
+    os.makedirs(a_dir)
+    os.makedirs(b_dir)
+    a = b = None
+    agent_a = agent_b = None
+    result = {"run": root, "arch": "x86_64", "guest": guest, "vcpus": smp,
+              "backend": args.backend, "suite": "g2g"}
+    try:
+        a = g2g_launch(args, "a", guest, smp, pin_a, hub.switch_sock, net["g2g_a_mac"], a_dir)
+        b = g2g_launch(args, "b", guest, smp, pin_b, hub.switch_sock, net["g2g_b_mac"], b_dir)
+        agent_a, _hello_a = lib.wait_for_agent(a.agent_socket(), 300.0, vm_exited=a.session.exit_code)
+        agent_b, _hello_b = lib.wait_for_agent(b.agent_socket(), 300.0, vm_exited=b.session.exit_code)
+        g2g_setup_guest(agent_a, net["g2g_a_ip"])
+        g2g_setup_guest(agent_b, net["g2g_b_ip"])
+
+        port = 5903
+        a2b, blast, sink = g2g_direction(agent_b, agent_a, net["g2g_a_ip"], port, NET_WINDOW)
+        log(f"g2g b->a: {a2b} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
+        b2a, blast, sink = g2g_direction(agent_a, agent_b, net["g2g_b_ip"], port, NET_WINDOW)
+        log(f"g2g a->b: {b2a} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
+        result["samples"] = {
+            "net_g2g_a2b_tcp_mbps": a2b,
+            "net_g2g_b2a_tcp_mbps": b2a,
+        }
+        # b sent to a first: a2b is the a-side sink rate.
+        return result, a
+    finally:
+        g2g_teardown([a, b], [agent_a, agent_b])
+        hub.kill()
+        if not args.keep:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def g2g_run_config(args, guest, smp, pin_a, pin_b, version, commit, dirty, host):
+    all_samples = {w: [] for w in lib.X86_G2G_WORKLOADS}
+    env = {
+        "governor": lib.read_governor(),
+        "loadavg_start": lib.read_loadavg(),
+        "pin": f"{pin_a}+{pin_b}",
+        "memory_max": lib.MEMORY_MAX,
+        "template": version,
+        "host_cpus": os.cpu_count(),
+        "nic_mtu": lib.BENCH_NET["mtu"],
+        "net_peer": "bench/netpeer.c hub (2 ports)",
+    }
+    for i in range(1, args.repeats + 1):
+        log(f"=== {args.backend} x86_64 g2g {guest} repeat {i}/{args.repeats}")
+        result, a = g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, i)
+        env["backend_version"] = a.backend_version()
+        for w, value in result["samples"].items():
+            all_samples[w].append(value)
+        log(f"repeat {i}: {result['samples']}")
+    env["loadavg_end"] = lib.read_loadavg()
+    return finish_config(args, "x86_64", smp, all_samples, env, commit, dirty, host)
+
+
+# ---------------------------------------------------------------------------
+
+
 def main(argv=None):
     args = parse_args(argv)
     if args.repeats < 2:
         log("note: --repeats < 2 leaves no spread; bench-check treats that as zero noise")
     arches = resolve_arches(args.arch)
-    vcpus = [int(v) for v in args.vcpus.split(",") if v.strip()]
+    if args.suite == "g2g" and arches != ["x86_64"]:
+        raise lib.BenchError("--suite g2g is an x86_64 suite")
     commit, dirty = git_commit()
     host = os.uname().nodename
+    if "x86_64" in arches:
+        netpeer.compile_tools(log)
 
     for arch in arches:
+        if arch == "x86_64":
+            guests = [args.guest] if args.guest != "debian-13" else ["ubuntu-26.04"]
+            for guest in guests:
+                if guest not in lib.X86_GUESTS:
+                    raise lib.BenchError(f"unknown x86_64 guest {guest!r}")
+                version = lib.latest_template(arch, guest)
+                profile_smp = lib.X86_GUESTS[guest]["vcpus"]
+                smp_list = ([int(v) for v in args.vcpus.split(",") if v.strip()]
+                            if args.vcpus else [profile_smp])
+                for smp in smp_list:
+                    if args.suite == "g2g":
+                        pin_a, pin_b = "16-19", "20-23"
+                        if args.cpus:
+                            pin_a, pin_b = args.cpus, args.cpus
+                        log(f"### {args.backend} x86_64 g2g {guest}@{version} "
+                            f"pins={pin_a}+{pin_b} governor={lib.read_governor()}")
+                        if args.dry_run:
+                            continue
+                        records = g2g_run_config(args, guest, smp, pin_a, pin_b,
+                                                 version, commit, dirty, host)
+                    else:
+                        pin = lib.pin_cpus(smp, args.cpus)
+                        log(f"### {args.backend} x86_64 {guest} smp={smp} {guest}@{version} "
+                            f"pin={pin} governor={lib.read_governor()} "
+                            f"load={lib.read_loadavg()}")
+                        if args.dry_run:
+                            continue
+                        records = x86_run_config(args, guest, smp, pin, version,
+                                                 commit, dirty, host)
+                    for r in records:
+                        log(f"history: {r['workload']} median={r['median']}{r['unit']} "
+                            f"spread={r['spread']}")
+            continue
+
         version = lib.latest_template(arch, args.guest)
-        for smp in vcpus:
+        vcpu_spec = args.vcpus or "1,4"
+        for smp in [int(v) for v in vcpu_spec.split(",") if v.strip()]:
             pin = lib.pin_cpus(smp, args.cpus)
             log(f"### {args.backend} {arch} smp={smp} {args.guest}@{version} pin={pin} "
                 f"governor={lib.read_governor()} load={lib.read_loadavg()}")

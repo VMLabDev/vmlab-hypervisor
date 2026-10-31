@@ -42,9 +42,131 @@ MACHINE_ARG = {"aarch64": "virt", "riscv64": "virt,acpi=off"}
 # The safety cap every VM-booting command runs under (wave-4 common brief).
 MEMORY_MAX = "24G"
 
-# The three D2 workloads, in report order.
-WORKLOADS = ("boot_to_agent_ready", "sha256_256M", "xz_9_32M")
-UNIT = "s"
+# ---------------------------------------------------------------------------
+# x86_64 KVM (phase 2, HV-D28): templates, firmware, workloads
+# ---------------------------------------------------------------------------
+
+# The firmware binaries the two backends share. vmlab-hv names SeaBIOS
+# explicitly; QEMU loads the same file from its own data directory when the
+# argv carries no pflash drive (docs/hwref: BIOS vendor SeaBIOS 1.17.0).
+SEABIOS = "/usr/share/qemu/bios-256k.bin"
+# vmlab's bundled edk2 pair (src/qemu/firmware.rs `bundled_names`, x86_64
+# plain pairing) — the highest-priority source on this host.
+OVMF_CODE = os.path.expanduser(
+    "~/.local/share/vmlab/guest/firmware/x86_64/OVMF_CODE_4M.fd"
+)
+OVMF_VARS = os.path.expanduser(
+    "~/.local/share/vmlab/guest/firmware/x86_64/OVMF_VARS_4M.fd"
+)
+# The iPXE ROM the hv NIC carries (just firmware-ipxe-build). QEMU's NIC
+# keeps its own default combo ROM; D16 compares presence and identity, not
+# bytes, and neither ROM is on the measured path.
+IPXE_ROM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "ipxe", "virtio-net.rom")
+
+# The x86_64 templates the phase-2 gate runs on (package brief): profile
+# shape from vmlab's profiles/shipped.wcl + the template's own template.wcl.
+X86_GUESTS = {
+    "ubuntu-26.04": {
+        "firmware": "seabios",
+        "vcpus": 2,
+        "memory_mib": 4096,
+        "hyperv": False,
+    },
+    "windows-10": {
+        "firmware": "ovmf",
+        "vcpus": 4,
+        "memory_mib": 8192,
+        "hyperv": True,
+    },
+}
+
+# The benchmark network: both backends attach the NIC as a stream-socket
+# client of vmlab's switch framing (4-byte big-endian length + one frame).
+# The bench serves that socket with bench/netpeer (README §net).
+BENCH_NET = {
+    "guest_ip": "192.168.50.2",
+    "peer_ip": "192.168.50.1",
+    "peer_mac": "52:54:00:aa:00:01",
+    "guest_mac": "52:54:00:12:34:56",
+    # Jumbo frames keep the Python guest tools and the framing peer off the
+    # measured ceiling; both backends get the identical host_mtu deviation.
+    "mtu": 65520,
+    "udp_payload": 65000,
+    "port": 5901,
+    "g2g_a_ip": "192.168.60.2",
+    "g2g_a_mac": "52:54:00:12:34:60",
+    "g2g_b_ip": "192.168.60.3",
+    "g2g_b_mac": "52:54:00:12:34:61",
+}
+
+# Workloads per suite, in report order. x86_64 windows boots to agent ready
+# only (package brief); ubuntu carries the full phase-2 set.
+TCG_WORKLOADS = ("boot_to_agent_ready", "sha256_256M", "xz_9_32M")
+X86_UBUNTU_WORKLOADS = (
+    "boot_to_agent_ready",
+    "blk_seq_read_mbps",
+    "blk_seq_write_mbps",
+    "blk_rand_read_4k_iops",
+    "blk_rand_write_4k_iops",
+    "net_tx_udp_mbps",
+    "net_rx_udp_mbps",
+    "idle_cpu_pct",
+)
+X86_WINDOWS_WORKLOADS = ("boot_to_agent_ready",)
+X86_G2G_WORKLOADS = ("net_g2g_a2b_tcp_mbps", "net_g2g_b2a_tcp_mbps")
+
+UNIT = {
+    "boot_to_agent_ready": "s",
+    "sha256_256M": "s",
+    "xz_9_32M": "s",
+    "blk_seq_read_mbps": "MiB/s",
+    "blk_seq_write_mbps": "MiB/s",
+    "blk_rand_read_4k_iops": "iops",
+    "blk_rand_write_4k_iops": "iops",
+    "net_tx_udp_mbps": "Mbit/s",
+    "net_rx_udp_mbps": "Mbit/s",
+    "net_g2g_a2b_tcp_mbps": "Mbit/s",
+    "net_g2g_b2a_tcp_mbps": "Mbit/s",
+    "idle_cpu_pct": "%cpu",
+}
+
+
+def workloads(arch, guest="debian-13", suite="full"):
+    """The workload list for one run, in report order."""
+    if arch != "x86_64":
+        return TCG_WORKLOADS
+    if suite == "g2g":
+        return X86_G2G_WORKLOADS
+    return X86_WINDOWS_WORKLOADS if guest == "windows-10" else X86_UBUNTU_WORKLOADS
+
+
+# HV-D28 bars for the x86_64 suite: boot no slower than QEMU (ratio <= 1.00),
+# virtio-blk and virtio-net at least 80% of QEMU's throughput. Idle CPU is
+# reported against QEMU but gates nothing. TCG arches keep the phase-3 bar
+# (>= 1.00x) that bench-report already prints.
+D28_BAR = {
+    "boot_to_agent_ready": ("<=", 1.00),
+    "blk_seq_read_mbps": (">=", 0.80),
+    "blk_seq_write_mbps": (">=", 0.80),
+    "blk_rand_read_4k_iops": (">=", 0.80),
+    "blk_rand_write_4k_iops": (">=", 0.80),
+    "net_tx_udp_mbps": (">=", 0.80),
+    "net_rx_udp_mbps": (">=", 0.80),
+    "net_g2g_a2b_tcp_mbps": (">=", 0.80),
+    "net_g2g_b2a_tcp_mbps": (">=", 0.80),
+    "idle_cpu_pct": None,
+}
+
+# Which way is a regression, for bench-check. Everything the TCG suite
+# records is seconds; idle CPU is a percentage — both grow when worse. The
+# phase-2 throughput workloads are rates that shrink when worse.
+DIRECTION = {
+    name: ("lower" if unit in ("s", "%cpu") else "higher")
+    for name, unit in UNIT.items()
+}
+
+# The three D2 workloads, in report order (alias for the TCG suites).
+WORKLOADS = TCG_WORKLOADS
 
 # Guest-side commands. Fixed inputs, timed host-side; identical to notes/03.
 PREP_ARGV = [
@@ -147,11 +269,20 @@ class AgentClient:
             raise BenchError(f"unexpected agent frame: kind={kind} channel={ch}")
         return json.loads(payload)
 
-    def exec(self, argv, timeout, idle_timeout=None):
+    def exec(self, argv, timeout, idle_timeout=None, stdin_data=None):
         cid = 1
         self.channels[cid] = {"data": b"", "stderr": b"", "code": None, "eof": False}
         msg = json.dumps({"cmd": "open_exec", "id": cid, "argv": argv}).encode()
         self.sock.sendall(agent_frame(0, 0, msg))
+        if stdin_data is not None:
+            # Exec stdin rides DATA frames on the channel, closed by `eof`;
+            # chunks stay under the agent's initial credit window (the tools
+            # this suite copies in are a few tens of KiB).
+            for off in range(0, len(stdin_data), 32768):
+                self.sock.sendall(agent_frame(1, cid, stdin_data[off : off + 32768]))
+            self.sock.sendall(
+                agent_frame(0, 0, json.dumps({"cmd": "eof", "id": cid}).encode())
+            )
         deadline = time.monotonic() + timeout
         last_data = time.monotonic()
         while True:
@@ -265,26 +396,30 @@ def qmp_cont(path, timeout=60):
 
 
 class HvControlClient:
-    """The vmlab-hv control socket: handshake, then one command per request."""
+    """The vmlab-hv control socket: handshake, then one command per request.
+
+    The protocol is client-speaks-first (vmlab-hv-proto server.rs): the
+    client's `hello` is answered by the server's `hello` carrying its
+    version and capabilities.
+    """
 
     def __init__(self, path, timeout=60):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.connect(path)
         self.sock.settimeout(timeout)
         self.f = self.sock.makefile("rwb")
-        greeting = self._read()
-        if greeting.get("type") != "hello":
-            raise BenchError(f"unexpected control greeting: {greeting}")
-        self.hv_version = greeting.get("hv_version", "?")
         self.f.write(
             (json.dumps({"type": "hello", "proto_version": HV_PROTO_VERSION}) + "\n").encode()
         )
         self.f.flush()
-        reply = self._read()
-        if reply.get("type") == "error":
-            raise BenchError(f"control handshake rejected: {reply}")
-        if reply.get("proto_version") != HV_PROTO_VERSION:
-            raise BenchError(f"control version mismatch: {reply}")
+        greeting = self._read()
+        if greeting.get("type") == "error":
+            raise BenchError(f"control handshake rejected: {greeting}")
+        if greeting.get("type") != "hello":
+            raise BenchError(f"unexpected control greeting: {greeting}")
+        if greeting.get("proto_version") != HV_PROTO_VERSION:
+            raise BenchError(f"control version mismatch: {greeting}")
+        self.hv_version = greeting.get("hv_version", "?")
         self.next_id = 1
 
     def _read(self):
@@ -294,8 +429,10 @@ class HvControlClient:
         return json.loads(line.decode())
 
     def request(self, command, **kwargs):
-        msg = {"type": "request", "id": self.next_id, "command": command}
-        msg.update(kwargs)
+        # The Command enum carries its own serde tag, so it nests:
+        # {"command": {"command": "status"}} (proto/tests/wire.rs).
+        inner = {"command": command, **kwargs}
+        msg = {"type": "request", "id": self.next_id, "command": inner}
         self.next_id += 1
         self.f.write((json.dumps(msg) + "\n").encode())
         self.f.flush()
@@ -338,23 +475,77 @@ def latest_template(arch, guest):
     return max(versions)[1]
 
 
+def short_backend(backend):
+    return {"qemu": "q", "vmlab-hv": "hv"}[backend]
+
+
+def run_dir_name(backend, arch, guest, smp, index, suite="full"):
+    """A run-directory basename short enough that `<run_dir>/<socket>`
+    stays under the 108-byte sun_path limit on every path this repo is
+    checked out at (worktrees have long roots)."""
+    stamp = time.strftime("%H%M%S")
+    if arch == "x86_64":
+        guest = {"ubuntu-26.04": "u2604", "windows-10": "win10"}.get(guest, guest[:8])
+        tag = "g2g" if suite == "g2g" else guest
+        return f"{stamp}-{short_backend(backend)}-x86_{tag}-r{index}"
+    return f"{stamp}-{short_backend(backend)}-{arch}-smp{smp}-r{index}"
+
+
 def _version_key(name):
     return tuple(int(p) if p.isdigit() else p for p in name.split("."))
 
 
+def template_disk(arch, guest, version):
+    """The template's backing disk. The windows-10 template boots its
+    sysprep-generalized `standard` variant when one is present — the disk
+    vmlab itself picks (labd template resolution, acceptance::template)."""
+    base = os.path.join(TEMPLATE_ROOT, arch, guest, version)
+    disk = os.path.join(base, "disk.qcow2")
+    if guest == "windows-10":
+        standard = os.path.join(base, "variants", "standard", "disk.qcow2")
+        if os.path.isfile(standard):
+            return standard
+    if not os.path.isfile(disk):
+        raise BenchError(f"template disk missing: {disk}")
+    return disk
+
+
 def prepare_run_dir(run, arch, guest, version):
     """A fresh qcow2 overlay over the (never-written) template, plus vars."""
-    template = os.path.join(TEMPLATE_ROOT, arch, guest, version, "disk.qcow2")
-    if not os.path.isfile(template):
-        raise BenchError(f"template disk missing: {template}")
+    template = template_disk(arch, guest, version)
     overlay = os.path.join(run, "overlay.qcow2")
     subprocess.run(
         ["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", template, overlay],
         check=True,
     )
+    if arch == "x86_64":
+        # SeaBIOS carries no VARS; an OVMF repeat gets a pristine copy of
+        # vmlab's blank VARS template (the template ships none of its own).
+        code, vars_path = (
+            (SEABIOS, None)
+            if X86_GUESTS[guest]["firmware"] == "seabios"
+            else (OVMF_CODE, os.path.join(run, "vars.fd"))
+        )
+        if vars_path:
+            shutil.copyfile(OVMF_VARS, vars_path)
+        return overlay, code, vars_path
     code, vars_template = FIRMWARE[arch]
     shutil.copyfile(vars_template, os.path.join(run, "vars.fd"))
     return overlay, code, os.path.join(run, "vars.fd")
+
+
+def host_apic_virtualization():
+    """vmlab's cmdline::host_apic_virtualization: kvm_intel's enable_apicv
+    or kvm_amd's avic. Decides the hv-avic enlightenment and QEMU's
+    kvm-pit lost-tick global on this host."""
+    for module, param in [("kvm_intel", "enable_apicv"), ("kvm_amd", "avic")]:
+        try:
+            with open(f"/sys/module/{module}/parameters/{param}") as f:
+                if f.read().strip() in ("Y", "y", "1"):
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -419,17 +610,30 @@ def read_loadavg():
         return None
 
 
+def process_cpu_seconds(pid):
+    """utime+stime of a whole process (all threads) in seconds, or None."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+        fields = stat[stat.rindex(")") + 2 :].split()
+        # After comm: state(0) ... utime(11) stime(12), in clock ticks.
+        ticks = int(fields[11]) + int(fields[12])
+        return ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Statistics and history
 # ---------------------------------------------------------------------------
 
 
-def median_and_spread(samples):
+def median_and_spread(samples, unit="s"):
     """Median plus max-min spread, the noise figure bench-check compares on."""
     med = statistics.median(samples)
     spread = max(samples) - min(samples)
-    return round(med, 2), round(spread, 2)
-
+    digits = 3 if unit in ("iops", "Mbit/s", "MiB/s") else 2
+    return round(med, digits), round(spread, digits)
 
 def history_path(arch):
     return os.path.join(HISTORY_DIR, f"{arch}.jsonl")
@@ -481,15 +685,24 @@ NOISE_FLOOR = 0.05
 
 
 def regression_verdict(previous, latest):
-    """('ok' | 'better' | 'worse', allowed-seconds) for latest vs previous."""
+    """('ok' | 'better' | 'worse', allowed) for latest vs previous.
+
+    `allowed` is in the workload's own unit: the larger of the two runs'
+    spreads, or 5 % of the previous median. Records without a `direction`
+    (the TCG suites' seconds) are lower-is-better; the phase-2 throughput
+    workloads record direction "higher" and a *drop* beyond the noise is
+    the regression.
+    """
     allowed = max(
         previous.get("spread") or 0.0,
         latest.get("spread") or 0.0,
         NOISE_FLOOR * previous["median"],
     )
     delta = latest["median"] - previous["median"]
+    if latest.get("direction", "lower") == "higher":
+        delta = -delta
     if delta > allowed:
-        return "worse", round(allowed, 2)
+        return "worse", round(allowed, 3)
     if delta < -allowed:
-        return "better", round(allowed, 2)
-    return "ok", round(allowed, 2)
+        return "better", round(allowed, 3)
+    return "ok", round(allowed, 3)
