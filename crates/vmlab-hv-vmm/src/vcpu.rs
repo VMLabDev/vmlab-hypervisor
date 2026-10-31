@@ -191,7 +191,13 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             }
             Ok(VcpuExit::IrqWindowOpen) => {}
             Ok(VcpuExit::Hyperv) => {
-                if let Err(e) = crate::hyperv::handle_exit(guard.get_kvm_run()) {
+                let Some(ram) = shared.ram() else {
+                    shared.request_exit(crate::vm::ExitReason::Error(
+                        "Hyper-V exit without guest RAM".into(),
+                    ));
+                    return;
+                };
+                if let Err(e) = crate::hyperv::handle_exit(guard.get_kvm_run(), &ram.mem) {
                     shared.request_exit(crate::vm::ExitReason::Error(e.to_string()));
                     return;
                 }
