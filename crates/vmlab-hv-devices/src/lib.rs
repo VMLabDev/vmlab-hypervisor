@@ -18,6 +18,7 @@ pub mod pflash;
 pub mod serial;
 pub mod tpm;
 pub mod usb;
+pub mod vfio;
 pub mod virtio;
 
 /// Guest physical memory as devices see it.
@@ -64,6 +65,12 @@ pub struct BarInfo {
 /// A PCI function. The VMM's PCI root owns config-space routing and BAR
 /// placement; the device owns the contents of its config space and BARs.
 pub trait PciDevice: Send {
+    /// Notify a direct-mapped device after root-owned BAR placement changes.
+    fn set_bar_address(&mut self, _bar: u8, _address: Option<u64>) {}
+    /// A fatal asynchronous or config-space host error, if any.
+    fn take_error(&mut self) -> Option<String> {
+        None
+    }
     /// Read a 32-bit config register (`reg` is the dword index).
     fn config_read(&mut self, reg: usize) -> u32;
     /// Write `data` at byte `offset` within dword `reg`.
