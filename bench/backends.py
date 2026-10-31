@@ -5,10 +5,8 @@ process under the systemd-run memory cap and a `taskset` pin, release the
 vCPUs the way vmlab does, and expose the guest agent on a unix socket. The
 suite times the same three workloads on either.
 
-The `vmlab-hv` backend is wired end to end, but until phase 3 lands
-foreign-arch `accel: tcg` support, `vmlab-hv` exits at launch with "is not
-supported" (builder::validate); the backend reports that as a skip with the
-error text as the reason, and the runner records it instead of results.
+The `vmlab-hv` backend supports riscv64 virt. Unsupported architectures
+report the hypervisor's launch error as a skip rather than a measurement.
 """
 
 import json
@@ -32,7 +30,11 @@ class VmSession:
         self.log = log
         self.stderr_path = os.path.join(run_dir, "stderr.log")
         self.stderr_file = open(self.stderr_path, "wb")
-        self.vm_slot = lib.VmSlot.acquire()
+        try:
+            self.vm_slot = lib.VmSlot.acquire()
+        except BaseException:
+            self.stderr_file.close()
+            raise
         argv = lib.systemd_run_prefix() + vm_argv
         self.log(f"launching: {' '.join(argv)}")
         self.t0 = time.monotonic()

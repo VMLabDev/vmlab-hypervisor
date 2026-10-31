@@ -18,10 +18,19 @@ import unittest
 from unittest import mock
 
 import lib
-from backends import hv_machine_description, qemu_vm_argv
+from backends import VmSession, hv_machine_description, qemu_vm_argv
 
 
 class StatsTests(unittest.TestCase):
+    def test_vm_slot_failure_closes_log_without_launching(self):
+        with mock.patch("backends.open", mock.mock_open()) as opened, \
+             mock.patch.object(lib.VmSlot, "acquire", side_effect=TimeoutError("slots busy")), \
+             mock.patch("backends.subprocess.Popen") as launched:
+            with self.assertRaisesRegex(TimeoutError, "slots busy"):
+                VmSession(["vmlab-hv"], "/unused", lambda _: None)
+            opened.return_value.close.assert_called_once_with()
+            launched.assert_not_called()
+
     def test_median_odd_and_even(self):
         self.assertEqual(lib.median_and_spread([3.0, 1.0, 2.0]), (2.0, 2.0))
         self.assertEqual(lib.median_and_spread([4.0, 1.0, 3.0, 2.0]), (2.5, 3.0))
