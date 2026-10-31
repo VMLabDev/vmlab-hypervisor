@@ -385,6 +385,10 @@ impl XhciController {
         }
     }
     fn flush_events(&mut self) -> Result<(), DeviceError> {
+        if self.state.interrupters[self.interrupter].pending.is_empty() {
+            self.update_interrupt();
+            return Ok(());
+        }
         let segments = self.segments()?;
         if segments.is_empty() {
             return Ok(());
@@ -425,6 +429,9 @@ impl XhciController {
         Ok(())
     }
     fn acknowledge_events(&mut self, old: u64, new: u64) -> Result<(), DeviceError> {
+        if !self.running() {
+            return Ok(());
+        }
         let seg = self.segments()?;
         let index = |ptr: u64| -> Option<usize> {
             let mut n = 0;

@@ -25,6 +25,31 @@ struct Driver {
     slot: u32,
 }
 
+#[test]
+fn event_ring_setup_does_not_dma_before_the_table_base_is_programmed() {
+    let mut driver = Driver::new();
+    driver.hc.config_write(1, 0, &6u16.to_le_bytes());
+    driver.write(0x40, 2);
+    driver.write(0x1028, 1);
+    driver.write(0x1038, 0x3008);
+    assert_eq!(
+        driver.read(0x44) & 0x1000,
+        0,
+        "halted event-ring configuration caused HCE"
+    );
+    driver.mem64(0x2000, 0x3000);
+    driver.mem32(0x2008, 16);
+    driver.write(0x1030, 0x2000);
+    driver.write(0x1034, 0);
+    driver.write(0x103c, 0);
+    driver.write(0x40, 5);
+    assert_eq!(
+        driver.read(0x44) & 0x1001,
+        0,
+        "configured controller did not run"
+    );
+}
+
 impl Driver {
     fn new() -> Self {
         let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 0x100000)]).unwrap();
