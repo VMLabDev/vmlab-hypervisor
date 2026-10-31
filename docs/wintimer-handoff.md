@@ -1,5 +1,22 @@
 # Handoff: p2-wintimer (Windows timer halt, OVMF first paint)
 
+## Follow-up status, 2026-10-31
+
+For Windows investigation or display work, read `wintimer-investigation.md`
+before using the historical findings below. It records reproduced snapshot
+defects, their S1 regressions, retained trace windows, and current validation.
+The owner selected the placeholder, now implemented with negotiated native
+frame flags and guest-paint checks that exclude host output.
+
+The time-base conclusion below does not cover rapid loads. An exact-TSC-offset
+regression subsequently reproduced rollback failure. Console DMA barriers and
+deferred Hyper-V HCALL completion also have independently failing regressions
+and fixes. Windows still reproduced `0x50` with an automatic reboot after those
+fixes. The historical `0x5c` root cause remains open. Snapshot validation now
+rejects automatic guest reboots even if the next agent command succeeds.
+
+## Previous session record
+
 Branch `wp/p2-wintimer`. Commits:
 
 - `18732e6` perf(vmm): sync OVMF VARS batches off the vCPU threads. Finished.
