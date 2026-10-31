@@ -3,6 +3,7 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::ops::{Deref, DerefMut};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command};
@@ -11,6 +12,63 @@ use std::time::{Duration, Instant};
 
 /// A slot shared by all S1 and acceptance test processes for this user.
 pub struct VmPermit(File);
+
+fn project_vm(command_line: &[u8]) -> bool {
+    let arguments: Vec<_> = command_line.split(|byte| *byte == 0).collect();
+    let Some(program) = arguments.first() else {
+        return false;
+    };
+    let Some(name) = Path::new(std::ffi::OsStr::from_bytes(program)).file_name() else {
+        return false;
+    };
+    let name = name.as_bytes();
+    if name.starts_with(b"qemu-system-") {
+        return !arguments.contains(&b"-avd".as_slice());
+    }
+    name == b"vmlab-hv" || name.starts_with(b"vmlab-hv-test-")
+}
+
+fn project_vm_count(processes: &Path) -> io::Result<usize> {
+    let mut count = 0;
+    for entry in std::fs::read_dir(processes)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+            .is_none()
+        {
+            continue;
+        }
+        match std::fs::read(entry.path().join("cmdline")) {
+            Ok(command_line) => count += usize::from(project_vm(&command_line)),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(count)
+}
+
+fn wait_for_vm_capacity(processes: &Path, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut waiting = false;
+    while project_vm_count(processes)? >= 2 {
+        if !waiting {
+            eprintln!("waiting for fewer than two project VMs before boot");
+            waiting = true;
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "waiting for shared host VM capacity",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
 
 impl VmPermit {
     pub fn acquire() -> io::Result<Self> {
@@ -25,7 +83,9 @@ impl VmPermit {
         let uid = unsafe { libc::geteuid() };
         let directory = std::env::temp_dir().join(format!("vmlab-hv-vm-slots-{uid}"));
         std::fs::create_dir_all(&directory)?;
-        Self::acquire_in(&directory, limit, Duration::from_secs(600))
+        let permit = Self::acquire_in(&directory, limit, Duration::from_secs(600))?;
+        wait_for_vm_capacity(Path::new("/proc"), Duration::from_secs(600))?;
+        Ok(permit)
     }
 
     fn acquire_in(directory: &Path, limit: usize, timeout: Duration) -> io::Result<Self> {
@@ -118,6 +178,9 @@ impl ManagedChild {
         permit: Option<VmPermit>,
         timeout: Duration,
     ) -> io::Result<Self> {
+        if permit.is_some() {
+            wait_for_vm_capacity(Path::new("/proc"), timeout)?;
+        }
         // SAFETY: the pre-exec closure calls only async-signal-safe syscalls.
         // A killed test runner must not leave a VM running without its guard.
         unsafe {
@@ -182,6 +245,47 @@ impl Drop for ManagedChild {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_capacity_counts_project_guests_and_excludes_android() {
+        let directory = tempfile::tempdir().unwrap();
+        for (pid, command) in [
+            (
+                1,
+                b"/usr/bin/qemu-system-x86_64\0-name\0vmlab:bench/test\0".as_slice(),
+            ),
+            (
+                2,
+                b"/tmp/debug/vmlab-hv-test-testing\0--machine\0machine.json\0".as_slice(),
+            ),
+            (
+                3,
+                b"/opt/emulator/qemu-system-x86_64\0-avd\0thevault\0".as_slice(),
+            ),
+            (4, b"/usr/bin/qemu-img\0info\0disk.img\0".as_slice()),
+            (
+                5,
+                b"/tmp/release/vmlab-hv\0--machine\0machine.json\0".as_slice(),
+            ),
+        ] {
+            let process = directory.path().join(pid.to_string());
+            std::fs::create_dir(&process).unwrap();
+            std::fs::write(process.join("cmdline"), command).unwrap();
+        }
+        assert_eq!(project_vm_count(directory.path()).unwrap(), 3);
+        assert_eq!(
+            wait_for_vm_capacity(directory.path(), Duration::ZERO)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        std::fs::write(directory.path().join("2/cmdline"), b"").unwrap();
+        assert_eq!(project_vm_count(directory.path()).unwrap(), 2);
+        assert!(wait_for_vm_capacity(directory.path(), Duration::ZERO).is_err());
+        std::fs::write(directory.path().join("5/cmdline"), b"").unwrap();
+        assert_eq!(project_vm_count(directory.path()).unwrap(), 1);
+        wait_for_vm_capacity(directory.path(), Duration::ZERO).unwrap();
+    }
 
     #[test]
     fn slots_are_exclusive_until_released() {
