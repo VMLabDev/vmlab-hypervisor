@@ -32,6 +32,7 @@ class ParserTests(unittest.TestCase):
 
                 cfg = {"nics": [], "title": "probe", "boot": "esp", "tpm": tpm}
                 with patch.object(capture, "DOCS", self.root), \
+                     patch.object(capture, "VmPermit") as permit, \
                      patch.object(capture, "build_argv", return_value=[]), \
                      patch.object(capture, "spawn_process", side_effect=launch), \
                      patch.object(capture, "stop_process") as stop, \
@@ -41,6 +42,8 @@ class ParserTests(unittest.TestCase):
                     self.assertFalse(capture.run_capture("probe", cfg, Mock()))
                 self.assertTrue(logs)
                 self.assertTrue(all(log.closed for log in logs))
+                permit.assert_called_once_with()
+                permit.return_value.close.assert_called_once_with()
                 if tpm and fail_at == 2:
                     stop.assert_any_call(child)
 
