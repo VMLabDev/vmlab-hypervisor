@@ -55,9 +55,9 @@ count and memory), N repeats, fresh qcow2 overlay per repeat:
 1. **boot_to_agent_ready** — process spawn to vmlab's own readiness: the
    agent's answered Hello plus, for the sysprep-generalized windows
    template, both setup phases cleared and the first-boot reboot done
-   (the gate vmlab's provision script applies). vmlab-hv exits cleanly on
-   a guest reset, so the bench respawns it exactly as vmlab would; QEMU
-   reboots in-process. The clock starts at the first spawn.
+   (the gate vmlab's provision script applies). Both current backends
+   reboot in-process. The runner retains a respawn path for older
+   vmlab-hv binaries that exit on reset. The clock starts at the first spawn.
 2. **blk_seq_read_mbps** — 1-MiB O_DIRECT reads over the template-backed
    overlay's allocated extent (`/dev/vda`), via bench/randblke.c copied in
    through the agent (the template ships no fio, and GNU dd's
@@ -177,3 +177,12 @@ setting them before `bench-run`; each run directory under `bench/run/`
 (gitignored) keeps `serial.log`, `stderr.log` and `result.json` with every
 raw timing, and `--keep` also preserves the overlay and vars so a run can be
 inspected post mortem.
+
+The leaf-IP sampler is `bench/ipsample.c`, built with
+`cc -O2 -o bench/run/bin/ipsample bench/ipsample.c` after the benchmark
+tools directory exists. Its invocation is `bench/run/bin/ipsample PID SECONDS`.
+It resolves runtime addresses through ELF load segments and symbol sizes;
+`--self-test` checks its own symbol resolution. Sampling is requested at
+1 kHz per existing thread with kernel and guest exclusion. Unresolved
+instruction pointers remain visible. These histograms identify sampled
+instructions, not call counts or wall-time percentages.

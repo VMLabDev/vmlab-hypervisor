@@ -28,6 +28,7 @@ class VmSession:
     """
 
     def __init__(self, vm_argv, run_dir, log):
+        lib.require_vm_slots()
         self.run_dir = run_dir
         self.log = log
         self.stderr_path = os.path.join(run_dir, "stderr.log")

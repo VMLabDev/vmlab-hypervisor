@@ -384,6 +384,75 @@ fn s2_backing_chains() {
     qemu_check(&top);
 }
 
+#[test]
+fn s2_bulk_reads_match_qemu_across_mapping_and_backing_boundaries() {
+    require_qemu_img!();
+    let temp = tmpdir("bulk-reads");
+    let raw = temp.path().join("base.raw");
+    std::fs::write(&raw, pattern(3 << 20, 29)).unwrap();
+    let compressed = temp.path().join("compressed.qcow2");
+    qemu_img(&[
+        "convert",
+        "-c",
+        "-O",
+        "qcow2",
+        &raw.to_string_lossy(),
+        &compressed.to_string_lossy(),
+    ]);
+    for (base, format) in [(&raw, "raw"), (&compressed, "qcow2")] {
+        for cluster in [512, 65536] {
+            let overlay = temp.path().join(format!("{format}-{cluster}.qcow2"));
+            qemu_img(&[
+                "create",
+                "-f",
+                "qcow2",
+                "-o",
+                &format!("cluster_size={cluster}"),
+                "-b",
+                &base.to_string_lossy(),
+                "-F",
+                format,
+                &overlay.to_string_lossy(),
+                "4M",
+            ]);
+            qemu_io(&[
+                "-c",
+                "write -P 0xa5 2M 256k",
+                "-c",
+                "write -P 0x7e 64k 128k",
+                "-c",
+                "write -z 512k 128k",
+                &overlay.to_string_lossy(),
+            ]);
+            let oracle = temp.path().join(format!("{format}-{cluster}.raw"));
+            qemu_img(&[
+                "convert",
+                "-O",
+                "raw",
+                &overlay.to_string_lossy(),
+                &oracle.to_string_lossy(),
+            ]);
+            let expected = std::fs::read(&oracle).unwrap();
+            let mut image = vmlab_disk::open(&overlay, Format::Qcow2, true).unwrap();
+            for (offset, len) in [
+                (0, 4 << 20),
+                (1, (4 << 20) - 1),
+                (65535, (2 << 20) + 3),
+                ((3 << 20) - 17, (1 << 20) + 17),
+            ] {
+                let mut received = vec![0; len];
+                image.read_at(offset as u64, &mut received).unwrap();
+                assert_eq!(
+                    received,
+                    expected[offset..offset + len],
+                    "{format}, cluster {cluster}, offset {offset}, length {len}"
+                );
+            }
+            qemu_check(&overlay);
+        }
+    }
+}
+
 /// Images and snapshots created by qemu-img read back identically through
 /// the crate: compressed clusters (deflate), version 2, refcount widths.
 #[test]

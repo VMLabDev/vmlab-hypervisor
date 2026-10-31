@@ -35,6 +35,9 @@ struct Source {
 impl IrqLine for Source {
     fn set_level(&self, high: bool) {
         let mut sources = self.hub.sources.lock();
+        if sources.get(&(self.id, self.gsi)).copied().unwrap_or(false) == high {
+            return;
+        }
         let previous = sources
             .iter()
             .any(|((_, gsi), active)| *gsi == self.gsi && *active);
@@ -592,6 +595,7 @@ mod tests {
         for _ in 0..65536 {
             first.set_level(false);
         }
+        assert!(hub.sources.lock().is_empty());
         first.set_level(true);
         second.set_level(true);
         first.set_level(false);

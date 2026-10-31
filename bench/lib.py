@@ -11,6 +11,7 @@ The QEMU argv below is vmlab's own argv for a linux-modern profile VM on the
 `target/p3-research/g3/bench.py`). Do not drift it without re-baselining.
 """
 
+import itertools
 import json
 import os
 import shutil
@@ -41,6 +42,34 @@ MACHINE_ARG = {"aarch64": "virt", "riscv64": "virt,acpi=off"}
 
 # The safety cap every VM-booting command runs under (wave-4 common brief).
 MEMORY_MAX = "24G"
+
+
+def project_vm_pids(proc_root="/proc"):
+    """Count VMs across worktrees, excluding the owner's Android emulator."""
+    pids = []
+    for pid in os.listdir(proc_root):
+        if not pid.isdecimal():
+            continue
+        try:
+            with open(os.path.join(proc_root, pid, "cmdline"), "rb") as f:
+                argv = f.read().split(b"\0")
+        except FileNotFoundError:
+            continue
+        if not argv or not argv[0]:
+            continue
+        executable = os.path.basename(os.fsdecode(argv[0]))
+        if executable == "vmlab-hv" or (
+            executable.startswith("qemu-system-") and b"-avd" not in argv
+        ):
+            pids.append(int(pid))
+    return sorted(pids)
+
+
+def require_vm_slots(count=1):
+    """Check the host-wide two-VM cap immediately before every launch."""
+    pids = project_vm_pids()
+    if len(pids) + count > 2:
+        raise BenchError(f"need {count} VM slots; running project VM PIDs: {pids}")
 
 # ---------------------------------------------------------------------------
 # x86_64 KVM (phase 2, HV-D28): templates, firmware, workloads
@@ -234,6 +263,8 @@ class AgentClient:
     eaten before the guest opens the port and never answered (notes/03 §1).
     """
 
+    _channel_ids = itertools.count(1)
+
     def __init__(self, path):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.connect(path)
@@ -270,7 +301,9 @@ class AgentClient:
         return json.loads(payload)
 
     def exec(self, argv, timeout, idle_timeout=None, stdin_data=None):
-        cid = 1
+        cid = next(self._channel_ids)
+        if cid > 0xffffffff:
+            raise BenchError("agent channel ID space exhausted")
         self.channels[cid] = {"data": b"", "stderr": b"", "code": None, "eof": False}
         msg = json.dumps({"cmd": "open_exec", "id": cid, "argv": argv}).encode()
         self.sock.sendall(agent_frame(0, 0, msg))
@@ -310,7 +343,7 @@ class AgentClient:
                     raise BenchError(f"agent error: {m}")
                 chan = self.channels[cid]
                 if chan["code"] is not None and chan["eof"]:
-                    return chan
+                    return self.channels.pop(cid)
             elif kind == 1 and ch == cid:
                 self.channels[cid]["data"] += payload
             elif kind == 2 and ch == cid:
