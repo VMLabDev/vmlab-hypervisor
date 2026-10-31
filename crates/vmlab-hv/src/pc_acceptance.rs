@@ -23,7 +23,7 @@ enum Guest {
     Dos,
     Windows7,
     Windows98,
-    Vista,
+    Server2008R2Core,
 }
 
 impl Guest {
@@ -48,28 +48,24 @@ impl Guest {
                 "4.10.2222.5",
                 "VMLAB_HV_TEMPLATE_WINDOWS_98_SE",
             ),
-            Self::Vista => (
+            Self::Server2008R2Core => (
                 "x86_64",
-                "windows-vista",
-                "6002.0.0",
-                "VMLAB_HV_TEMPLATE_WINDOWS_VISTA",
+                "windows-server-2008-r2-core",
+                "7601.0.0",
+                "VMLAB_HV_TEMPLATE_WINDOWS_SERVER_2008_R2_CORE",
             ),
         }
     }
 
-    fn windows(self) -> bool {
-        matches!(self, Self::Windows7 | Self::Vista)
+    fn windows_nt(self) -> bool {
+        matches!(self, Self::Windows7 | Self::Server2008R2Core)
     }
 
     fn timeout(self) -> Duration {
         Duration::from_secs(
             std::env::var("VMLAB_HV_PC_TIMEOUT")
                 .map(|value| value.parse().expect("VMLAB_HV_PC_TIMEOUT must be seconds"))
-                .unwrap_or(if self.windows() || self == Self::Windows98 {
-                    600
-                } else {
-                    180
-                }),
+                .unwrap_or(if self != Self::Dos { 600 } else { 180 }),
         )
     }
 
@@ -85,12 +81,13 @@ impl Guest {
                       "read_only":false, "vmstate":true}],
             "display":{"device":"std-vga", "pci":{"bus":0,"device":2,"function":0}, "rom":vga},
             "ports":[{"name":"vmlab.agent.0", "socket":directory.join("agent.sock"),
-                      "transport":if self.windows() {"virtio"} else {"com1"}}],
+                      "transport":if self.windows_nt() {"virtio"} else {"com1"}}],
             "nics":[], "serial_log":directory.join("serial.log"),
-            "serial_log_port":if self.windows() {"com1"} else {"com2"}
+            "serial_log_port":if self.windows_nt() {"com1"} else {"com2"}
         });
-        if self.windows() {
-            machine["console_pci"] = serde_json::json!({"bus":0,"device":3,"function":0});
+        if self.windows_nt() {
+            machine["display"]["pci"]["device"] = 4.into();
+            machine["console_pci"] = serde_json::json!({"bus":0,"device":2,"function":0});
             machine["hyperv"] = serde_json::json!([
                 "relaxed",
                 "vapic",
@@ -127,9 +124,34 @@ impl Guest {
         match self {
             Self::Temple => vec!["\"pc-agent-ready\\n\";"],
             Self::Dos => vec!["echo", "pc-agent-ready"],
-            Self::Windows98 => vec!["COMMAND.COM", "/C", "echo pc-agent-ready"],
+            Self::Windows98 => vec!["C:\\VMLAB\\VMLABAGT.EXE", "--help"],
             _ => vec!["cmd.exe", "/C", "echo pc-agent-ready"],
         }
+    }
+
+    fn ready_output_valid(self, output: &ExecOutput) -> bool {
+        if self == Self::Windows98 {
+            output.exit_code == 2
+                && output.stdout.is_empty()
+                && String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n")
+                    == concat!(
+                        "usage: vmlab-agent-legacy [--console] [--port COMn] [--log file]\n",
+                        "       vmlab-agent-legacy --install\n"
+                    )
+        } else {
+            output.exit_code == 0 && clean(&output.stdout) == "pc-agent-ready"
+        }
+    }
+
+    fn verify_ready(self, agent: &mut AgentClient) {
+        let arguments = self.ready_command();
+        let output = agent
+            .exec(&arguments, Duration::from_secs(60))
+            .unwrap_or_else(|error| panic!("guest readiness exec {arguments:?}: {error}"));
+        assert!(
+            self.ready_output_valid(&output),
+            "guest readiness exec {arguments:?}: {output:?}"
+        );
     }
 }
 
@@ -296,8 +318,43 @@ impl Running {
             "wrong guest agent: {:?}",
             agent.info()
         );
-        let output = exec(&mut agent, &self.guest.ready_command());
-        assert_eq!(clean(&output.stdout), "pc-agent-ready");
+        if self.guest.windows_nt() {
+            let deadline = Instant::now() + self.guest.timeout();
+            loop {
+                let result = agent.exec(
+                    &[
+                        "cmd.exe",
+                        "/C",
+                        "reg query HKLM\\SYSTEM\\Setup /v SystemSetupInProgress & reg query HKLM\\SYSTEM\\Setup /v OOBEInProgress",
+                    ],
+                    Duration::from_secs(20),
+                );
+                if let Ok(output) = &result
+                    && output.exit_code == 0
+                    && windows_setup_finished(&output.stdout)
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "Windows setup did not settle: {result:?}"
+                );
+                assert!(
+                    self.process.try_wait().unwrap().is_none(),
+                    "VM exited during setup"
+                );
+                if result.is_err() {
+                    let _ = agent.resync(Duration::from_secs(3));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            eprintln!(
+                "{:?}: setup finished; rebooting before acceptance",
+                self.guest
+            );
+            self.reboot(&mut agent);
+        }
+        self.guest.verify_ready(&mut agent);
         eprintln!(
             "{:?} resume-to-agent-exec: {:.3} s",
             self.guest,
@@ -322,11 +379,10 @@ impl Running {
                 "same agent socket did not re-handshake: {last}"
             );
         }
-        let output = exec(agent, &self.guest.ready_command());
-        assert_eq!(clean(&output.stdout), "pc-agent-ready");
+        self.guest.verify_ready(agent);
     }
 
-    fn reset(&mut self, agent: &mut AgentClient) {
+    fn reboot(&mut self, agent: &mut AgentClient) {
         self.call(Control::Status);
         self.control.take_events();
         let pid = self.process.id();
@@ -355,32 +411,57 @@ impl Running {
             "in-place reset must retain process"
         );
         self.refresh(agent);
-        let probe = match self.guest {
-            Guest::Temple => agent.exec(&["\"%d\\n\",hv_pc_live_cookie;"], Duration::from_secs(30)),
-            Guest::Dos => agent.exec(&["type", "C:\\HVPC.TXT"], Duration::from_secs(30)),
-            _ => agent.exec(
-                &["reg.exe", "query", "HKLM\\HARDWARE\\HVPC", "/v", "Cookie"],
-                Duration::from_secs(30),
-            ),
-        }
-        .expect("probe volatile boot state after reset");
-        assert_ne!(
-            probe.exit_code, 0,
-            "reset left pre-reset boot state intact: {probe:?}"
-        );
-        if self.guest == Guest::Temple {
-            assert!(
-                clean(&probe.stdout).contains("hv_pc_live_cookie"),
-                "reset probe failed for an unrelated reason: {probe:?}"
-            );
-        }
+    }
+
+    fn reset(&mut self, agent: &mut AgentClient) {
+        self.reboot(agent);
         if self.guest == Guest::Dos {
+            let startup = shell(agent, self.guest, "type C:\\FDAUTO.BAT");
+            assert!(clean(&startup.stdout).contains("HVPC.TXT"));
+            let absent = shell(
+                agent,
+                self.guest,
+                "if not exist C:\\HVPC.TXT echo pc-cookie-absent",
+            );
+            assert_eq!(clean(&absent.stdout), "pc-cookie-absent");
             shell(agent, self.guest, DOS_RESTORE_STARTUP);
+        } else {
+            if self.guest.windows_nt() {
+                exec(agent, &["reg.exe", "query", "HKLM\\HARDWARE"]);
+            }
+            let probe = match self.guest {
+                Guest::Temple => {
+                    agent.exec(&["\"%d\\n\",hv_pc_live_cookie;"], Duration::from_secs(30))
+                }
+                _ => agent.exec(
+                    &["reg.exe", "query", "HKLM\\HARDWARE\\HVPC", "/v", "Cookie"],
+                    Duration::from_secs(30),
+                ),
+            }
+            .expect("probe volatile boot state after reset");
+            assert_ne!(
+                probe.exit_code, 0,
+                "reset left pre-reset boot state intact: {probe:?}"
+            );
+            if self.guest == Guest::Temple {
+                assert!(
+                    clean(&probe.stdout).contains("hv_pc_live_cookie"),
+                    "reset probe failed for an unrelated reason: {probe:?}"
+                );
+            } else {
+                assert_eq!(probe.exit_code, 1, "unexpected registry failure: {probe:?}");
+                let diagnostic = format!("{}{}", clean(&probe.stdout), clean(&probe.stderr));
+                assert!(
+                    diagnostic.contains("unable to find"),
+                    "unrelated registry error: {probe:?}"
+                );
+            }
         }
         self.call(Control::Status);
         eprintln!(
-            "{:?}: reset retained process {pid}, control, and agent socket",
-            self.guest
+            "{:?}: reset retained process {}, control, and agent socket",
+            self.guest,
+            self.process.id()
         );
     }
 
@@ -464,6 +545,20 @@ fn clean(bytes: &[u8]) -> String {
         .to_string()
 }
 
+fn windows_setup_finished(output: &[u8]) -> bool {
+    ["SystemSetupInProgress", "OOBEInProgress"]
+        .iter()
+        .all(|name| {
+            String::from_utf8_lossy(output).lines().any(|line| {
+                let fields: Vec<_> = line.split_ascii_whitespace().collect();
+                fields.len() == 3
+                    && fields[0] == *name
+                    && fields[1] == "REG_DWORD"
+                    && fields[2] == "0x0"
+            })
+        })
+}
+
 fn exec(agent: &mut AgentClient, arguments: &[&str]) -> ExecOutput {
     let output = agent
         .exec(arguments, Duration::from_secs(60))
@@ -539,7 +634,7 @@ fn snapshot(running: &mut Running, agent: &mut AgentClient) {
                 "guest rebooted or RAM did not roll back"
             );
         }
-        Guest::Windows7 | Guest::Windows98 | Guest::Vista => {
+        Guest::Windows7 | Guest::Windows98 | Guest::Server2008R2Core => {
             let cookie = shell(agent, guest, "reg query HKLM\\HARDWARE\\HVPC /v Cookie");
             assert!(
                 clean(&cookie.stdout).contains("before"),
@@ -590,7 +685,7 @@ fn exercise(guest: Guest) {
         );
         eprintln!("Windows 7 HAL/ACPI enumeration:\n{report}");
     }
-    if !matches!(guest, Guest::Vista | Guest::Windows98) {
+    if guest != Guest::Windows98 {
         snapshot(&mut running, &mut agent);
         running.reset(&mut agent);
     }
@@ -613,8 +708,8 @@ fn windows_7_agent_snapshot_reset() {
 }
 
 #[test]
-fn windows_vista_agent_smoke() {
-    exercise(Guest::Vista);
+fn windows_server_2008_r2_core_agent_snapshot_reset() {
+    exercise(Guest::Server2008R2Core);
 }
 
 #[test]
@@ -634,7 +729,7 @@ fn pc_descriptions_use_explicit_ide_slots_and_the_gate_agent_transport() {
         Guest::Dos,
         Guest::Windows7,
         Guest::Windows98,
-        Guest::Vista,
+        Guest::Server2008R2Core,
     ] {
         let description: vmlab_hv_proto::machine::MachineDescription =
             serde_json::from_value(guest.description(
@@ -651,8 +746,15 @@ fn pc_descriptions_use_explicit_ide_slots_and_the_gate_agent_transport() {
         );
         assert_eq!(description.disks[0].channel, Some(0));
         assert_eq!(description.disks[0].unit, Some(0));
-        assert_eq!(description.ports[0].transport.is_virtio(), guest.windows());
-        assert_eq!(description.serial_log_port.is_com1(), guest.windows());
+        assert_eq!(
+            description.ports[0].transport.is_virtio(),
+            guest.windows_nt()
+        );
+        assert_eq!(description.serial_log_port.is_com1(), guest.windows_nt());
+        if guest.windows_nt() {
+            assert_eq!(description.console_pci.unwrap().device, 2);
+            assert_eq!(description.display.unwrap().pci.device, 4);
+        }
     }
 }
 
@@ -681,4 +783,121 @@ fn freedos_reboot_guard_patches_the_startup_file_that_installs_the_agent() {
             .all(|command| !command.contains("AUTOEXEC"))
     );
     assert_eq!(Guest::Dos.ready_command(), ["echo", "pc-agent-ready"]);
+}
+
+#[test]
+fn windows_98_readiness_uses_the_installed_native_agent() {
+    assert_eq!(
+        Guest::Windows98.ready_command(),
+        ["C:\\VMLAB\\VMLABAGT.EXE", "--help"]
+    );
+}
+
+#[test]
+fn windows_98_readiness_requires_native_usage_output_and_exit_status() {
+    let expected = ExecOutput {
+        exit_code: 2,
+        stdout: Vec::new(),
+        stderr: concat!(
+            "usage: vmlab-agent-legacy [--console] [--port COMn] [--log file]\r\n",
+            "       vmlab-agent-legacy --install\r\n"
+        )
+        .as_bytes()
+        .to_vec(),
+    };
+    assert!(Guest::Windows98.ready_output_valid(&expected));
+    let mut output = expected.clone();
+    output.stderr = String::from_utf8(output.stderr)
+        .unwrap()
+        .replace("\r\n", "\n")
+        .into_bytes();
+    assert!(Guest::Windows98.ready_output_valid(&output));
+    for exit_code in [0, 1, 3] {
+        let mut output = expected.clone();
+        output.exit_code = exit_code;
+        assert!(!Guest::Windows98.ready_output_valid(&output));
+    }
+    for stderr in [
+        b"".as_slice(),
+        b"pc-agent-ready",
+        b"usage: unknown command\r\n",
+    ] {
+        let mut output = expected.clone();
+        output.stderr = stderr.to_vec();
+        assert!(!Guest::Windows98.ready_output_valid(&output));
+    }
+    let mut output = expected.clone();
+    output.stdout = b"pc-agent-ready".to_vec();
+    assert!(!Guest::Windows98.ready_output_valid(&output));
+    let mut output = expected;
+    output.stderr.extend_from_slice(b"unexpected\r\n");
+    assert!(!Guest::Windows98.ready_output_valid(&output));
+}
+
+#[test]
+fn readiness_keeps_the_successful_echo_contract_for_other_guests() {
+    for guest in [
+        Guest::Temple,
+        Guest::Dos,
+        Guest::Windows7,
+        Guest::Server2008R2Core,
+    ] {
+        let mut output = ExecOutput {
+            exit_code: 0,
+            stdout: b"pc-agent-ready\r\n".to_vec(),
+            stderr: Vec::new(),
+        };
+        assert!(guest.ready_output_valid(&output));
+        output.exit_code = 2;
+        assert!(!guest.ready_output_valid(&output));
+        output.exit_code = 0;
+        output.stdout.clear();
+        assert!(!guest.ready_output_valid(&output));
+    }
+}
+
+#[test]
+fn server_2008_r2_core_uses_the_installed_template_and_windows_nt_machine() {
+    let guest = Guest::Server2008R2Core;
+    assert_eq!(
+        guest.template(),
+        (
+            "x86_64",
+            "windows-server-2008-r2-core",
+            "7601.0.0",
+            "VMLAB_HV_TEMPLATE_WINDOWS_SERVER_2008_R2_CORE"
+        )
+    );
+    assert!(guest.windows_nt());
+    assert_eq!(
+        guest.ready_command(),
+        ["cmd.exe", "/C", "echo pc-agent-ready"]
+    );
+    let description = |guest: Guest| {
+        guest.description(
+            Path::new("/var/tmp/pc"),
+            Path::new("/bios"),
+            Path::new("/vga"),
+        )
+    };
+    let mut server = description(guest);
+    assert_eq!(server["name"], "windows-server-2008-r2-core");
+    server["name"] = "windows-7".into();
+    assert_eq!(server, description(Guest::Windows7));
+}
+
+#[test]
+fn windows_setup_requires_both_completed_dword_values() {
+    assert!(windows_setup_finished(
+        b"SystemSetupInProgress REG_DWORD 0x0\r\nOOBEInProgress REG_DWORD 0x0\r\n"
+    ));
+    assert!(!windows_setup_finished(
+        b"SystemSetupInProgress REG_DWORD 0x0\r\nOOBEInProgress REG_DWORD 0x1\r\n"
+    ));
+    assert!(!windows_setup_finished(
+        b"SystemSetupInProgress REG_DWORD 0x0\r\n"
+    ));
+    assert!(!windows_setup_finished(
+        b"ERROR: The system was unable to find the specified registry key or value."
+    ));
 }

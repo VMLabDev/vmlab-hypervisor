@@ -83,8 +83,9 @@ impl VmPermit {
         let uid = unsafe { libc::geteuid() };
         let directory = std::env::temp_dir().join(format!("vmlab-hv-vm-slots-{uid}"));
         std::fs::create_dir_all(&directory)?;
-        let permit = Self::acquire_in(&directory, limit, Duration::from_secs(600))?;
-        wait_for_vm_capacity(Path::new("/proc"), Duration::from_secs(600))?;
+        let timeout = ManagedChild::timeout()?;
+        let permit = Self::acquire_in(&directory, limit, timeout)?;
+        wait_for_vm_capacity(Path::new("/proc"), timeout)?;
         Ok(permit)
     }
 

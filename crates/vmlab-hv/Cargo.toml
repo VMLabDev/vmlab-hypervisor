@@ -27,6 +27,7 @@ testing = ["vmlab-hv-vmm/testing"]
 workspace = true
 
 [dev-dependencies]
+vmlab-hv-firmware.workspace = true
 vmlab-hv-display = { path = "../vmlab-hv-display" }
 tempfile = "3"
 vmlab-hv-proto.workspace = true

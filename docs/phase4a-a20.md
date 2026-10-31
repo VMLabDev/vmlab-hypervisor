@@ -51,4 +51,30 @@ The host measures command-to-completion elapsed time.
 The disabled mean is 0.6% lower, within the observed sample variation.
 This run shows no steady-state slowdown. These figures measure the loop,
 not FreeDOS or Windows 98 boot time, and exclude the gate-transition cost.
-Template boot measurements remain unqualified.
+
+## FreeDOS boot
+
+The fresh FreeDOS 1.3.0 overlay reached its COM1 agent and completed the
+readiness command in 19.296 seconds from control-socket resume. This sample
+used the unoptimized current executable, one host-model vCPU, 64 MiB RAM,
+standard VGA, and no NIC, under the same 24-GiB scope with swap disabled.
+Shared-host VM-slot waiting and binary compilation are excluded.
+
+The run also passed disk and live-state snapshot rollback, an in-place guest
+reboot retaining the process and both sockets, and guest poweroff. This is
+an end-to-end boot sample with the A20 implementation active, not an isolated
+estimate of A20 overhead.
+
+## Windows 98 boot
+
+A fresh Windows 98 SE 4.10.2222.5 overlay reached its COM1 agent and completed
+a native executable probe in 56.552 seconds from resume. This sample used
+one Pentium III-model vCPU, 128 MiB RAM, standard VGA, no NIC, and the
+unoptimized executable under a 24-GiB scope with swap disabled. Compilation
+and shared-host slot waiting are excluded.
+
+The probe invokes the installed `C:\VMLAB\VMLABAGT.EXE --help` and checks its
+documented usage output and exit code 2. This verifies native process launch,
+output capture, and exit reporting without relying on 16-bit `COMMAND.COM`
+output redirection. The host then quits the VM. This sample does not qualify
+Cirrus graphics, PCnet, or clean guest shutdown; those remain phase-4 gates.
