@@ -65,9 +65,9 @@ regression test reproduces the fault with the defaults and executes the
 pflash instruction with the virt PMAs, including after CPU-state restore.
 The paused S1 snapshot save/load/delete round trip passes.
 
-Earlier runtime revisions passed the complete Sail-oracle corpus: 133
-programs, including the two FP regressions. The latest runtime changes
-require another complete run. `just tcg-generate-check` reproduces both
+Runtime revision `b7747be8` passes the complete Sail-oracle corpus: 133
+programs, including the two FP regressions, with no divergences.
+`just tcg-generate-check` reproduces both
 committed generated artifacts byte-for-byte. The three-repeat warm run for
 `b7747be8` passes `just bench-check`; its CoreMark median is 46.861 MIPS
 (6.493 seconds for 304,258,499 instructions). Earlier failed comparisons
