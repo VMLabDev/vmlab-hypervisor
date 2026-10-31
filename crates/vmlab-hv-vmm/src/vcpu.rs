@@ -83,9 +83,11 @@ impl VcpuThread {
 fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
     let mut pending_completion = false;
     let mut sampler = crate::diagnostics::TimeSampler::start(id);
+    let trace_hyperv = std::env::var_os("VMLAB_HV_DIAG_TIME_SAMPLE_MS").is_some();
     loop {
         let running = shared.should_run();
-        // KVM_EXIT_IO/MMIO finish on the next KVM_RUN. Their pending state
+        // I/O, MMIO and Hyper-V hypercalls finish on the next KVM_RUN.
+        // Their pending state
         // is not included in GET_REGS or migration state (KVM API section 5).
         // Complete before parking, without executing another instruction.
         // A split MMIO access can exit again, so keep dispatching until done.
@@ -192,6 +194,40 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             }
             Ok(VcpuExit::IrqWindowOpen) => {}
             Ok(VcpuExit::Hyperv) => {
+                // SAFETY: KVM_EXIT_HYPERV selects this union member.
+                pending_completion = unsafe {
+                    guard.get_kvm_run().__bindgen_anon_1.hyperv.type_
+                        == kvm_bindings::KVM_EXIT_HYPERV_HCALL
+                };
+                if trace_hyperv {
+                    // SAFETY: this exit selects hyperv and its subtype selects u.
+                    let exit = unsafe { &guard.get_kvm_run().__bindgen_anon_1.hyperv };
+                    match exit.type_ {
+                        kvm_bindings::KVM_EXIT_HYPERV_HCALL => {
+                            // SAFETY: HCALL selects the hcall union member.
+                            let hcall = unsafe { exit.u.hcall };
+                            eprintln!(
+                                "Hyper-V exit: vcpu={id} host={:?} hcall={:#x} input={:#x}",
+                                std::time::Instant::now(),
+                                hcall.input,
+                                hcall.params[0]
+                            );
+                        }
+                        kvm_bindings::KVM_EXIT_HYPERV_SYNIC => {
+                            // SAFETY: SYNIC selects the synic union member.
+                            let synic = unsafe { exit.u.synic };
+                            eprintln!(
+                                "Hyper-V exit: vcpu={id} host={:?} msr={:#x} control={:#x} event={:#x} message={:#x}",
+                                std::time::Instant::now(),
+                                synic.msr,
+                                synic.control,
+                                synic.evt_page,
+                                synic.msg_page
+                            );
+                        }
+                        _ => {}
+                    }
+                }
                 let Some(ram) = shared.ram() else {
                     shared.request_exit(crate::vm::ExitReason::Error(
                         "Hyper-V exit without guest RAM".into(),

@@ -125,6 +125,14 @@ fn kvm_or_skip() -> Option<KvmVm> {
 }
 
 fn machine(payload: &[u8], disk_mib: u64) -> Option<Machine> {
+    machine_with_setup(payload, disk_mib, |_, _| {})
+}
+
+fn machine_with_setup(
+    payload: &[u8],
+    disk_mib: u64,
+    setup: impl FnOnce(&KvmVm, &mut kvm_ioctls::VcpuFd),
+) -> Option<Machine> {
     let kvm = kvm_or_skip()?;
     let dir = tempfile::tempdir().ok()?;
     let disk_path = dir.path().join("scratch.qcow2");
@@ -201,6 +209,7 @@ fn machine(payload: &[u8], disk_mib: u64) -> Option<Machine> {
     let mut sregs = vcpu.get_sregs().ok()?;
     sregs.ds.limit = u32::MAX;
     vcpu.set_sregs(&sregs).ok()?;
+    setup(&shared.kvm, &mut vcpu);
     let mut vm = Vm::from_parts(shared, vec![(0, vcpu)], ram).ok()?;
     *pause_target.lock() = Some(vm.handle());
     vm.start();
@@ -556,6 +565,102 @@ fn snapshot_at_io(instruction: &[u8], expected: u16) {
         expected,
         "post-save I/O leaked into restored CPU"
     );
+}
+
+#[test]
+fn snapshot_load_completes_deferred_hyperv_hypercalls() {
+    // Save just before the marker store, then load while PostMessage exits
+    // repeatedly. A stale completion overwrites restored registers and uses
+    // KVM's cached next RIP inside the old hypercall page.
+    let mut payload = vec![0xe4, 0x80, 0xb8, 0xcd, 0xab, 0xa3, 0x00, 0x90];
+    let loop_at = payload.len();
+    // Hyper-V's x86 convention: EDX:EAX control, EBX:ECX input GPA.
+    for (register, value) in [(0xb8, 0x5cu32), (0xba, 0), (0xbb, 0), (0xb9, 0xc000)] {
+        payload.extend([0x66, register]);
+        payload.extend(value.to_le_bytes());
+    }
+    payload.push(0xe8);
+    let displacement = 0xb000u16.wrapping_sub(0x8000 + payload.len() as u16 + 2);
+    payload.extend(displacement.to_le_bytes());
+    payload.push(0xe9);
+    let displacement = (loop_at as u16).wrapping_sub(payload.len() as u16 + 2);
+    payload.extend(displacement.to_le_bytes());
+    let Some(m) = machine_with_setup(&payload, 8, |kvm, cpu| {
+        crate::hyperv::configure_vcpu(&kvm.kvm, cpu, crate::hyperv::WINDOWS_FEATURES).unwrap();
+        crate::loader::init_protected_16(cpu, 0x8000).unwrap();
+        let msrs = kvm_bindings::Msrs::from_entries(&[
+            kvm_bindings::kvm_msr_entry {
+                index: 0x40000000,
+                data: 42,
+                ..Default::default()
+            },
+            kvm_bindings::kvm_msr_entry {
+                index: 0x40000001,
+                data: 0xb001,
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+        assert_eq!(cpu.set_msrs(&msrs).unwrap(), 2);
+    }) else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while m.handle.status() != vmlab_hv_proto::control::RunState::Paused
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(m.handle.status(), vmlab_hv_proto::control::RunState::Paused);
+    m.handle
+        .shared()
+        .wait_quiesced(Duration::from_secs(5))
+        .unwrap();
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = vmlab_hv_proto::client::Client::connect(socket).unwrap();
+    let call = |client: &mut vmlab_hv_proto::client::Client, command| {
+        assert!(matches!(
+            client.call(command).unwrap(),
+            vmlab_hv_proto::control::Outcome::Ok { .. }
+        ));
+    };
+    call(
+        &mut client,
+        vmlab_hv_proto::control::Command::SnapshotSave {
+            name: "hcall".into(),
+        },
+    );
+    for cycle in 0..20 {
+        call(&mut client, vmlab_hv_proto::control::Command::Resume);
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            m.counter(),
+            0xabcd,
+            "guest did not reach the hypercall loop"
+        );
+        call(
+            &mut client,
+            vmlab_hv_proto::control::Command::SnapshotLoad {
+                name: "hcall".into(),
+            },
+        );
+        call(&mut client, vmlab_hv_proto::control::Command::Resume);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while m.counter() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            m.counter(),
+            0xabcd,
+            "load {cycle} completed a stale hypercall over restored registers"
+        );
+        call(&mut client, vmlab_hv_proto::control::Command::Pause);
+        m.handle
+            .shared()
+            .wait_quiesced(Duration::from_secs(5))
+            .unwrap();
+    }
 }
 
 #[test]
