@@ -103,6 +103,11 @@ ordered continuations. The eight-page regression checks every Sail global
 against the reference interpreter and requires zero source operations on
 each warmed path. Counted-memory tests verify that rejecting a trace does
 not duplicate a store and that a memory-derived index reads MMIO once.
+Repeatedly revisiting eight pages exposed a separate four-variant-per-PC
+eviction limit, even when the working set fit the metadata budget. CPU
+traces now use the configured metadata budget to bound variants. After
+warming the complete page set, the revisit regression requires no Sail
+operations or new recordings and checks that usage stays within that budget.
 
 edk2 boot, Linux hardware capture, booted-guest snapshot restoration, and
 boot-to-agent-ready timing are pending. This reference does not establish

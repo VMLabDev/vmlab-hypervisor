@@ -483,9 +483,6 @@ impl<M: Memory> Riscv64<M> {
         trace.last_used = self.cache_clock;
         if let Some(index) = promotion {
             variants.remove(index);
-        } else if variants.len() == 4 {
-            variants.remove(0);
-            self.specialization_stats.evictions += 1;
         }
         variants.push(trace);
         self.cache_variants(pc, variants);

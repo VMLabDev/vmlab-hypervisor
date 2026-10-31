@@ -365,6 +365,29 @@ fn paged_data_loads_specialize_and_revalidate_the_tlb_index() {
             "paged load at {address:#x} returned to Sail"
         );
     }
+    for turn in 0..48 {
+        let page = turn % 8;
+        let address = 0x10000 + page * 4096;
+        let before = specialized.interpreter.operations;
+        let recordings = specialized.specialization_stats.recordings;
+        for cpu in [&mut reference, &mut specialized] {
+            cpu.set_gpr(2, address).unwrap();
+            cpu.run(192).unwrap();
+        }
+        assert_eq!(
+            *specialized.interpreter.globals,
+            *reference.interpreter.globals
+        );
+        if turn >= 24 {
+            assert_eq!(
+                specialized.interpreter.operations, before,
+                "revisited page at {address:#x} returned to Sail"
+            );
+            assert_eq!(specialized.specialization_stats.recordings, recordings);
+        }
+        let (used, limit) = specialized.trace_cache_usage();
+        assert!(used <= limit);
+    }
     eprintln!(
         "paged load stops: {:?}",
         specialized.specialization_stats.stop_reasons
