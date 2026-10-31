@@ -6,8 +6,6 @@
 //! complete synchronously, including tagged NCQ commands. Port multipliers and
 //! power management are not advertised. Disk contents belong to the VMM snapshot.
 
-mod ata;
-mod atapi;
 #[cfg(test)]
 mod tests;
 
@@ -16,12 +14,11 @@ use std::sync::Arc;
 use vm_memory::{Bytes, GuestAddress, GuestMemory as _, Permissions};
 use vmlab_disk::DiskImage;
 
+use crate::ata::{AtaDisk, Drive, Payload, Transport, atapi::Optical};
 use crate::{
     BarInfo, BarKind, BusDevice, DeviceError, GuestMemory, IrqLine, MsiMessage, MsiSink, PciDevice,
     PciSnapshot, Snapshot,
 };
-use ata::{AtaDisk, Drive};
-use atapi::Optical;
 
 const PORTS: usize = 6;
 const REGS: usize = 0x1000;
@@ -31,19 +28,6 @@ const PSS: u32 = 2;
 const DSS: u32 = 4;
 const HBFS: u32 = 1 << 29;
 const TFES: u32 = 1 << 30;
-
-enum Payload {
-    Bytes(Vec<u8>),
-    Read { offset: u64, len: usize },
-}
-impl Payload {
-    fn len(&self) -> usize {
-        match self {
-            Self::Bytes(data) => data.len(),
-            Self::Read { len, .. } => *len,
-        }
-    }
-}
 
 fn port_base(port: usize) -> usize {
     0x100 + port * 0x80
@@ -55,13 +39,7 @@ fn le64(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes[..8].try_into().unwrap())
 }
 
-/// Guest-visible state of an optical drive's medium and tray.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MediaState {
-    pub present: bool,
-    pub tray_open: bool,
-    pub locked: bool,
-}
+pub use crate::ata::MediaState;
 
 /// An AHCI PCI function with six independently attachable SATA devices.
 pub struct Ahci {
@@ -142,19 +120,8 @@ impl Ahci {
         port: usize,
         image: Option<Box<dyn DiskImage>>,
     ) -> Result<(), DeviceError> {
-        Self::validate_media(image.as_deref())?;
+        Optical::validate_media(image.as_deref())?;
         self.attach(port, Drive::Cdrom(Optical::new(image)))
-    }
-
-    fn validate_media(image: Option<&dyn DiskImage>) -> Result<(), DeviceError> {
-        if let Some(image) = image
-            && (!image.read_only() || image.size() < 2048 || !image.size().is_multiple_of(2048))
-        {
-            return Err(DeviceError::Other(
-                "CD-ROM media must be read-only, nonempty and 2048-byte aligned".into(),
-            ));
-        }
-        Ok(())
     }
 
     fn attach(&mut self, port: usize, drive: Drive) -> Result<(), DeviceError> {
@@ -177,28 +144,12 @@ impl Ahci {
         port: usize,
         image: Box<dyn DiskImage>,
     ) -> Result<(), DeviceError> {
-        Self::validate_media(Some(image.as_ref()))?;
-        let optical = self.optical_mut(port)?;
-        if optical.locked {
-            return Err(DeviceError::Other("CD-ROM medium is locked".into()));
-        }
-        optical.image = Some(image);
-        optical.tray_open = false;
-        optical.generation = optical.generation.wrapping_add(1);
-        optical.changed(2);
-        Ok(())
+        self.optical_mut(port)?.insert_media(image)
     }
 
     /// Open the tray and remove the host image. Guest removal locks apply.
     pub fn eject_media(&mut self, port: usize) -> Result<Option<Box<dyn DiskImage>>, DeviceError> {
-        let optical = self.optical_mut(port)?;
-        if optical.locked {
-            return Err(DeviceError::Other("CD-ROM medium is locked".into()));
-        }
-        optical.tray_open = true;
-        optical.generation = optical.generation.wrapping_add(1);
-        optical.changed(3);
-        Ok(optical.image.take())
+        self.optical_mut(port)?.eject_media()
     }
 
     fn optical_mut(&mut self, port: usize) -> Result<&mut Optical, DeviceError> {
@@ -210,11 +161,7 @@ impl Ahci {
 
     pub fn media_state(&self, port: usize) -> Result<MediaState, DeviceError> {
         match self.drives.get(port) {
-            Some(Some(Drive::Cdrom(optical))) => Ok(MediaState {
-                present: optical.present(),
-                tray_open: optical.tray_open,
-                locked: optical.locked,
-            }),
+            Some(Some(Drive::Cdrom(optical))) => Ok(optical.media_state()),
             _ => Err(DeviceError::Other("AHCI port is not a CD-ROM".into())),
         }
     }
@@ -581,24 +528,7 @@ impl Ahci {
     }
 
     fn read_backing(&mut self, port: usize, offset: u64, bytes: &mut [u8]) -> Result<(), u8> {
-        match self.drives[port].as_mut() {
-            Some(Drive::Disk(disk)) => disk.image.read_at(offset, bytes).map_err(|_| 0x40),
-            Some(Drive::Cdrom(optical)) => {
-                if optical
-                    .image
-                    .as_mut()
-                    .ok_or(4)?
-                    .read_at(offset, bytes)
-                    .is_err()
-                {
-                    optical.sense = [3, 0x11, 0];
-                    Err(0x34)
-                } else {
-                    Ok(())
-                }
-            }
-            None => Err(4),
-        }
+        self.drives[port].as_mut().ok_or(4u8)?.read(offset, bytes)
     }
 
     fn ata_range(fis: &[u8; 20]) -> (u64, usize) {
@@ -632,10 +562,10 @@ impl Ahci {
         let write = flags & 0x40 != 0;
         match fis[2] {
             0xec if matches!(drive, Drive::Disk(_)) && !write => {
-                Ok(Payload::Bytes(drive.identify(port)))
+                Ok(Payload::Bytes(drive.identify(port, Transport::Sata)))
             }
             0xa1 if matches!(drive, Drive::Cdrom(_)) && !write => {
-                Ok(Payload::Bytes(drive.identify(port)))
+                Ok(Payload::Bytes(drive.identify(port, Transport::Sata)))
             }
             0xa0 if flags & 0x20 != 0 && (!write || matches!(packet[0], 0x2a | 0xaa)) => {
                 match drive {
@@ -648,37 +578,18 @@ impl Ahci {
                 if write != expected_write {
                     return Err(4);
                 }
-                let Drive::Disk(disk) = drive else {
-                    return Err(4);
-                };
-                let image = &mut disk.image;
                 let (offset, len) = Self::ata_range(fis);
-                if offset
-                    .checked_add(len as u64)
-                    .is_none_or(|end| end > image.size())
-                {
-                    return Err(0x10);
-                }
-                if write {
-                    if image.read_only() || input.len() != len {
-                        return Err(4);
-                    }
-                    image.write_at(offset, input).map_err(|_| 0x40)?;
-                    if !disk.write_cache || (fis[2] == 0x61 && fis[7] & 0x80 != 0) {
-                        image.flush().map_err(|_| 0x40)?;
-                    }
-                    Ok(Payload::Bytes(Vec::new()))
-                } else {
-                    Ok(Payload::Read { offset, len })
-                }
+                drive.transfer(
+                    offset,
+                    len,
+                    write.then_some(input),
+                    fis[2] == 0x61 && fis[7] & 0x80 != 0,
+                )
             }
-            0xe7 | 0xea => match drive {
-                Drive::Disk(disk) => {
-                    disk.image.flush().map_err(|_| 0x40)?;
-                    Ok(Payload::Bytes(Vec::new()))
-                }
-                _ => Err(4),
-            },
+            0xe7 | 0xea => {
+                drive.flush()?;
+                Ok(Payload::Bytes(Vec::new()))
+            }
             0x2f if !write && fis[4] == 0x10 && fis[5..7] == [0, 0] && fis[12..14] == [1, 0] => {
                 let Drive::Disk(disk) = drive else {
                     return Err(4);
@@ -698,26 +609,7 @@ impl Ahci {
                 Ok(Payload::Bytes(log))
             }
             0xef => {
-                if fis[3] == 3
-                    && matches!(fis[12], 0x00 | 0x01 | 0x08..=0x0c | 0x20..=0x22 | 0x40..=0x45)
-                {
-                    match drive {
-                        Drive::Disk(disk) => disk.transfer_mode = fis[12],
-                        Drive::Cdrom(optical) => optical.transfer_mode = fis[12],
-                    }
-                    return Ok(Payload::Bytes(Vec::new()));
-                }
-                let Drive::Disk(disk) = drive else {
-                    return Err(4);
-                };
-                match fis[3] {
-                    2 => disk.write_cache = true,
-                    0x82 => {
-                        disk.image.flush().map_err(|_| 0x40)?;
-                        disk.write_cache = false;
-                    }
-                    _ => return Err(4),
-                }
+                drive.set_features(fis[3], fis[12])?;
                 Ok(Payload::Bytes(Vec::new()))
             }
             _ => Err(4),
