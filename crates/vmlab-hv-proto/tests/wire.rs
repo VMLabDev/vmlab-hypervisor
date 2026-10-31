@@ -108,6 +108,7 @@ fn fs_share_socket_and_path_are_alternatives() {
 
 fn sample_machine() -> MachineDescription {
     MachineDescription {
+        vfio: vec![],
         machine: Default::default(),
         cpu: Default::default(),
         hyperv: vec![],
@@ -181,6 +182,37 @@ fn sample_machine() -> MachineDescription {
         }),
         rtc_base: Some("2026-10-30T00:00:00Z".to_owned()),
     }
+}
+
+#[test]
+fn vfio_assignment_wire_shape_and_omitted_default() {
+    use vmlab_hv_proto::machine::{PciAddress, VfioDevice};
+    let mut machine = sample_machine();
+    assert!(
+        serde_json::to_value(&machine)
+            .unwrap()
+            .get("vfio")
+            .is_none()
+    );
+    machine.vfio.push(VfioDevice {
+        host: "0000:65:00.0".into(),
+        pci: PciAddress {
+            bus: 0,
+            device: 6,
+            function: 0,
+        },
+    });
+    let encoded = serde_json::to_value(&machine).unwrap();
+    assert_eq!(
+        encoded["vfio"],
+        serde_json::json!([
+            {"host": "0000:65:00.0", "pci": {"bus": 0, "device": 6, "function": 0}}
+        ])
+    );
+    assert_eq!(
+        serde_json::from_value::<MachineDescription>(encoded).unwrap(),
+        machine
+    );
 }
 
 #[test]

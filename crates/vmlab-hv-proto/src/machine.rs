@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineDescription {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vfio: Vec<VfioDevice>,
     #[serde(default, skip_serializing_if = "Machine::is_microvm")]
     pub machine: Machine,
     #[serde(default, skip_serializing_if = "CpuPolicy::is_host")]
@@ -62,6 +64,15 @@ pub struct MachineDescription {
     /// RTC start, RFC 3339. `None` means host time.
     #[serde(default)]
     pub rtc_base: Option<String>,
+}
+
+/// A pre-bound host PCI function assigned at an explicit guest address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VfioDevice {
+    /// Canonical domain:bus:device.function, e.g. `0000:65:00.0`.
+    pub host: String,
+    pub pci: PciAddress,
 }
 
 /// The guest audio device and the host streams it plays into.

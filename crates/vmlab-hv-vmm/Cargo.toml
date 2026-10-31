@@ -25,6 +25,9 @@ serde.workspace = true
 zerocopy.workspace = true
 sha2.workspace = true
 parking_lot.workspace = true
+vfio-ioctls = "0.10"
+vfio-bindings = "0.7"
+vmm-sys-util = "0.15"
 
 [dev-dependencies]
 tempfile = "3"

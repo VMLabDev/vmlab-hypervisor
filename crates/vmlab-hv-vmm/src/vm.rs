@@ -66,6 +66,7 @@ impl Drop for MemoryUpdateGuard<'_> {
 
 /// Everything the vCPU threads and the control threads share.
 pub struct VmShared {
+    pub(crate) vfio: Mutex<Vec<Arc<Mutex<crate::vfio::AssignedDevice>>>>,
     io_trace: Option<Mutex<std::collections::VecDeque<String>>>,
     pub(crate) display: Mutex<Option<Arc<vmlab_hv_display::DisplayServer>>>,
     pub(crate) display_generation: std::sync::atomic::AtomicU64,
@@ -133,6 +134,7 @@ impl VmShared {
         mmio64_base: u64,
     ) -> Arc<Self> {
         Arc::new(VmShared {
+            vfio: Mutex::new(Vec::new()),
             io_trace: std::env::var_os("VMLAB_HV_DIAGNOSTICS")
                 .map(|_| Mutex::new(std::collections::VecDeque::new())),
             display: Mutex::new(None),
@@ -602,11 +604,25 @@ impl VmShared {
         if port >= IO_ALLOC_BASE {
             let mut root = self.pci_root.lock();
             if root.dispatch_io_write(port, data) {
+                let error = if self.vfio.lock().is_empty() {
+                    None
+                } else {
+                    root.take_error()
+                };
+                drop(root);
+                if let Some(error) = error {
+                    self.request_exit(ExitReason::Error(error));
+                }
                 self.take_guest_sleep();
                 return;
             }
         }
         self.io_bus.lock().write(port, data);
+        if !self.vfio.lock().is_empty()
+            && let Some(error) = self.pci_root.lock().take_error()
+        {
+            self.request_exit(ExitReason::Error(error));
+        }
         if _memory_update.is_some()
             && let Err(error) = self.sync_vga_mapping()
         {
@@ -656,6 +672,11 @@ impl VmShared {
             let _memory_update = self.memory_update();
             use vmlab_hv_devices::BusDevice;
             crate::pci::PciEcam::new(self.pci_root.clone()).write(offset, data);
+            if !self.vfio.lock().is_empty()
+                && let Some(error) = self.pci_root.lock().take_error()
+            {
+                self.request_exit(ExitReason::Error(error));
+            }
             if let Err(error) = self.sync_vga_mapping() {
                 self.request_exit(ExitReason::Error(error.to_string()));
             }
@@ -667,6 +688,15 @@ impl VmShared {
         if self.in_pci_window(addr) {
             let mut root = self.pci_root.lock();
             if root.dispatch_mmio_write(addr, data) {
+                let error = if self.vfio.lock().is_empty() {
+                    None
+                } else {
+                    root.take_error()
+                };
+                drop(root);
+                if let Some(error) = error {
+                    self.request_exit(ExitReason::Error(error));
+                }
                 return;
             }
         }
@@ -693,7 +723,7 @@ impl VmShared {
             return true;
         }
         let ((b32, e32), (b64, e64)) = self.pci_windows;
-        (b32 <= addr && addr < e32) || (b64 <= addr && addr < e64)
+        (b32 <= addr && addr < e32) || (b64 <= addr && addr < e64) || !self.vfio.lock().is_empty()
     }
 
     pub(crate) fn sync_vga_mapping(&self) -> Result<(), VmmError> {
@@ -1036,6 +1066,11 @@ impl Vm {
     pub fn wait(mut self) -> ExitReason {
         let reason = self.shared.wait_exit();
         self.join_workers();
+        for device in self.shared.vfio.lock().iter() {
+            if let Err(error) = device.lock().reset() {
+                return ExitReason::Error(format!("VFIO reset at VM exit: {error}"));
+            }
+        }
         if let Some(tpm) = self.shared.tpm.lock().as_ref()
             && let Err(e) = tpm.lock().shutdown()
         {
@@ -1274,6 +1309,55 @@ mod tests {
     struct NullIrq;
     impl vmlab_hv_devices::IrqLine for NullIrq {
         fn set_level(&self, _: bool) {}
+    }
+
+    #[test]
+    fn ordinary_io_does_not_scan_pci_errors_without_vfio() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use vmlab_hv_devices::{BarInfo, BarKind, PciDevice};
+        struct Probe(Arc<AtomicUsize>);
+        impl PciDevice for Probe {
+            fn config_read(&mut self, _: usize) -> u32 {
+                3
+            }
+            fn config_write(&mut self, _: usize, _: u64, _: &[u8]) {}
+            fn bars(&self) -> Vec<BarInfo> {
+                vec![BarInfo {
+                    index: 0,
+                    size: 4096,
+                    kind: BarKind::Mmio32,
+                }]
+            }
+            fn bar_read(&mut self, _: u8, _: u64, _: &mut [u8]) {}
+            fn bar_write(&mut self, _: u8, _: u64, _: &[u8]) {}
+            fn take_error(&mut self) -> Option<String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("SKIP VFIO I/O fast path: /dev/kvm absent");
+            return;
+        }
+        let checks = Arc::new(AtomicUsize::new(0));
+        let mut root = PciRoot::new(1 << 32);
+        root.add_device(Arc::new(Mutex::new(Probe(checks.clone()))))
+            .unwrap();
+        let signal = Arc::new(SleepSignal::default());
+        let shared = VmShared::new(
+            KvmVm::new().unwrap(),
+            IoBus::new(),
+            MmioBus::new(),
+            Arc::new(Mutex::new(root)),
+            Arc::new(Mutex::new(PmDevice::new(Arc::new(NullIrq), signal.sink()))),
+            signal,
+            1 << 32,
+        );
+        for _ in 0..100 {
+            shared.io_write(0x80, &[0]);
+            shared.mmio_write(crate::layout::MMIO32_BASE, &[0]);
+        }
+        assert_eq!(checks.load(Ordering::SeqCst), 0);
     }
 
     #[test]

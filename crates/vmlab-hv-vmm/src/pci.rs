@@ -383,6 +383,20 @@ impl PciRoot {
             offset += n;
             data = &data[n..];
         }
+        let mut dev = func.dev.lock();
+        for bar in &func.bars {
+            dev.set_bar_address(
+                bar.info.index,
+                (bar.addr != 0 && !bar.sizing).then_some(bar.addr),
+            );
+        }
+    }
+
+    pub(crate) fn take_error(&mut self) -> Option<String> {
+        self.slots
+            .iter_mut()
+            .flatten()
+            .find_map(|f| f.dev.lock().take_error())
     }
 
     /// Overlay a partial write on the BAR's low dword and interpret it. The

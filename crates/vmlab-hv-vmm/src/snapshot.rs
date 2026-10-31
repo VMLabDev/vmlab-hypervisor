@@ -253,6 +253,11 @@ fn writable_disks(reg: &SnapshotRegistry) -> impl Iterator<Item = &DiskNode> {
 /// in the run state it had.
 pub fn save(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
     let shared = handle.shared();
+    if !shared.vfio.lock().is_empty() {
+        return Err(SnapshotError::Unsupported(
+            "online snapshots are unavailable with assigned VFIO devices".into(),
+        ));
+    }
     let _op = shared.begin_snapshot();
     if let Some(xhci) = shared.xhci.lock().as_ref()
         && xhci.lock().has_host_devices()
@@ -452,6 +457,11 @@ fn save_kernel_state(
 /// recorded.
 pub fn load(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
     let shared = handle.shared();
+    if !shared.vfio.lock().is_empty() {
+        return Err(SnapshotError::Unsupported(
+            "online snapshots are unavailable with assigned VFIO devices".into(),
+        ));
+    }
     let _op = shared.begin_snapshot();
     if let Some(xhci) = shared.xhci.lock().as_ref()
         && xhci.lock().has_host_devices()

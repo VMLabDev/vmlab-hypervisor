@@ -23,6 +23,7 @@ pub mod q35;
 pub mod smm;
 pub mod snapshot;
 pub mod vcpu;
+mod vfio;
 pub mod vm;
 
 #[cfg(test)]
