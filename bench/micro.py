@@ -34,6 +34,11 @@ QEMU_MEMORY_MAX = "8G"  # the wave-4 brief's cap for one QEMU TCG run
 LOOP_WORDS = (0x00108093, 0xFFF10113, 0xFE011CE3)
 LOOP_ITERATIONS = 10_000_000
 STARTUP_ITERATIONS = 1
+# A QEMU sample's wall is ~35 ms with a few ms of scheduler and HTIF-poll
+# jitter, and the 30M-instruction loop executes in ~4 ms: the net needs
+# enough samples for a stable median, so flat-QEMU runs use at least this
+# many repeats (each sample costs ~40 ms).
+FLAT_QEMU_MIN_REPEATS = 15
 
 
 def measure(command, environment, timeout=7200):
@@ -221,14 +226,23 @@ def run_qemu(args, commit, dirty, host, log):
                  "coremark_algorithms_1000_warm":
                      (coremark_elf, coremark_image, None, "400000000")}
     startup_samples = []
-    for repeat in range(args.repeats):
+    # One unrecorded run of each image first: the recorded walls then miss
+    # the host's cold page-cache cost of QEMU's own binary and the ELF,
+    # which is not guest execution. QEMU's translation cache is per
+    # process, so nothing about the guest itself is warmed across runs.
+    measure_qemu([*lib.systemd_run_prefix(QEMU_MEMORY_MAX),
+                  *lib.taskset_prefix(pin), *qemu_argv(startup_elf)], qemu_environment)
+    repeats = max(args.repeats, FLAT_QEMU_MIN_REPEATS)
+    for repeat in range(repeats):
         wall, _, _ = measure_qemu([*lib.systemd_run_prefix(QEMU_MEMORY_MAX),
                                    *lib.taskset_prefix(pin), *qemu_argv(startup_elf)],
                                   qemu_environment)
         startup_samples.append(wall)
     startup = statistics.median(startup_samples)
-    log(f"qemu startup baseline: median {startup:.6f} s over {args.repeats} repeats")
+    log(f"qemu startup baseline: median {startup:.6f} s over {repeats} repeats")
     for name, (elf, image, expected, limit) in workloads.items():
+        measure_qemu([*lib.systemd_run_prefix(QEMU_MEMORY_MAX),
+                      *lib.taskset_prefix(pin), *qemu_argv(elf)], qemu_environment)
         counted = measure([*lib.systemd_run_prefix(), *lib.taskset_prefix(pin), binary,
                            "image", str(image), "80001000", limit], count_environment)
         instructions = counted["instructions"]
@@ -246,23 +260,28 @@ def run_qemu(args, commit, dirty, host, log):
                  "instruction_count": instructions,
                  "instruction_count_source": "interpreter-specialized run of the same flat image",
                  "instruction_count_seconds": counted["seconds"]}
-        for repeat in range(args.repeats):
+        for repeat in range(repeats):
             wall, _, _ = measure_qemu([*lib.systemd_run_prefix(QEMU_MEMORY_MAX),
                                        *lib.taskset_prefix(pin), *qemu_argv(elf)],
                                       qemu_environment)
             net = wall - startup
-            if net <= 0:
-                raise lib.BenchError(f"{name}: wall {wall:.6f} s does not exceed startup {startup:.6f} s")
             samples.append(net)
+            # A single sample below the startup median is expected noise
+            # when the workload executes for only a few milliseconds; the
+            # median must still be positive or the run is not a measurement.
             raw.append({"wall_seconds": wall, "net_seconds": net,
-                        "instructions": instructions, "mips": instructions / net / 1e6})
-            log(f"{name} repeat {repeat + 1}: {raw[-1]['mips']:.2f} MIPS, "
-                f"{net:.6f} s net ({wall:.6f} s wall)")
+                        "instructions": instructions,
+                        "mips": instructions / net / 1e6 if net > 0 else None})
+            mips = "" if net <= 0 else f" {raw[-1]['mips']:.2f} MIPS,"
+            log(f"{name} repeat {repeat + 1}:{mips} {net:.6f} s net ({wall:.6f} s wall)")
+        if statistics.median(samples) <= 0:
+            raise lib.BenchError(f"{name}: median net {statistics.median(samples):.6f} s"
+                                 f" does not exceed the startup median {startup:.6f} s")
         noise["loadavg_end"] = lib.read_loadavg()
         record = {"recorded": datetime.datetime.now().isoformat(timespec="seconds"),
                   "commit": commit, "dirty": dirty, "host": host, "backend": "qemu",
                   "arch": "riscv64", "guest": "flat-rv64gc", "vcpus": 1,
-                  "workload": name, "unit": "s", "repeats": args.repeats, "samples": samples,
+                  "workload": name, "unit": "s", "repeats": repeats, "samples": samples,
                   "median": statistics.median(samples), "spread": max(samples) - min(samples),
                   "qemu_baseline": None, "env": noise, "measurements": raw}
         lib.append_history("riscv64", record)
