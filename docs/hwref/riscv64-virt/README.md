@@ -234,6 +234,16 @@ The intervening CI run was stopped with no owned VM active before RISC-V
 acceptance. Its interrupted log remains at `target/p3b-ci-pc-budget.log`;
 it is not a full CI pass. Fresh serialized CI must verify the fixture change.
 
+The disk-backed CI repeat passes formatting, clippy, disk interop, x86 S1
+acceptance, all four PC hardware-reference captures, and the new fixture
+location regression. It was then stopped at the owner's benchmark-window
+request during the first RISC-V direct-kernel test. The guest had reached
+4.6 million instructions and was explicitly quit; the driver was stopped
+before it could launch another guest. The interrupted run exits 101 and
+remains at `target/p3b-ci-disk-fixtures.log`. It is not a full CI pass or
+a completed RISC-V acceptance result. All further boots, including CI
+children, are held until the owner closes the benchmark window.
+
 The benchmark runner's TCG path referenced an undefined `BOOT_DEADLINE`,
 removed by an earlier x86 readiness change. The original 1,800-second
 deadline is restored, retaining `--timeout-scale`. A no-VM regression first
