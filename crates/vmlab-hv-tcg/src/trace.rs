@@ -40,6 +40,7 @@ fn lower_stage(graph: &Graph, slots: &[usize], stage: Vec<ScalarId>) -> Stage {
 pub(crate) struct Trace {
     recorded: Recorded,
     revision: Option<u64>,
+    code_epoch: Cell<Option<(u64, u64)>>,
     context_slots: Vec<usize>,
     stages: Vec<Stage>,
     checkpoint_stages: Vec<Stage>,
@@ -914,6 +915,7 @@ impl Trace {
         let mut trace = Self {
             recorded,
             revision: None,
+            code_epoch: Cell::new(None),
             context_slots,
             stages,
             checkpoint_stages,
@@ -980,7 +982,11 @@ impl Trace {
     }
 
     fn code_valid(&self, memory: &impl Memory) -> bool {
-        self.recorded.block.code_guards.iter().all(|guard| {
+        let epoch = memory.code_epoch();
+        if epoch.is_some() && epoch == self.code_epoch.get() {
+            return true;
+        }
+        let valid = self.recorded.block.code_guards.iter().all(|guard| {
             memory
                 .code_stamp(guard.address, guard.len)
                 .is_some_and(|stamp| {
@@ -990,7 +996,9 @@ impl Trace {
                         && stamp.first_page == guard.first_page
                         && stamp.last_page == guard.last_page
                 })
-        })
+        });
+        self.code_epoch.set(if valid { epoch } else { None });
+        valid
     }
 
     pub fn run<M: Memory>(

@@ -9,6 +9,13 @@ use crate::{bus::MmioBus, pci::PciRoot};
 
 const MAX_CODE_WINDOWS: usize = 262144;
 const WINDOW_MAPPING: u64 = 1 << 63;
+static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_identity() -> u64 {
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert_ne!(id, 0, "physical memory identity exhausted");
+    id
+}
 
 #[derive(Clone)]
 struct ReadObservation {
@@ -45,11 +52,12 @@ pub struct PhysicalMemory {
     flash: Vec<(u64, Arc<Mutex<super::flash::Flash>>)>,
     last_read: Option<ReadObservation>,
     code_windows: Arc<Mutex<CodeWindows>>,
+    #[cfg(test)]
+    stamp_queries: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PhysicalMemory {
     pub fn new(ram: GuestMemory, size: u64, bus: MmioBus, pci: Arc<Mutex<PciRoot>>) -> Self {
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             ram,
             size,
@@ -62,15 +70,18 @@ impl PhysicalMemory {
                     .map(|_| std::sync::atomic::AtomicU64::new(0))
                     .collect(),
             ),
-            identity: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            identity: next_identity(),
             cache_safe: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             flash: Vec::new(),
             last_read: None,
             code_windows: Arc::default(),
+            #[cfg(test)]
+            stamp_queries: Arc::default(),
         }
     }
 
     pub(super) fn map_flash(&mut self, base: u64, flash: Arc<Mutex<super::flash::Flash>>) {
+        self.identity = next_identity();
         self.flash.push((base, flash));
     }
 
@@ -213,6 +224,10 @@ impl Memory for PhysicalMemory {
             .generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .wrapping_add(1);
+        if generation == 0 {
+            self.cache_safe
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         // These platform registers cannot initiate DMA. Any other MMIO write
         // disables the page-epoch shortcut before firmware can start PCI or
         // fw_cfg DMA. Device writes bypass this CPU memory adapter.
@@ -246,6 +261,16 @@ impl Memory for PhysicalMemory {
     fn generation(&self) -> u64 {
         self.generation.load(std::sync::atomic::Ordering::SeqCst)
     }
+    fn code_epoch(&self) -> Option<(u64, u64)> {
+        if !self.cache_safe.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        let mut epoch = self.generation();
+        for (_, flash) in &self.flash {
+            epoch = epoch.checked_add(flash.lock().code_generation()?)?;
+        }
+        Some((self.identity, epoch))
+    }
     fn ram_bounds(&self, address: u64) -> Option<(u64, u64)> {
         self.is_ram(address, 1)
             .then_some((RAM_BASE, RAM_BASE + self.size - 1))
@@ -258,6 +283,9 @@ impl Memory for PhysicalMemory {
             })
     }
     fn code_stamp(&self, address: u64, len: usize) -> Option<CodeStamp> {
+        #[cfg(test)]
+        self.stamp_queries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _guard = self.transaction.lock();
         if len == 0 {
             return None;
@@ -337,6 +365,51 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_traces_do_not_revalidate_each_instruction_window() {
+        let mut memory = memory();
+        memory
+            .write(RAM_BASE, &0x00108093u32.to_le_bytes())
+            .unwrap();
+        memory
+            .write(RAM_BASE + 4, &0xffdff06fu32.to_le_bytes())
+            .unwrap();
+        let queries = memory.stamp_queries.clone();
+        let mut cpu = vmlab_hv_tcg::Riscv64::new(memory).unwrap();
+        cpu.use_external_clock().unwrap();
+        cpu.specialize = true;
+        cpu.interpreter.operation_limit = u64::MAX;
+        cpu.set_pc(RAM_BASE);
+        cpu.run(4096).unwrap();
+        let before = queries.load(std::sync::atomic::Ordering::Relaxed);
+        let operations = cpu.interpreter.operations;
+        cpu.run(4096).unwrap();
+        assert_eq!(cpu.gpr(1).unwrap(), 4096);
+        assert_eq!(
+            queries.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "unchanged code revalidated every window"
+        );
+        cpu.interpreter.memory.write(RAM_BASE + 128, &[1]).unwrap();
+        cpu.run(4096).unwrap();
+        assert!(queries.load(std::sync::atomic::Ordering::Relaxed) > before);
+        assert_eq!(cpu.interpreter.operations, operations);
+        cpu.interpreter
+            .memory
+            .write(RAM_BASE, &0x00208093u32.to_le_bytes())
+            .unwrap();
+        cpu.run(4096).unwrap();
+        assert_eq!(cpu.gpr(1).unwrap(), 10240);
+        cpu.interpreter.memory.write(0x30008004, &[7]).unwrap();
+        cpu.interpreter
+            .memory
+            .ram
+            .write_slice(&0x00308093u32.to_le_bytes(), GuestAddress(RAM_BASE))
+            .unwrap();
+        cpu.run(4096).unwrap();
+        assert_eq!(cpu.gpr(1).unwrap(), 16384);
+    }
+
+    #[test]
     fn advertised_empty_virtio_mmio_transports_are_readable_after_cpu_restore() {
         use vmlab_hv_devices::riscv::virtio_mmio::EmptyVirtioMmio;
         use vmlab_hv_tcg::Riscv64;
@@ -391,6 +464,7 @@ mod tests {
             .register(0x20000000, 32 << 20, flash.clone())
             .unwrap();
         memory.map_flash(0x20000000, flash.clone());
+        let epoch = memory.code_epoch().unwrap();
         let initial = memory.code_stamp(0x20000000, 4).unwrap();
         assert_eq!(
             memory.ram_bounds(0x20000000),
@@ -398,17 +472,22 @@ mod tests {
         );
         let state = flash.lock().save_state().unwrap();
         memory.write(0x20000000, &[0x98]).unwrap();
+        assert!(memory.code_epoch().is_none());
         assert!(memory.code_stamp(0x20000000, 4).is_none());
         assert_eq!(
             memory.ram_bounds(0x20000000),
             Some((0x20000000, 0x21ffffff))
         );
         flash.lock().write(0, &[0xff]);
+        assert_ne!(memory.code_epoch(), Some(epoch));
         assert_ne!(memory.code_stamp(0x20000000, 4), Some(initial));
         let array = memory.code_stamp(0x20000000, 4).unwrap();
+        let array_epoch = memory.code_epoch();
         flash.lock().restore_state(&state).unwrap();
+        assert_ne!(memory.code_epoch(), array_epoch);
         assert_ne!(memory.code_stamp(0x20000000, 4), Some(array));
         memory.write(0x30008004, &7u16.to_le_bytes()).unwrap();
+        assert!(memory.code_epoch().is_none());
         assert!(memory.code_stamp(RAM_BASE, 4).is_some());
         assert!(memory.code_stamp(0x20000000, 4).is_some());
         assert!(memory.code_stamp(0x21ffffff, 2).is_none());

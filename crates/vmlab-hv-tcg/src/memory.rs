@@ -32,6 +32,12 @@ pub trait Memory {
     fn code_stamp(&self, _address: u64, _len: usize) -> Option<CodeStamp> {
         None
     }
+    /// An optional memory identity and monotonic change epoch for all executable
+    /// bytes and mappings. Equal tokens permit skipping individual code stamps.
+    /// Return None while any writer can bypass this epoch, including DMA.
+    fn code_epoch(&self) -> Option<(u64, u64)> {
+        None
+    }
     /// Inclusive numeric bounds of the RAM or firmware-ROM region containing
     /// this address. Specialization must guard the range and retain memory
     /// effects, including flash command modes. This does not authorize folding
