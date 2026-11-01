@@ -9,6 +9,8 @@ hardware references. The owner keeps this host at `kvm.ignore_msrs=N`.
 
 ## Current verification state
 
+The live macOS boot test (`macos_tahoe_p1_agent_display_keyboard_network_reset_snapshot_stop`) is opt-in while macOS is parked under https://github.com/VMLabDev/vmlab/issues/200: run it with `VMLAB_HV_MACOS_ACCEPTANCE=1`. A later gate run failed it with the agent handshake timing out while both vCPUs were still in firmware or OpenCore, one of the intermittent boot stalls that issue tracks. The macOS device and unit tests stay in the default gate.
+
 P1, P2, P4, and `just ci::check` pass. Eight complete lifecycle runs passed
 with host `kvm.ignore_msrs=N`. The final workspace gate used
 `RUST_TEST_THREADS=1`, `CARGO_BUILD_JOBS=4`, and `VMLAB_HV_TEST_VM_LIMIT=4`

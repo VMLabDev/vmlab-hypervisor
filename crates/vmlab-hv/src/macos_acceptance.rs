@@ -271,6 +271,15 @@ fn password_glyph_detector_matches_the_captured_five_key_exercise() {
 
 #[test]
 fn macos_tahoe_p1_agent_display_keyboard_network_reset_snapshot_stop() {
+    // The live macOS boot is intermittent (OpenCore and early-boot stalls) and is
+    // parked under https://github.com/VMLabDev/vmlab/issues/200, so it runs only on
+    // request until that issue is picked up.
+    if std::env::var_os("VMLAB_HV_MACOS_ACCEPTANCE").is_none() {
+        eprintln!(
+            "skipping macOS P1: opt-in while parked under vmlab#200; set VMLAB_HV_MACOS_ACCEPTANCE=1"
+        );
+        return;
+    }
     if !Path::new("/dev/kvm").exists() {
         eprintln!("skipping macOS P1: /dev/kvm unavailable");
         return;
