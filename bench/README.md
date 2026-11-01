@@ -151,11 +151,14 @@ lines share workload keys, binaries, stop condition and unit, and
 executes; its numbers cannot exclude a training phase the way the warm
 interpreter numbers do, and the records say so (`warmup_excluded: false`).
 
-- **Pinning**: the VM process tree runs under `taskset -c` on full physical
-  cores in the top half of the topology (smp1 → e.g. `16-19`, smp4 →
+- **Pinning**: the VM process tree runs under `taskset -c` on a fixed window
+  of logical CPUs in the top half of the topology (smp1 → e.g. `16-19`, smp4 →
   `16-23` on the 32-thread host this was written on; `--cpus` overrides).
   Every backend gets the same window. The g2g pair pins one VM per half
-  (`16-19` + `20-23`) so the two never contend.
+  (`16-19` + `20-23`) so they use disjoint logical CPUs.
+  On helios, CPUs 16-23 are one SMT thread each on cores 0-7. Their siblings
+  0-7 remain outside the window. Affinity does not reserve either thread
+  against other host work.
 - **Recorded per run**: cpufreq governor, load average (start and end of
   each repeat), pin window, memory cap, template version, backend version,
   host CPU count, git commit (with dirty marker), and for x86_64 the APIC

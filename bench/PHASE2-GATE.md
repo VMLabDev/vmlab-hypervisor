@@ -3,6 +3,141 @@
 **Verdict: NOT passed. Six of ten bars meet D28; G1, G2, G7, and G10 fail.**
 The VM default must remain unchanged.
 
+## Round 3 development diagnostics
+
+These are shared-host diagnostics on 2026-11-01, not a new D28 verdict.
+The round 2 final cohort below remains the latest gate result. No gate
+threshold, workload, CPU pin, template, cache policy, or readiness condition
+has changed. A final quiet-host run requires the owner's bench window.
+
+### G7 investigation
+
+Historical binaries were built from isolated source trees and target
+directories, with the same installed firmware and rebuilt iPXE ROM.
+Each diagnostic boot used a fresh overlay and the normal Ubuntu profile:
+2 vCPUs, 4 GiB, CPUs 16-23, MTU 65520, 65000-byte UDP payloads, and
+12-second sends. All samples, delivery counters, load averages, binary
+hashes, command statuses, and incomplete attempts are retained in
+`bench/profiles/phase2-round3-20261101.json`.
+
+The initial three-send medians were 28882.25 Mbit/s at `8bcbf1b`,
+23083.97 at `fe0915b`, and 22586.79 at `6cceef4`. This initially placed
+the loss before the phase-4a merge. Repeated five-send cohorts did not
+support a reliable bisect: `8bcbf1b` fell to 22030.51, `6e1a493` ranged
+from 18229.06 to 30122.47 across boots, and `6cceef4` reached 27932.50.
+The adjacent `6e1a493` and `27a43c8` distributions also overlap. No
+regression commit is assigned from these measurements.
+
+Four network changes have independent correctness or allocation evidence.
+The table records consecutive diagnostic cohorts, not isolated causal
+estimates. Each before/after cell is the median of five sends in one boot.
+
+| Change | Commit | Before / after UDP TX (Mbit/s) | Evidence |
+|---|---|---|---|
+| C11: avoid empty-queue interrupts | `ba17a4e` | 22281.22 / 23303.73 | Empty TX and unavailable RX-buffer regressions fail before and pass after |
+| C12: offer indirect descriptors | `ccc4288` | 23303.73 / 23630.37 | A two-leg indirect TX chain produces the exact framed packet and used completion |
+| C13: remove TX staging copies | `b3704f5` | 24618.83 / 23593.81 | A backpressured socket preserves every byte and unsent suffix across save/restore |
+| C14: honor classic interrupt suppression | `4448937` | 22313.87 / 22758.85 | Suppressed TX/RX completions raised an IRQ before the fix; suppression and reenable now pass |
+
+The sample ranges overlap, and C13's measured median decreased. None of
+these cohorts proves an isolated throughput gain. In the C14 comparison,
+QEMU's median was 28470.70 Mbit/s and the C14 binary's was 22758.85;
+their shared-host ratio is not a final gate result. Delivery counters
+validate the traffic rather than accepting guest send rates alone.
+
+The device's previous notification helper did not implement
+`VRING_AVAIL_F_NO_INTERRUPT` when EVENT_IDX was disabled. The fix observes
+the driver's flag after used-ring publication and preserves EVENT_IDX
+semantics. Empty drains no longer produce completion interrupts. The
+socket worker still bounds queued output and retains unsent data; queue
+reset, quiescence, framing, and snapshot layouts are unchanged.
+
+### Boot investigation
+
+An installed-firmware pair reached first kernel output at 1.70 seconds
+under QEMU and 2.98 under the C14 binary. Agent readiness was 6.97 and
+12.22 seconds. A separate diagnostic SeaBIOS build reached the boot
+sector at 0.83 seconds under vmlab-hv and first kernel output at 2.80.
+That debug firmware is not used for gate measurements.
+
+A three-second host instruction sampler found repeated platform timer
+updates and PCI/VGA synchronization in the boot path. Leaf instruction
+samples are not wall-time measurements; unresolved samples remain in
+the evidence. A targeted regression reproduced an unrelated MMIO read
+waiting for the RTC lock. An experimental clock change avoided platform
+timer synchronization for unrelated MMIO while retaining HPET and audio
+updates, periodic timer service, and pause/resume behavior.
+
+The installed-firmware comparison retained all three boots of each
+configuration. Readiness was 12.22, 8.18, 8.17 seconds before the clock
+change; 8.21, 8.30, 12.12 afterward; and 6.73, 6.80, 6.95 for QEMU.
+The medians, 8.18 / 8.30 / 6.80 seconds, show no boot-time improvement
+from this change and do not meet G1. Early auxiliary NIC-feature probes
+matched no sysfs entry because they assumed a particular hexadecimal
+width. Later probes compare numeric device IDs; an empty early field
+does not mean no features were negotiated.
+
+The experiment's UDP TX medians were 23695.32 before and 22686.61 Mbit/s
+afterward; QEMU measured 31736.33 in that cohort. It is not retained:
+neither timing diagnostic improved, and
+there is no reason to change clock synchronization for this gate without
+evidence of a gain. Its patch, tests, binary hash, and measurements remain
+in the evidence as the `mmio` candidate. The final code keeps the existing
+platform-clock behavior.
+
+The Windows diagnostic retained two boots of each vmlab-hv candidate:
+93.32 and 94.75 seconds with C14, 113.51 and 85.76 with the discarded
+clock experiment. One QEMU boot took 167.57 seconds. These include the
+unchanged specialize, OOBE, AppX-settle, and in-guest reboot sequence.
+The small, noisy shared-host set is not a G2 median-of-three verdict.
+No Windows-specific fix is claimed.
+
+### Verification and remaining work
+
+All 15 network tests, the release build, workspace clippy with
+`-D warnings`, and 83 benchmark tests pass. The S1 NIC test passes through
+traffic before snapshot, after save, and after restore with all four net
+changes. All 23 active S2 integration tests pass; the ignored 1 GiB test
+has not been rerun in round 3. Benchmark tests still print their existing
+mock socket/file ResourceWarnings.
+
+The MMIO lock regression fails before the candidate and passes afterward.
+HPET progress, pause/resume freezing, and audio pre-access service pass
+their positive controls. The S1 fixed-base clock and both clock snapshot
+roundtrips pass with the candidate binary, including SMP CMOS restore.
+Two later diagnostic sequences were rejected by the per-launch VM-count
+guard before starting their next VM. Their nonzero command statuses and
+completed samples are retained; the scratch runners now wait and retry
+only this admission error. An initial historical build failed because a
+shared target directory reused incompatible dependency metadata. Isolated
+target directories fixed that build setup without changing historical
+sources. The initial interrupt-mask test also needed a borrow-check
+correction before its intended failing assertion could run.
+
+Every diagnostic VM uses the shared host admission checks and a
+24 GiB, zero-swap scope. Live cgroup limits and CPU topology are recorded.
+CPUs 16-23 are one SMT sibling of each of eight physical cores, not eight
+complete physical cores. The pinning is unchanged. No host PCI or USB
+device was claimed, rebound, or reset. Real-device opt-in tests remain
+for the owner to run with an explicitly designated device.
+
+QEMU's userspace virtio-net, stream socket, block submission, and x86
+firmware paths were read as behavioral references. The reference checkout
+was read-only; no QEMU code was copied or translated. No shared trait,
+control protocol, or snapshot-format signature has changed.
+
+The G10 diagnostic waited for both host VM slots without reserving an
+idle slot. It produced no transfer samples and was stopped before any
+pair launch when preparing the required bench-window handoff. G10 has
+not been remeasured or diagnosed in this round.
+
+G7's regression commit, G10's cause, the final G1/G2/G7/G10 verdicts,
+and the complete `just ci::check` run remain unresolved. The changed
+paths have targeted S1/S2 checks; these do not replace full CI. The
+final gate and full serial CI are deferred to the owner's bench window,
+where other sessions can hold new boots, including while in-process
+KVM tests run. No final numbers have been run without authorization.
+
 ## Round 2 final run
 
 The final window opened with the owner's confirmation that no other
