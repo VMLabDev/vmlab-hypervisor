@@ -483,6 +483,7 @@ impl<M: Memory> Riscv64<M> {
             stop_at_control_flow: promotion.is_none(),
             unbounded_globals,
             small_integer_globals: general_names().clone(),
+            constant_context_writes: self.external_clock,
         };
         let recording = crate::trace::Trace::record_block(
             &mut self.interpreter,

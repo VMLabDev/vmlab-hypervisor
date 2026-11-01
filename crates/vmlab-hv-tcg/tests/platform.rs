@@ -227,3 +227,79 @@ fn platform_timer_interrupt_entry_and_return_match_sail() {
         }
     }
 }
+
+#[test]
+fn warmed_trap_context_transitions_do_not_resume_sail() {
+    for supervisor in [false, true] {
+        let make = || {
+            let mut cpu = loop_cpu();
+            let irq = if supervisor { 5 } else { 7 };
+            let ret = if supervisor {
+                0x10200073u32
+            } else {
+                0x30200073
+            };
+            for (index, word) in [0x00110113u32, ret].into_iter().enumerate() {
+                cpu.interpreter
+                    .memory
+                    .write(0x80000100 + index as u64 * 4, &word.to_le_bytes())
+                    .unwrap();
+            }
+            cpu.write_csr(if supervisor { 0x105 } else { 0x305 }, 0x80000100)
+                .unwrap();
+            cpu.write_csr(0x304, 1 << irq).unwrap();
+            let status = cpu.read_csr(0x300).unwrap();
+            cpu.write_csr(0x300, status | if supervisor { 2 } else { 8 })
+                .unwrap();
+            if supervisor {
+                cpu.write_csr(0x3b0, (1u64 << 54) - 1).unwrap();
+                cpu.write_csr(0x3a0, 0x1f).unwrap();
+                cpu.write_csr(0x303, 1 << irq).unwrap();
+                cpu.write_csr(0x30a, 1 << 63).unwrap();
+                cpu.set_privilege(Privilege::Supervisor);
+            }
+            cpu
+        };
+        let deadline = |cpu: &mut Riscv64<FlatMemory>, value| {
+            cpu.interpreter.globals.insert(
+                if supervisor { "zstimecmp" } else { "zmtimecmp" }.into(),
+                Value::bits(64, value),
+            );
+        };
+        let mut specialized = make();
+        specialized.specialize = true;
+        for _ in 0..32 {
+            deadline(&mut specialized, 500u64);
+            specialized.run(1).unwrap();
+            deadline(&mut specialized, 1_000_000u64);
+            specialized.run(3).unwrap();
+        }
+        let mut reference = make();
+        for (name, value) in specialized.interpreter.globals.iter() {
+            reference
+                .interpreter
+                .globals
+                .insert(name.clone(), value.clone());
+        }
+        reference.steps = specialized.steps;
+        let operations = specialized.interpreter.operations;
+        let recordings = specialized.specialization_stats.recordings;
+        for _ in 0..16 {
+            for (value, count) in [(500u64, 1), (1_000_000, 3)] {
+                deadline(&mut reference, value);
+                deadline(&mut specialized, value);
+                reference.run(count).unwrap();
+                specialized.run(count).unwrap();
+                assert_eq!(
+                    *specialized.interpreter.globals,
+                    *reference.interpreter.globals
+                );
+            }
+        }
+        assert_eq!(
+            specialized.interpreter.operations, operations,
+            "supervisor={supervisor}: warmed trap/return resumed Sail"
+        );
+        assert_eq!(specialized.specialization_stats.recordings, recordings);
+    }
+}

@@ -63,6 +63,7 @@ pub(crate) struct Options {
     pub stop_at_control_flow: bool,
     pub unbounded_globals: BTreeSet<String>,
     pub small_integer_globals: BTreeSet<String>,
+    pub constant_context_writes: bool,
 }
 
 pub(crate) struct Recorded {
@@ -803,11 +804,15 @@ impl Recorder {
         } else {
             if !self.options.dynamic_globals.contains(&root) && root != "zPC" {
                 let old = self.global(interpreter, &root)?;
-                if self.known(old)? != self.known(value)? {
+                if self.known(old)? == self.known(value)? {
+                    // A guarded idempotent write has no value to commit.
+                    return Some(());
+                }
+                if !self.options.constant_context_writes {
                     return None;
                 }
-                // A guarded idempotent write has no value to commit.
-                return Some(());
+                // Both values are compile-time constants. The initial value
+                // remains an entry guard; later operations see the new value.
             }
             self.globals.insert(root.clone(), value);
             self.dirty.insert(root);
