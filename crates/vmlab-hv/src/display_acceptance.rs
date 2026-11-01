@@ -360,7 +360,9 @@ impl Observer {
     }
 
     fn guest(agent: &mut AgentClient, args: &[&str]) -> Vec<u8> {
-        let output = agent.exec(args, Duration::from_secs(30)).unwrap();
+        // Longer than the guest-side waits these commands run (the login wait
+        // polls for up to 30 s), so the guest reports its own timeout first.
+        let output = agent.exec(args, Duration::from_secs(90)).unwrap();
         assert_eq!(
             output.exit_code,
             0,
