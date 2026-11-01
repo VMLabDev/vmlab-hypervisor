@@ -167,6 +167,16 @@ impl Client {
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<Option<Event>, ClientError> {
+        let previous_timeout = self.reader.get_ref().read_timeout()?;
+        let result = self.wait_event_deadline(timeout);
+        self.reader.get_ref().set_read_timeout(previous_timeout)?;
+        result
+    }
+
+    fn wait_event_deadline(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<Event>, ClientError> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if let Some(event) = self.events.pop_front() {
@@ -215,6 +225,57 @@ mod tests {
             .unwrap();
         let path = dir.path().join("control.sock");
         (dir, path)
+    }
+
+    #[test]
+    fn event_deadline_does_not_limit_the_next_control_reply() {
+        use std::time::Duration;
+        let (client, server) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(move || {
+            let mut reader = BufReader::new(server.try_clone().unwrap());
+            let mut writer = server;
+            assert!(matches!(
+                codec::read_client_msg(&mut reader).unwrap(),
+                Some(ClientMsg::Hello { .. })
+            ));
+            codec::write_server_msg(
+                &mut writer,
+                &ServerMsg::Hello {
+                    proto_version: PROTO_VERSION,
+                    hv_version: "test".into(),
+                    capabilities: vec![],
+                },
+            )
+            .unwrap();
+            let Some(ClientMsg::Request { id, .. }) = codec::read_client_msg(&mut reader).unwrap()
+            else {
+                panic!("missing request")
+            };
+            thread::sleep(Duration::from_millis(80));
+            codec::write_server_msg(
+                &mut writer,
+                &ServerMsg::Reply {
+                    id,
+                    outcome: Outcome::Ok { status: None },
+                },
+            )
+            .unwrap();
+        });
+        let mut client = Client::handshake(client).unwrap();
+        assert_eq!(
+            client
+                .wait_event_timeout(Duration::from_millis(10))
+                .unwrap(),
+            None
+        );
+        let result = client.call(Command::SnapshotSave {
+            name: "slow".into(),
+        });
+        worker.join().unwrap();
+        assert!(
+            matches!(result, Ok(Outcome::Ok { .. })),
+            "event timeout leaked into RPC: {result:?}"
+        );
     }
 
     #[test]
