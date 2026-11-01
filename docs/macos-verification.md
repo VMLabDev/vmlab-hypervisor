@@ -17,8 +17,11 @@ device tests, with one existing ignored device test. The firmware, protocol,
 TCG, audio, S1, filesystem-restore, sharing, VMM, and documentation suites
 also passed. The log is `.scratch/macos-ci-interval.log`; its exit status is 0.
 
-A literal host-reboot restore remains unmeasured. The synthetic TSC-jump
-regression does not replace that requirement.
+On 2026-11-01, the owner explicitly deferred literal host-reboot restore
+verification to an owner-coordinated reboot. The owner is away, and a reboot
+would end every active session. This deferred measurement does not block
+merge. The synthetic TSC-jump evidence below does not establish cross-reboot
+behavior.
 
 An earlier CI repeat failed after all guest checks when
 agent powerdown left an unsuccessful process status. The exit code or
@@ -163,12 +166,19 @@ This list is evidence, not an allow-list.
 
 ## Snapshot and shutdown measurements
 
-The S1 snapshot regression passed with the named CPU model. It changes the
-destination TSC frequency and verifies rejection before RAM changes. It
-also introduces a large synthetic guest-TSC jump and verifies restoration
-of CPUID, frequency, and the logged-MSR set. A synthetic jump does not
-establish behavior across a literal host reboot. No host reboot has been
-performed.
+The S1 regression
+`macos_snapshot_preserves_cpuid_msr_log_and_refuses_changed_tsc_frequency`
+passed with the named CPU model. It changes the destination TSC frequency
+and verifies rejection before RAM changes. With the original frequency
+restored, it sets `IA32_TSC` to `1 << 60` and loads the snapshot. The test
+verifies rollback of that synthetic jump, restoration of CPUID and the
+pinned frequency, and preservation of the union of logged MSR indices.
+
+No host reboot has been performed. The owner explicitly deferred that
+measurement on 2026-11-01 to an owner-coordinated reboot because the owner
+is away and restarting the host would end every active session. The synthetic
+regression and passing same-host P1 round-trips remain the available evidence;
+they do not establish behavior across a host reboot.
 
 The existing guest-agent shutdown vocabulary supplies `reboot` and
 `powerdown`. P1 verifies the S1 reset event, a new guest boot-session UUID,
