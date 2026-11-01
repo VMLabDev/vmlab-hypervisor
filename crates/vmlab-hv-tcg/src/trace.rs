@@ -1420,10 +1420,6 @@ impl Trace {
         fragment.branch_depth = self.branch_depth + 1;
         let units = fragment.cache_units();
         if units <= 250_000 {
-            if variants.len() == 4 {
-                self.fragment_units
-                    .set(self.fragment_units.get() - variants.remove(0).cache_units());
-            }
             self.fragment_units.set(self.fragment_units.get() + units);
             variants.push(fragment);
         }

@@ -451,6 +451,81 @@ fn conflicting_code_and_data_tlb_entries_remain_native() {
 }
 
 #[test]
+fn replacing_tlb_entries_keeps_warmed_page_walks_native() {
+    let make = || {
+        let mut cpu = paged(8, true);
+        let mut bytes = vec![0; 2 * 1024 * 1024];
+        cpu.interpreter
+            .memory
+            .read(0x8000_0000, &mut bytes[..64 * 1024])
+            .unwrap();
+        cpu.interpreter.memory = FlatMemory::new(0x8000_0000, bytes);
+        for (index, word) in [0x00013183u32, 0x00108093, 0xff9ff06f]
+            .into_iter()
+            .enumerate()
+        {
+            cpu.interpreter
+                .memory
+                .write(0x8000_0000 + index as u64 * 4, &word.to_le_bytes())
+                .unwrap();
+        }
+        for page in 0..128u64 {
+            let pte = ((0x80008 + page) << 10) | 0xdf;
+            cpu.interpreter
+                .memory
+                .write(0x8000_3000 + (16 + page) * 8, &pte.to_le_bytes())
+                .unwrap();
+            cpu.interpreter
+                .memory
+                .write(0x8000_8000 + page * 4096, &(42 + page).to_le_bytes())
+                .unwrap();
+        }
+        cpu.use_external_clock().unwrap();
+        cpu.interpreter.operation_limit = u64::MAX;
+        cpu
+    };
+    let mut reference = make();
+    let mut specialized = make();
+    specialized.specialize = true;
+    for _ in 0..2 {
+        for page in 0..128 {
+            specialized.set_gpr(2, 0x10000 + page * 4096).unwrap();
+            specialized.run(192).unwrap();
+            assert_eq!(specialized.gpr(3).unwrap(), 42 + page);
+            assert_eq!(specialized.pc().unwrap(), 0x4000);
+        }
+    }
+    // Loads and arithmetic leave RAM and reservations unchanged during warming.
+    for (name, value) in specialized.interpreter.globals.iter() {
+        reference
+            .interpreter
+            .globals
+            .insert(name.clone(), value.clone());
+    }
+    reference.steps = specialized.steps;
+    let operations = specialized.interpreter.operations;
+    let recordings = specialized.specialization_stats.recordings;
+    for page in 0..128 {
+        for cpu in [&mut reference, &mut specialized] {
+            cpu.set_gpr(2, 0x10000 + page * 4096).unwrap();
+            cpu.run(192).unwrap();
+        }
+        assert_eq!(
+            *specialized.interpreter.globals,
+            *reference.interpreter.globals
+        );
+        assert_eq!(specialized.gpr(3).unwrap(), 42 + page);
+        assert_eq!(
+            specialized.interpreter.operations, operations,
+            "warmed page walk at page {page} returned to Sail"
+        );
+        assert_eq!(specialized.specialization_stats.recordings, recordings);
+        let (used, limit) = specialized.trace_cache_usage();
+        assert!(used <= limit);
+    }
+}
+
+#[test]
 fn sail_user_fetch_permission_fault() {
     let mut cpu = paged(8, false);
     cpu.step().unwrap();
