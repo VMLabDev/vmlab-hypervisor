@@ -97,6 +97,10 @@ fn macos_p2_all_pci_identities_classes_and_bar_sizes_match_hwref() {
             "smbus", irq,
         ))),
     );
+    let mut root = vmlab_hv_vmm::pci::PciRoot::q35(32 << 30);
+    for (&(slot, function), device) in &devices {
+        root.add_device_at(slot, function, device.clone()).unwrap();
+    }
     let reference: Vec<serde_json::Value> = serde_json::from_str(include_str!(
         "../../../docs/hwref/q35-macos-tahoe/query-pci.json"
     ))
@@ -149,6 +153,26 @@ fn macos_p2_all_pci_identities_classes_and_bar_sizes_match_hwref() {
                 region["type"] == "io",
                 "{address:?} BAR{index} kind"
             );
+            let reg = if index == 6 {
+                12
+            } else {
+                4 + usize::from(index)
+            };
+            let flags = root.config_read(0, address.0, address.1, reg);
+            if region["type"] == "memory" {
+                assert_eq!(
+                    flags & 6 == 4,
+                    region["mem_type_64"].as_bool().unwrap(),
+                    "{address:?} BAR{index} memory width"
+                );
+                assert_eq!(
+                    flags & 8 != 0,
+                    region["prefetch"].as_bool().unwrap(),
+                    "{address:?} BAR{index} prefetchability"
+                );
+            } else {
+                assert_eq!(flags & 1, 1, "{address:?} BAR{index} I/O flag");
+            }
         }
         assert_eq!(
             bars.len(),

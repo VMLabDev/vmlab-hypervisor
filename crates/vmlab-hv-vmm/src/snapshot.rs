@@ -453,7 +453,7 @@ fn stream_ram_out(
     Ok(())
 }
 
-/// The in-kernel and per-vCPU state, as sections.
+/// Reject a changed TSC frequency before restoring guest state.
 fn validate_cpu_frequencies(
     shared: &crate::vm::VmShared,
     sections: &SavedSections,
@@ -476,6 +476,7 @@ fn validate_cpu_frequencies(
     Ok(())
 }
 
+/// The in-kernel and per-vCPU state, as sections.
 pub(crate) fn save_kernel_state(
     shared: &crate::vm::VmShared,
     sections: &mut Vec<Section>,
