@@ -22,8 +22,8 @@ pub(crate) fn vm_state(shared: &VmShared) -> serde_json::Value {
             .map(|(id, fd)| {
                 let registers = fd.try_lock().map(|fd| {
                     json!({
-                        "regs":fd.get_regs().ok(), "sregs":fd.get_sregs().ok(),
-                        "mp_state":fd.get_mp_state().ok(),
+                        "regs":fd.get_regs().ok().map(registers), "sregs":fd.get_sregs().ok().map(special_registers),
+                        "mp_state":fd.get_mp_state().ok().map(|state| state.mp_state),
                     })
                 });
                 let exits = shared
@@ -53,6 +53,38 @@ pub(crate) fn vm_state(shared: &VmShared) -> serde_json::Value {
 }
 
 const HV: u32 = 0x4000_0000;
+
+// kvm-bindings serializes its C ABI structures as byte arrays for snapshots.
+// Crash reports use named fields so they can be read without an ABI decoder.
+fn registers(r: kvm_bindings::kvm_regs) -> serde_json::Value {
+    serde_json::json!({
+        "rax":r.rax, "rbx":r.rbx, "rcx":r.rcx, "rdx":r.rdx,
+        "rsi":r.rsi, "rdi":r.rdi, "rsp":r.rsp, "rbp":r.rbp,
+        "r8":r.r8, "r9":r.r9, "r10":r.r10, "r11":r.r11,
+        "r12":r.r12, "r13":r.r13, "r14":r.r14, "r15":r.r15,
+        "rip":r.rip, "rflags":r.rflags,
+    })
+}
+
+fn segment(r: kvm_bindings::kvm_segment) -> serde_json::Value {
+    serde_json::json!({
+        "base":r.base, "limit":r.limit, "selector":r.selector, "type":r.type_,
+        "present":r.present, "dpl":r.dpl, "db":r.db, "s":r.s,
+        "l":r.l, "g":r.g, "avl":r.avl, "unusable":r.unusable,
+    })
+}
+
+fn special_registers(r: kvm_bindings::kvm_sregs) -> serde_json::Value {
+    serde_json::json!({
+        "cs":segment(r.cs), "ds":segment(r.ds), "es":segment(r.es),
+        "fs":segment(r.fs), "gs":segment(r.gs), "ss":segment(r.ss),
+        "tr":segment(r.tr), "ldt":segment(r.ldt),
+        "gdt":{"base":r.gdt.base, "limit":r.gdt.limit},
+        "idt":{"base":r.idt.base, "limit":r.idt.limit},
+        "cr0":r.cr0, "cr2":r.cr2, "cr3":r.cr3, "cr4":r.cr4, "cr8":r.cr8,
+        "efer":r.efer, "apic_base":r.apic_base, "interrupt_bitmap":r.interrupt_bitmap,
+    })
+}
 
 fn lapic_u32(regs: &[std::os::raw::c_char], offset: usize) -> u32 {
     u32::from_le_bytes(std::array::from_fn(|i| regs[offset + i] as u8))
@@ -239,4 +271,34 @@ pub(crate) fn timer_state(shared: &VmShared, mem: &GuestMemoryMmap) -> Vec<Strin
         );
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registers_have_named_fields_instead_of_abi_byte_arrays() {
+        let regs = registers(kvm_bindings::kvm_regs {
+            rip: 0xfff0,
+            rax: 0x1234,
+            ..Default::default()
+        });
+        assert_eq!(regs["rip"], 0xfff0);
+        assert_eq!(regs["rax"], 0x1234);
+        assert_eq!(regs.as_object().unwrap().len(), 18);
+        let sregs = special_registers(kvm_bindings::kvm_sregs {
+            cr0: 0x6000_0010,
+            cs: kvm_bindings::kvm_segment {
+                base: 0xffff_0000,
+                selector: 0xf000,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(sregs["cr0"], 0x6000_0010u64);
+        assert_eq!(sregs["cs"]["base"], 0xffff_0000u64);
+        assert_eq!(sregs["cs"]["selector"], 0xf000);
+        assert!(sregs["gdt"].is_object());
+    }
 }

@@ -100,7 +100,11 @@ impl Machine {
 
     fn finish(&mut self, expected: ProcessExitReason) {
         let mut found = false;
-        while let Some(event) = self.client.wait_event().unwrap() {
+        while let Some(event) = self
+            .client
+            .wait_event_timeout(Duration::from_secs(30))
+            .unwrap()
+        {
             if let Event::Exiting { reason, code, .. } = event {
                 assert_eq!(reason, expected);
                 assert_eq!(code, expected.exit_code());
@@ -141,7 +145,7 @@ fn guest_poweroff_is_zero_and_final_event_precedes_eof() {
     let code = [
         0xfa, 0xba, 0xf8, 0x0c, 0x66, 0xb8, 0x40, 0xf8, 0, 0x80, 0x66, 0xef, 0xba, 0xfc, 0x0c,
         0x66, 0xb8, 1, 6, 0, 0, 0x66, 0xef, 0xba, 0xf8, 0x0c, 0x66, 0xb8, 0x44, 0xf8, 0, 0x80,
-        0x66, 0xef, 0xba, 0xfc, 0x0c, 0xb0, 0x80, 0xee, 0xba, 4, 6, 0xb8, 0, 0x34, 0xef, 0xf4,
+        0x66, 0xef, 0xba, 0xfc, 0x0c, 0xb0, 0x80, 0xee, 0xba, 4, 6, 0xb8, 0, 0x20, 0xef, 0xf4,
     ];
     let Some(mut machine) = Machine::launch(&code, false) else {
         return;
@@ -176,7 +180,11 @@ fn runtime_filter_dump_and_quit_round_trip() {
     let report = machine.dump();
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["machine"]["name"], "diagnostics-test");
-    assert!(report["vm"]["vcpus"][0]["registers"]["regs"]["rip"].is_u64());
+    assert!(
+        report["vm"]["vcpus"][0]["registers"]["regs"]["rip"].is_u64(),
+        "paused vCPU registers: {}",
+        report["vm"]["vcpus"]
+    );
     machine.client.call(Ctrl::Quit).unwrap();
     machine.finish(ProcessExitReason::Quit);
 }
