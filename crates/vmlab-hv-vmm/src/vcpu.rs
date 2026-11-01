@@ -95,16 +95,13 @@ impl VcpuThread {
 /// The KVM_RUN loop of one vCPU. The fd is locked across the ioctl only, so
 /// the snapshot path can hold it while this thread is parked.
 fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
-    let sync_regs = shared
+    let sync_supported = shared
         .kvm
         .kvm
         .check_extension_int(kvm_ioctls::Cap::SyncRegs)
         & kvm_bindings::KVM_SYNC_X86_REGS as i32
         != 0;
-    if sync_regs {
-        vcpu.lock()
-            .set_sync_valid_reg(kvm_ioctls::SyncReg::Register);
-    }
+    let mut sync_regs = false;
     let recorder = shared.exit_rings[id as usize]
         .get_or_init(|| Arc::new(crate::diagnostics::flight::ExitRing::default()));
     let mut pending_completion = false;
@@ -135,12 +132,17 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             shared.wait_smi_delivery();
         }
         guard.set_kvm_immediate_exit(u8::from(!running));
+        sync_exit_rip(
+            guard.get_kvm_run(),
+            &mut sync_regs,
+            sync_supported && crate::diagnostics::report::capture_exit_rip(),
+        );
         let run_ptr = guard.get_kvm_run() as *const kvm_bindings::kvm_run;
         let permit = shared.enter_kvm();
         let result = guard.run();
         drop(permit);
-        // Metadata is disjoint from the exit's borrowed data slice. Sync regs
-        // avoid a KVM_GET_REGS ioctl on every exit; old kernels report no RIP.
+        // Metadata is disjoint from the exit's borrowed data slice. Only the
+        // opt-in mode requests a register copy; the default records metadata.
         // SAFETY: run_ptr is the live KVM mapping; the exit reason selects the union.
         recorder.record(unsafe {
             exit_record(run_ptr, result.as_ref().err().map(|e| e.errno()), sync_regs)
@@ -180,6 +182,11 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                     // Complete the deferred OUT before SMM saves RIP. Without
                     // this completion, RSM can return to the same APMC write.
                     guard.set_kvm_immediate_exit(1);
+                    sync_exit_rip(
+                        guard.get_kvm_run(),
+                        &mut sync_regs,
+                        sync_supported && crate::diagnostics::report::capture_exit_rip(),
+                    );
                     let permit = shared.enter_kvm();
                     let completion = guard.run();
                     drop(permit);
@@ -311,6 +318,19 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
     }
 }
 
+#[inline]
+fn sync_exit_rip(run: &mut kvm_bindings::kvm_run, active: &mut bool, requested: bool) {
+    if *active != requested {
+        let mask = u64::from(kvm_bindings::KVM_SYNC_X86_REGS);
+        if requested {
+            run.kvm_valid_regs |= mask;
+        } else {
+            run.kvm_valid_regs &= !mask;
+        }
+        *active = requested;
+    }
+}
+
 unsafe fn exit_record(
     run: *const kvm_bindings::kvm_run,
     errno: Option<i32>,
@@ -360,6 +380,32 @@ mod tests {
     use super::io_dispatch_width;
 
     #[test]
+    fn exact_rip_copy_is_disabled_by_default_and_can_be_switched_off_again() {
+        let other = u64::from(kvm_bindings::KVM_SYNC_X86_SREGS);
+        let mut run = kvm_bindings::kvm_run {
+            kvm_valid_regs: other,
+            ..Default::default()
+        };
+        let mut active = false;
+        super::sync_exit_rip(&mut run, &mut active, false);
+        assert_eq!(run.kvm_valid_regs, other);
+        for requested in [true, true, false, false, true, false] {
+            super::sync_exit_rip(&mut run, &mut active, requested);
+            assert_eq!(active, requested);
+            assert_eq!(
+                run.kvm_valid_regs,
+                other
+                    | if requested {
+                        u64::from(kvm_bindings::KVM_SYNC_X86_REGS)
+                    } else {
+                        0
+                    }
+            );
+            assert_eq!(run.kvm_dirty_regs, 0);
+        }
+    }
+
+    #[test]
     #[ignore = "manual release-mode vCPU recorder microbenchmark; no VM boot"]
     fn recorder_exit_hook_overhead() {
         use crate::diagnostics::flight::ExitRing;
@@ -393,7 +439,7 @@ mod tests {
         let begin = std::time::Instant::now();
         for _ in 0..N {
             // SAFETY: the synthetic mapping has initialized the selected metadata.
-            ring.record(unsafe { super::exit_record(black_box(pointer), None, true) });
+            ring.record(unsafe { super::exit_record(black_box(pointer), None, false) });
         }
         let recorded = begin.elapsed();
         eprintln!(
@@ -406,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual KVM exit-loop benchmark; requires a host VM slot and memory scope"]
+    #[ignore = "manual KVM exit-loop benchmark; requires /dev/kvm and a memory scope"]
     fn recorder_kvm_loop_overhead() {
         use crate::diagnostics::flight::ExitRing;
         use vm_memory::{Bytes, GuestAddress};
@@ -435,36 +481,66 @@ mod tests {
         let run = vcpu.get_kvm_run() as *const kvm_bindings::kvm_run;
         let ring = ExitRing::default();
         const N: usize = 200_000;
-        let mut samples = [Vec::new(), Vec::new()];
+        crate::diagnostics::report::init_logging().unwrap();
+        let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         for round in 0..10 {
-            // Alternate the order to reduce drift; discard the warm-up pair.
-            for recording in if round % 2 == 0 {
-                [false, true]
+            // Reverse the order to reduce drift; discard the warm-up quartet.
+            for mode in if round % 2 == 0 {
+                [0, 1, 2, 3]
             } else {
-                [true, false]
+                [3, 2, 1, 0]
             } {
-                if recording {
-                    vcpu.set_sync_valid_reg(kvm_ioctls::SyncReg::Register);
+                crate::diagnostics::report::set_log_filter(if mode == 2 {
+                    "off,vmlab_hv_vmm::diagnostics::flight=debug"
                 } else {
-                    vcpu.clear_sync_valid_reg(kvm_ioctls::SyncReg::Register);
-                }
+                    "off"
+                })
+                .unwrap();
+                vcpu.clear_sync_valid_reg(kvm_ioctls::SyncReg::Register);
+                let mut sync_regs = false;
                 let begin = std::time::Instant::now();
                 let mut completed = 0;
                 while completed < N {
+                    if mode == 1 || mode == 2 {
+                        super::sync_exit_rip(
+                            vcpu.get_kvm_run(),
+                            &mut sync_regs,
+                            crate::diagnostics::report::capture_exit_rip(),
+                        );
+                    }
                     match vcpu.run() {
                         Ok(kvm_ioctls::VcpuExit::IoOut(0x80, data)) if data.len() == 1 => {}
                         Err(error) if error.errno() == libc::EINTR => continue,
                         other => panic!("unexpected benchmark exit: {other:?}"),
                     }
-                    if recording {
-                        // SAFETY: the live mmap published IO metadata and requested sync regs.
-                        ring.record(unsafe { super::exit_record(run, None, true) });
+                    if mode == 1 || mode == 2 {
+                        // SAFETY: the live mmap published IO metadata; RIP is read only when requested.
+                        ring.record(unsafe { super::exit_record(run, None, sync_regs) });
+                    }
+                    if mode == 3 {
+                        std::hint::black_box(crate::diagnostics::flight::unix_ns());
                     }
                     completed += 1;
                 }
                 let ns = begin.elapsed().as_nanos() as f64 / N as f64;
                 if round != 0 {
-                    samples[usize::from(recording)].push(ns);
+                    samples[mode].push(ns);
+                }
+                if mode == 1 || mode == 2 {
+                    let exits = ring.snapshot().unwrap();
+                    assert_eq!(exits.len(), 256);
+                    assert!(exits.iter().all(|exit| {
+                        exit.rip.is_some() == (mode == 2) && exit.address == Some(0x80)
+                    }));
+                    assert_eq!(
+                        vcpu.get_kvm_run().kvm_valid_regs
+                            & u64::from(kvm_bindings::KVM_SYNC_X86_REGS),
+                        if mode == 2 {
+                            u64::from(kvm_bindings::KVM_SYNC_X86_REGS)
+                        } else {
+                            0
+                        }
+                    );
                 }
             }
         }
@@ -472,19 +548,19 @@ mod tests {
             sample.sort_by(f64::total_cmp);
         }
         let baseline = samples[0][4];
-        let recorded = samples[1][4];
-        eprintln!(
-            "KVM recorder loop: median baseline {baseline:.2} ns/exit; recorded {recorded:.2} ns/exit; delta {:.2} ns/exit ({:.2}%); 9 alternating pairs, {N} exits/sample; includes kernel sync-reg copy",
-            recorded - baseline,
-            (recorded / baseline - 1.0) * 100.0
-        );
-        assert_eq!(ring.snapshot().unwrap().len(), 256);
-        assert!(
-            ring.snapshot()
-                .unwrap()
-                .iter()
-                .all(|exit| exit.rip.is_some() && exit.address == Some(0x80))
-        );
+        for (mode, label) in [
+            (1, "default metadata"),
+            (2, "opt-in exact RIP"),
+            (3, "timestamp-only control"),
+        ] {
+            let recorded = samples[mode][4];
+            eprintln!(
+                "KVM recorder loop ({label}): median baseline {baseline:.2} ns/exit; recorded {recorded:.2} ns/exit; delta {:.2} ns/exit ({:.2}%); 9 alternating quartets, {N} exits/sample",
+                recorded - baseline,
+                (recorded / baseline - 1.0) * 100.0
+            );
+        }
+        crate::diagnostics::report::set_log_filter("off").unwrap();
     }
 
     #[test]

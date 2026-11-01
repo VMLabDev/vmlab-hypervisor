@@ -1537,6 +1537,13 @@ impl VmHandle {
         self.0.request_exit(ExitReason::Error(message));
     }
 
+    pub(crate) fn set_log_filter(&self, filter: &str) -> Result<(), String> {
+        crate::diagnostics::report::set_log_filter(filter)?;
+        // A halted vCPU must leave KVM_RUN to apply its new sync-register mask.
+        self.0.kick_all();
+        Ok(())
+    }
+
     pub(crate) fn dump_diagnostics(&self) -> Result<(), String> {
         let path = crate::diagnostics::report::dump_report()?;
         self.0.emit(Event::DiagnosticsDumped {

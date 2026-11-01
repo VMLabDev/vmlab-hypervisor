@@ -19,6 +19,8 @@ static LOGGER: OnceLock<Recorder> = OnceLock::new();
 static CONTEXT: OnceLock<Context> = OnceLock::new();
 static STDERR: Mutex<()> = Mutex::new(());
 static FINISHED: AtomicBool = AtomicBool::new(false);
+static EXIT_RIP: AtomicBool = AtomicBool::new(false);
+const RECORDER_TARGET: &str = "vmlab_hv_vmm::diagnostics::flight";
 type StateReader = Arc<dyn Fn() -> Value + Send + Sync>;
 type ExitSink = Arc<dyn Fn(ProcessExitReason, Vec<String>) + Send + Sync>;
 
@@ -41,6 +43,21 @@ fn parse_filter(filter: &str) -> Result<env_filter::Filter, String> {
     Ok(builder.build())
 }
 
+fn recorder_debug(filter: &env_filter::Filter) -> bool {
+    filter.enabled(
+        &Metadata::builder()
+            .level(log::Level::Debug)
+            .target(RECORDER_TARGET)
+            .build(),
+    )
+}
+
+/// Cached target/level selection; the exit loop never locks the log filter.
+#[inline]
+pub(crate) fn capture_exit_rip() -> bool {
+    EXIT_RIP.load(Ordering::Relaxed)
+}
+
 pub fn init_logging() -> Result<(), String> {
     let filter = std::env::var("VMLAB_HV_LOG").unwrap_or_else(|_| "info".into());
     let recorder = Recorder {
@@ -50,18 +67,19 @@ pub fn init_logging() -> Result<(), String> {
     };
     let logger = LOGGER.get_or_init(|| recorder);
     log::set_logger(logger).map_err(|e| e.to_string())?;
-    // All records go to the ring; the runtime filter governs stderr only.
+    EXIT_RIP.store(recorder_debug(&logger.filter.read()), Ordering::Relaxed);
+    // All log records go to the ring, independently of the stderr filter.
     log::set_max_level(LevelFilter::Trace);
     Ok(())
 }
 
 pub(crate) fn set_log_filter(filter: &str) -> Result<(), String> {
     let parsed = parse_filter(filter)?;
-    *LOGGER
-        .get()
-        .ok_or("logging is not initialized")?
-        .filter
-        .write() = parsed;
+    let logger = LOGGER.get().ok_or("logging is not initialized")?;
+    let mut filter = logger.filter.write();
+    EXIT_RIP.store(recorder_debug(&parsed), Ordering::Relaxed);
+    *filter = parsed;
+    drop(filter);
     log::info!("stderr log filter changed");
     Ok(())
 }
@@ -527,6 +545,29 @@ mod tests {
     fn invalid_filter_does_not_replace_a_valid_filter() {
         assert!(parse_filter("info,vmlab_hv_vmm=debug").is_ok());
         assert!(parse_filter("vmlab=invalid-level").is_err());
+    }
+
+    #[test]
+    fn exit_rip_follows_the_recorder_target_level_not_other_debug_logs() {
+        for filter in [
+            "off",
+            "info",
+            "vmlab_hv_devices=debug",
+            "debug,vmlab_hv_vmm::diagnostics::flight=info",
+            "trace,vmlab_hv_vmm::diagnostics::flight=off",
+        ] {
+            assert!(!recorder_debug(&parse_filter(filter).unwrap()), "{filter}");
+        }
+        for filter in [
+            "debug",
+            "trace",
+            "vmlab_hv_vmm=debug",
+            "info,vmlab_hv_vmm::diagnostics::flight=debug",
+            "off,vmlab_hv_vmm::diagnostics::flight=trace",
+            "vmlab_hv_vmm::diagnostics::flight=debug/message-regex",
+        ] {
+            assert!(recorder_debug(&parse_filter(filter).unwrap()), "{filter}");
+        }
     }
 
     #[test]

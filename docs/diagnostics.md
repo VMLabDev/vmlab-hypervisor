@@ -24,6 +24,37 @@ Messages are formatted once for the recorder, redacted, and truncated to
 It previously selected an ad-hoc timer dump. Timer information now appears in
 every report under `vm.timers`.
 
+### Exact per-exit RIP
+
+The per-vCPU ring always retains the last 256 exits: reason, port or MMIO
+address, size, direction, timestamp, and ioctl error when present. Its default
+mode has `rip: null`. It requests no `KVM_SYNC_X86_REGS` copy and performs no
+`KVM_GET_REGS` ioctl in the exit loop.
+
+Exact per-exit RIP is opt-in. This startup filter enables it:
+
+```sh
+VMLAB_HV_LOG=info,vmlab_hv_vmm::diagnostics::flight=debug
+```
+
+Debug or trace on the recorder target enables RIP capture. A global `debug`
+or `trace`, or a matching parent target such as `vmlab_hv_vmm=debug`, also
+enables it. `info` or lower on the recorder target disables it. For example,
+`VMLAB_HV_LOG=debug,vmlab_hv_vmm::diagnostics::flight=info` retains other debug
+logs without per-exit register copying. Debug on an unrelated device target
+does not enable RIP capture. Message regexes do not affect this target/level
+selection, and the all-level log ring does not enable it.
+
+The `set_log_filter` control request switches the same mode on and off at
+runtime, as shown below. vCPUs are kicked and apply the selection before their
+next `KVM_RUN`. Existing history is preserved: old RIP samples remain until
+the ring overwrites them, and enabling capture does not fill earlier entries.
+Unsupported kernels retain `rip: null` even when capture is requested.
+
+Reports still attempt to read every vCPU's general and special registers,
+independently of this switch. Fatal-signal reports retain the checkpoint
+freshness limits described below.
+
 ## Exit outcomes
 
 The final `exiting` control event identifies the reason separately from the
@@ -64,9 +95,19 @@ for an established control connection:
 {"type":"request","id":11,"command":{"command":"dump_diagnostics"}}
 ```
 
-`set_log_filter` replaces only the stderr filter. It leaves the recorder
-enabled at all levels. Success returns the normal `ok` reply with no status.
-An invalid filter returns `invalid_argument` and preserves the previous filter.
+`set_log_filter` replaces the stderr filter and its exact-RIP selection.
+Both rings remain enabled. Success returns the normal `ok` reply with no
+status. An invalid filter returns `invalid_argument` and preserves both
+the previous filter and RIP selection.
+
+These requests enable exact RIP, then disable it while retaining the default
+info logs. They use the same version-1 handshake and `diagnostics` capability;
+no additional command or capability is required:
+
+```json
+{"type":"request","id":12,"command":{"command":"set_log_filter","filter":"info,vmlab_hv_vmm::diagnostics::flight=debug"}}
+{"type":"request","id":13,"command":{"command":"set_log_filter","filter":"info"}}
+```
 
 `dump_diagnostics` writes a report beside the control socket. Success emits
 `diagnostics_dumped {path}` and returns an `ok` reply with no status. A write
@@ -100,8 +141,9 @@ The schema-version-1 report contains these fields:
 | `reason`, `exit_code`, `error_chain` | Process outcome and causes |
 | `panic.message`, `panic.backtrace` | Panic details, independent of `RUST_BACKTRACE` |
 | `logs` | Bounded, redacted records, including debug and trace |
-| `vm.vcpus[].registers` | General registers, special registers, and MP state |
+| `vm.vcpus[].registers` | General registers, special registers, MP state, and `sync_valid_regs` KVM mask |
 | `vm.vcpus[].exits` | Last 256 KVM_RUN outcomes for that vCPU |
+| `vm.exit_rip.requested`, `vm.exit_rip.supported` | Recorder debug selection and kernel sync-register support |
 | `vm.timers` | Hyper-V MSRs and SIMP timer headers, LAPIC, PIT, PIC, IOAPIC, HPET |
 | `vm.pci_bars`, `vm.mch_smram`, `vm.usb_attachments` | Cheap device summaries |
 | `process_status`, `thread_count`, `threads` | Linux memory, scheduling, and thread statistics |
@@ -110,8 +152,10 @@ Exit records contain a Unix timestamp in nanoseconds, numeric `KVM_EXIT_*`
 reason, `rip`, `address`, `size`, `write`, and `errno`. `address` is a port or
 MMIO address; `size` is the access width. No I/O payload is retained.
 An interrupted or failed ioctl uses reason 4294967295 and carries `errno`.
-Kernels supporting `KVM_SYNC_X86_REGS` copy RIP through the shared KVM mapping,
-without an extra ioctl per exit. On older kernels, per-exit `rip` is null.
+Per-exit `rip` is null by default. When exact RIP is enabled on a supporting
+kernel, `KVM_SYNC_X86_REGS` copies general registers through the shared KVM
+mapping, without an extra ioctl per exit. Older kernels retain null RIP.
+The `regs` and `sregs` report fields are read independently of exit recording.
 
 Busy locks and unreadable KVM registers produce null fields or explicit busy
 entries. Reports never wait for a device lock held by a panicking thread.
@@ -176,7 +220,8 @@ https://man7.org/linux/man-pages/man2/madvise.2.html.
 ## Verification and recorder cost
 
 The source inventory is `vmlab-hv-proto/src/control.rs`,
-`vmlab-hv/src/main.rs`, and `vmlab-hv-vmm/src/diagnostics/` under `crates/`.
+`vmlab-hv/src/main.rs`, `vmlab-hv-vmm/src/vcpu.rs`, and
+`vmlab-hv-vmm/src/diagnostics/` under `crates/`.
 Unit tests cover outcome codes, bounds, redaction, panic reports, real SIGSEGV
 delivery in a child, and RAM's Linux `dd` mapping flag. The S1 tests in
 `crates/vmlab-hv/tests/diagnostics.rs` exercise the binary's control socket.
@@ -194,16 +239,19 @@ CARGO_BUILD_JOBS=4 taskset -c 0-7 cargo test --release -p vmlab-hv-vmm \
   vcpu::tests::recorder_exit_hook_overhead -- --ignored --nocapture
 ```
 
-On the development host, 2,000,000 iterations measured 0.19 ns per baseline
-iteration and 31.24 ns with exit decoding, timestamp, and ring insertion,
-a 31.05 ns delta. The benchmark calls the actual hook with synthetic KVM
+On the development host, 2,000,000 iterations measured 0.32 ns per baseline
+iteration and 30.52 ns with exit decoding, timestamp, and ring insertion,
+a 30.20 ns delta. The benchmark calls the default-mode hook with synthetic KVM
 metadata. It excludes KVM register-copy cost, checkpoint contention, and guest
 throughput; it is not a whole-VM performance claim.
 
-The real KVM loop benchmark includes the kernel register-copy cost. It requires
-`/dev/kvm`, sync-register support, an externally reserved host VM slot, and a
-memory-capped scope. The ignored test does not acquire the VM slot itself.
-After reserving a slot, its command is:
+The real KVM loop benchmark compares recording disabled, default metadata,
+opt-in exact RIP, and a timestamp-only control without ring insertion. It
+includes the cached-mode check in both recording modes and kernel
+register-copy cost only in the opt-in mode. It requires
+`/dev/kvm`, sync-register support, and a memory-capped scope. It creates a KVM
+VM inside the test binary, without a `vmlab-hv` or `qemu-system` process.
+The host's test-window policy must permit in-process KVM tests. Its command is:
 
 ```sh
 systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
@@ -213,30 +261,39 @@ systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
 ```
 
 Three repetitions on CPU 14, outside CI's CPU 0-7 affinity, each discarded a
-warm-up pair and used nine alternating pairs of 200,000 exits per sample.
-The guest repeatedly writes one byte to port 80h. Results were:
+warm-up quartet and used nine alternating quartets of 200,000 exits per sample.
+The guest repeatedly wrote one byte to port 80h. The default-mode samples
+asserted that `KVM_SYNC_X86_REGS` was clear and every recorded RIP was null.
+The opt-in samples asserted the opposite. Results were:
 
-| Repetition | Baseline ns/exit | Recording ns/exit | Delta ns/exit | Overhead |
-| --- | ---: | ---: | ---: | ---: |
-| 1 | 3341.13 | 3550.45 | 209.32 | 6.26% |
-| 2 | 3320.93 | 3555.59 | 234.65 | 7.07% |
-| 3 | 3535.71 | 3596.69 | 60.98 | 1.72% |
+| Repetition | Mode | Baseline ns/exit | Recorded ns/exit | Delta ns/exit | Overhead |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Default metadata | 3358.56 | 3506.74 | 148.19 | 4.41% |
+| 1 | Opt-in exact RIP | 3358.56 | 3549.22 | 190.67 | 5.68% |
+| 1 | Timestamp only | 3358.56 | 3490.07 | 131.51 | 3.92% |
+| 2 | Default metadata | 3389.74 | 3532.38 | 142.63 | 4.21% |
+| 2 | Opt-in exact RIP | 3389.74 | 3582.99 | 193.24 | 5.70% |
+| 2 | Timestamp only | 3389.74 | 3499.56 | 109.82 | 3.24% |
+| 3 | Default metadata | 3376.00 | 3515.84 | 139.84 | 4.14% |
+| 3 | Opt-in exact RIP | 3376.00 | 3574.03 | 198.03 | 5.87% |
+| 3 | Timestamp only | 3376.00 | 3496.17 | 120.17 | 3.56% |
 
-An initial run sharing CI's CPU set appeared 20.88% faster with recording;
-that noisy result is excluded from this table. Recording has measurable
-overhead in this exit-saturated workload. Representative guest throughput
-has not been measured. Exact per-exit RIP requires KVM's general-register
-copy; the smaller userspace-only number must not stand in for total cost.
-The accepted design retains exact RIP and accepts the measured exit-loop
-overhead as an exception to the original no-measurable-slowdown requirement.
+The default no longer copies general registers, but its measured overhead
+is not near zero in this exit-saturated workload. The timestamp-only control
+also has measurable cost, without register copying or a ring. The
+userspace-only microbenchmark excludes the KVM transition context and must
+not stand in for the full-loop result. Representative guest throughput has
+not been measured.
 
-The six S1 diagnostics tests pass, covering guest poweroff, guest reset,
+The seven S1 diagnostics tests cover guest poweroff, guest reset,
 SIGTERM, runtime failure, filter changes, on-demand reports, quit, and
-startup-error redaction.
+startup-error redaction. They also check default metadata, startup debug,
+runtime RIP capture in both directions, unchanged selection after an invalid
+filter, and crash-time register reads for both vCPUs with per-exit RIP off.
 
 ### Illustrative report excerpt
 
-This excerpt omits large arrays and is not a complete captured report:
+This default-mode excerpt omits large arrays and is not a complete captured report:
 
 ```json
 {
@@ -251,7 +308,7 @@ This excerpt omits large arrays and is not a complete captured report:
             "unix_ns": 1793491200000000000, "target": "vmlab_hv_vmm",
             "message": "device dispatch completed"}],
   "vm": {"vcpus": [{"id": 0, "exits": [
-    {"unix_ns": 1793491200000000000, "reason": 2, "rip": 65520,
+    {"unix_ns": 1793491200000000000, "reason": 2, "rip": null,
      "address": 1016, "size": 1, "write": true, "errno": null}
   ]}]}
 }

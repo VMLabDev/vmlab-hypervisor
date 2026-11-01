@@ -20,10 +20,11 @@ pub(crate) fn vm_state(shared: &VmShared) -> serde_json::Value {
     let vcpus = shared.vcpus.try_lock().map(|fds| {
         fds.iter()
             .map(|(id, fd)| {
-                let registers = fd.try_lock().map(|fd| {
+                let registers = fd.try_lock().map(|mut fd| {
                     json!({
                         "regs":fd.get_regs().ok().map(registers), "sregs":fd.get_sregs().ok().map(special_registers),
                         "mp_state":fd.get_mp_state().ok().map(|state| state.mp_state),
+                        "sync_valid_regs":fd.get_kvm_run().kvm_valid_regs,
                     })
                 });
                 let exits = shared
@@ -48,7 +49,12 @@ pub(crate) fn vm_state(shared: &VmShared) -> serde_json::Value {
         mch.as_ref()
             .and_then(|mch| mch.try_lock().and_then(|mch| mch.diagnostic_smram()))
     });
-    json!({"vcpus":vcpus, "pci_bars":bars, "timers":timers, "mch_smram":smram,
+    let exit_rip = json!({
+        "requested":report::capture_exit_rip(),
+        "supported":shared.kvm.kvm.check_extension_int(kvm_ioctls::Cap::SyncRegs)
+            & kvm_bindings::KVM_SYNC_X86_REGS as i32 != 0,
+    });
+    json!({"vcpus":vcpus, "exit_rip":exit_rip, "pci_bars":bars, "timers":timers, "mch_smram":smram,
         "usb_attachments":shared.usb_attachments.try_lock().map(|a| a.iter().map(|a| a.id.clone()).collect::<Vec<_>>())})
 }
 

@@ -44,7 +44,7 @@ pub enum Command {
     Powerdown,
     /// Stop the machine immediately and exit the process.
     Quit,
-    /// Replace the stderr log filter without changing the flight recorder.
+    /// Replace the stderr filter and recorder RIP selection; keep both rings enabled.
     SetLogFilter {
         filter: String,
     },

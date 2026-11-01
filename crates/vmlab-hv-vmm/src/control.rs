@@ -52,15 +52,13 @@ impl ControlHandler {
 
     pub fn handle(&self, command: Command) -> Outcome {
         match command {
-            Command::SetLogFilter { filter } => {
-                match crate::diagnostics::report::set_log_filter(&filter) {
-                    Ok(()) => Outcome::Ok { status: None },
-                    Err(message) => Outcome::Error {
-                        code: ErrorCode::InvalidArgument,
-                        message,
-                    },
-                }
-            }
+            Command::SetLogFilter { filter } => match self.vm.set_log_filter(&filter) {
+                Ok(()) => Outcome::Ok { status: None },
+                Err(message) => Outcome::Error {
+                    code: ErrorCode::InvalidArgument,
+                    message,
+                },
+            },
             Command::DumpDiagnostics => match self.vm.dump_diagnostics() {
                 Ok(()) => Outcome::Ok { status: None },
                 Err(message) => Outcome::Error {
