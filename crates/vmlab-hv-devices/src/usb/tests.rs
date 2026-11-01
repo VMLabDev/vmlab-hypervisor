@@ -118,6 +118,15 @@ impl Driver {
         assert_eq!(self.read(0x44) & 1, 0);
     }
     fn event(&mut self, kind: u32) -> Trb {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while kind == 32 && Trb::read(&self.mem, self.event).unwrap().control & 1 == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "transfer event timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_micros(125));
+            self.hc.poll();
+        }
         let t = Trb::read(&self.mem, self.event).unwrap();
         assert_eq!(t.control & 1, 1, "event missing at {:#x}", self.event);
         assert_eq!(t.kind(), kind);
@@ -212,6 +221,64 @@ impl Driver {
         self.mem.read_slice(&mut b, GuestAddress(0xa000)).unwrap();
         b
     }
+}
+
+#[test]
+fn event_data_td_completes_without_requesting_a_usb_report() {
+    let mut d = Driver::new();
+    d.hc.detach(5).unwrap();
+    d.hc.attach(5, Box::new(super::Keyboard::new("test-keyboard")))
+        .unwrap();
+    d.enumerate();
+    d.configure();
+    d.trb(0x8000, 0xfeed, 0, (7 << 10) | 32);
+    d.write(0x2000 + u64::from(d.slot) * 4, 3);
+    let event = Trb::read(&d.mem, d.event).unwrap();
+    assert_eq!(event.kind(), 32, "Event Data TD waited for a USB report");
+    assert_eq!(event.parameter, 0xfeed);
+    assert_eq!(event.status, 1 << 24);
+    assert_ne!(event.control & 4, 0);
+    d.event(32);
+    d.hc.inject_key("a", true).unwrap();
+    d.trb(0x8010, 0xa000, 8, (1 << 10) | 32);
+    d.write(0x2000 + u64::from(d.slot) * 4, 3);
+    assert_eq!(d.event(32).parameter, 0x8010);
+    assert_eq!(d.report()[2], 4);
+}
+
+#[test]
+fn interrupt_keyboard_reports_wait_for_the_endpoint_service_interval() {
+    let mut d = Driver::new();
+    d.hc.detach(5).unwrap();
+    d.hc.attach(5, Box::new(super::Keyboard::new("test-keyboard")))
+        .unwrap();
+    d.enumerate();
+    d.mem32(0x6080, 9 << 16);
+    d.configure();
+    d.hc.inject_key("a", true).unwrap();
+    d.hc.inject_key("a", false).unwrap();
+    d.trb(0x8000, 0xa000, 8, (1 << 10) | 32);
+    d.trb(0x8010, 0xa100, 8, (1 << 10) | 32);
+    d.write(0x2000 + u64::from(d.slot) * 4, 3);
+    assert_eq!(d.event(32).parameter, 0x8000);
+    assert_eq!(d.report()[2], 4);
+    assert_eq!(
+        Trb::read(&d.mem, d.event).unwrap().control,
+        0,
+        "two interrupt reports completed in one service interval"
+    );
+    let state = d.hc.save_state().unwrap();
+    d.hc.restore_state(&state).unwrap();
+    d.hc.poll();
+    assert_eq!(Trb::read(&d.mem, d.event).unwrap().control, 0);
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    d.hc.poll();
+    assert_eq!(d.event(32).parameter, 0x8010);
+    let mut released = [1; 8];
+    d.mem
+        .read_slice(&mut released, GuestAddress(0xa100))
+        .unwrap();
+    assert_eq!(released, [0; 8]);
 }
 
 #[test]
