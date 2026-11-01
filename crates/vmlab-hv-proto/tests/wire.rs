@@ -31,6 +31,23 @@ fn macos_launch_serialization_and_description_redaction_are_separate() {
     );
 }
 
+#[test]
+fn invalid_smc_sections_do_not_echo_supplied_values() {
+    let fake = "FAKE".repeat(16);
+    let mut unknown = serde_json::json!({"osk":fake});
+    unknown
+        .as_object_mut()
+        .unwrap()
+        .insert(fake.clone(), 0.into());
+    for value in [serde_json::Value::String(fake.clone()), unknown] {
+        let error = serde_json::from_value::<vmlab_hv_proto::machine::AppleSmc>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains(&fake), "SMC input appeared in an error");
+        assert!(error.contains("osk"));
+    }
+}
+
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use vmlab_hv_proto::control::{

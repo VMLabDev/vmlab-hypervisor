@@ -104,10 +104,23 @@ impl MsrPolicy {
 }
 
 /// Serialize only for the private launch transport. Use `redacted()` for dumps.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppleSmc {
     pub osk: String,
+}
+
+impl<'de> Deserialize<'de> for AppleSmc {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            osk: String,
+        }
+        Fields::deserialize(deserializer)
+            .map(|fields| Self { osk: fields.osk })
+            .map_err(|_| serde::de::Error::custom("applesmc requires an object with an osk string"))
+    }
 }
 
 impl std::fmt::Debug for AppleSmc {

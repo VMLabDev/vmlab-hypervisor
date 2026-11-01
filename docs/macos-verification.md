@@ -153,6 +153,13 @@ dumps redact the OSK. Snapshot device state stores the SMC transaction
 cursor, not OSK bytes or read-response buffers. Restore uses the key from
 the current description. SMC port values are excluded from I/O diagnostics.
 
+Malformed SMC sections originally exposed supplied values in Serde errors.
+Fake-key regressions reproduced this through both the public protocol type
+and the real CLI. SMC deserialization now returns a value-free schema error.
+CLI JSON errors report the file, line, and column without input values.
+All 30 wire tests and the CLI regression pass. No real key was used in
+these malformed-input tests.
+
 The task brief forbids the OSK in every snapshot file. The specification
 requires complete RAM snapshots and explicitly forbids it in device state.
 These requirements differ because guest RAM can contain OSK responses.

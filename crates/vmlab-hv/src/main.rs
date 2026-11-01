@@ -100,7 +100,15 @@ fn main() -> ExitCode {
 fn read_machine(path: &PathBuf) -> Result<MachineDescription, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", path.display()))
+    // Deserializer errors can include input values, including secrets.
+    serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "parsing {}: invalid machine description at line {}, column {}",
+            path.display(),
+            error.line(),
+            error.column()
+        )
+    })
 }
 
 fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
