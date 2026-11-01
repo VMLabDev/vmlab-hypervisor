@@ -46,7 +46,7 @@ def permit(timeout):
     held = None
     try:
         while held is None:
-            for slot in range(2):
+            for slot in range(int(os.environ.get("VMLAB_HV_TEST_VM_LIMIT", "4"))):
                 candidate = (directory / f"{slot}.lock").open("a+b")
                 try:
                     fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -59,7 +59,7 @@ def permit(timeout):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("waiting for a shared test VM permit")
                 time.sleep(0.1)
-        while len(project_vms()) >= 2:
+        while len(project_vms()) >= int(os.environ.get("VMLAB_HV_TEST_VM_LIMIT", "4")):
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"waiting for host VM capacity: {project_vms()}")
             time.sleep(0.1)
@@ -349,7 +349,7 @@ def main():
                 argv.extend(["-parallel", "null"])
             result["argv"] = argv
             result["project_vm_pids_before_launch"] = project_vms()
-            if len(result["project_vm_pids_before_launch"]) >= 2:
+            if len(result["project_vm_pids_before_launch"]) >= int(os.environ.get("VMLAB_HV_TEST_VM_LIMIT", "4")):
                 raise RuntimeError("host VM capacity changed before launch")
             with (directory / "qemu.stderr").open("w+b") as stderr:
                 try:
