@@ -58,6 +58,33 @@ class MicroTests(unittest.TestCase):
     def test_specialized_backend_routes_without_template_lookup(self):
         self.assertEqual(run.main(["--backend", "interpreter-specialized", "--arch", "riscv64", "--vcpus", "1", "--dry-run"]), 0)
 
+    def test_os_suite_never_routes_to_a_vm_backend(self):
+        for backend in ("qemu", "vmlab-hv", "interpreter", "interpreter-reference"):
+            with mock.patch.object(run, "sweep_stale_vms") as sweep:
+                with self.assertRaises(lib.BenchError):
+                    run.main(["--backend", backend, "--suite", "os", "--dry-run"])
+                sweep.assert_not_called()
+
+    def test_os_suite_retains_flat_controls_and_os_counters(self):
+        args = run.parse_args(["--backend", "interpreter-specialized", "--arch", "riscv64",
+                               "--vcpus", "1", "--suite", "os", "--repeats", "2"])
+        sample = {"instructions": 100, "seconds": 0.25, "mips": 0.0004,
+                  "native_instructions": 0, "events": 10, "ir_operations": 123}
+        def measurement(command, environment):
+            return dict(sample, native_instructions=0 if "os-workload" in " ".join(command) else 100)
+        with mock.patch.object(micro, "build_coremark", return_value=Path("coremark.bin")), \
+                mock.patch.object(subprocess, "run"), \
+                mock.patch.object(micro, "measure", side_effect=measurement), \
+                mock.patch.object(lib, "append_history") as history:
+            self.assertEqual(micro.run(args, "commit", True, "host", lambda text: None), 0)
+        records = [call.args[1] for call in history.call_args_list]
+        self.assertEqual(len(records), 2 + len(micro.OS_WORKLOADS))
+        self.assertEqual([record["guest"] for record in records[:2]], ["flat-rv64gc"] * 2)
+        for record in records[2:]:
+            self.assertEqual(record["guest"], "os-rv64gc")
+            self.assertEqual(record["samples"], [0.25, 0.25])
+            self.assertEqual(record["measurements"][0]["ir_operations"], 123)
+
     def test_qemu_flat_backend_routes_without_template_lookup(self):
         self.assertEqual(run.main(["--backend", "qemu", "--arch", "riscv64", "--vcpus", "1",
                                    "--guest", "flat-rv64gc", "--dry-run"]), 0)

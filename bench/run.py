@@ -60,7 +60,7 @@ def parse_args(argv):
                         "the template's own for x86_64)")
     p.add_argument("--repeats", type=int, default=3, help="repeats per configuration")
     p.add_argument("--guest", default="debian-13", help="template name")
-    p.add_argument("--suite", choices=("full", "g2g", "boot"), default="full",
+    p.add_argument("--suite", choices=("full", "g2g", "boot", "os"), default="full",
                    help="full workload set; g2g: x86_64 net pair; boot: TCG boot time only")
     p.add_argument("--cpus", default=None, help="taskset window override (e.g. 16-19)")
     p.add_argument("--hv-bin", default=os.path.join(lib.REPO_DIR, "target/release/vmlab-hv"))
@@ -1060,6 +1060,8 @@ def sweep_stale_vms():
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.suite == "os" and args.backend != "interpreter-specialized":
+        raise lib.BenchError("--suite os requires --backend interpreter-specialized")
     if args.backend in ("interpreter", "interpreter-reference", "interpreter-specialized") or (
             args.backend == "qemu" and args.guest == "flat-rv64gc"):
         import micro

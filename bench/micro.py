@@ -17,6 +17,12 @@ import subprocess
 import lib
 
 COREMARK_REVISION = "1f483d5b8316753a742cbf5590caf5bd0a4e4777"
+OS_WORKLOADS = ("ram", "ram-after-mmio", "same-page-data", "self-modifying",
+                "sv39-tlb", "sv48-tlb", "m-traps", "s-traps", "clint-timer",
+                "clint-software", "mmio", "large-code", "fresh-code")
+OS_ROUNDS = {case: (1024 if case.startswith("ram") else
+                    1 if case in ("self-modifying", "large-code", "fresh-code") else 8)
+             for case in OS_WORKLOADS}
 
 # The flat QEMU machine: spike (HTIF tohost/fromhost exit), one rv64 hart,
 # TCG, no devices the images do not touch. The kernel is the ELF so QEMU
@@ -289,6 +295,9 @@ def run_qemu(args, commit, dirty, host, log):
 
 
 def run(args, commit, dirty, host, log):
+    os_suite = args.suite == "os"
+    if os_suite and args.backend != "interpreter-specialized":
+        raise lib.BenchError("--suite os requires --backend interpreter-specialized")
     if args.backend == "qemu":
         return run_qemu(args, commit, dirty, host, log)
     if args.arch not in ("all", "riscv64") or (args.vcpus or "1,4") not in ("1", "1,4"):
@@ -308,8 +317,18 @@ def run(args, commit, dirty, host, log):
     if specialized:
         workloads = {"scalar_loop_30000000_warm": ["loop", "10000000"],
                      "coremark_algorithms_1000_warm": ["image", str(image), "80001000", "1000000000"]}
+    workloads = {name: ([binary, *command], "flat-rv64gc")
+                 for name, command in workloads.items()}
+    if os_suite:
+        subprocess.run(["cargo", "build", "--release", "-p", "vmlab-hv-vmm",
+                        "--features", "tcg-bench", "--example", "os-workload"],
+                       cwd=lib.REPO_DIR, check=True)
+        os_binary = str(Path(lib.REPO_DIR) / "target/release/examples/os-workload")
+        workloads.update({f"os_v1_{case}_{OS_ROUNDS[case]}":
+                          ([os_binary, case, str(OS_ROUNDS[case])], "os-rv64gc")
+                          for case in OS_WORKLOADS})
     environment = execution_environment(args.backend, os.environ)
-    for name, command in workloads.items():
+    for name, (command, guest) in workloads.items():
         samples = []
         raw = []
         noise = {"governor": lib.read_governor(), "loadavg_start": lib.read_loadavg(),
@@ -317,8 +336,8 @@ def run(args, commit, dirty, host, log):
                  "coremark_revision": COREMARK_REVISION, "backend_version": "guarded scalar blocks" if specialized else "generated IR interpreter",
                  "warmup_excluded": specialized}
         for repeat in range(args.repeats):
-            result = measure([*lib.systemd_run_prefix(), *lib.taskset_prefix(pin), binary, *command], environment)
-            if specialized and result["native_instructions"] == 0:
+            result = measure([*lib.systemd_run_prefix(), *lib.taskset_prefix(pin), *command], environment)
+            if specialized and guest == "flat-rv64gc" and result["native_instructions"] == 0:
                 raise lib.BenchError("specialized measurement executed no native instructions")
             raw.append(result)
             samples.append(result["seconds"])
@@ -328,7 +347,7 @@ def run(args, commit, dirty, host, log):
         noise["loadavg_end"] = lib.read_loadavg()
         record = {"recorded": datetime.datetime.now().isoformat(timespec="seconds"),
                   "commit": commit, "dirty": dirty, "host": host, "backend": args.backend,
-                  "arch": "riscv64", "guest": "flat-rv64gc", "vcpus": 1,
+                  "arch": "riscv64", "guest": guest, "vcpus": 1,
                   "workload": name, "unit": "s", "repeats": args.repeats, "samples": samples,
                   "median": statistics.median(samples), "spread": max(samples) - min(samples),
                   "qemu_baseline": None, "env": noise, "measurements": raw}

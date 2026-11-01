@@ -39,6 +39,40 @@ TCG performance gate. `--suite boot` is restricted to TCG guests.
 
 ## Workloads
 
+### Bounded RISC-V OS mechanisms
+
+```sh
+python3 bench/run.py --backend interpreter-specialized --arch riscv64 --vcpus 1 --repeats 3 --suite os
+```
+
+This suite starts no VM or worker thread. It runs the generated CPU through
+virt's production RAM adapter, MMIO bus, PCI root, and CLINT with a deterministic
+external clock. The same run records the existing warm scalar and CoreMark
+controls under `flat-rv64gc`, then the following cases under `os-rv64gc`:
+
+| Case | Measured work per round |
+|---|---|
+| `ram`, `ram-after-mmio` | 24,576 steps; the latter first disables the CPU-only code-epoch shortcut through a PCI configuration write |
+| `same-page-data`, `self-modifying` | 128 writes beside code or alternating its first instruction, each followed by 192 steps |
+| `sv39-tlb`, `sv48-tlb` | 128 mapped data pages, 192 steps per page, exceeding the model's 64-entry TLB |
+| `m-traps`, `s-traps` | 128 ECALL, handler, and return cycles |
+| `clint-timer`, `clint-software` | 128 real CLINT interrupt/acknowledgment/return cycles |
+| `mmio` | 8,192 reads of the real CLINT time register in 24,576 steps |
+| `large-code` | Four instructions at each of 4,097 distinct sites, 65,552 bytes of code |
+| `fresh-code` | The same sites loaded and executed without translation warmup |
+
+RAM cases use 1,024 rounds. Self-modifying, large-code, and fresh-code cases
+use one round; the other cases use eight. Fixture setup and two warmup rounds
+are excluded, except `fresh-code`, which has no warmup. Each case checks its
+register result; paged loads also check every page's value and return PC.
+
+Raw history retains retired instructions, CPU steps, elapsed seconds, source
+operations, native steps, recordings, evictions, metadata usage, event count,
+and checksum. Interrupt entry and faulting ECALL steps are not counted as
+retired instructions. Workload keys include the version and round count, so
+`just bench-check` compares like configurations. These bounded cases do not
+establish S1 boot acceptance or a whole-OS performance gate.
+
 Per guest arch (aarch64, riscv64), per vCPU count (1 and 4), N repeats,
 from the local vmlab templates (`~/.local/share/vmlab/templates/<arch>/`;
 newest version dir; a fresh qcow2 overlay per repeat — the template is never

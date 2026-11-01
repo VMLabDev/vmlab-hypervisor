@@ -1,5 +1,7 @@
 //! RISC-V virt with the Sail-derived interpreter and the existing device set.
 
+#[cfg(feature = "tcg-bench")]
+pub mod benchmark;
 mod cpu;
 mod display;
 mod fdt;
