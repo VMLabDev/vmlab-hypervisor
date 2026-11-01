@@ -146,6 +146,15 @@ fn key(client: &vmlab_hv_display::Client, qcode: &str, down: bool) {
         .unwrap();
 }
 
+fn clear_password(input: &vmlab_hv_display::Client) {
+    key(input, "meta_l", true);
+    key(input, "a", true);
+    key(input, "a", false);
+    key(input, "meta_l", false);
+    key(input, "backspace", true);
+    key(input, "backspace", false);
+}
+
 fn keyboard_input(native: &Path, input: &vmlab_hv_display::Client, guest: &mut AgentClient) {
     use vmlab_hv_display::Message;
     let deadline = Instant::now() + Duration::from_secs(300);
@@ -181,24 +190,43 @@ fn keyboard_input(native: &Path, input: &vmlab_hv_display::Client, guest: &mut A
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    input
-        .send(&Message::PointerAbs {
-            x: 640,
-            y: 718,
-            width: 1280,
-            height: 800,
-        })
-        .unwrap();
-    input.send(&Message::Buttons { mask: 1 }).unwrap();
-    input.send(&Message::Buttons { mask: 0 }).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    'focus: loop {
+        input
+            .send(&Message::PointerAbs {
+                x: 640,
+                y: 718,
+                width: 1280,
+                height: 800,
+            })
+            .unwrap();
+        input.send(&Message::Buttons { mask: 1 }).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        input.send(&Message::Buttons { mask: 0 }).unwrap();
+        clear_password(input);
+        key(input, "h", true);
+        key(input, "h", false);
+        let attempt = (Instant::now() + Duration::from_secs(2)).min(deadline);
+        loop {
+            if password_bullets(&native_pixels(native)) == 1 {
+                break 'focus;
+            }
+            if Instant::now() >= deadline {
+                super::display_acceptance::diagnostic_screenshot(
+                    native,
+                    &native.parent().unwrap().join("keyboard-failure.ppm"),
+                );
+                panic!("macOS password field did not accept the keyboard focus probe");
+            }
+            if Instant::now() >= attempt {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    eprintln!("macOS P1 password focus confirmed by one native-frame glyph");
     for amount in [5, 3] {
-        key(input, "meta_l", true);
-        key(input, "a", true);
-        key(input, "a", false);
-        key(input, "meta_l", false);
-        key(input, "backspace", true);
-        key(input, "backspace", false);
+        clear_password(input);
         for qcode in ["h", "w", "r", "e", "f"].into_iter().take(amount) {
             key(input, qcode, true);
             key(input, qcode, false);

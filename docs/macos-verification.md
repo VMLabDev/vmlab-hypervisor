@@ -9,25 +9,28 @@ hardware references. The owner keeps this host at `kvm.ignore_msrs=N`.
 
 ## Current verification state
 
-P2 and P4 pass. Three complete lifecycle runs passed with host
+P2 and P4 pass. Four complete lifecycle runs passed with host
 `kvm.ignore_msrs=N`, but a CI repeat failed after all guest checks when
 agent powerdown left an unsuccessful process status. The exit code or
 signal is unknown because the test omitted the status and stderr from its
 assertion. That diagnostic is corrected; the shutdown failure is not fixed.
-The CI binary finished with 38 passing tests and this one failure. The full
-workspace gate stopped there and has not passed.
+That CI binary finished with 38 passing tests and this one failure. A later
+run finished with 39 passing tests and an initial keyboard failure. Its
+failure matches an isolated run of the same CI-built binary: the password
+field remained empty. The full workspace gate has not passed.
 
 The owner closed the intervening benchmark window and raised the host limit
-to four project VMs. Commit `fb507f3` is merged. Builds retain
+to four project VMs. Commit `fb507f3` is merged. Direct builds retain
 `CARGO_BUILD_JOBS=4` under `taskset -c 0-7`.
 
 The successful runs verified agent execution, visible 1280x800 native frames,
 keyboard glyphs, network ping, online snapshot file rollback, reboot with
 a new boot-session UUID, unchanged TSC frequency, and clean agent powerdown.
-They took 137.44, 86.99, and 100.10 seconds, including shared VM permit waits.
-The two post-window runs did not reproduce the shutdown failure. The last
-run checks keyboard input before networking, as the spec orders, and again
-after reset. It passes both input checks.
+They took 137.44, 86.99, 100.10, and 97.02 seconds, including shared VM permit
+waits. The three post-window runs did not reproduce the shutdown failure.
+The last two runs check keyboard input before networking, as the spec orders,
+and again after reset. The latest also confirms focus with a visible glyph
+before each key sequence. It passes the entire lifecycle.
 
 One subsequent attempt stopped at OpenCore's prohibited-boot screen. The
 same implementation booted on retry. Another attempt reached agent-ready
@@ -53,11 +56,12 @@ controller test reproduced two keyboard reports completing within one
 64-ms service interval. It passes after interval enforcement, including a
 snapshot between reports. Another regression covers standalone Event Data
 TDs, which must complete without consuming a USB report. All 47 USB tests pass.
-The native input test also waits 100 ms after the pointer click before
-sending keys, so the guest can focus the password field. It observes five
-masked glyphs, then replaces them with three. Earlier runs sent keys
-immediately after queuing the click and produced no glyphs. They are not
-counted as passes.
+The native input test waits for the password field and holds the pointer
+button for 50 ms. It then requires one visible probe glyph to confirm focus,
+retrying the focus request for at most 20 seconds. After clearing the probe,
+it requires exactly five masked glyphs, then replaces them with exactly three.
+The earlier one-shot click and fixed 100-ms wait failed in both full CI and
+an isolated CI-binary run. Those failures are not counted as passes.
 
 The parallel device suite also hit an unchanged console event-order test
 failure. That test passes alone. The final serial device suite passes 390 tests,
@@ -67,7 +71,7 @@ After the failed CI run, formatting, workspace clippy with `-D warnings`,
 the glyph-detector fixture, and the serial device suite pass under the CPU
 restriction. A real child process exiting with status 17 verifies that the
 corrected shutdown diagnostic retains both its exit status and stderr.
-Both post-window macOS shutdown reproductions passed. The earlier
+All three post-window macOS shutdown reproductions passed. The earlier
 failure remains unexplained.
 
 The first full `just ci::check` run failed two binary acceptance tests.
