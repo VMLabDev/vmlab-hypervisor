@@ -1059,7 +1059,6 @@ impl VmShared {
 
     fn poll_chipset(&self) {
         self.advance_serials(None);
-        self.poll_display();
         if self.status() == RunState::Running
             && let Some(xhci) = self.xhci.lock().as_ref()
         {
@@ -1206,6 +1205,7 @@ pub struct Vm {
     /// Guest RAM, kept for snapshot orchestration and later vhost-user.
     pub ram: Arc<GuestRam>,
     timer: Option<std::thread::JoinHandle<()>>,
+    display_worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Vm {
@@ -1231,6 +1231,7 @@ impl Vm {
             vcpus: Vec::new(),
             ram,
             timer: None,
+            display_worker: None,
         };
         for (id, fd) in fds {
             machine.vcpus.push(
@@ -1259,6 +1260,29 @@ impl Vm {
                     .map_err(|e| VmmError::Other(format!("spawning chipset timer: {e}")))?,
             )
         };
+        // Rendering a frame can exceed the guest's PCM I/O timeout. Keep
+        // it off the thread that advances audio and the platform timers.
+        // The binary attaches the display server after constructing the VM.
+        if machine.shared.vga.lock().is_some() || machine.shared.display.lock().is_some() {
+            let weak = Arc::downgrade(&machine.shared);
+            machine.display_worker = Some(
+                std::thread::Builder::new()
+                    .name("display-frames".into())
+                    .spawn(move || {
+                        while let Some(shared) = weak.upgrade() {
+                            if shared.exited() {
+                                break;
+                            }
+                            shared.poll_display();
+                            let mut state = shared.state.lock();
+                            shared
+                                .state_cv
+                                .wait_for(&mut state, std::time::Duration::from_millis(16));
+                        }
+                    })
+                    .map_err(|e| VmmError::Other(format!("spawning display worker: {e}")))?,
+            );
+        }
         if machine.shared.pflash.lock().is_some() {
             let weak = Arc::downgrade(&machine.shared);
             std::thread::Builder::new()
@@ -1405,6 +1429,9 @@ impl Vm {
         }
         if let Some(timer) = self.timer.take() {
             let _ = timer.join();
+        }
+        if let Some(display) = self.display_worker.take() {
+            let _ = display.join();
         }
     }
 }
@@ -1698,12 +1725,110 @@ mod tests {
             DisplayServer::new(probe.clone(), probe.clone()).unwrap(),
         ));
         *shared.last_frame.lock() = std::time::Instant::now() - Duration::from_millis(16);
-        shared.poll_chipset();
+        shared.poll_display();
         assert_eq!(probe.0.load(Ordering::SeqCst), 2);
         // Keep the interval deterministic even if the test thread is descheduled.
         *shared.last_frame.lock() = std::time::Instant::now() + Duration::from_secs(1);
-        shared.poll_chipset();
+        shared.poll_display();
         assert_eq!(probe.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn slow_display_does_not_block_audio_clock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use vmlab_hv_devices::audio::AudioClock;
+        use vmlab_hv_display::{DisplayServer, Frame, FrameSource, InputSink, Pixels};
+
+        struct SlowFrame {
+            block: AtomicBool,
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        impl FrameSource for SlowFrame {
+            fn frame(&self) -> std::io::Result<Frame> {
+                if self.block.swap(false, Ordering::SeqCst) {
+                    self.entered.send(()).unwrap();
+                    self.release
+                        .lock()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+                Ok(Frame {
+                    flags: Default::default(),
+                    generation: 0,
+                    width: 1,
+                    height: 1,
+                    stride: 4,
+                    drm_fourcc: vmlab_hv_display::protocol::XRGB8888,
+                    modifier: 0,
+                    timestamp_ns: 0,
+                    damage: vec![],
+                    pixels: Pixels::Shm(Arc::new(vec![0; 4])),
+                })
+            }
+            fn readback(&self, _: &Frame) -> std::io::Result<Vec<u8>> {
+                Ok(vec![0; 4])
+            }
+        }
+        impl InputSink for SlowFrame {
+            fn input(&self, _: vmlab_hv_display::Message) {}
+        }
+        struct Clock(mpsc::Sender<()>);
+        impl AudioClock for Clock {
+            fn advance(&mut self, _: Duration) -> Result<(), vmlab_hv_devices::DeviceError> {
+                self.0.send(()).unwrap();
+                Ok(())
+            }
+            fn set_paused(&mut self, _: bool) {}
+        }
+
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("skipping audio clock test: /dev/kvm is unavailable");
+            return;
+        }
+        let kvm = KvmVm::new().unwrap();
+        let layout = crate::layout::MemLayout::q35(16).unwrap();
+        let ram = GuestRam::anonymous(layout.clone()).unwrap();
+        crate::memory::register_memslots(&kvm.vm, &ram).unwrap();
+        let chipset = crate::chipset::Chipset::new(kvm.vm.clone(), &layout, 0, false).unwrap();
+        let (ticks, clock) = mpsc::channel();
+        *chipset.audio.lock() = Some(Arc::new(Mutex::new(Clock(ticks))));
+        let signal = Arc::new(SleepSignal::default());
+        let shared = VmShared::new(
+            kvm,
+            IoBus::new(),
+            MmioBus::new(),
+            Arc::new(Mutex::new(PciRoot::new(layout.mmio64_base))),
+            Arc::new(Mutex::new(PmDevice::new(Arc::new(NullIrq), signal.sink()))),
+            signal,
+            layout.mmio64_base,
+        );
+        *shared.chipset.lock() = Some(chipset);
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let source = Arc::new(SlowFrame {
+            block: AtomicBool::new(false),
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        });
+        *shared.vga.lock() = Some(crate::display::Video::Standard(Arc::new(Mutex::new(
+            vmlab_hv_devices::display::StandardVga::new("vga", &[0x55, 0xaa, 0]).unwrap(),
+        ))));
+        let mut vm = Vm::from_parts(shared.clone(), vec![], ram).unwrap();
+        // Match binary startup: attach the server after VM construction.
+        *shared.display.lock() = Some(Arc::new(
+            DisplayServer::new(source.clone(), source.clone()).unwrap(),
+        ));
+        source.block.store(true, Ordering::SeqCst);
+        *shared.last_frame.lock() = std::time::Instant::now() - Duration::from_millis(16);
+        vm.start();
+        entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        while clock.try_recv().is_ok() {}
+        let progress = clock.recv_timeout(Duration::from_millis(50));
+        release.send(()).unwrap();
+        drop(vm);
+        assert!(progress.is_ok(), "frame rendering blocked the audio clock");
     }
 
     #[test]
