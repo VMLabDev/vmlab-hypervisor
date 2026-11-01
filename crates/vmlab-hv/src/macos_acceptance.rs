@@ -33,6 +33,28 @@ fn control(client: &mut Client, command: Control) {
     assert!(matches!(result, Outcome::Ok { .. }), "{result:?}");
 }
 
+fn check_powerdown(status: std::process::ExitStatus, diagnostics: &str) -> Result<(), String> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "macOS agent powerdown exited with {status}: {diagnostics}"
+        ))
+    }
+}
+
+#[test]
+fn powerdown_failure_reports_exit_status_and_stderr() {
+    let output = Command::new("/bin/sh")
+        .args(["-c", "printf shutdown-diagnostic >&2; exit 17"])
+        .output()
+        .unwrap();
+    let message =
+        check_powerdown(output.status, std::str::from_utf8(&output.stderr).unwrap()).unwrap_err();
+    assert!(message.contains("17"), "{message}");
+    assert!(message.contains("shutdown-diagnostic"), "{message}");
+}
+
 fn native_pixels(path: &Path) -> Vec<u8> {
     use vmlab_hv_display::{Capabilities, Message};
     let client =
@@ -473,7 +495,8 @@ fn macos_tahoe_p1_agent_display_keyboard_network_reset_snapshot_stop() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(process.wait().unwrap().success());
+    let status = process.wait().unwrap();
+    check_powerdown(status, &diagnostics()).unwrap();
     let ignored: Vec<_> = diagnostics()
         .lines()
         .filter(|line| line.contains("ignored unknown MSR"))

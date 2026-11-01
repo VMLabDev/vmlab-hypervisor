@@ -9,7 +9,18 @@ hardware references. The owner keeps this host at `kvm.ignore_msrs=N`.
 
 ## Current verification state
 
-P1, P2, and P4 pass. The final `just ci::check` run is in progress.
+P2 and P4 pass. One complete P1 run passed, but its repeat in final
+`just ci::check` failed after all guest checks, when agent powerdown left a
+unsuccessful process status. The exit code or signal is unknown because the
+test omitted the status and stderr from its
+assertion. That diagnostic is corrected; the shutdown failure is not fixed.
+The CI binary finished with 38 passing tests and this one failure. The full
+workspace gate stopped there and has not passed.
+
+The owner requested a benchmark window after CI started. The existing run
+finished, and no new VM may boot until `BENCH WINDOW CLOSED`. The CI process
+and its future children were restricted to CPUs 0-7. Further builds use
+`CARGO_BUILD_JOBS=4` under `taskset -c 0-7`.
 The complete P1 run passed with host `kvm.ignore_msrs=N` before boot and
 after shutdown. It verified agent execution, visible 1280x800 native frames,
 keyboard glyphs, network ping, online snapshot file rollback, reboot with
@@ -47,8 +58,14 @@ immediately after queuing the click and produced no glyphs. They are not
 counted as passes.
 
 The parallel device suite also hit an unchanged console event-order test
-failure. That test passes alone. The serial device suite passes 389 tests,
+failure. That test passes alone. The final serial device suite passes 390 tests,
 with one existing ignored test. No console implementation changed.
+
+After the failed CI run, formatting, workspace clippy with `-D warnings`,
+the glyph-detector fixture, and the serial device suite pass under the CPU
+restriction. A real child process exiting with status 17 verifies that the
+corrected shutdown diagnostic retains both its exit status and stderr.
+The macOS shutdown reproduction awaits the benchmark-window release.
 
 The first full `just ci::check` run failed two binary acceptance tests.
 The macOS run stopped before its agent handshake. The unchanged QEMU Ubuntu
@@ -118,7 +135,9 @@ performed.
 
 The existing guest-agent shutdown vocabulary supplies `reboot` and
 `powerdown`. P1 verifies the S1 reset event, a new guest boot-session UUID,
-and clean process exit after `powerdown`. No new control command is needed.
+and clean process exit after `powerdown` in the standalone run. The CI repeat
+passed reset but exited unsuccessfully after `powerdown`; its cause is unknown.
+No new control command has been added.
 
 ## Secret handling and safety
 
@@ -136,6 +155,8 @@ requires complete RAM snapshots and explicitly forbids it in device state.
 These requirements differ because guest RAM can contain OSK responses.
 The implementation follows the specification. The live acceptance test
 automatically removes its private snapshot directory, including on failure.
+The temporary overlays and RAM snapshots from both lifecycle runs were
+removed and cannot be recovered. The original template is unchanged.
 
 All tests use fresh overlays. Every boot uses the shared VM permits and a
 24-GiB systemd scope with no swap. Host KVM settings and physical USB and
