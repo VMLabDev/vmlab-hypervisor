@@ -14,7 +14,7 @@ use vmlab_hv_devices::virtio::fs::{Fs, FsConfig, InProcessFs, InProcessFsConfig}
 use vmlab_hv_devices::virtio::net::{Net, NetConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
 use vmlab_hv_devices::{GuestMemory, IrqLine, VirtioDevice};
-use vmlab_hv_proto::machine::{Disk, FsBacking, FsShare, Nic, NicAttachment, SerialPort};
+use vmlab_hv_proto::machine::{Disk, FsBacking, FsShare, Nic, NicAttachment, NicModel, SerialPort};
 use vmlab_hv_vmm::DeviceUnavailable;
 use vmlab_hv_vmm::factory::{BuiltBlk, BuiltPci, BuiltSerial, SharedDisk};
 
@@ -145,6 +145,30 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         let switch = match &nic.attachment {
             NicAttachment::Stream { socket } => socket.clone(),
         };
+        if nic.model != NicModel::Virtio {
+            let irq = msi
+                .intx
+                .ok_or_else(|| DeviceUnavailable::new("legacy NIC", "requires INTx wiring"))?;
+            let rom = nic
+                .rom
+                .as_ref()
+                .map(std::fs::read)
+                .transpose()
+                .map_err(|e| DeviceUnavailable::new("NIC ROM", e.to_string()))?;
+            return match nic.model {
+                NicModel::E1000 => legacy_nic(
+                    vmlab_hv_devices::net::e1000::E1000::new(id, mac, mem.clone(), irq),
+                    switch,
+                    rom.as_deref(),
+                ),
+                NicModel::Pcnet => legacy_nic(
+                    vmlab_hv_devices::net::pcnet::Pcnet::new(id, mac, mem.clone(), irq),
+                    switch,
+                    rom.as_deref(),
+                ),
+                NicModel::Virtio => unreachable!(),
+            };
+        }
         let config = NetConfig {
             id: id.clone(),
             mac,
@@ -202,6 +226,25 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
             )),
         }
     }
+}
+
+fn legacy_nic<C: vmlab_hv_devices::net::Controller>(
+    controller: C,
+    switch: std::path::PathBuf,
+    rom: Option<&[u8]>,
+) -> Result<BuiltPci, DeviceUnavailable> {
+    let mut card = vmlab_hv_devices::net::NetworkCard::new(controller, switch)
+        .map_err(|e| DeviceUnavailable::new("legacy NIC", e.to_string()))?;
+    if let Some(rom) = rom {
+        card = card
+            .with_option_rom(rom)
+            .map_err(|e| DeviceUnavailable::new("NIC ROM", e.to_string()))?;
+    }
+    let card = Arc::new(Mutex::new(card));
+    Ok(BuiltPci {
+        function: card.clone(),
+        snapshot: Some(card),
+    })
 }
 
 /// `aa:bb:cc:dd:ee:ff` to bytes.

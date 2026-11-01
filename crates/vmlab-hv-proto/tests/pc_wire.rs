@@ -64,3 +64,31 @@ fn later_phase_device_wire_names_are_explicit() {
         "\"pcnet\""
     );
 }
+
+#[test]
+fn nic_models_are_additive_and_default_to_virtio() {
+    let mut wire = base();
+    wire["nics"] = serde_json::json!([{"mac":"52:54:00:01:02:03", "attachment":{"kind":"stream","socket":"/switch.sock"}}]);
+    let desc: MachineDescription = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(desc.nics[0].model, NicModel::Virtio);
+    assert!(
+        serde_json::to_value(&desc.nics[0])
+            .unwrap()
+            .get("model")
+            .is_none()
+    );
+    for (name, model) in [
+        ("virtio", NicModel::Virtio),
+        ("e1000", NicModel::E1000),
+        ("pcnet", NicModel::Pcnet),
+    ] {
+        wire["nics"][0]["model"] = name.into();
+        let desc: MachineDescription = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(desc.nics[0].model, model);
+        assert_eq!(
+            serde_json::from_slice::<MachineDescription>(&serde_json::to_vec(&desc).unwrap())
+                .unwrap(),
+            desc
+        );
+    }
+}

@@ -110,7 +110,7 @@ pub trait DeviceFactory: Send + Sync {
         msi: PciWiring,
     ) -> Result<BuiltPci, DeviceUnavailable>;
 
-    /// A virtio-net PCI function for one NIC.
+    /// A PCI NIC selected by `nic.model` (virtio when absent on the wire).
     fn virtio_net(
         &self,
         nic: &Nic,

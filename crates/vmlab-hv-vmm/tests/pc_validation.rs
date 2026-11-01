@@ -51,11 +51,6 @@ fn phase_boundaries_refuse_undelivered_devices_and_invalid_machine_combinations(
             "phase 4c",
         ),
         (
-            "nics",
-            serde_json::json!([{"model":"e1000","mac":"52:54:00:00:00:01","attachment":{"kind":"stream","socket":"/net"}}]),
-            "phase 4b",
-        ),
-        (
             "cpu_model",
             serde_json::json!("arbitrary-host-argument"),
             "cpu_model",

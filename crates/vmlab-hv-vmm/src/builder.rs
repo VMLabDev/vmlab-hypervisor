@@ -329,9 +329,6 @@ fn validate_legacy_features(desc: &MachineDescription) -> Result<(), VmmError> {
         if desc.tablet.is_some() || desc.usb.is_some() {
             return invalid("pc UHCI tablet and USB require phase 4c");
         }
-        if !desc.nics.is_empty() {
-            return invalid("pc networking requires phase 4b");
-        }
         if desc.ahci_pci.is_some() || desc.disks.iter().any(|disk| disk.bus == DiskBus::Ahci) {
             return invalid("pc uses PIIX IDE, not q35 AHCI");
         }
@@ -346,7 +343,7 @@ fn validate_legacy_features(desc: &MachineDescription) -> Result<(), VmmError> {
             return invalid("audio, TPM and VFIO require machine=q35");
         }
     } else if desc.nics.iter().any(|nic| nic.model != NicModel::Virtio) {
-        return invalid("e1000 and pcnet require machine=pc and phase 4b");
+        return invalid("e1000 and pcnet require machine=pc");
     }
     if desc
         .display
@@ -1541,6 +1538,33 @@ mod tests {
             shares: vec![],
             audio: None,
             rtc_base: None,
+        }
+    }
+
+    #[test]
+    fn pc_accepts_each_nic_model_but_q35_keeps_virtio_only() {
+        let mut machine = desc();
+        machine.machine = Machine::Pc;
+        machine.boot = Boot::Firmware {
+            firmware: vmlab_hv_proto::machine::FirmwareKind::Seabios,
+            code: "/bios".into(),
+            vars: None,
+            secure_boot: false,
+            bootorder: vec![],
+        };
+        for model in ["virtio", "e1000", "pcnet"] {
+            machine.nics =
+                vec![serde_json::from_value(serde_json::json!({
+                "model":model,"mac":"52:54:00:12:34:56","pci":{"bus":0,"device":3,"function":0},
+                "attachment":{"kind":"stream","socket":"/switch"}
+            })).unwrap()];
+            assert!(validate_legacy_features(&machine).is_ok(), "pc NIC {model}");
+            machine.machine = Machine::Q35;
+            assert_eq!(
+                validate_legacy_features(&machine).is_ok(),
+                model == "virtio"
+            );
+            machine.machine = Machine::Pc;
         }
     }
 
