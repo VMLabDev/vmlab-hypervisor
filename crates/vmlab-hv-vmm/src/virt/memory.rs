@@ -50,6 +50,7 @@ pub struct PhysicalMemory {
     identity: u64,
     cache_safe: Arc<std::sync::atomic::AtomicBool>,
     flash: Vec<(u64, Arc<Mutex<super::flash::Flash>>)>,
+    flash_epochs: Vec<Arc<std::sync::atomic::AtomicU64>>,
     last_read: Option<ReadObservation>,
     code_windows: Arc<Mutex<CodeWindows>>,
     #[cfg(test)]
@@ -73,6 +74,7 @@ impl PhysicalMemory {
             identity: next_identity(),
             cache_safe: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             flash: Vec::new(),
+            flash_epochs: Vec::new(),
             last_read: None,
             code_windows: Arc::default(),
             #[cfg(test)]
@@ -82,6 +84,7 @@ impl PhysicalMemory {
 
     pub(super) fn map_flash(&mut self, base: u64, flash: Arc<Mutex<super::flash::Flash>>) {
         self.identity = next_identity();
+        self.flash_epochs.push(flash.lock().generation_clock());
         self.flash.push((base, flash));
     }
 
@@ -266,8 +269,8 @@ impl Memory for PhysicalMemory {
             return None;
         }
         let mut epoch = self.generation();
-        for (_, flash) in &self.flash {
-            epoch = epoch.checked_add(flash.lock().code_generation()?)?;
+        for flash in &self.flash_epochs {
+            epoch = epoch.checked_add(flash.load(std::sync::atomic::Ordering::Acquire))?;
         }
         Some((self.identity, epoch))
     }
@@ -362,6 +365,68 @@ mod tests {
             MmioBus::new(),
             Arc::new(Mutex::new(PciRoot::q35(0x4_0000_0000))),
         )
+    }
+
+    #[test]
+    fn flash_mode_changes_cannot_reuse_an_array_execution_epoch() {
+        use std::os::unix::fs::FileExt;
+        use vmlab_hv_devices::BusDevice;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file().set_len(32 << 20).unwrap();
+        file.as_file()
+            .write_all_at(&0x00108093u32.to_le_bytes(), 0)
+            .unwrap();
+        file.as_file()
+            .write_all_at(&0xffdff06fu32.to_le_bytes(), 4)
+            .unwrap();
+        let flash = Arc::new(Mutex::new(
+            super::super::flash::Flash::open("flash", file.path(), false).unwrap(),
+        ));
+        let mut memory = memory();
+        memory
+            .bus
+            .lock()
+            .register(0x20000000, 32 << 20, flash.clone())
+            .unwrap();
+        memory.map_flash(0x20000000, flash.clone());
+        let mut cpu = vmlab_hv_tcg::Riscv64::new(memory).unwrap();
+        super::super::cpu::configure_memory(&mut cpu, 4 * 4096).unwrap();
+        cpu.use_external_clock().unwrap();
+        cpu.specialize = true;
+        cpu.interpreter.operation_limit = u64::MAX;
+        cpu.set_pc(0x20000000);
+        cpu.run(128).unwrap();
+        assert_eq!(cpu.gpr(1).unwrap(), 64);
+        flash.lock().write(0, &[0x98]);
+        cpu.set_pc(0x20000000);
+        cpu.run(1).unwrap();
+        assert_eq!(cpu.gpr(1).unwrap(), 64);
+        assert_eq!(cpu.read_csr(0x342).unwrap(), 2);
+        flash.lock().write(0, &[0xff]);
+        cpu.set_pc(0x20000000);
+        cpu.run(32).unwrap();
+        assert_eq!(cpu.gpr(1).unwrap(), 80);
+    }
+
+    #[test]
+    fn code_epoch_queries_do_not_lock_pflash_devices() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file().set_len(32 << 20).unwrap();
+        let flash = Arc::new(Mutex::new(
+            super::super::flash::Flash::open("flash", file.path(), false).unwrap(),
+        ));
+        let mut memory = memory();
+        memory.map_flash(0x20000000, flash.clone());
+        let guard = flash.lock();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || sender.send(memory.code_epoch()).unwrap());
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(1));
+        drop(guard);
+        worker.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "code epoch query waited for the pflash device lock"
+        );
     }
 
     #[test]
@@ -472,7 +537,7 @@ mod tests {
         );
         let state = flash.lock().save_state().unwrap();
         memory.write(0x20000000, &[0x98]).unwrap();
-        assert!(memory.code_epoch().is_none());
+        assert_ne!(memory.code_epoch(), Some(epoch));
         assert!(memory.code_stamp(0x20000000, 4).is_none());
         assert_eq!(
             memory.ram_bounds(0x20000000),

@@ -3,6 +3,10 @@
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 use vmlab_hv_devices::{BusDevice, DeviceError, Resettable, Snapshot};
@@ -38,6 +42,7 @@ pub struct Flash {
     file: Option<File>,
     state: State,
     generation: u64,
+    generation_clock: Arc<AtomicU64>,
 }
 
 impl Flash {
@@ -62,11 +67,27 @@ impl Flash {
                 status: 0x80,
             },
             generation: 0,
+            generation_clock: Arc::default(),
         })
     }
 
     pub(super) fn code_generation(&self) -> Option<u64> {
         matches!(self.state.command, Command::Array).then_some(self.generation)
+    }
+
+    pub(super) fn generation_clock(&self) -> Arc<AtomicU64> {
+        self.generation_clock.clone()
+    }
+
+    fn advance_generation(&mut self) {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("flash generation exhausted");
+        // Publish before changing array contents or command mode. A trace with
+        // an old epoch then rechecks its guards under the flash device lock.
+        self.generation_clock
+            .store(self.generation, Ordering::Release);
     }
 
     fn program(&mut self, offset: usize, bytes: &[u8]) {
@@ -174,10 +195,7 @@ impl BusDevice for Flash {
         if offset.checked_add(bytes.len()).is_none_or(|end| end > SIZE) {
             return;
         }
-        self.generation = self
-            .generation
-            .checked_add(1)
-            .expect("flash generation exhausted");
+        self.advance_generation();
         let command = bytes[0];
         let previous = std::mem::replace(&mut self.state.command, Command::Status);
         match previous {
@@ -243,12 +261,9 @@ impl BusDevice for Flash {
 
 impl Resettable for Flash {
     fn reset(&mut self) -> Result<(), DeviceError> {
+        self.advance_generation();
         self.state.command = Command::Array;
         self.state.status = 0x80;
-        self.generation = self
-            .generation
-            .checked_add(1)
-            .expect("flash generation exhausted");
         Ok(())
     }
 }
@@ -290,15 +305,12 @@ impl Snapshot for Flash {
         if !valid || (self.file.is_none() && state.data != self.state.data) {
             return Err(DeviceError::State("incompatible flash state".into()));
         }
+        self.advance_generation();
         if let Some(file) = &self.file {
             file.write_all_at(&state.data, 0)?;
             file.sync_data()?;
         }
         self.state = state;
-        self.generation = self
-            .generation
-            .checked_add(1)
-            .expect("flash generation exhausted");
         Ok(())
     }
 }
@@ -318,6 +330,7 @@ mod tests {
                 status: 0x80,
             },
             generation: 0,
+            generation_clock: Arc::default(),
         }
     }
     fn word(flash: &mut Flash, offset: u64) -> u32 {
