@@ -303,3 +303,35 @@ fn warmed_trap_context_transitions_do_not_resume_sail() {
         assert_eq!(specialized.specialization_stats.recordings, recordings);
     }
 }
+
+#[test]
+fn platform_registers_cross_small_integer_ranges_without_retraining() {
+    let mut specialized = loop_cpu();
+    specialized.specialize = true;
+    specialized.run(4096).unwrap();
+    let mut reference = loop_cpu();
+    for (name, value) in specialized.interpreter.globals.iter() {
+        reference
+            .interpreter
+            .globals
+            .insert(name.clone(), value.clone());
+    }
+    reference.steps = specialized.steps;
+    for cpu in [&mut reference, &mut specialized] {
+        cpu.set_gpr(1, 65530).unwrap();
+    }
+    let operations = specialized.interpreter.operations;
+    let recordings = specialized.specialization_stats.recordings;
+    reference.run(4096).unwrap();
+    specialized.run(4096).unwrap();
+    assert_eq!(
+        *specialized.interpreter.globals,
+        *reference.interpreter.globals
+    );
+    assert_eq!(specialized.gpr(1).unwrap(), 67578);
+    assert_eq!(
+        specialized.interpreter.operations, operations,
+        "platform register growth resumed Sail"
+    );
+    assert_eq!(specialized.specialization_stats.recordings, recordings);
+}

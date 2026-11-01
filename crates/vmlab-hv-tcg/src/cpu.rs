@@ -482,7 +482,14 @@ impl<M: Memory> Riscv64<M> {
             narrow_ram_inputs: true,
             stop_at_control_flow: promotion.is_none(),
             unbounded_globals,
-            small_integer_globals: general_names().clone(),
+            // A platform register can grow beyond its startup range at every
+            // cached PC. Avoid duplicating its whole OS code working set when
+            // a counter or virtual address crosses the flat-loop heuristic.
+            small_integer_globals: if self.external_clock {
+                Default::default()
+            } else {
+                general_names().clone()
+            },
             constant_context_writes: self.external_clock,
         };
         let recording = crate::trace::Trace::record_block(
