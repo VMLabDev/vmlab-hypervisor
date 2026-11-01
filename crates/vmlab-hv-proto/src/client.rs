@@ -111,7 +111,8 @@ impl Client {
         &self.hv_version
     }
 
-    /// The capabilities the server advertised in the handshake.
+    /// The capabilities the server advertised, including unknown names for
+    /// logging. Unknown capabilities do not enable any known feature.
     pub fn capabilities(&self) -> &[Capability] {
         &self.capabilities
     }
@@ -148,7 +149,8 @@ impl Client {
     }
 
     /// Block for the next event, serving buffered events first. `Ok(None)`
-    /// means the server closed the stream.
+    /// means the server closed the stream. [`Event::Unknown`] is returned
+    /// with its name so callers can log and ignore it without ending the stream.
     pub fn wait_event(&mut self) -> Result<Option<Event>, ClientError> {
         if let Some(event) = self.events.pop_front() {
             return Ok(Some(event));

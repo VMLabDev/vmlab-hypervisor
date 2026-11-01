@@ -17,6 +17,7 @@ pub enum ServerMsg {
     Hello {
         proto_version: u32,
         hv_version: String,
+        #[serde(default)]
         capabilities: Vec<Capability>,
     },
     Reply {
@@ -77,6 +78,10 @@ pub enum Command {
     SnapshotDelete {
         name: String,
     },
+    /// An unrecognized command. The server replies `unsupported` without
+    /// passing it to the machine's command handler.
+    #[serde(other)]
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,7 +108,7 @@ pub enum RunState {
     ShuttingDown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// A request arrived before the handshake.
@@ -121,9 +126,12 @@ pub enum ErrorCode {
     /// The snapshot's device state has an incompatible major version.
     SnapshotIncompatible,
     Internal,
+    /// A newer peer's error code, preserved for the generic error message.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     Diagnostics,
@@ -131,6 +139,9 @@ pub enum Capability {
     Display,
     Input,
     Hotplug,
+    /// An optional feature this build cannot use.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +151,7 @@ pub enum Event {
     Exiting {
         reason: ProcessExitReason,
         code: u8,
+        #[serde(default)]
         error_chain: Vec<String>,
     },
     DiagnosticsDumped {
@@ -158,6 +170,25 @@ pub enum Event {
     DeviceDeleted {
         id: String,
     },
+    /// An event consumers ignore, retaining its wire name for logging.
+    #[serde(untagged)]
+    Unknown {
+        #[serde(rename = "event", deserialize_with = "unknown_event_name")]
+        name: String,
+    },
+}
+
+fn unknown_event_name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let name = String::deserialize(d)?;
+    // A malformed known event must not fall through to the unknown variant.
+    // Unit variants decode without payload, so only data variants need guarding.
+    if matches!(
+        name.as_str(),
+        "exiting" | "diagnostics_dumped" | "shutdown" | "device_deleted"
+    ) {
+        return Err(serde::de::Error::custom("malformed known event"));
+    }
+    Ok(name)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

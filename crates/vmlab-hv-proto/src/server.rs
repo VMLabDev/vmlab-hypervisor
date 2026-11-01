@@ -228,6 +228,13 @@ fn respond<H: FnMut(Command) -> Outcome>(
                     "handshake required before requests",
                 ));
             }
+            if command == Command::Unsupported {
+                return Response::Send(error_reply(
+                    id,
+                    ErrorCode::Unsupported,
+                    "unsupported request",
+                ));
+            }
             let mut handler = lock(&shared.handler);
             let outcome = (*handler)(command);
             Response::Send(ServerMsg::Reply { id, outcome })

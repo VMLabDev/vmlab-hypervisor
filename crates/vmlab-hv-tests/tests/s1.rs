@@ -27,6 +27,55 @@ const BUSYBOX: &str = "/.vmlab/busybox";
 /// How long a whole boot may take before the test gives up.
 const BOOT: Duration = Duration::from_secs(120);
 
+#[test]
+fn control_protocol_unknown_request_preserves_the_connection() {
+    use std::io::{BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use vmlab_hv_proto::codec;
+    use vmlab_hv_proto::control::{ErrorCode, RunState, ServerMsg};
+
+    let Some(assets) = check() else { return };
+    let mut spec = MachineSpec::idle("s1-proto-tolerance");
+    spec.paused = true;
+    spec.nics = 0;
+    let mut guest = vmlab_hv_tests::launch(&spec, &assets);
+    let mut stream = UnixStream::connect(guest.dir().join("control.sock")).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    writeln!(stream, r#"{{"type":"hello","proto_version":1}}"#).unwrap();
+    assert!(matches!(
+        codec::read_server_msg(&mut reader).unwrap(),
+        Some(ServerMsg::Hello { .. })
+    ));
+    writeln!(
+        stream,
+        r#"{{"type":"request","id":10,"command":{{"command":"future_operation","hardware":true}}}}"#
+    )
+    .unwrap();
+    assert!(
+        matches!(codec::read_server_msg(&mut reader).unwrap(), Some(ServerMsg::Reply {
+        id: 10, outcome: Outcome::Error { code: ErrorCode::Unsupported, message },
+    }) if message.contains("unsupported request"))
+    );
+    writeln!(
+        stream,
+        r#"{{"type":"request","id":11,"command":{{"command":"status"}}}}"#
+    )
+    .unwrap();
+    assert_eq!(
+        codec::read_server_msg(&mut reader).unwrap(),
+        Some(ServerMsg::Reply {
+            id: 11,
+            outcome: Outcome::Ok {
+                status: Some(RunState::Paused)
+            },
+        })
+    );
+    guest.quit_and_exit_zero();
+}
+
 fn snapshot_roundtrip(paused: bool, check_disk: bool) {
     let Some(assets) = check() else { return };
     let spec = MachineSpec::idle("s1-snapshot");
