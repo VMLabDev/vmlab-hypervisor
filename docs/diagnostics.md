@@ -116,6 +116,8 @@ without an extra ioctl per exit. On older kernels, per-exit `rip` is null.
 Busy locks and unreadable KVM registers produce null fields or explicit busy
 entries. Reports never wait for a device lock held by a panicking thread.
 They contain no guest RAM dump, guest screen text, or device snapshot blobs.
+General and special registers use named fields, including `rip`, `cr0`, and
+segment descriptors, rather than KVM's snapshot ABI byte arrays.
 
 Machine fields are public only after their paths appear in the diagnostic
 allowlist. New fields default to `[REDACTED]`. Secret-key names, including OSK,
@@ -198,8 +200,38 @@ a 31.05 ns delta. The benchmark calls the actual hook with synthetic KVM
 metadata. It excludes KVM register-copy cost, checkpoint contention, and guest
 throughput; it is not a whole-VM performance claim.
 
-The non-VM checks have passed in this worktree. S1 guest tests and
-`just ci::check` remain unrun while the host's benchmark window is open.
+The real KVM loop benchmark includes the kernel register-copy cost. It requires
+`/dev/kvm`, sync-register support, an externally reserved host VM slot, and a
+memory-capped scope. The ignored test does not acquire the VM slot itself.
+After reserving a slot, its command is:
+
+```sh
+systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
+  env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=1 taskset -c 14 \
+  cargo test --release -p vmlab-hv-vmm \
+  vcpu::tests::recorder_kvm_loop_overhead -- --ignored --nocapture
+```
+
+Three repetitions on CPU 14, outside CI's CPU 0-7 affinity, each discarded a
+warm-up pair and used nine alternating pairs of 200,000 exits per sample.
+The guest repeatedly writes one byte to port 80h. Results were:
+
+| Repetition | Baseline ns/exit | Recording ns/exit | Delta ns/exit | Overhead |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 3341.13 | 3550.45 | 209.32 | 6.26% |
+| 2 | 3320.93 | 3555.59 | 234.65 | 7.07% |
+| 3 | 3535.71 | 3596.69 | 60.98 | 1.72% |
+
+An initial run sharing CI's CPU set appeared 20.88% faster with recording;
+that noisy result is excluded from this table. Recording has measurable
+overhead in this exit-saturated workload. Representative guest throughput
+has not been measured. Exact per-exit RIP requires KVM's general-register
+copy; the smaller userspace-only number must not stand in for total cost.
+The accepted design retains exact RIP and accepts the measured exit-loop
+overhead as an exception to the original no-measurable-slowdown requirement.
+
+The four S1 diagnostics tests pass, covering guest poweroff, runtime failure,
+filter changes, on-demand reports, quit, and startup-error redaction.
 
 ### Illustrative report excerpt
 

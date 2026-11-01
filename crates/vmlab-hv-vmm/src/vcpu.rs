@@ -406,6 +406,88 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual KVM exit-loop benchmark; requires a host VM slot and memory scope"]
+    fn recorder_kvm_loop_overhead() {
+        use crate::diagnostics::flight::ExitRing;
+        use vm_memory::{Bytes, GuestAddress};
+
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("SKIP recorder KVM loop benchmark: /dev/kvm is absent");
+            return;
+        }
+        let kvm = crate::kvm::KvmVm::new().unwrap();
+        if kvm.kvm.check_extension_int(kvm_ioctls::Cap::SyncRegs)
+            & kvm_bindings::KVM_SYNC_X86_REGS as i32
+            == 0
+        {
+            eprintln!("SKIP recorder KVM loop benchmark: sync registers are unavailable");
+            return;
+        }
+        let ram =
+            crate::memory::GuestRam::anonymous(crate::layout::MemLayout::new(8).unwrap()).unwrap();
+        crate::memory::register_memslots(&kvm.vm, &ram).unwrap();
+        // Flat real mode, interrupts disabled: repeatedly OUT one byte to 80h.
+        ram.mem
+            .write_slice(&[0xba, 0x80, 0, 0xee, 0xeb, 0xfd], GuestAddress(0x8000))
+            .unwrap();
+        let mut vcpu = kvm.create_vcpu(0).unwrap();
+        crate::loader::init_real_mode(&mut vcpu, 0x8000).unwrap();
+        let run = vcpu.get_kvm_run() as *const kvm_bindings::kvm_run;
+        let ring = ExitRing::default();
+        const N: usize = 200_000;
+        let mut samples = [Vec::new(), Vec::new()];
+        for round in 0..10 {
+            // Alternate the order to reduce drift; discard the warm-up pair.
+            for recording in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                if recording {
+                    vcpu.set_sync_valid_reg(kvm_ioctls::SyncReg::Register);
+                } else {
+                    vcpu.clear_sync_valid_reg(kvm_ioctls::SyncReg::Register);
+                }
+                let begin = std::time::Instant::now();
+                let mut completed = 0;
+                while completed < N {
+                    match vcpu.run() {
+                        Ok(kvm_ioctls::VcpuExit::IoOut(0x80, data)) if data.len() == 1 => {}
+                        Err(error) if error.errno() == libc::EINTR => continue,
+                        other => panic!("unexpected benchmark exit: {other:?}"),
+                    }
+                    if recording {
+                        // SAFETY: the live mmap published IO metadata and requested sync regs.
+                        ring.record(unsafe { super::exit_record(run, None, true) });
+                    }
+                    completed += 1;
+                }
+                let ns = begin.elapsed().as_nanos() as f64 / N as f64;
+                if round != 0 {
+                    samples[usize::from(recording)].push(ns);
+                }
+            }
+        }
+        for sample in &mut samples {
+            sample.sort_by(f64::total_cmp);
+        }
+        let baseline = samples[0][4];
+        let recorded = samples[1][4];
+        eprintln!(
+            "KVM recorder loop: median baseline {baseline:.2} ns/exit; recorded {recorded:.2} ns/exit; delta {:.2} ns/exit ({:.2}%); 9 alternating pairs, {N} exits/sample; includes kernel sync-reg copy",
+            recorded - baseline,
+            (recorded / baseline - 1.0) * 100.0
+        );
+        assert_eq!(ring.snapshot().unwrap().len(), 256);
+        assert!(
+            ring.snapshot()
+                .unwrap()
+                .iter()
+                .all(|exit| exit.rip.is_some() && exit.address == Some(0x80))
+        );
+    }
+
+    #[test]
     fn exit_metadata_does_not_include_payload_and_rejects_stale_ioctl_state() {
         let mut run = kvm_bindings::kvm_run {
             exit_reason: kvm_bindings::KVM_EXIT_IO,
