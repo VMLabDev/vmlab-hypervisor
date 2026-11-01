@@ -27,6 +27,7 @@ struct CodeWindow {
 #[derive(Default)]
 struct CodeWindows {
     entries: std::collections::BTreeMap<(u64, usize), CodeWindow>,
+    versions: std::collections::BTreeMap<(u64, usize, [u8; 16]), u64>,
     clock: u64,
 }
 
@@ -77,7 +78,9 @@ impl PhysicalMemory {
         let _guard = self.transaction.lock();
         self.cache_safe
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.code_windows.lock().entries.clear();
+        let mut windows = self.code_windows.lock();
+        windows.entries.clear();
+        windows.versions.clear();
     }
 
     fn is_ram(&self, address: u64, len: usize) -> bool {
@@ -146,11 +149,23 @@ impl PhysicalMemory {
         if windows.entries.len() == MAX_CODE_WINDOWS && !windows.entries.contains_key(&key) {
             windows.entries.pop_first();
         }
-        windows.clock = windows
-            .clock
-            .checked_add(1)
-            .expect("code window epoch exhausted");
-        let generation = windows.clock;
+        // Reusing a previous byte image may reuse its translations. Keep exact
+        // bytes rather than a hash so identity cannot alias different code.
+        let version_key = (address, len, actual);
+        let generation = if let Some(generation) = windows.versions.get(&version_key) {
+            *generation
+        } else {
+            if windows.versions.len() == MAX_CODE_WINDOWS {
+                windows.versions.pop_first();
+            }
+            windows.clock = windows
+                .clock
+                .checked_add(1)
+                .expect("code window epoch exhausted");
+            let generation = windows.clock;
+            windows.versions.insert(version_key, generation);
+            generation
+        };
         windows.entries.insert(
             key,
             CodeWindow {
@@ -566,6 +581,23 @@ mod tests {
         assert_eq!(memory.code_windows.lock().entries.len(), MAX_CODE_WINDOWS);
         assert_ne!(memory.code_stamp(RAM_BASE, 2), Some(first));
         assert_eq!(memory.code_windows.lock().entries.len(), MAX_CODE_WINDOWS);
+        assert_eq!(memory.code_windows.lock().versions.len(), MAX_CODE_WINDOWS);
+    }
+
+    #[test]
+    fn recurring_code_image_history_has_a_global_bound() {
+        let mut memory = memory();
+        memory.write(RAM_BASE, &0u32.to_le_bytes()).unwrap();
+        let first = memory.code_stamp(RAM_BASE, 4).unwrap();
+        for version in 1..=MAX_CODE_WINDOWS as u32 {
+            memory.write(RAM_BASE, &version.to_le_bytes()).unwrap();
+            memory.code_stamp(RAM_BASE, 4).unwrap();
+        }
+        assert_eq!(memory.code_windows.lock().entries.len(), 1);
+        assert_eq!(memory.code_windows.lock().versions.len(), MAX_CODE_WINDOWS);
+        memory.write(RAM_BASE, &0u32.to_le_bytes()).unwrap();
+        assert_ne!(memory.code_stamp(RAM_BASE, 4), Some(first));
+        assert_eq!(memory.code_windows.lock().versions.len(), MAX_CODE_WINDOWS);
     }
 
     #[test]
@@ -601,6 +633,72 @@ mod tests {
         }
         cpu.run(64).unwrap();
         assert_eq!(cpu.gpr(1).unwrap(), 96);
+    }
+
+    #[test]
+    fn alternating_instruction_images_reuse_warmed_translations() {
+        for dma in [false, true] {
+            let make = || {
+                let mut memory = memory();
+                memory
+                    .write(RAM_BASE, &0x00108093u32.to_le_bytes())
+                    .unwrap();
+                memory
+                    .write(RAM_BASE + 4, &0xffdff06fu32.to_le_bytes())
+                    .unwrap();
+                if dma {
+                    memory.write(0x30008004, &[7]).unwrap();
+                }
+                let mut cpu = vmlab_hv_tcg::Riscv64::new(memory).unwrap();
+                cpu.use_external_clock().unwrap();
+                cpu.interpreter.operation_limit = u64::MAX;
+                cpu.set_pc(RAM_BASE);
+                cpu
+            };
+            let replace = |cpu: &mut vmlab_hv_tcg::Riscv64<PhysicalMemory>, turn: u32| {
+                let word = (0x00108093 + (turn % 2) * 0x100000).to_le_bytes();
+                if dma {
+                    cpu.interpreter
+                        .memory
+                        .ram
+                        .write_slice(&word, GuestAddress(RAM_BASE))
+                        .unwrap();
+                } else {
+                    cpu.interpreter.memory.write(RAM_BASE, &word).unwrap();
+                }
+            };
+            let mut specialized = make();
+            specialized.specialize = true;
+            for turn in 0..8 {
+                replace(&mut specialized, turn);
+                specialized.run(192).unwrap();
+            }
+            let mut reference = make();
+            for (name, value) in specialized.interpreter.globals.iter() {
+                reference
+                    .interpreter
+                    .globals
+                    .insert(name.clone(), value.clone());
+            }
+            reference.steps = specialized.steps;
+            let operations = specialized.interpreter.operations;
+            let recordings = specialized.specialization_stats.recordings;
+            for turn in 0..8 {
+                replace(&mut reference, turn);
+                replace(&mut specialized, turn);
+                reference.run(192).unwrap();
+                specialized.run(192).unwrap();
+                assert_eq!(
+                    *specialized.interpreter.globals, *reference.interpreter.globals,
+                    "dma={dma} turn={turn}"
+                );
+            }
+            assert_eq!(
+                specialized.interpreter.operations, operations,
+                "dma={dma}: recurring code image returned to Sail"
+            );
+            assert_eq!(specialized.specialization_stats.recordings, recordings);
+        }
     }
 
     #[test]
