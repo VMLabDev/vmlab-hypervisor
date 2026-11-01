@@ -188,7 +188,7 @@ impl Chipset {
         let hub = Arc::new(IrqHub {
             deliver: Box::new(move |gsi, level| {
                 if let Err(error) = irq_vm.set_irq_line(gsi, level) {
-                    eprintln!("q35 IRQ {gsi}: {error}");
+                    log::error!("q35 IRQ {gsi}: {error}");
                 }
             }),
             sources: Mutex::new(BTreeMap::new()),
@@ -336,7 +336,7 @@ impl Chipset {
                 // raises its error state for the guest); it never stops
                 // the machine.
                 if let Err(e) = device.lock().advance(Duration::from_nanos(ns)) {
-                    eprintln!("vmlab-hv: audio stream error: {e}");
+                    log::warn!("vmlab-hv: audio stream error: {e}");
                 }
             }
         }

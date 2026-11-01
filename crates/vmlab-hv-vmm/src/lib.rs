@@ -10,7 +10,7 @@ pub mod chipset;
 mod clock;
 mod coalesced;
 pub mod control;
-mod diagnostics;
+pub mod diagnostics;
 mod display;
 pub mod e820;
 pub mod error;

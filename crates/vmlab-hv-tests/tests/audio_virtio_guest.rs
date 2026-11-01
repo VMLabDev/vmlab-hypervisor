@@ -72,6 +72,15 @@ impl SndVm {
         let output = agent
             .exec(argv, Duration::from_secs(240))
             .unwrap_or_else(|e| panic!("`{}`: {e}\n{}", argv.join(" "), self.diagnostics()));
+        if output.exit_code != 0 {
+            match agent.exec(&["dmesg"], Duration::from_secs(30)) {
+                Ok(log) => eprintln!(
+                    "--- guest dmesg ---\n{}",
+                    String::from_utf8_lossy(&log.stdout)
+                ),
+                Err(error) => eprintln!("guest dmesg unavailable: {error}"),
+            }
+        }
         assert_eq!(
             output.exit_code,
             0,
@@ -292,12 +301,26 @@ fn play(vm: &SndVm, agent: &mut AgentClient, card: &str) {
 }
 
 /// Wait until the dump holds at least `seconds` of frames past `from`.
-fn wait_for_dump(vm: &SndVm, from: usize, seconds: u32) -> Vec<u8> {
+fn wait_for_dump(vm: &SndVm, agent: &mut AgentClient, from: usize, seconds: u32) -> Vec<u8> {
     let want = from + (seconds as usize) * 48000 * 4;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let dump = vm.dump();
         if dump.len() >= want || Instant::now() >= deadline {
+            if dump.len() < want {
+                let output = agent.exec(
+                    &["sh", "-c", "cat /tmp/playback.log; cat /proc/asound/card*/pcm*/sub*/status; dmesg | tail -40"],
+                    Duration::from_secs(30),
+                );
+                match output {
+                    Ok(output) => eprintln!(
+                        "playback diagnostics:\n{}\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    ),
+                    Err(error) => eprintln!("playback diagnostics unavailable: {error}"),
+                }
+            }
             assert!(
                 dump.len() >= want,
                 "only {} of {want} PCM bytes reached the recording host\n{}",
@@ -350,7 +373,7 @@ fn virtio_snd_guest_plays_and_records() {
     // --- playback: a known tone lands intact ----------------------------
     write_tone(&vm, &mut agent, 440, 2);
     play(&vm, &mut agent, &card);
-    let dump = wait_for_dump(&vm, 0, 2);
+    let dump = wait_for_dump(&vm, &mut agent, 0, 2);
     assert!(
         (430.0..=450.0).contains(&dominant_frequency(&dump, 48000..96000)),
         "the recording host did not receive the 440 Hz tone"
@@ -400,7 +423,7 @@ fn virtio_snd_guest_plays_and_records() {
         &format!(
             "ALSA_CARD={card} ALSA_BUFFER_FRAMES=15360 python3 /tmp/alsa.py play 48000 2 \
              < /tmp/tone.raw \
-             >/dev/null 2>&1 &"
+             >/tmp/playback.log 2>&1 &"
         ),
     );
     std::thread::sleep(Duration::from_millis(1500));
@@ -417,7 +440,7 @@ fn virtio_snd_guest_plays_and_records() {
     vm.call(Ctrl::Resume);
     // Restored into the middle of the 880 Hz play: audio resumes and the
     // dump keeps growing with the same tone.
-    let dump = wait_for_dump(&vm, before, 2);
+    let dump = wait_for_dump(&vm, &mut agent, before, 2);
     assert!(
         (870.0..=890.0).contains(&dominant_frequency(
             &dump,

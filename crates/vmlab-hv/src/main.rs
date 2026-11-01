@@ -1,15 +1,15 @@
 //! `vmlab-hv --machine <machine.json> --control <control.sock> [--paused]`
 //!
 //! One process per machine. Exit status: 0 on guest-initiated or requested
-//! clean shutdown (S5, guest reset, `quit`), 2 on a launch problem (usage,
-//! unreadable machine description, missing kernel, absent device model), 1
-//! on a runtime failure. The control socket is bound before the vCPUs start.
+//! clean shutdown (S5, guest reset, `quit`). Other outcomes and reports are
+//! documented in docs/diagnostics.md. The control socket is bound before vCPUs start.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use vmlab_hv_proto::MachineDescription;
-use vmlab_hv_vmm::{VmHandle, builder, control, vm::ExitReason};
+use vmlab_hv_proto::control::ProcessExitReason;
+use vmlab_hv_vmm::{VmHandle, builder, control, diagnostics, vm::ExitReason};
 
 use crate::devices::DeviceSet;
 
@@ -33,6 +33,7 @@ fn parse_args() -> Result<Args, String> {
             "--paused" => paused = true,
             "--help" | "-h" => {
                 println!("{USAGE}");
+                log::info!("process exit: help; exit_code=0");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other:?}")),
@@ -68,39 +69,75 @@ mod pc_acceptance;
 mod pc_hwref;
 
 fn main() -> ExitCode {
+    if let Err(message) = diagnostics::report::init_logging() {
+        // Logging cannot report its own initialization failure through the facade.
+        eprintln!(
+            "vmlab-hv: logging initialization: {message}; exit_reason=startup_error exit_code=2"
+        );
+        return ExitCode::from(ProcessExitReason::StartupError.exit_code());
+    }
     let args = match parse_args() {
         Ok(args) => args,
         Err(message) => {
-            eprintln!("vmlab-hv: {message}\n{USAGE}");
-            return ExitCode::from(2);
+            log::error!("{message}\n{USAGE}; exit_reason=startup_error exit_code=2");
+            return ExitCode::from(ProcessExitReason::StartupError.exit_code());
         }
     };
 
-    let desc = match read_machine(&args.machine) {
+    let desc = match read_machine(&args.machine, &args.control) {
         Ok(desc) => desc,
         Err(message) => {
-            eprintln!("vmlab-hv: {message}");
-            return ExitCode::from(2);
+            log::error!("{message}; exit_reason=startup_error exit_code=2");
+            diagnostics::signal::cleanup();
+            return ExitCode::from(ProcessExitReason::StartupError.exit_code());
         }
     };
 
-    match run(desc, args) {
-        Ok(ExitReason::Shutdown(_)) => ExitCode::SUCCESS,
-        Ok(ExitReason::Error(message)) => {
-            eprintln!("vmlab-hv: {message}");
-            ExitCode::FAILURE
-        }
-        Err(message) => {
-            eprintln!("vmlab-hv: {message}");
-            ExitCode::from(2)
-        }
+    let (reason, errors) = match run(desc, args) {
+        Ok(reason) => (reason.process_reason(), reason.error_chain()),
+        Err(message) => (
+            ProcessExitReason::StartupError,
+            vec![diagnostics::report::scrub(&message)],
+        ),
+    };
+    let code = reason.exit_code();
+    if code == 0 {
+        log::info!("process exit: {reason:?}; exit_code={code}");
+    } else {
+        log::error!("process exit: {reason:?}; exit_code={code}; error_chain={errors:?}");
     }
+    let report = if matches!(
+        reason,
+        ProcessExitReason::RuntimeError | ProcessExitReason::GuestPanic
+    ) || std::env::var_os("VMLAB_HV_DIAGNOSTICS").is_some()
+    {
+        Some(diagnostics::report::write_report(reason, errors, None))
+    } else {
+        None
+    };
+    // No worker or teardown log may follow the report path on stderr.
+    diagnostics::signal::cleanup();
+    if let Some(report) = report {
+        diagnostics::report::finish_report(report);
+    }
+    ExitCode::from(code)
 }
 
-fn read_machine(path: &PathBuf) -> Result<MachineDescription, String> {
+fn read_machine(path: &PathBuf, control: &std::path::Path) -> Result<MachineDescription, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    // Deserializer errors can include input values, including secrets.
+    // Syntax errors report only location, never the input line or a secret value.
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "parsing {}: invalid JSON at line {} column {}",
+            path.display(),
+            e.line(),
+            e.column()
+        )
+    })?;
+    diagnostics::report::configure(control, &value)?;
+    // Deserializer errors can include input values, including secrets, so only
+    // the location is reported.
     serde_json::from_str(&text).map_err(|error| {
         format!(
             "parsing {}: invalid machine description at line {}, column {}",
@@ -112,10 +149,15 @@ fn read_machine(path: &PathBuf) -> Result<MachineDescription, String> {
 }
 
 fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
-    // SIGTERM/SIGQUIT stop the machine as a host request instead of killing
-    // the process mid-flight. sigwait needs them blocked in every thread, so
-    // block before the vCPU threads exist.
-    block_termination_signals();
+    // sigwait requires termination signals blocked before workers inherit the mask.
+    block_termination_signals()?;
+    log::info!(
+        "vmlab-hv {}: building machine {:?}, {} vCPUs, {} MiB",
+        env!("CARGO_PKG_VERSION"),
+        desc.name,
+        desc.vcpus,
+        desc.memory_mib
+    );
 
     // Refuse an occupied control path before doing any work, so a stale
     // socket or a second launch fails fast and leaves the path alone.
@@ -128,6 +170,7 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
 
     let mut vm = builder::build(&desc, &DeviceSet, true)
         .map_err(|e| format!("building machine `{}`: {e}", desc.name))?;
+    vm.attach_diagnostics();
     let handle = vm.handle();
 
     // Bind every served socket before the vCPUs run.
@@ -148,37 +191,77 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
     let control =
         control::serve(&args.control, &handle).map_err(|e| format!("control socket: {e}"))?;
 
-    spawn_signal_waiter(handle.clone());
+    diagnostics::signal::checkpoint()?;
+
+    let signal_waiter = spawn_signal_waiter(handle.clone())?;
+
+    // A low-frequency checkpoint is prepared outside all signal handlers.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let checkpoint = {
+        let stop = stop.clone();
+        std::thread::Builder::new()
+            .name("diagnostic-checkpoint".into())
+            .spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                    if let Err(error) = diagnostics::signal::checkpoint() {
+                        log::warn!("fatal checkpoint: {error}");
+                    }
+                    std::thread::park_timeout(std::time::Duration::from_secs(1));
+                }
+            })
+            .map_err(|e| format!("spawning diagnostic checkpoint: {e}"))?
+    };
 
     if !args.paused {
         vm.start();
     }
 
+    handle.wait_exit();
+    // Stop checkpoint readers before taking the final joined register sample.
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    checkpoint.thread().unpark();
+    checkpoint
+        .join()
+        .map_err(|_| "diagnostic checkpoint panicked".to_string())?;
     let reason = vm.wait();
+    // Wake an idle sigwait without inventing another exit reason. The state
+    // is already ShuttingDown, so the waiter returns without logging a signal.
+    if !signal_waiter.is_finished() {
+        use std::os::unix::thread::JoinHandleExt;
+        // SAFETY: this unjoined thread's pthread id is valid and SIGTERM is blocked.
+        unsafe {
+            libc::pthread_kill(signal_waiter.as_pthread_t(), libc::SIGTERM);
+        }
+    }
+    signal_waiter
+        .join()
+        .map_err(|_| "signal waiter panicked".to_string())?;
     control
         .join()
         .map_err(|_| "control server panicked".to_string())?;
     Ok(reason)
 }
 
-fn block_termination_signals() {
-    // SAFETY: pthread_sigmask on the calling thread; failure only means the
-    // default signal behaviour stays, which is safe to run without.
+fn block_termination_signals() -> Result<(), String> {
+    // SAFETY: pthread_sigmask changes only the calling thread's mask.
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
         libc::sigaddset(&mut set, libc::SIGTERM);
         libc::sigaddset(&mut set, libc::SIGQUIT);
-        if libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0 {
-            eprintln!(
-                "vmlab-hv: cannot block signals: {}",
-                std::io::Error::last_os_error()
-            );
+        libc::sigaddset(&mut set, libc::SIGINT);
+        let status = libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        if status != 0 {
+            return Err(format!(
+                "cannot block termination signals: {}",
+                std::io::Error::from_raw_os_error(status)
+            ));
         }
     }
+    Ok(())
 }
 
-fn spawn_signal_waiter(handle: VmHandle) {
+fn spawn_signal_waiter(handle: VmHandle) -> Result<std::thread::JoinHandle<()>, String> {
     std::thread::Builder::new()
         .name("signal-wait".into())
         .spawn(move || {
@@ -188,12 +271,22 @@ fn spawn_signal_waiter(handle: VmHandle) {
                 libc::sigemptyset(&mut set);
                 libc::sigaddset(&mut set, libc::SIGTERM);
                 libc::sigaddset(&mut set, libc::SIGQUIT);
+                libc::sigaddset(&mut set, libc::SIGINT);
                 let mut sig: libc::c_int = 0;
-                if libc::sigwait(&set, &mut sig) == 0 {
-                    eprintln!("vmlab-hv: caught signal {sig}, stopping the machine");
-                    handle.quit();
+                let status = libc::sigwait(&set, &mut sig);
+                if handle.status() == vmlab_hv_proto::control::RunState::ShuttingDown {
+                    return;
+                }
+                if status == 0 {
+                    log::info!("caught signal {sig}, stopping the machine");
+                    handle.host_signal(sig);
+                } else {
+                    handle.runtime_error(format!(
+                        "sigwait: {}",
+                        std::io::Error::from_raw_os_error(status)
+                    ));
                 }
             }
         })
-        .expect("spawn signal waiter");
+        .map_err(|e| format!("spawning signal waiter: {e}"))
 }

@@ -21,7 +21,7 @@ impl BusDevice for DebugPort {
     fn write(&mut self, _: u64, data: &[u8]) {
         use std::io::Write;
         if let Err(e) = self.0.write_all(data) {
-            eprintln!("firmware debug log: {e}");
+            log::warn!("firmware debug log: {e}");
         }
     }
 }
@@ -102,6 +102,8 @@ impl Pam {
             .map_err(|e| VmmError::Memory(e.to_string()))?;
         let smram = GuestMemoryMmap::from_ranges(&[(GuestAddress(0xa0000), 0x20000)])
             .map_err(|e| VmmError::Memory(e.to_string()))?;
+        crate::memory::dont_dump(&shadow)?;
+        crate::memory::dont_dump(&smram)?;
         let pam = Self {
             shadow,
             rom,
@@ -387,6 +389,22 @@ impl Mch {
             _ => return None,
         };
         Some((value & 0x0000_000f_ffff_ffff & !(size - 1), size))
+    }
+
+    /// Read diagnostic registers without waiting for SMRAM configuration locks.
+    pub(crate) fn diagnostic_smram(&self) -> Option<[u32; 3]> {
+        let control = match &self.smm {
+            Some(smm) => Some(smm.control.try_lock()?),
+            None => None,
+        };
+        Some([0x50, 0x9c, 0xac].map(|offset| {
+            u32::from_le_bytes(std::array::from_fn(|i| {
+                control
+                    .as_ref()
+                    .and_then(|c| c.read_config(offset + i))
+                    .unwrap_or(self.config[offset + i])
+            }))
+        }))
     }
 }
 

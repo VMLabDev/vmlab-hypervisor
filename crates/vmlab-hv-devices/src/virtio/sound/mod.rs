@@ -423,7 +423,7 @@ impl VirtioSnd {
                 match self.open_host(index, false) {
                     Ok(()) => {}
                     Err(error) => {
-                        eprintln!("vmlab-hv: virtio-snd host stream: {error}");
+                        log::warn!("vmlab-hv: virtio-snd host stream: {error}");
                         return status(S_IO_ERR);
                     }
                 }
@@ -568,6 +568,9 @@ impl VirtioSnd {
                 .get_mut(VQ_TX)
                 .map(|q| q.add_used(&mem, head, written as u32));
             used_any = true;
+            if all {
+                continue;
+            }
             // With VIRTIO_F_RING_EVENT_IDX negotiated, the drain re-arms
             // notifications and catches messages that arrived while the
             // response was being published.
@@ -578,6 +581,16 @@ impl VirtioSnd {
             match en.map(|r| r.ok()) {
                 Some(Some(true)) if !all => continue,
                 _ => break,
+            }
+        }
+        if !all {
+            let queue = &self.queues[VQ_TX];
+            if queue
+                .avail_idx(&mem, std::sync::atomic::Ordering::Acquire)
+                .is_ok_and(|idx| idx.0 == queue.next_avail())
+            {
+                // Time without queued audio cannot pay for future periods.
+                self.streams[0].tx_credit = 0;
             }
         }
         let want = used_any
@@ -855,20 +868,21 @@ impl AudioClock for VirtioSnd {
             // Capture banks what it is owed; playback banks what it may
             // deliver. Both accrue at the stream's frame rate, so guest
             // data never moves faster than real time in either direction.
-            if stream
+            let credit = if stream
                 .host
                 .as_ref()
                 .is_some_and(|h| matches!(h, HostStream::Capture(_)))
             {
-                let period = stream.params.unwrap().period_frames() as u64;
-                let due = stream.due_frames.saturating_add(frames);
-                // Bound catch-up to one period. A burst can wrap the
-                // guest's entire PCM pointer before it observes progress.
-                // Keep the remainder so regular ticks retain the frame rate.
-                stream.due_frames = due.min(period + due % period);
+                &mut stream.due_frames
             } else {
-                stream.tx_credit += frames;
-            }
+                &mut stream.tx_credit
+            };
+            let period = stream.params.unwrap().period_frames() as u64;
+            let due = credit.saturating_add(frames);
+            // Bound catch-up in both directions to one period. A burst can
+            // wrap the guest's PCM pointer before it observes progress.
+            // Keep the remainder so regular ticks retain the frame rate.
+            *credit = due.min(period + due % period);
         }
         self.drain_tx(false);
         self.drain_rx(false);
@@ -1141,7 +1155,8 @@ impl Snapshot for VirtioSnd {
             stream.params = params;
             stream.host = None;
             stream.due_frames = u64::from_le_bytes(b[17..25].try_into().unwrap());
-            stream.fraction = u64::from_le_bytes(b[25..33].try_into().unwrap());
+            stream.tx_credit = u64::from_le_bytes(b[25..33].try_into().unwrap());
+            stream.fraction = u64::from_le_bytes(b[33..41].try_into().unwrap());
             // A stream that was past PREPARE reopens its host stream. The
             // one discarded capture period is the audio plan's snapshot
             // rule: the host buffered it before the machine froze.

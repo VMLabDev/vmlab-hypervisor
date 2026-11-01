@@ -127,7 +127,7 @@ mod file_recording {
             .open(path)
             .and_then(|mut file| file.write_all(bytes));
         if let Err(e) = result {
-            eprintln!("vmlab-hv: test audio dump {}: {e}", path.display());
+            log::warn!("vmlab-hv: test audio dump {}: {e}", path.display());
         }
     }
 

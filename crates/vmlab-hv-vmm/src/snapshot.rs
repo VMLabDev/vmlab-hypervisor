@@ -755,6 +755,11 @@ fn restore(
         .sync_vga_mapping()
         .map_err(|e| SnapshotError::Internal(e.to_string()))?;
     audit::write(shared, "load");
+    // Device restore can block long enough for in-kernel timers to expire.
+    // Keep the initial kernel restore for devices that depend on its clock,
+    // then refresh it at the resume boundary so restore work is not charged
+    // to the guest. This also clears timer interrupts raised while stopped.
+    restore_kernel_state(shared, &sections)?;
     Ok(header.run_state)
 }
 

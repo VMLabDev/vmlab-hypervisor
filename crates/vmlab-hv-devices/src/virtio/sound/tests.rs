@@ -704,6 +704,65 @@ fn tx_completions_follow_host_consumption() {
 }
 
 #[test]
+fn playback_does_not_bank_time_without_transmit_buffers() {
+    let mut g = Guest::new(Arc::new(RecordingHost::new()), false);
+    g.negotiate();
+    g.setup_queues();
+    assert_eq!(g.set_params(0, 8192, 1024), S_OK);
+    assert_eq!(g.pcm_command(R_PCM_PREPARE, 0), S_OK);
+    assert_eq!(g.pcm_command(R_PCM_START, 0), S_OK);
+
+    g.advance(Duration::from_secs(1));
+    for slot in 0..8 {
+        g.tx(slot, 0, &period_pcm(0x51));
+    }
+    assert_eq!(
+        g.used_idx(VQ_TX),
+        0,
+        "refilling must not complete a whole ring"
+    );
+    g.advance(period_time());
+    assert_eq!(g.used_idx(VQ_TX), 1);
+    assert_eq!(g.tx_status(0).0, S_OK);
+}
+
+#[test]
+fn playback_does_not_complete_a_ring_after_a_clock_stall() {
+    let mut g = Guest::new(Arc::new(RecordingHost::new()), false);
+    g.negotiate();
+    g.setup_queues();
+    assert_eq!(g.set_params(0, 8192, 1024), S_OK);
+    assert_eq!(g.pcm_command(R_PCM_PREPARE, 0), S_OK);
+    for slot in 0..8 {
+        g.tx(slot, 0, &period_pcm(0x51));
+    }
+    assert_eq!(g.pcm_command(R_PCM_START, 0), S_OK);
+    g.advance(Duration::from_secs(1));
+    assert_eq!(g.used_idx(VQ_TX), 1);
+    g.advance(Duration::ZERO);
+    assert_eq!(g.used_idx(VQ_TX), 1);
+    g.advance(period_time());
+    assert_eq!(g.used_idx(VQ_TX), 2);
+}
+
+#[test]
+fn playback_release_completes_every_pending_message() {
+    let mut g = Guest::new(Arc::new(RecordingHost::new()), false);
+    g.negotiate();
+    g.setup_queues();
+    assert_eq!(g.set_params(0, 8192, 1024), S_OK);
+    assert_eq!(g.pcm_command(R_PCM_PREPARE, 0), S_OK);
+    for slot in 0..8 {
+        g.tx(slot, 0, &period_pcm(0x51));
+    }
+    assert_eq!(g.pcm_command(R_PCM_RELEASE, 0), S_OK);
+    assert_eq!(g.used_idx(VQ_TX), 8);
+    for slot in 0..8 {
+        assert_eq!(g.tx_status(slot).0, S_IO_ERR);
+    }
+}
+
+#[test]
 fn tx_pre_buffers_until_started_and_rejects_foreign_streams() {
     let host = PacedHost::default();
     let mut g = Guest::new(Arc::new(host.clone()), true);
@@ -955,6 +1014,37 @@ fn snapshot_round_trip_reopens_streams_and_discards_capture() {
     g.rx(1, 1, 1024);
     g.advance(Duration::from_nanos(5_333_334));
     assert_eq!(g.rx_payload(1, 1024).0, period_pcm(0x93));
+}
+
+#[test]
+fn snapshot_restores_both_frame_credits_and_fraction() {
+    let mut g = Guest::new(Arc::new(RecordingHost::new()), true);
+    g.negotiate();
+    g.setup_queues();
+    g.start_streams();
+    {
+        let mut device = g.device.lock();
+        for (i, stream) in device.streams.iter_mut().enumerate() {
+            stream.due_frames = 11 + i as u64;
+            stream.tx_credit = 23 + i as u64;
+            stream.fraction = 345_678_901 + i as u64;
+        }
+    }
+    let state = g.device.lock().save_state().unwrap();
+    {
+        let mut device = g.device.lock();
+        for stream in &mut device.streams {
+            stream.due_frames = 0;
+            stream.tx_credit = 0;
+            stream.fraction = 0;
+        }
+        device.restore_state(&state).unwrap();
+        for (i, stream) in device.streams.iter().enumerate() {
+            assert_eq!(stream.due_frames, 11 + i as u64);
+            assert_eq!(stream.tx_credit, 23 + i as u64);
+            assert_eq!(stream.fraction, 345_678_901 + i as u64);
+        }
+    }
 }
 
 #[test]

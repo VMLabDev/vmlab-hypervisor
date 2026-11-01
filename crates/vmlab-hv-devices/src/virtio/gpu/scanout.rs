@@ -164,7 +164,7 @@ impl Scanout {
                 ) == 0
                 || count == 0
             {
-                eprintln!(
+                log::warn!(
                     "GPU capture EGL display/config failed: {:#x}, configs={count}",
                     eglGetError()
                 );
@@ -190,7 +190,7 @@ impl Scanout {
                 let name = std::ffi::CString::new(name).unwrap();
                 eglGetProcAddress(name.as_ptr())
             });
-            eprintln!(
+            log::info!(
                 "GPU readback renderer: {}",
                 gl.get_parameter_string(glow::RENDERER)
             );
@@ -209,7 +209,7 @@ impl Scanout {
                 gl.shader_source(shader, source);
                 gl.compile_shader(shader);
                 if !gl.get_shader_compile_status(shader) {
-                    eprintln!("GPU scanout shader: {}", gl.get_shader_info_log(shader));
+                    log::warn!("GPU scanout shader: {}", gl.get_shader_info_log(shader));
                     gl.delete_shader(shader);
                     return Err(0x1200);
                 }
@@ -300,7 +300,7 @@ impl Scanout {
             unsafe { (self.image)(self.display, null_mut(), 0x3270, null_mut(), attrs.as_ptr()) };
         if image.is_null() {
             // SAFETY: eglGetError reads thread-local error state.
-            eprintln!("GPU dma-buf import failed: {:#x}, info={info:?}", unsafe {
+            log::warn!("GPU dma-buf import failed: {:#x}, info={info:?}", unsafe {
                 eglGetError()
             });
             Err(0x1200)

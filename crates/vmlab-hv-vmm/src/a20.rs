@@ -41,6 +41,7 @@ impl A20 {
             .map_err(|e| VmmError::Memory(e.to_string()))?;
         let cpu = GuestMemoryMmap::from_ranges_with_files(ranges)
             .map_err(|e| VmmError::Memory(e.to_string()))?;
+        crate::memory::dont_dump(&cpu)?;
         Ok(Self {
             file,
             cpu,
@@ -60,6 +61,7 @@ impl A20 {
         let base = region.start_addr().0;
         let alias = GuestMemoryMmap::from_ranges(&[(GuestAddress(base), region.len() as usize)])
             .map_err(|e| VmmError::Memory(e.to_string()))?;
+        crate::memory::dont_dump(&alias)?;
         let mut bytes = vec![0xff; region.len() as usize];
         let mut offset = 0;
         while offset < bytes.len() {
@@ -213,6 +215,8 @@ impl A20 {
                 addr += MIB;
             }
         }
+        // MAP_FIXED replaces VMA advice along with the mapping.
+        crate::memory::dont_dump(&self.cpu)?;
         self.enabled = enabled;
         if enabled {
             self.map(APERTURE_SLOT, 0x1a0000, 0x60000)?;
