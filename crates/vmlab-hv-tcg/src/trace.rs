@@ -50,6 +50,7 @@ pub(crate) struct Trace {
     waiting: Vec<Option<bool>>,
     global_identity: u64,
     input_values: Vec<bool>,
+    defer_wide_values: bool,
     entry_guards: Vec<(ScalarId, bool)>,
     has_entry_inputs: bool,
     successful_runs: u32,
@@ -559,6 +560,9 @@ impl Evaluation<'_> {
                 Ok(matches!(descriptor.shape, Shape::Scalar(expected) if expected == ty).then_some(()).filter(|_| descriptor.range.is_none_or(|range| range.contains(value as i128))).map(|_| Captured::Word(ty, value)))
             }
             Recipe::Constant(id) => Ok(project_value(&self.recorded.constants[*id], path).and_then(|value| capture_value(descriptor, value, full))),
+            Recipe::Input(id) if !matches!(self.recorded.inputs[*id].shape, Shape::Scalar(_)) => {
+                Ok(self.wide_inputs[*id].as_ref().and_then(|value| project_value(value, path)).and_then(|value| capture_value(descriptor, value, full)))
+            }
             Recipe::Struct(fields) if path.is_empty() && !full => Ok(matches!(&descriptor.shape, Shape::Struct(keys) if keys.len() == fields.len() && keys.iter().all(|key| fields.iter().any(|(name, _)| name == key))).then_some(Captured::Verified)),
             Recipe::Vector(values) if path.is_empty() && !full => Ok(matches!(descriptor.shape, Shape::Vector(len) if len == values.len()).then_some(Captured::Verified)),
             Recipe::Union(tag, _) if path.is_empty() && !full => Ok(matches!(&descriptor.shape, Shape::Union(expected) if expected == tag).then_some(Captured::Verified)),
@@ -920,6 +924,7 @@ impl Trace {
             waiting,
             global_identity: interpreter.globals.identity(),
             input_values: Vec::new(),
+            defer_wide_values: false,
             entry_guards,
             has_entry_inputs,
             successful_runs: 0,
@@ -949,6 +954,9 @@ impl Trace {
                 trace.input_values[*id] = true;
             }
         }
+        trace.defer_wide_values = trace.input_values.iter().enumerate().any(|(id, full)| {
+            *full && !matches!(trace.recorded.inputs[id].shape, Shape::Scalar(_))
+        });
         trace
             .scratch
             .resize(slot_count + publication_constants.len(), 0);
@@ -1033,49 +1041,80 @@ impl Trace {
             return Ok(Outcome::Miss);
         }
         self.begin_capture();
-        for id in 0..self.recorded.inputs.len() {
-            let resolved = if INDEXED && self.recorded.inputs[id].source.has_entry_index() {
-                let Some(source) = self.resolve_source(id)? else {
+        // Reject incompatible scalar inputs, shapes, and entry predicates
+        // before copying aggregate state needed only by a matching trace.
+        let passes = if self.defer_wide_values { 2 } else { 1 };
+        for pass in 0..passes {
+            for id in 0..self.recorded.inputs.len() {
+                if pass == 1
+                    && (!self.input_values[id]
+                        || matches!(self.recorded.inputs[id].shape, Shape::Scalar(_)))
+                {
+                    continue;
+                }
+                let resolved = if INDEXED && self.recorded.inputs[id].source.has_entry_index() {
+                    let Some(source) = self.resolve_source(id)? else {
+                        return Ok(Outcome::Miss);
+                    };
+                    Some(source)
+                } else {
+                    None
+                };
+                let descriptor = &self.recorded.inputs[id];
+                if let Some(steps) = steps
+                    && matches!(descriptor.source, InputSource::Argument(0))
+                {
+                    let Some(value) =
+                        capture_global_word(descriptor, (ScalarType::Integer, u128::from(steps)))
+                    else {
+                        return Ok(Outcome::Miss);
+                    };
+                    self.bind_capture(id, value);
+                    continue;
+                }
+                if let Some(word) =
+                    self.input_slots[id].and_then(|slot| interpreter.globals.native_slot(slot))
+                {
+                    let Some(value) = capture_global_word(descriptor, word) else {
+                        return Ok(Outcome::Miss);
+                    };
+                    self.bind_capture(id, value);
+                    continue;
+                }
+                let Some(value) = input(
+                    resolved.as_ref().unwrap_or(&descriptor.source),
+                    interpreter,
+                    args,
+                ) else {
                     return Ok(Outcome::Miss);
                 };
-                Some(source)
-            } else {
-                None
-            };
-            let descriptor = &self.recorded.inputs[id];
-            if let Some(steps) = steps
-                && matches!(descriptor.source, InputSource::Argument(0))
-            {
-                let Some(value) =
-                    capture_global_word(descriptor, (ScalarType::Integer, u128::from(steps)))
-                else {
+                let full = self.input_values[id] && (!self.defer_wide_values || pass == 1);
+                let Some(value) = capture_value(descriptor, value, full) else {
                     return Ok(Outcome::Miss);
                 };
                 self.bind_capture(id, value);
-                continue;
             }
-            if let Some(word) =
-                self.input_slots[id].and_then(|slot| interpreter.globals.native_slot(slot))
+            if self.defer_wide_values
+                && pass == 0
+                && !self.entry_guards.is_empty()
+                && !self.entry_guards_valid()?
             {
-                let Some(value) = capture_global_word(descriptor, word) else {
-                    return Ok(Outcome::Miss);
-                };
-                self.bind_capture(id, value);
-                continue;
+                return Ok(Outcome::Miss);
             }
-            let Some(value) = input(
-                resolved.as_ref().unwrap_or(&descriptor.source),
-                interpreter,
-                args,
-            ) else {
-                return Ok(Outcome::Miss);
-            };
-            let Some(value) = capture_value(descriptor, value, self.input_values[id]) else {
-                return Ok(Outcome::Miss);
-            };
-            self.bind_capture(id, value);
         }
         self.run_captured(interpreter, limit)
+    }
+
+    fn entry_guards_valid(&mut self) -> Result<bool> {
+        self.evaluate(|trace, evaluation| {
+            for &(condition, expected) in &trace.entry_guards {
+                if (evaluation.scalar(condition)? != 0) != expected {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+        .0
     }
 
     fn entry_valid<M: Memory>(&mut self, interpreter: &Interpreter<'_, M>) -> bool {
@@ -1258,74 +1297,91 @@ impl Trace {
             return Ok(Outcome::Miss);
         }
         self.begin_capture();
-        for id in 0..self.recorded.inputs.len() {
-            let resolved = if INDEXED && self.recorded.inputs[id].source.has_entry_index() {
-                let Some(source) = self.resolve_source(id)? else {
+        // Parent continuations can contain the entire software TLB. Validate
+        // candidate fragments before materializing those aggregate values.
+        let passes = if self.defer_wide_values { 2 } else { 1 };
+        for pass in 0..passes {
+            for id in 0..self.recorded.inputs.len() {
+                if pass == 1
+                    && (!self.input_values[id]
+                        || matches!(self.recorded.inputs[id].shape, Shape::Scalar(_)))
+                {
+                    continue;
+                }
+                let resolved = if INDEXED && self.recorded.inputs[id].source.has_entry_index() {
+                    let Some(source) = self.resolve_source(id)? else {
+                        return Ok(Outcome::Miss);
+                    };
+                    Some(source)
+                } else {
+                    None
+                };
+                let descriptor = &self.recorded.inputs[id];
+                let source = resolved.as_ref().unwrap_or(&descriptor.source);
+                let full = self.input_values[id] && (!self.defer_wide_values || pass == 1);
+                let value = match source {
+                    InputSource::Local(frame, name, path) => {
+                        let symbol = parent.recorded.block.exits[exit]
+                            .frames
+                            .get(*frame)
+                            .and_then(|frame| {
+                                frame.locals.iter().find(|binding| binding.name == *name)
+                            })
+                            .map(|binding| binding.value);
+                        if let Some(symbol) = symbol {
+                            parent.capture(interpreter, symbol, path, descriptor, full)?
+                        } else {
+                            None
+                        }
+                    }
+                    InputSource::FetchAddress => {
+                        if let Some(symbol) = parent.recorded.block.exits[exit].fetch_address {
+                            if let Some(value) =
+                                parent.capture(interpreter, symbol, &[], descriptor, false)?
+                            {
+                                Some(value)
+                            } else {
+                                parent
+                                    .value(interpreter, symbol)?
+                                    .u64()
+                                    .ok()
+                                    .map(|address| {
+                                        Captured::Word(ScalarType::Bits(64), address.into())
+                                    })
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    InputSource::Global(_, path)
+                        if path.is_empty()
+                            && self.input_slots[id]
+                                .and_then(|slot| interpreter.globals.native_slot(slot))
+                                .is_some() =>
+                    {
+                        capture_global_word(
+                            descriptor,
+                            interpreter
+                                .globals
+                                .native_slot(self.input_slots[id].unwrap())
+                                .unwrap(),
+                        )
+                    }
+                    _ => input(source, interpreter, &[])
+                        .and_then(|value| capture_value(descriptor, value, full)),
+                };
+                let Some(value) = value else {
                     return Ok(Outcome::Miss);
                 };
-                Some(source)
-            } else {
-                None
-            };
-            let descriptor = &self.recorded.inputs[id];
-            let source = resolved.as_ref().unwrap_or(&descriptor.source);
-            let value = match source {
-                InputSource::Local(frame, name, path) => {
-                    let symbol = parent.recorded.block.exits[exit]
-                        .frames
-                        .get(*frame)
-                        .and_then(|frame| frame.locals.iter().find(|binding| binding.name == *name))
-                        .map(|binding| binding.value);
-                    if let Some(symbol) = symbol {
-                        parent.capture(
-                            interpreter,
-                            symbol,
-                            path,
-                            descriptor,
-                            self.input_values[id],
-                        )?
-                    } else {
-                        None
-                    }
-                }
-                InputSource::FetchAddress => {
-                    if let Some(symbol) = parent.recorded.block.exits[exit].fetch_address {
-                        if let Some(value) =
-                            parent.capture(interpreter, symbol, &[], descriptor, false)?
-                        {
-                            Some(value)
-                        } else {
-                            parent
-                                .value(interpreter, symbol)?
-                                .u64()
-                                .ok()
-                                .map(|address| Captured::Word(ScalarType::Bits(64), address.into()))
-                        }
-                    } else {
-                        None
-                    }
-                }
-                InputSource::Global(_, path)
-                    if path.is_empty()
-                        && self.input_slots[id]
-                            .and_then(|slot| interpreter.globals.native_slot(slot))
-                            .is_some() =>
-                {
-                    capture_global_word(
-                        descriptor,
-                        interpreter
-                            .globals
-                            .native_slot(self.input_slots[id].unwrap())
-                            .unwrap(),
-                    )
-                }
-                _ => input(source, interpreter, &[])
-                    .and_then(|value| capture_value(descriptor, value, self.input_values[id])),
-            };
-            let Some(value) = value else {
+                self.bind_capture(id, value);
+            }
+            if self.defer_wide_values
+                && pass == 0
+                && !self.entry_guards.is_empty()
+                && !self.entry_guards_valid()?
+            {
                 return Ok(Outcome::Miss);
-            };
-            self.bind_capture(id, value);
+            }
         }
         self.run_captured(interpreter, 1)
     }
@@ -1862,6 +1918,113 @@ mod tests {
     use crate::FlatMemory;
     use std::collections::{BTreeMap, BTreeSet};
     use vmlab_hv_tcg_ir::{Expr, Location, Op, Program, Target, Type};
+
+    #[test]
+    fn rejected_entry_guard_does_not_capture_wide_values() {
+        let function = Function {
+            name: "update".into(),
+            args: vec![],
+            result: Type::Vector(Box::new(Type::Integer(None))),
+            locals: BTreeMap::new(),
+            code: vec![
+                Op::Call(
+                    Location::Id("return".into()),
+                    Target::Intrinsic("vector_update".into()),
+                    vec![
+                        Expr::Id("items".into()),
+                        Expr::Id("index".into()),
+                        Expr::Integer("7".into(), None),
+                    ],
+                ),
+                Op::Return,
+            ],
+        };
+        let program = Program {
+            globals: BTreeMap::from([
+                ("index".into(), Type::Integer(None)),
+                ("items".into(), Type::Vector(Box::new(Type::Integer(None)))),
+            ]),
+            ..Program::default()
+        };
+        let mut interpreter = Interpreter::new(&program, FlatMemory::new(0, vec![]));
+        interpreter.initialize().unwrap();
+        interpreter.globals.insert("index".into(), Value::int(0));
+        interpreter.globals.insert(
+            "items".into(),
+            Value::Vector((0..4096).map(Value::int).collect()),
+        );
+        let options = Options {
+            dynamic_globals: BTreeSet::from(["items".into(), "index".into()]),
+            ..Options::default()
+        };
+        let (mut trace, expected) =
+            Trace::record(&mut interpreter, &function, vec![], options).unwrap();
+        assert!(!trace.entry_guards.is_empty());
+        let root = trace.recorded.inputs.iter().position(|input| matches!(&input.source, InputSource::Global(name, path) if name == "items" && path.is_empty())).unwrap();
+        assert!(trace.input_values[root]);
+        assert!(trace.wide_inputs[root].is_none());
+        let operations = interpreter.operations;
+        interpreter.globals.insert("index".into(), Value::int(1));
+        assert!(matches!(
+            trace.run(&mut interpreter, &[], 1).unwrap(),
+            Outcome::Miss
+        ));
+        assert!(
+            trace.wide_inputs[root].is_none(),
+            "rejected trace copied the entire vector"
+        );
+        assert_eq!(interpreter.operations, operations);
+        interpreter.globals.insert("index".into(), Value::int(0));
+        assert!(
+            matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(value, 1) if value == expected)
+        );
+    }
+
+    #[test]
+    fn rejected_input_shape_does_not_capture_earlier_wide_values() {
+        let function = Function {
+            name: "read".into(),
+            args: vec![],
+            result: Type::Vector(Box::new(Type::Integer(None))),
+            locals: BTreeMap::new(),
+            code: vec![
+                Op::Assign(Location::Id("return".into()), Expr::Id("items".into())),
+                Op::Assign(Location::Id("unused".into()), Expr::Id("index".into())),
+                Op::Return,
+            ],
+        };
+        let program = Program {
+            globals: BTreeMap::from([
+                ("index".into(), Type::Integer(None)),
+                ("items".into(), Type::Vector(Box::new(Type::Integer(None)))),
+            ]),
+            ..Program::default()
+        };
+        let mut interpreter = Interpreter::new(&program, FlatMemory::new(0, vec![]));
+        interpreter.initialize().unwrap();
+        interpreter.globals.insert(
+            "items".into(),
+            Value::Vector((0..4096).map(Value::int).collect()),
+        );
+        let options = Options {
+            dynamic_globals: BTreeSet::from(["items".into(), "index".into()]),
+            ..Options::default()
+        };
+        let (mut trace, _) = Trace::record(&mut interpreter, &function, vec![], options).unwrap();
+        assert!(trace.entry_guards.is_empty());
+        let root = trace.recorded.inputs.iter().position(|input| matches!(&input.source, InputSource::Global(name, path) if name == "items" && path.is_empty())).unwrap();
+        interpreter
+            .globals
+            .insert("index".into(), Value::Bool(false));
+        assert!(matches!(
+            trace.run(&mut interpreter, &[], 1).unwrap(),
+            Outcome::Miss
+        ));
+        assert!(
+            trace.wide_inputs[root].is_none(),
+            "shape mismatch copied an earlier vector"
+        );
+    }
 
     #[test]
     fn vector_entry_index_selects_live_values_without_retraining() {
