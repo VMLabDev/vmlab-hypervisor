@@ -81,7 +81,7 @@ impl Drop for Backend {
             if resource.mapped {
                 // A failed unregister must not leave KVM referencing freed host pages.
                 if let Err(error) = self.mapper.unmap(id) {
-                    eprintln!("GPU mapping teardown: {error}");
+                    log::warn!("GPU mapping teardown: {error}");
                     std::process::abort();
                 }
                 let _ = self.gpu.unmap(id);
@@ -367,7 +367,7 @@ impl Renderer {
 
 fn host<T>(result: RutabagaResult<T>) -> Result<T, u32> {
     result.map_err(|error| {
-        eprintln!("virtio-gpu: {error}");
+        log::warn!("virtio-gpu: {error}");
         0x1200
     })
 }
@@ -743,7 +743,7 @@ impl Backend {
                 }
                 if let Err(error) = self.mapper.map(id, offset, mapping.ptr, size) {
                     let _ = self.gpu.unmap(id);
-                    eprintln!("GPU blob mapping: {error}");
+                    log::warn!("GPU blob mapping: {error}");
                     return Err(0x1200);
                 }
                 resource.mapped = true;

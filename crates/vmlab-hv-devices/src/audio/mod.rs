@@ -199,7 +199,7 @@ pub fn select_backend(node_name: &str, node_description: &str) -> Arc<dyn HostAu
                         if probe.pulse_compiled && probe.pulse_server_set {
                             return select_pulse(node_name, node_description);
                         }
-                        eprintln!(
+                        log::warn!(
                             "vmlab-hv: audio to the null backend: PipeWire startup failed ({e}); PulseAudio unavailable"
                         );
                         Arc::new(null::NullHost)
@@ -236,7 +236,7 @@ fn select_pulse(node_name: &str, node_description: &str) -> Arc<dyn HostAudio> {
 
 fn warn_null() {
     if let Some(reason) = HostChoice::Null.null_reason() {
-        eprintln!("vmlab-hv: audio to the null backend: {reason}");
+        log::warn!("vmlab-hv: audio to the null backend: {reason}");
     }
 }
 

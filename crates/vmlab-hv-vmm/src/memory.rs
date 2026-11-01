@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use kvm_bindings::kvm_userspace_memory_region;
 use kvm_ioctls::VmFd;
-use vm_memory::{FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap};
+use vm_memory::{FileOffset, GuestAddress, GuestMemoryBackend, GuestMemoryMmap, GuestMemoryRegion};
 
 use crate::error::VmmError;
 use crate::layout::MemLayout;
@@ -27,6 +27,7 @@ impl GuestRam {
     pub fn anonymous(layout: MemLayout) -> Result<Self, VmmError> {
         let mem = mmap_regions(&layout, None)
             .map_err(|e| VmmError::Memory(format!("allocating guest RAM: {e}")))?;
+        dont_dump(&mem)?;
         Ok(GuestRam {
             mem,
             layout,
@@ -52,6 +53,7 @@ impl GuestRam {
             .map_err(|e| VmmError::Memory(format!("sizing memfd: {e}")))?;
         let mem = mmap_regions(&layout, Some(&file))
             .map_err(|e| VmmError::Memory(format!("mapping guest RAM: {e}")))?;
+        dont_dump(&mem)?;
         Ok(GuestRam {
             mem,
             layout,
@@ -80,6 +82,27 @@ impl GuestRam {
         )?)));
         Ok(ram)
     }
+}
+
+/// Exclude every guest-RAM mapping, including CPU-only aliases, from host cores.
+pub(crate) fn dont_dump(mem: &GuestMemoryMmap) -> Result<(), VmmError> {
+    for region in mem.iter() {
+        // SAFETY: each region owns this page-aligned mapping for its full length.
+        if unsafe {
+            libc::madvise(
+                region.as_ptr().cast(),
+                region.len() as usize,
+                libc::MADV_DONTDUMP,
+            )
+        } != 0
+        {
+            return Err(VmmError::Memory(format!(
+                "MADV_DONTDUMP: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn mmap_regions(
@@ -153,6 +176,37 @@ fn register_address_space(
 mod tests {
     use super::*;
     use vm_memory::Bytes;
+
+    #[test]
+    fn guest_ram_is_excluded_from_host_core_dumps() {
+        let memories = [
+            GuestRam::anonymous(MemLayout::new(8).unwrap()).unwrap(),
+            GuestRam::shared_memfd(MemLayout::new(8).unwrap()).unwrap(),
+        ];
+        let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+        for memory in memories {
+            for region in memory.mem.iter() {
+                let address = region.as_ptr() as u64;
+                let mut selected = false;
+                let mut excluded = false;
+                for line in smaps.lines() {
+                    let mut fields = line.split_whitespace();
+                    let first = fields.next().unwrap_or_default();
+                    if let Some((start, end)) = first.split_once('-')
+                        && let (Ok(start), Ok(end)) =
+                            (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16))
+                    {
+                        selected = (start..end).contains(&address);
+                    }
+                    if selected && first == "VmFlags:" {
+                        excluded = fields.any(|flag| flag == "dd");
+                        break;
+                    }
+                }
+                assert!(excluded, "guest mapping must carry MADV_DONTDUMP");
+            }
+        }
+    }
 
     #[test]
     fn registering_ram_ignores_device_regions_in_the_dma_view() {

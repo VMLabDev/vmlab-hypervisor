@@ -44,6 +44,12 @@ pub enum Command {
     Powerdown,
     /// Stop the machine immediately and exit the process.
     Quit,
+    /// Replace the stderr filter and recorder RIP selection; keep both rings enabled.
+    SetLogFilter {
+        filter: String,
+    },
+    /// Write a diagnostic report beside the control socket; emit its path.
+    DumpDiagnostics,
     /// Hot-plug a device. The fields carry what vmlab passes QEMU's
     /// `usb-host` today: `driver` selects the device model, `bus` names the
     /// controller root hub (`usbx.0`), and `hostbus`/`hostaddr`/`hostport`
@@ -105,6 +111,8 @@ pub enum ErrorCode {
     VersionMismatch,
     /// The command is not valid in the current run state.
     InvalidState,
+    /// A request parameter is malformed; the existing setting is unchanged.
+    InvalidArgument,
     /// The machine lacks the capability the command needs.
     Unsupported,
     /// No hot-plugged device carries the id the command named.
@@ -118,6 +126,7 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
+    Diagnostics,
     Snapshots,
     Display,
     Input,
@@ -127,6 +136,15 @@ pub enum Capability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
+    /// The process's final reason, after worker and device cleanup.
+    Exiting {
+        reason: ProcessExitReason,
+        code: u8,
+        error_chain: Vec<String>,
+    },
+    DiagnosticsDumped {
+        path: String,
+    },
     Shutdown {
         reason: ShutdownReason,
     },
@@ -149,4 +167,87 @@ pub enum ShutdownReason {
     GuestReset,
     HostRequest,
     GuestPanic,
+}
+
+/// Process outcomes. Guest reset is a clean shutdown under the launch contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProcessExitReason {
+    GuestPoweroff,
+    GuestReset,
+    Quit,
+    HostSignal { signal: i32 },
+    StartupError,
+    RuntimeError,
+    Panic,
+    GuestPanic,
+    FatalSignal { signal: i32 },
+}
+
+impl ProcessExitReason {
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::GuestPoweroff | Self::GuestReset | Self::Quit => 0,
+            Self::RuntimeError => 1,
+            Self::StartupError => 2,
+            Self::Panic => 3,
+            Self::GuestPanic => 4,
+            Self::HostSignal { signal } | Self::FatalSignal { signal } => (128 + signal) as u8,
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn exit_codes_follow_the_launch_contract() {
+        for reason in [
+            ProcessExitReason::GuestPoweroff,
+            ProcessExitReason::GuestReset,
+            ProcessExitReason::Quit,
+        ] {
+            assert_eq!(reason.exit_code(), 0);
+        }
+        assert_eq!(ProcessExitReason::RuntimeError.exit_code(), 1);
+        assert_eq!(ProcessExitReason::StartupError.exit_code(), 2);
+        assert_eq!(ProcessExitReason::Panic.exit_code(), 3);
+        assert_eq!(ProcessExitReason::GuestPanic.exit_code(), 4);
+        assert_eq!(
+            ProcessExitReason::HostSignal { signal: 15 }.exit_code(),
+            143
+        );
+        assert_eq!(
+            ProcessExitReason::FatalSignal { signal: 11 }.exit_code(),
+            139
+        );
+    }
+
+    #[test]
+    fn additive_diagnostic_messages_round_trip() {
+        for command in [
+            Command::SetLogFilter {
+                filter: "info,vmlab_hv_devices=debug".into(),
+            },
+            Command::DumpDiagnostics,
+        ] {
+            let wire = serde_json::to_string(&ClientMsg::Request {
+                id: 7,
+                command: command.clone(),
+            })
+            .unwrap();
+            assert_eq!(
+                serde_json::from_str::<ClientMsg>(&wire).unwrap(),
+                ClientMsg::Request { id: 7, command }
+            );
+        }
+        let event = Event::Exiting {
+            reason: ProcessExitReason::RuntimeError,
+            code: 1,
+            error_chain: vec!["KVM_RUN failed".into()],
+        };
+        let wire = serde_json::to_string(&event).unwrap();
+        assert_eq!(serde_json::from_str::<Event>(&wire).unwrap(), event);
+    }
 }

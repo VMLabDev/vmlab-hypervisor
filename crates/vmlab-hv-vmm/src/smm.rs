@@ -203,6 +203,7 @@ impl Smram {
             .collect();
         let memory =
             GuestMemoryMmap::from_ranges(&ranges).map_err(|e| VmmError::Memory(e.to_string()))?;
+        crate::memory::dont_dump(&memory)?;
         let smram = Self {
             vm,
             memory,

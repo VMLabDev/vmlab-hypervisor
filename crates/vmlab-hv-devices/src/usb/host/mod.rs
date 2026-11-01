@@ -383,7 +383,7 @@ impl HostUsbDevice {
                 Some(match self.set_config(config) {
                     Ok(()) => UsbTransfer::Ack(Vec::new()),
                     Err(e) => {
-                        eprintln!("usb host {}: set config {config}: {e}", self.describe());
+                        log::warn!("usb host {}: set config {config}: {e}", self.describe());
                         UsbTransfer::Stall
                     }
                 })
@@ -394,7 +394,7 @@ impl HostUsbDevice {
                 Some(match self.set_interface(interface, alt) {
                     Ok(()) => UsbTransfer::Ack(Vec::new()),
                     Err(e) => {
-                        eprintln!(
+                        log::warn!(
                             "usb host {}: set interface {interface} alt {alt}: {e}",
                             self.describe()
                         );
@@ -407,7 +407,7 @@ impl HostUsbDevice {
                     Some(match self.device.clear_halt(setup.index as u8) {
                         Ok(()) => UsbTransfer::Ack(Vec::new()),
                         Err(e) => {
-                            eprintln!(
+                            log::warn!(
                                 "usb host {}: clear halt {:#x}: {e}",
                                 self.describe(),
                                 setup.index
@@ -427,7 +427,7 @@ impl HostUsbDevice {
                 Some(match self.config_descriptor_filtered(setup.value as u8) {
                     Ok(bytes) => UsbTransfer::Ack(bytes),
                     Err(e) => {
-                        eprintln!(
+                        log::warn!(
                             "usb host {}: configuration descriptor: {e}",
                             self.describe()
                         );
@@ -650,6 +650,41 @@ mod tests {
 
     fn clear_halt(endpoint: u8) -> SetupPacket {
         setup(0x02, 1, 0, u16::from(endpoint), 0)
+    }
+
+    #[test]
+    fn intercepted_errors_use_the_logging_facade() {
+        struct Warnings(parking_lot::Mutex<Vec<String>>);
+        impl log::Log for Warnings {
+            fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+                metadata.level() == log::Level::Warn
+                    && metadata.target() == "vmlab_hv_devices::usb::host"
+            }
+
+            fn log(&self, record: &log::Record<'_>) {
+                if self.enabled(record.metadata()) {
+                    self.0.lock().push(record.args().to_string());
+                }
+            }
+
+            fn flush(&self) {}
+        }
+
+        static WARNINGS: Warnings = Warnings(parking_lot::Mutex::new(Vec::new()));
+        log::set_logger(&WARNINGS).unwrap();
+        log::set_max_level(log::LevelFilter::Warn);
+        for request in [set_config(255), set_interface(0, 255), get_config(255)] {
+            let (mut host, _fake) = device();
+            assert_eq!(host.control(request, &[]), UsbTransfer::Stall);
+        }
+        let messages = WARNINGS.0.lock();
+        for operation in [
+            "set config 255",
+            "set interface 0 alt 255",
+            "configuration descriptor",
+        ] {
+            assert!(messages.iter().any(|message| message.contains(operation)));
+        }
     }
 
     #[test]

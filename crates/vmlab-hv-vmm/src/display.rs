@@ -307,7 +307,7 @@ impl InputSink for Input {
                 if let Some(chipset) = shared.chipset.lock().as_ref()
                     && let Err(e) = chipset.ps2.lock().inject_key(&qcode, down)
                 {
-                    eprintln!("display key: {e}");
+                    log::warn!("display key: {e}");
                 }
             }
             Message::RequestSize { width, height } => {
@@ -323,7 +323,7 @@ impl InputSink for Input {
                 if let Some(xhci) = shared.xhci.lock().as_ref()
                     && let Err(e) = xhci.lock().inject_pointer(*pointer)
                 {
-                    eprintln!("display pointer: {e}");
+                    log::warn!("display pointer: {e}");
                 }
             }
             _ => {}
@@ -405,7 +405,7 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
                             continue;
                         }
                         Err(error) => {
-                            eprintln!("{name}: {error}");
+                            log::error!("{name}: {error}");
                             break;
                         }
                     };
