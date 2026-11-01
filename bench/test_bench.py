@@ -539,6 +539,7 @@ class X86WorkloadTests(unittest.TestCase):
             lib.workloads("x86_64", "ubuntu-26.04"), lib.X86_UBUNTU_WORKLOADS
         )
         self.assertEqual(lib.workloads("x86_64", "windows-10"), ("boot_to_agent_ready",))
+        self.assertEqual(lib.workloads("x86_64", "windows-server-2025"), ("boot_to_agent_ready",))
         self.assertEqual(lib.workloads("x86_64", suite="g2g"), lib.X86_G2G_WORKLOADS)
 
     def test_every_workload_has_unit_and_direction(self):
