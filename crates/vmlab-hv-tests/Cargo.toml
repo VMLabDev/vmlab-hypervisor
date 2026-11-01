@@ -17,6 +17,7 @@ vmlab-disk = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
+wcl_lang = { git = "https://github.com/wiltaylor/wcl.git", rev = "ec886d3d297aaaacba050109195d3b464eb5f025" }
 
 # vmlab's wire contracts (guest/cinit-proto, guest/agent-proto), pinned to a
 # vmlab commit. They are wire types only — nothing depends on vmlab

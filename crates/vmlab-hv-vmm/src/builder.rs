@@ -293,9 +293,38 @@ fn validate_legacy_features(desc: &MachineDescription) -> Result<(), VmmError> {
     let invalid = |reason: &str| Err(VmmError::InvalidMachine(reason.into()));
     let pc = desc.machine == Machine::Pc;
     if let Some(model) = desc.cpu_model.as_deref()
-        && (!pc || !matches!(model, "host" | "pentium3"))
+        && !(model == "host"
+            || (pc && model == "pentium3")
+            || (desc.machine == Machine::Q35 && model == "Skylake-Client-v4"))
     {
-        return invalid("cpu_model requires pc and must be host or pentium3");
+        return invalid("cpu_model must be host, pentium3 (pc), or Skylake-Client-v4 (q35)");
+    }
+    if desc.tsc_khz == Some(0) {
+        return invalid("tsc_khz must be positive");
+    }
+    if desc.machine != Machine::Q35
+        && (desc.applesmc.is_some()
+            || desc.usb_keyboard
+            || desc.smbios_type2
+            || desc.vmware_cpuid_freq
+            || desc.invtsc
+            || desc.tsc_khz.is_some()
+            || !desc.msr_policy.is_fault())
+    {
+        return invalid("macOS platform features require machine=q35");
+    }
+    if desc.usb_keyboard && desc.tablet.or(desc.usb).is_none() {
+        return invalid("usb_keyboard requires an xHCI PCI address in tablet or usb");
+    }
+    if let Some(smc) = &desc.applesmc {
+        vmlab_hv_devices::applesmc::AppleSmc::new(&smc.osk).map_err(|_| {
+            VmmError::InvalidMachine(
+                "applesmc requires exactly 64 printable ASCII characters".into(),
+            )
+        })?;
+    }
+    if desc.vmware_cpuid_freq && !desc.hyperv.is_empty() {
+        return invalid("vmware_cpuid_freq cannot share the Hyper-V CPUID range");
     }
     if desc.floppy.is_some() {
         return invalid(if pc {
@@ -391,8 +420,12 @@ fn validate_legacy_features(desc: &MachineDescription) -> Result<(), VmmError> {
 }
 
 pub(crate) fn tablet_serial(address: PciAddress) -> String {
+    hid_serial(address, 28754, 1)
+}
+
+fn hid_serial(address: PciAddress, prefix: u32, connector: u8) -> String {
     format!(
-        "28754-0000:{:02x}:{:02x}.{}-1",
+        "{prefix}-0000:{:02x}:{:02x}.{}-{connector}",
         address.bus, address.device, address.function
     )
 }
@@ -825,14 +858,15 @@ pub fn build(
 
     let vga = if let Some(display) = &desc.display {
         let virtio = display.device == vmlab_hv_proto::machine::DisplayDevice::VirtioVga;
-        let path = display
-            .rom
-            .as_deref()
-            .unwrap_or(std::path::Path::new(if virtio {
+        let path = display.rom.as_deref().unwrap_or(std::path::Path::new(
+            if display.device == vmlab_hv_proto::machine::DisplayDevice::VmwareSvga {
+                "/usr/share/qemu/vgabios-vmware.bin"
+            } else if virtio {
                 "/usr/share/qemu/vgabios-virtio.bin"
             } else {
                 "/usr/share/qemu/vgabios-stdvga.bin"
-            }));
+            },
+        ));
         let rom = std::fs::read(path)
             .map_err(|e| VmmError::Other(format!("reading VGA ROM {}: {e}", path.display())))?;
         Some(if virtio {
@@ -871,10 +905,12 @@ pub fn build(
             snap_nodes.push(DeviceNode::Resettable(vga.clone()));
             crate::display::Video::Virtio(vga)
         } else {
-            let vga = Arc::new(Mutex::new(
-                vmlab_hv_devices::display::StandardVga::new("vga", &rom)
-                    .map_err(|e| VmmError::Other(e.to_string()))?,
-            ));
+            let mut device = vmlab_hv_devices::display::StandardVga::new("vga", &rom)
+                .map_err(|e| VmmError::Other(e.to_string()))?;
+            if display.device == vmlab_hv_proto::machine::DisplayDevice::VmwareSvga {
+                device.enable_vmware();
+            }
+            let vga = Arc::new(Mutex::new(device));
             place(vga.clone(), Some(display.pci))?;
             snap_nodes.push(DeviceNode::Resettable(vga.clone()));
             crate::display::Video::Standard(vga)
@@ -882,6 +918,16 @@ pub fn build(
     } else {
         None
     };
+    if let Some(config) = &desc.applesmc {
+        let smc = Arc::new(Mutex::new(
+            vmlab_hv_devices::applesmc::AppleSmc::new(&config.osk)
+                .map_err(|e| VmmError::Other(e.to_string()))?,
+        ));
+        io_bus
+            .register(0x300, 0x20, smc.clone())
+            .map_err(VmmError::Other)?;
+        snap_nodes.push(DeviceNode::Resettable(smc));
+    }
     let add_pci = |_root: &Arc<Mutex<PciRoot>>,
                    built: Result<crate::factory::BuiltPci, crate::error::DeviceUnavailable>,
                    what: String|
@@ -1124,8 +1170,22 @@ pub fn build(
                 .map_err(|e| VmmError::Other(e.to_string()))?;
             controller
                 .attach(
-                    vmlab_hv_devices::usb::TABLET_PORT,
-                    Box::new(vmlab_hv_devices::usb::Tablet::new(tablet_serial(address))),
+                    vmlab_hv_devices::usb::TABLET_PORT + u8::from(desc.usb_keyboard),
+                    Box::new(vmlab_hv_devices::usb::Tablet::new(hid_serial(
+                        address,
+                        28754,
+                        if desc.usb_keyboard { 2 } else { 1 },
+                    ))),
+                )
+                .map_err(|e| VmmError::Other(e.to_string()))?;
+        }
+        if desc.usb_keyboard {
+            xhci.lock()
+                .attach(
+                    vmlab_hv_devices::usb::KEYBOARD_PORT,
+                    Box::new(vmlab_hv_devices::usb::Keyboard::new(hid_serial(
+                        address, 68284, 1,
+                    ))),
                 )
                 .map_err(|e| VmmError::Other(e.to_string()))?;
         }
@@ -1215,6 +1275,8 @@ pub fn build(
                 .copied(),
         );
         let platform = vmlab_hv_firmware::Platform {
+            applesmc: desc.applesmc.is_some(),
+            amd_hypertransport: kvm.amd_hypertransport(desc.cpu_model.as_deref()),
             vcpus: desc.vcpus as u16,
             max_cpus: desc.vcpus as u16,
             ram_regions,
@@ -1234,7 +1296,7 @@ pub fn build(
                 .collect(),
             ecam_base: if ovmf { 0xe0000000 } else { 0xb0000000 },
             pci64_base: Some(if ovmf {
-                kvm.ovmf_pci64_base()
+                kvm.ovmf_pci64_base(desc.cpu_model.as_deref())
             } else {
                 kvm.seabios_pci64_base(layout.ram_top() > 1 << 32)
             }),
@@ -1250,7 +1312,8 @@ pub fn build(
             nographic: desc.display.is_none(),
             ..Default::default()
         };
-        if pc {
+        options.smbios.baseboard = desc.smbios_type2;
+        if pc || desc.cpu_model.is_some() {
             options.smbios.processor_id =
                 kvm.processor_id(desc.vcpus, desc.cpu, desc.cpu_model.as_deref())?;
         }
@@ -1329,6 +1392,8 @@ pub fn build(
     *shared.pflash.lock() = pflash;
     *shared.tpm.lock() = tpm;
     *shared.smi_fwcfg.lock() = smi_fwcfg;
+    *shared.msr_policy.lock() = desc.msr_policy;
+    crate::macos::configure_msrs(&shared.kvm, desc.msr_policy)?;
     shared.set_reset_description(desc.clone());
     shared.set_snapshot_registry(Arc::new(SnapshotRegistry {
         digest: machine_digest(desc),
@@ -1347,6 +1412,7 @@ pub fn build(
             desc.cpu_model.as_deref(),
         )?;
         crate::hyperv::configure_vcpu(&shared.kvm.kvm, &vcpu, &desc.hyperv)?;
+        crate::macos::configure_tsc(&vcpu, desc, id == 0)?;
         if id == 0
             && let Some(boot) = &boot
         {
@@ -1376,7 +1442,7 @@ fn disk_index_letter(
 /// serialisation is deterministic for a given build.
 fn machine_digest(desc: &MachineDescription) -> [u8; 32] {
     use sha2::{Digest, Sha256};
-    let bytes = serde_json::to_vec(desc).unwrap_or_default();
+    let bytes = serde_json::to_vec(&desc.redacted()).unwrap_or_default();
     Sha256::digest(&bytes).into()
 }
 
@@ -1435,19 +1501,27 @@ mod tests {
     #[test]
     fn tablet_serial_uses_the_explicit_controller_address() {
         assert_eq!(
-            super::tablet_serial(vmlab_hv_proto::machine::PciAddress {
-                bus: 0,
-                device: 5,
-                function: 0,
-            }),
+            super::hid_serial(
+                vmlab_hv_proto::machine::PciAddress {
+                    bus: 0,
+                    device: 5,
+                    function: 0,
+                },
+                28754,
+                1
+            ),
             "28754-0000:00:05.0-1"
         );
         assert_eq!(
-            super::tablet_serial(vmlab_hv_proto::machine::PciAddress {
-                bus: 0,
-                device: 26,
-                function: 2,
-            }),
+            super::hid_serial(
+                vmlab_hv_proto::machine::PciAddress {
+                    bus: 0,
+                    device: 26,
+                    function: 2,
+                },
+                28754,
+                1
+            ),
             "28754-0000:00:1a.2-1"
         );
     }
@@ -1461,6 +1535,13 @@ mod tests {
             machine: Default::default(),
             cpu: Default::default(),
             cpu_model: None,
+            invtsc: false,
+            tsc_khz: None,
+            vmware_cpuid_freq: false,
+            msr_policy: Default::default(),
+            applesmc: None,
+            usb_keyboard: false,
+            smbios_type2: false,
             floppy: None,
             serial_log_port: Default::default(),
             hyperv: vec![],

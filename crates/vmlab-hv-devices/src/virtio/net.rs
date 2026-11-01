@@ -9,6 +9,7 @@
 //! One receiveq and one transmitq, no control queue: the offered features are
 //! `VIRTIO_NET_F_MAC`, `VIRTIO_NET_F_STATUS` and `VIRTIO_NET_F_MTU` (only when
 //! an MTU other than 1500 is configured, matching what vmlab passes to QEMU).
+//! Indirect descriptor tables let one ring entry describe a scatter/gather packet.
 //! The `virtio_net_hdr` (12 bytes for a modern device) is stripped on transmit
 //! and prepended with `num_buffers` = 1 on receive.
 //!
@@ -32,6 +33,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use virtio_queue::{Queue, QueueOwnedT, QueueState, QueueT};
+use vm_memory::{Bytes, GuestAddress};
 
 use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
 
@@ -48,12 +50,16 @@ const F_MAC: u64 = 1 << 5;
 const F_MRG_RXBUF: u64 = 1 << 15;
 /// `VIRTIO_NET_F_STATUS` (feature bit 16).
 const F_STATUS: u64 = 1 << 16;
+/// `VIRTIO_F_RING_INDIRECT_DESC` (feature bit 28).
+const F_INDIRECT_DESC: u64 = 1 << 28;
 /// `VIRTIO_F_VERSION_1` (feature bit 32): this is a modern virtio device.
 const F_VERSION_1: u64 = 1 << 32;
 /// `VIRTIO_NET_S_LINK_UP` (status bit 0).
 const S_LINK_UP: u16 = 1;
 /// Queue size offered for both virtqueues (QEMU's virtio-net default).
 const QUEUE_SIZE: u16 = 256;
+/// Split-ring driver flag suppressing used-buffer interrupts.
+const AVAIL_F_NO_INTERRUPT: u16 = 1;
 /// The receiveq index.
 const RXQ: u16 = 0;
 /// The transmitq index.
@@ -468,6 +474,18 @@ fn read_frames(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(
     Ok(())
 }
 
+fn needs_interrupt(queue: &mut Queue, mem: &GuestMemory) -> bool {
+    // virtio-queue handles used_event and the publication fence. It does not
+    // check avail.flags without EVENT_IDX.
+    if !queue.needs_notification(mem).unwrap_or(false) {
+        return false;
+    }
+    queue.event_idx_enabled()
+        || mem
+            .load::<u16>(GuestAddress(queue.avail_ring()), Ordering::Relaxed)
+            .is_ok_and(|flags| u16::from_le(flags) & AVAIL_F_NO_INTERRUPT == 0)
+}
+
 /// Move pending frames into free receiveq buffers, header first.
 fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
     let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
@@ -493,6 +511,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
         let mut hdr = vec![0u8; hdr_len];
         let num_buffers_at = hdr.len().saturating_sub(2);
         hdr[num_buffers_at..].copy_from_slice(&1u16.to_le_bytes());
+        let mut used_any = false;
         while let Some(frame) = sh.rx_pending.front() {
             let Some(chain) = q.pop_descriptor_chain(mem) else {
                 break;
@@ -510,6 +529,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
             if q.add_used(mem, head, written).is_err() {
                 break;
             }
+            used_any = true;
             if written == 0 {
                 // Buffer too small for the frame: the frame is dropped and
                 // the buffer returns empty for the driver to reuse.
@@ -517,7 +537,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
             }
             sh.rx_pending.pop_front();
         }
-        if q.needs_notification(mem).unwrap_or(false) {
+        if used_any && needs_interrupt(q, mem) {
             irq = sh.interrupt.clone().map(|irq| (irq, RXQ));
         }
     }
@@ -530,7 +550,6 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
 /// to the switch — or drop it while the link is down.
 fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_len: usize) {
     loop {
-        let mut out = Vec::new();
         let mut blocked = false;
         let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
         {
@@ -540,15 +559,15 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             if sh.snapshot_paused {
                 return;
             }
-            let pending = sh.tx_out.len();
             let Some(mem) = sh.mem.as_ref() else {
                 return;
             };
             let Some(q) = sh.queues.get_mut(usize::from(TXQ)).and_then(|q| q.as_mut()) else {
                 return;
             };
+            let mut used_any = false;
             while let Some(chain) = q.pop_descriptor_chain(mem) {
-                if stream.is_some() && pending + out.len() >= MAX_TX_STAGE {
+                if stream.is_some() && sh.tx_out.len() >= MAX_TX_STAGE {
                     q.go_to_previous_position();
                     blocked = true;
                     break;
@@ -563,13 +582,13 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
                             consumed = (header_len + reader.available_bytes()) as u32;
                         } else {
                             let len = reader.available_bytes();
-                            let start = out.len();
-                            out.extend_from_slice(&(len as u32).to_be_bytes());
-                            out.resize(start + 4 + len, 0);
-                            if reader.read_exact(&mut out[start + 4..]).is_ok() {
+                            let start = sh.tx_out.len();
+                            sh.tx_out.extend_from_slice(&(len as u32).to_be_bytes());
+                            sh.tx_out.resize(start + 4 + len, 0);
+                            if reader.read_exact(&mut sh.tx_out[start + 4..]).is_ok() {
                                 consumed = (header_len + len) as u32;
                             } else {
-                                out.truncate(start);
+                                sh.tx_out.truncate(start);
                             }
                         }
                     }
@@ -577,12 +596,10 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
                 if q.add_used(mem, head, consumed).is_err() {
                     break;
                 }
+                used_any = true;
             }
-            if q.needs_notification(mem).unwrap_or(false) {
+            if used_any && needs_interrupt(q, mem) {
                 irq = sh.interrupt.clone().map(|irq| (irq, TXQ));
-            }
-            if stream.is_some() {
-                sh.tx_out.extend_from_slice(&out);
             }
         }
         if let Some((irq, queue)) = irq {
@@ -602,22 +619,27 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
 /// Push framed bytes into the switch socket; keeps the remainder when the
 /// socket would block. `Err(())` means the connection is gone.
 fn flush_tx(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(), ()> {
-    loop {
-        let mut sh = lock(shared);
-        if sh.tx_out.is_empty() {
-            return Ok(());
+    let mut sh = lock(shared);
+    let mut sent = 0;
+    let result = loop {
+        if sent == sh.tx_out.len() {
+            break Ok(());
         }
-        let take = sh.tx_out.len().min(READ_CHUNK);
-        match stream.write(&sh.tx_out[..take]) {
-            Ok(0) => return Err(()),
-            Ok(n) => {
-                sh.tx_out.drain(..n);
-            }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+        let end = sh.tx_out.len().min(sent + READ_CHUNK);
+        match stream.write(&sh.tx_out[sent..end]) {
+            Ok(0) => break Err(()),
+            Ok(n) => sent += n,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break Ok(()),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => return Err(()),
+            Err(_) => break Err(()),
         }
+    };
+    if sent == sh.tx_out.len() {
+        sh.tx_out.clear();
+    } else if sent != 0 {
+        sh.tx_out.drain(..sent);
     }
+    result
 }
 
 // ---- VirtioDevice -----------------------------------------------------------
@@ -636,7 +658,7 @@ impl VirtioDevice for Net {
     }
 
     fn features(&self) -> u64 {
-        let mut features = F_MAC | F_STATUS | F_VERSION_1;
+        let mut features = F_MAC | F_STATUS | F_INDIRECT_DESC | F_VERSION_1;
         if self.config.mtu != DEFAULT_MTU {
             features |= F_MTU;
         }
@@ -1237,6 +1259,97 @@ mod tests {
     }
 
     #[test]
+    fn empty_transmit_drain_does_not_interrupt_the_guest() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.irq.queues.lock().clear();
+        process_tx(&f.dev.shared, &mut None, 12);
+        assert_eq!(f.vqs[1].used_idx(&f.mem), 0);
+        assert!(f.irq.queues.lock().is_empty());
+    }
+
+    #[test]
+    fn receive_without_available_buffers_does_not_interrupt_the_guest() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.irq.queues.lock().clear();
+        lock(&f.dev.shared)
+            .rx_pending
+            .push_back(b"waiting for a receive buffer".to_vec());
+        place_rx_frames(&f.dev.shared, 12);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
+        assert!(f.irq.queues.lock().is_empty());
+    }
+
+    #[test]
+    fn driver_can_suppress_and_reenable_transmit_and_receive_interrupts() {
+        let mut f = Fixture::new();
+        let mut switch = f.take_switch_side();
+        switch
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let frame = b"interrupt suppression";
+        for suppressed in [true, false] {
+            for queue in &f.vqs {
+                f.mem
+                    .write_obj(u16::from(suppressed).to_le(), GuestAddress(queue.avail))
+                    .unwrap();
+            }
+            f.irq.queues.lock().clear();
+            f.dev.resume_snapshot();
+            let tx_used = f.vqs[1].used_idx(&f.mem) + 1;
+            let rx_used = f.vqs[0].used_idx(&f.mem) + 1;
+            f.queue_tx(frame);
+            let receive_addr = f.data(2);
+            f.vqs[0].add_chain(&f.mem, &[(receive_addr, 128, true)]);
+            f.dev.queue_notify(TXQ);
+            f.dev.queue_notify(RXQ);
+            let mut prefix = [0; 4];
+            switch.read_exact(&mut prefix).unwrap();
+            assert_eq!(u32::from_be_bytes(prefix), frame.len() as u32);
+            let mut received = vec![0; frame.len()];
+            switch.read_exact(&mut received).unwrap();
+            assert_eq!(received, frame);
+            switch
+                .write_all(&(frame.len() as u32).to_be_bytes())
+                .unwrap();
+            switch.write_all(frame).unwrap();
+            wait_for("suppressed queue completions", || {
+                f.vqs[0].used_idx(&f.mem) == rx_used && f.vqs[1].used_idx(&f.mem) == tx_used
+            });
+            f.dev.quiesce();
+            let interrupts = f.irq.queues.lock();
+            if suppressed {
+                assert!(
+                    interrupts.is_empty(),
+                    "suppressed interrupts: {interrupts:?}"
+                );
+            } else {
+                assert!(interrupts.contains(&RXQ));
+                assert!(interrupts.contains(&TXQ));
+            }
+        }
+    }
+
+    #[test]
+    fn event_idx_ignores_classic_interrupt_suppression() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        lock(&f.dev.shared).queues[usize::from(TXQ)]
+            .as_mut()
+            .unwrap()
+            .set_event_idx(true);
+        f.mem
+            .write_obj(AVAIL_F_NO_INTERRUPT.to_le(), GuestAddress(f.vqs[1].avail))
+            .unwrap();
+        f.queue_tx(b"event-index notification");
+        f.dev.queue_notify(TXQ);
+        wait_for("event-index completion", || f.vqs[1].used_idx(&f.mem) == 1);
+        f.dev.quiesce();
+        assert!(f.irq.queues.lock().contains(&TXQ));
+    }
+
+    #[test]
     fn config_space_carries_mac_status_and_mtu() {
         let dir = TempDir::new();
         let switch = dir.0.join("switch.sock");
@@ -1253,6 +1366,7 @@ mod tests {
         assert_ne!(features & F_MTU, 0);
         assert_ne!(features & F_MAC, 0);
         assert_ne!(features & F_STATUS, 0);
+        assert_ne!(features & F_INDIRECT_DESC, 0);
         assert_ne!(features & F_VERSION_1, 0);
         assert_eq!(big.config_len(), 12);
         let mut config = [0u8; 12];
@@ -1273,6 +1387,65 @@ mod tests {
         let mut config = [0u8; 12];
         normal.read_config(0, &mut config);
         assert_eq!(&config[10..12], &[0, 0]);
+    }
+
+    #[test]
+    fn partial_transmit_writes_and_snapshot_retain_exactly_the_unsent_suffix() {
+        let expected: Vec<_> = (0..MAX_TX_STAGE).map(|index| (index % 251) as u8).collect();
+        let directory = TempDir::new();
+        let mut device = Net::new(NetConfig {
+            id: "partial-transmit".into(),
+            mac: [0x52, 0x54, 0, 1, 2, 3],
+            mtu: DEFAULT_MTU,
+            switch: directory.0.join("absent.sock"),
+        })
+        .unwrap();
+        device.quiesce();
+        let shared = device.shared.clone();
+        lock(&shared).tx_out = expected.clone();
+        let (mut producer, mut receiver) = UnixStream::pair().unwrap();
+        producer.set_nonblocking(true).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let size: libc::c_int = 4096;
+        assert_eq!(
+            // SAFETY: the socket is live and size is a valid integer option value.
+            unsafe {
+                libc::setsockopt(
+                    producer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    std::ptr::from_ref(&size).cast(),
+                    std::mem::size_of_val(&size) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        flush_tx(&shared, &mut producer).unwrap();
+        assert!(!lock(&shared).tx_out.is_empty());
+        let snapshot = device.save_state().unwrap();
+        lock(&shared).tx_out.clear();
+        device.restore_state(&snapshot).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut received = Vec::new();
+        loop {
+            let mut bytes = [0; 4096];
+            loop {
+                match receiver.read(&mut bytes) {
+                    Ok(0) => panic!("transmit socket closed"),
+                    Ok(count) => received.extend_from_slice(&bytes[..count]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("read transmitted bytes: {error}"),
+                }
+            }
+            assert_eq!(lock(&shared).tx_out.as_slice(), &expected[received.len()..]);
+            if received.len() == expected.len() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "transmit made no progress");
+            flush_tx(&shared, &mut producer).unwrap();
+        }
+        assert_eq!(received, expected);
     }
 
     #[test]
@@ -1366,6 +1539,51 @@ mod tests {
         wait_for("tx buffer returned", || f.vqs[1].used_idx(&f.mem) == 1);
         let (_, len) = f.vqs[1].used_entry(&f.mem, 0);
         assert_eq!(len as usize, 12 + frame.len());
+    }
+
+    #[test]
+    fn indirect_transmit_chain_reaches_the_switch() {
+        let mut f = Fixture::new();
+        let mut switch = f.take_switch_side();
+        switch
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let frame = b"indirect transmit frame";
+        let header = f.data(0);
+        let payload = f.data(1);
+        f.mem.write_slice(frame, GuestAddress(payload)).unwrap();
+        let table = 0x8_0000;
+        let mut descriptors = [0u8; 32];
+        descriptors[..8].copy_from_slice(&header.to_le_bytes());
+        descriptors[8..12].copy_from_slice(&12u32.to_le_bytes());
+        descriptors[12..14].copy_from_slice(&VRING_DESC_F_NEXT.to_le_bytes());
+        descriptors[14..16].copy_from_slice(&1u16.to_le_bytes());
+        descriptors[16..24].copy_from_slice(&payload.to_le_bytes());
+        descriptors[24..28].copy_from_slice(&(frame.len() as u32).to_le_bytes());
+        f.mem
+            .write_slice(&descriptors, GuestAddress(table))
+            .unwrap();
+        let head = f.vqs[1].add_chain(&f.mem, &[(table, 32, false)]);
+        f.mem
+            .write_obj(
+                4u16,
+                GuestAddress(f.vqs[1].desc + u64::from(head) * 16 + 12),
+            )
+            .unwrap();
+        f.dev.queue_notify(TXQ);
+        let mut prefix = [0u8; 4];
+        switch.read_exact(&mut prefix).unwrap();
+        assert_eq!(u32::from_be_bytes(prefix), frame.len() as u32);
+        let mut received = vec![0; frame.len()];
+        switch.read_exact(&mut received).unwrap();
+        assert_eq!(received, frame);
+        wait_for("indirect transmit completion", || {
+            f.vqs[1].used_idx(&f.mem) == 1
+        });
+        assert_eq!(
+            f.vqs[1].used_entry(&f.mem, 0),
+            (u32::from(head), 12 + frame.len() as u32)
+        );
     }
 
     #[test]

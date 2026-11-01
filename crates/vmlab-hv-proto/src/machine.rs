@@ -23,6 +23,20 @@ pub struct MachineDescription {
     pub cpu: CpuPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_model: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invtsc: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsc_khz: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vmware_cpuid_freq: bool,
+    #[serde(default, skip_serializing_if = "MsrPolicy::is_fault")]
+    pub msr_policy: MsrPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applesmc: Option<AppleSmc>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub usb_keyboard: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub smbios_type2: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hyperv: Vec<HyperV>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +87,56 @@ pub struct MachineDescription {
     pub rtc_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub floppy: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MsrPolicy {
+    #[default]
+    Fault,
+    Ignore,
+}
+
+impl MsrPolicy {
+    pub fn is_fault(&self) -> bool {
+        *self == Self::Fault
+    }
+}
+
+/// Serialize only for the private launch transport. Use `redacted()` for dumps.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppleSmc {
+    pub osk: String,
+}
+
+impl<'de> Deserialize<'de> for AppleSmc {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            osk: String,
+        }
+        Fields::deserialize(deserializer)
+            .map(|fields| Self { osk: fields.osk })
+            .map_err(|_| serde::de::Error::custom("applesmc requires an object with an osk string"))
+    }
+}
+
+impl std::fmt::Debug for AppleSmc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AppleSmc { osk: [redacted] }")
+    }
+}
+
+impl MachineDescription {
+    pub fn redacted(&self) -> Self {
+        let mut description = self.clone();
+        if let Some(smc) = &mut description.applesmc {
+            smc.osk = "[redacted]".into();
+        }
+        description
+    }
 }
 
 /// A pre-bound host PCI function assigned at an explicit guest address.
@@ -347,6 +411,7 @@ pub enum DisplayDevice {
     VirtioVga,
     VirtioGpu,
     CirrusVga,
+    VmwareSvga,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

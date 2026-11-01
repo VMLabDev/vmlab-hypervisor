@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 pub mod ahci;
+pub mod applesmc;
 pub mod ata;
 pub mod audio;
 pub mod chipset;

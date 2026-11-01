@@ -140,6 +140,7 @@ impl Frame {
 
 /// A single standard VGA PCI function. Firmware supplies the option ROM bytes.
 pub struct StandardVga {
+    svga: Option<Svga>,
     id: String,
     config: [u8; 256],
     regs: [u8; REG_SIZE],
@@ -176,6 +177,7 @@ impl StandardVga {
             return Err(DeviceError::Other("invalid VGA option ROM".into()));
         }
         let mut dev = Self {
+            svga: None,
             id: id.into(),
             config: [0; 256],
             regs: [0; REG_SIZE],
@@ -816,6 +818,31 @@ impl PciDevice for StandardVga {
     }
 
     fn config_write(&mut self, reg: usize, offset: u64, data: &[u8]) {
+        if self.svga.is_some() {
+            let Some(start) = reg
+                .checked_mul(4)
+                .and_then(|off| off.checked_add(offset as usize))
+            else {
+                return;
+            };
+            for (i, byte) in data.iter().enumerate() {
+                if let Some(position) = start.checked_add(i).filter(|pos| *pos < 256)
+                    && matches!(position, 4 | 5 | 0x0c | 0x0d | 0x10..=0x1b | 0x30..=0x33 | 0x3c)
+                {
+                    self.config[position] = *byte;
+                }
+            }
+            for (off, mask, flags) in [
+                (0x10, 0xfffffff0u32, 1),
+                (0x14, 0xff000000, 8),
+                (0x18, 0xffff0000, 8),
+                (0x30, 0xffff0001, 0),
+            ] {
+                let value = u32::from_le_bytes(self.config[off..off + 4].try_into().expect("BAR"));
+                self.config[off..off + 4].copy_from_slice(&((value & mask) | flags).to_le_bytes());
+            }
+            return;
+        }
         let Some(start) = reg
             .checked_mul(4)
             .and_then(|v| v.checked_add(usize::try_from(offset).ok()?))
@@ -846,6 +873,30 @@ impl PciDevice for StandardVga {
     }
 
     fn bars(&self) -> Vec<BarInfo> {
+        if self.svga.is_some() {
+            return vec![
+                BarInfo {
+                    index: 0,
+                    size: 16,
+                    kind: BarKind::Io,
+                },
+                BarInfo {
+                    index: 1,
+                    size: VRAM_SIZE as u64,
+                    kind: BarKind::Mmio32,
+                },
+                BarInfo {
+                    index: 2,
+                    size: 65536,
+                    kind: BarKind::Mmio32,
+                },
+                BarInfo {
+                    index: ROM_BAR,
+                    size: 65536,
+                    kind: BarKind::Mmio32,
+                },
+            ];
+        }
         vec![
             BarInfo {
                 index: 0,
@@ -866,6 +917,40 @@ impl PciDevice for StandardVga {
     }
 
     fn bar_read(&mut self, bar: u8, offset: u64, data: &mut [u8]) {
+        if let Some(svga) = &self.svga {
+            match bar {
+                0 => {
+                    let value = if offset == 0 {
+                        svga.index
+                    } else if offset == 4 {
+                        self.svga_read()
+                    } else {
+                        0
+                    };
+                    data.fill(0);
+                    if data.len() <= 4 {
+                        data.copy_from_slice(&value.to_le_bytes()[..data.len()]);
+                    }
+                }
+                1 => {
+                    for (i, byte) in data.iter_mut().enumerate() {
+                        *byte = self.byte(offset as usize + i);
+                    }
+                }
+                2 => {
+                    for (i, byte) in data.iter_mut().enumerate() {
+                        *byte = svga.fifo.get(offset as usize + i).copied().unwrap_or(0);
+                    }
+                }
+                ROM_BAR => {
+                    for (i, byte) in data.iter_mut().enumerate() {
+                        *byte = self.rom.get(offset as usize + i).copied().unwrap_or(0xff);
+                    }
+                }
+                _ => data.fill(0xff),
+            }
+            return;
+        }
         data.fill(0xff);
         if bar == 2 {
             if offset < 0x400 {
@@ -934,6 +1019,43 @@ impl PciDevice for StandardVga {
     }
 
     fn bar_write(&mut self, bar: u8, offset: u64, data: &[u8]) {
+        if self.svga.is_some() {
+            match bar {
+                0 if data.len() == 4 => {
+                    let value = u32::from_le_bytes(data.try_into().expect("SVGA dword"));
+                    if offset == 0 {
+                        self.svga.as_mut().unwrap().index = value;
+                    } else if offset == 4 {
+                        self.svga_write(value);
+                    }
+                }
+                1 => {
+                    for (i, byte) in data.iter().enumerate() {
+                        if let Some(address) = (offset as usize)
+                            .checked_add(i)
+                            .filter(|address| *address < VRAM_SIZE)
+                        {
+                            self.set_byte(address, *byte);
+                            self.dirty = true;
+                        }
+                    }
+                }
+                2 => {
+                    let svga = self.svga.as_mut().unwrap();
+                    if let Some(target) = (offset as usize)
+                        .checked_add(data.len())
+                        .and_then(|end| svga.fifo.get_mut(offset as usize..end))
+                    {
+                        target.copy_from_slice(data);
+                        if offset + data.len() as u64 > 16 {
+                            svga.fifo_used = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         match bar {
             0 => {
                 for (i, byte) in data.iter().enumerate() {
@@ -975,7 +1097,11 @@ impl PciDevice for StandardVga {
 
 impl crate::Resettable for StandardVga {
     fn reset(&mut self) -> Result<(), DeviceError> {
-        let initial = Self::new(self.id.clone(), &self.rom)?.save_state()?;
+        let mut device = Self::new(self.id.clone(), &self.rom)?;
+        if self.svga.is_some() {
+            device.enable_vmware();
+        }
+        let initial = device.save_state()?;
         self.restore_state(&initial)
     }
 }
@@ -1015,18 +1141,33 @@ impl Snapshot for StandardVga {
         self.vram
             .read_slice(&mut state[start..], GuestAddress(0))
             .map_err(|e| DeviceError::Memory(e.to_string()))?;
+        if let Some(svga) = &self.svga {
+            state.extend(serde_json::to_vec(svga).map_err(|e| DeviceError::State(e.to_string()))?);
+        }
         Ok(state)
     }
 
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
         let header = 8 + 256 + REG_SIZE + 32;
-        if state.len() != header + 20 + VRAM_SIZE
+        let size = header + 20 + VRAM_SIZE;
+        if state.len() < size
+            || (self.svga.is_none() && state.len() != size)
             || !matches!(&state[..8], b"VGA\0\x01\0\0\0" | b"VGA\0\x02\0\0\0")
         {
             return Err(DeviceError::State(
                 "invalid VGA snapshot version or length".into(),
             ));
         }
+        let svga = if self.svga.is_some() {
+            let svga: Svga = serde_json::from_slice(&state[size..])
+                .map_err(|_| DeviceError::State("invalid SVGA state".into()))?;
+            if svga.fifo.len() != 65536 {
+                return Err(DeviceError::State("invalid SVGA FIFO length".into()));
+            }
+            Some(svga)
+        } else {
+            None
+        };
         let scalar = &state[header..header + 20];
         let mut dispi = [0; 16];
         for (i, value) in dispi.iter_mut().enumerate() {
@@ -1067,10 +1208,100 @@ impl Snapshot for StandardVga {
         self.dispi_index = u16::from_le_bytes([scalar[14], scalar[15]]);
         self.latch.copy_from_slice(&scalar[16..20]);
         self.vram
-            .write_slice(&state[header + 20..], GuestAddress(0))
+            .write_slice(&state[header + 20..size], GuestAddress(0))
             .map_err(|e| DeviceError::Memory(e.to_string()))?;
         self.dirty = true;
         self.cached_frame = None;
+        self.svga = svga;
         Ok(())
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Svga {
+    index: u32,
+    id: u32,
+    enabled: u32,
+    config_done: u32,
+    fifo: Vec<u8>,
+    fifo_used: bool,
+}
+
+impl StandardVga {
+    pub fn enable_vmware(&mut self) {
+        self.config[..4].copy_from_slice(&0x040515adu32.to_le_bytes());
+        self.config[8] = 0;
+        self.config[0x10..0x1c].fill(0);
+        self.config[0x10] = 1;
+        self.config[0x14] = 8;
+        self.config[0x18] = 8;
+        self.config[0x2c..0x30].copy_from_slice(&0x040515adu32.to_le_bytes());
+        self.svga = Some(Svga {
+            index: 0,
+            id: 0x90000002,
+            enabled: 0,
+            config_done: 0,
+            fifo: vec![0; 65536],
+            fifo_used: false,
+        });
+    }
+    pub fn pci_identity(&self) -> u32 {
+        u32::from_le_bytes(self.config[..4].try_into().expect("PCI identity"))
+    }
+    pub fn framebuffer_bar(&self) -> usize {
+        usize::from(self.svga.is_some())
+    }
+    pub fn unsupported_fifo(&self) -> Option<String> {
+        let svga = self.svga.as_ref()?;
+        let word = |offset| {
+            u32::from_le_bytes(
+                svga.fifo[offset..offset + 4]
+                    .try_into()
+                    .expect("FIFO header"),
+            )
+        };
+        (svga.fifo_used && svga.config_done != 0 && word(8) != word(12)).then(|| format!(
+            "VMware SVGA FIFO submitted: MIN={:#x} MAX={:#x} NEXT_CMD={:#x} STOP={:#x}; FIFO processing is unsupported", word(0), word(4), word(8), word(12)))
+    }
+    fn svga_read(&self) -> u32 {
+        let svga = self.svga.as_ref().expect("SVGA variant");
+        match svga.index {
+            0 => svga.id,
+            1 => svga.enabled,
+            2 => u32::from(self.dispi[1]),
+            3 => u32::from(self.dispi[2]),
+            4 => 2560,
+            5 => 1600,
+            6 => 24,
+            7 => 32,
+            8 => 0,
+            9 => 0xff0000,
+            10 => 0xff00,
+            11 => 0xff,
+            12 => u32::from(self.dispi[1]) * 4,
+            13 => {
+                u32::from_le_bytes(self.config[0x14..0x18].try_into().expect("framebuffer BAR"))
+                    & !15
+            }
+            15 | 16 => VRAM_SIZE as u32,
+            17 => 0,
+            18 => u32::from_le_bytes(self.config[0x18..0x1c].try_into().expect("FIFO BAR")) & !15,
+            19 => 65536,
+            20 => svga.config_done,
+            _ => 0,
+        }
+    }
+    fn svga_write(&mut self, value: u32) {
+        let svga = self.svga.as_mut().expect("SVGA variant");
+        match svga.index {
+            0 if (0x90000000..=0x90000002).contains(&value) => svga.id = value,
+            1 => svga.enabled = value & 3,
+            2 | 3 if value <= u32::from(u16::MAX) => {
+                let index = svga.index as usize - 1;
+                self.dispi_write(index, value as u16);
+            }
+            20 => svga.config_done = value,
+            _ => {}
+        }
     }
 }

@@ -8,6 +8,46 @@
 
 use std::path::PathBuf;
 
+#[test]
+fn macos_launch_serialization_and_description_redaction_are_separate() {
+    let description: vmlab_hv_proto::MachineDescription =
+        serde_json::from_value(serde_json::json!({
+            "name":"macos", "arch":"x86_64","accel":"kvm","vcpus":4,"memory_mib":8192,
+            "boot":{"kind":"kernel","kernel":"unused","cmdline":""},
+            "disks":[],"nics":[],"ports":[],"serial_log":"unused",
+            "applesmc":{"osk":"FAKE".repeat(16)}, "cpu_model":"Skylake-Client-v4",
+            "msr_policy":"ignore","tsc_khz":4291934,"invtsc":true,"vmware_cpuid_freq":true,
+            "usb_keyboard":true,"smbios_type2":true
+        }))
+        .unwrap();
+    let fake = "FAKE".repeat(16);
+    assert!(!format!("{description:?}").contains(&fake));
+    let redacted = serde_json::to_string(&description.redacted()).unwrap();
+    assert!(!redacted.contains(&fake));
+    let encoded = serde_json::to_vec(&description).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<vmlab_hv_proto::MachineDescription>(&encoded).unwrap(),
+        description
+    );
+}
+
+#[test]
+fn invalid_smc_sections_do_not_echo_supplied_values() {
+    let fake = "FAKE".repeat(16);
+    let mut unknown = serde_json::json!({"osk":fake});
+    unknown
+        .as_object_mut()
+        .unwrap()
+        .insert(fake.clone(), 0.into());
+    for value in [serde_json::Value::String(fake.clone()), unknown] {
+        let error = serde_json::from_value::<vmlab_hv_proto::machine::AppleSmc>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains(&fake), "SMC input appeared in an error");
+        assert!(error.contains("osk"));
+    }
+}
+
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use vmlab_hv_proto::control::{
@@ -114,6 +154,13 @@ fn sample_machine() -> MachineDescription {
         machine: Default::default(),
         cpu: Default::default(),
         cpu_model: None,
+        invtsc: false,
+        tsc_khz: None,
+        vmware_cpuid_freq: false,
+        msr_policy: Default::default(),
+        applesmc: None,
+        usb_keyboard: false,
+        smbios_type2: false,
         floppy: None,
         serial_log_port: Default::default(),
         hyperv: vec![],

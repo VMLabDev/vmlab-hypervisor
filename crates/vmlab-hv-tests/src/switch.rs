@@ -181,7 +181,7 @@ fn serve(listener: UnixListener, inner: Arc<Mutex<Inner>>, stopped: Arc<AtomicBo
     }
 }
 
-/// Record one frame and produce a reply when it is DHCP.
+/// Record one frame and answer DHCP, gateway ARP, and ICMP echo requests.
 fn handle_frame(frame: &[u8], inner: &Arc<Mutex<Inner>>) -> Option<Vec<u8>> {
     if frame.len() < 14 {
         return None;
@@ -195,8 +195,27 @@ fn handle_frame(frame: &[u8], inner: &Arc<Mutex<Inner>>) -> Option<Vec<u8>> {
             inner.stats.frames_from_guest_mac += 1;
         }
     }
+    if ethertype == 0x0806
+        && frame.len() >= 42
+        && frame[14..22] == [0, 1, 8, 0, 6, 4, 0, 1]
+        && frame[38..42] == SERVER_IP.octets()
+    {
+        let mut reply = frame[..42].to_vec();
+        reply[..6].copy_from_slice(&src);
+        reply[6..12].copy_from_slice(&SWITCH_MAC);
+        reply[20..22].copy_from_slice(&2u16.to_be_bytes());
+        reply[32..38].copy_from_slice(&frame[22..28]);
+        reply[38..42].copy_from_slice(&frame[28..32]);
+        reply[22..28].copy_from_slice(&SWITCH_MAC);
+        reply[28..32].copy_from_slice(&SERVER_IP.octets());
+        reply.resize(60, 0);
+        return Some(reply);
+    }
     if ethertype != 0x0800 {
-        return None; // ARP and friends: observed, not answered
+        return None;
+    }
+    if let Some(reply) = echo_reply(frame) {
+        return Some(reply);
     }
     let dhcp = parse_dhcp(frame)?;
     let reply_type = match dhcp.message_type {
@@ -215,6 +234,42 @@ fn handle_frame(frame: &[u8], inner: &Arc<Mutex<Inner>>) -> Option<Vec<u8>> {
     }
     let mut reply = build_dhcp_reply(&dhcp, reply_type, LEASE_IP);
     reply.resize(reply.len().max(60), 0); // Ethernet minimum
+    Some(reply)
+}
+
+fn echo_reply(frame: &[u8]) -> Option<Vec<u8>> {
+    let ip = frame.get(14..)?;
+    if ip.len() < 20
+        || ip[0] >> 4 != 4
+        || ip[9] != 1
+        || ip[16..20] != SERVER_IP.octets()
+        || u16::from_be_bytes([ip[6], ip[7]]) & 0x3fff != 0
+    {
+        return None;
+    }
+    let header = usize::from(ip[0] & 15) * 4;
+    let length = usize::from(u16::from_be_bytes([ip[2], ip[3]]));
+    if header < 20
+        || length < header + 8
+        || length > ip.len()
+        || ip[header] != 8
+        || ip[header + 1] != 0
+    {
+        return None;
+    }
+    let mut reply = frame[..14 + length].to_vec();
+    reply[..6].copy_from_slice(&frame[6..12]);
+    reply[6..12].copy_from_slice(&SWITCH_MAC);
+    reply[26..30].copy_from_slice(&SERVER_IP.octets());
+    reply[30..34].copy_from_slice(&ip[12..16]);
+    reply[24..26].fill(0);
+    let ip_sum = ip_checksum(&reply[14..14 + header]);
+    reply[24..26].copy_from_slice(&ip_sum.to_be_bytes());
+    reply[14 + header] = 0;
+    reply[16 + header..18 + header].fill(0);
+    let icmp_sum = ip_checksum(&reply[14 + header..]);
+    reply[16 + header..18 + header].copy_from_slice(&icmp_sum.to_be_bytes());
+    reply.resize(reply.len().max(60), 0);
     Some(reply)
 }
 
@@ -345,4 +400,80 @@ fn ip_checksum(header: &[u8]) -> u16 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     !(sum as u16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_answers_arp_and_icmp_over_the_switch_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("switch.sock");
+        let switch = MiniSwitch::bind(&socket).unwrap();
+        let mut client = UnixStream::connect(socket).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut exchange = |frame: &[u8]| {
+            client
+                .write_all(&(frame.len() as u32).to_be_bytes())
+                .unwrap();
+            client.write_all(frame).unwrap();
+            let mut size = [0; 4];
+            client.read_exact(&mut size).unwrap();
+            let mut reply = vec![0; u32::from_be_bytes(size) as usize];
+            client.read_exact(&mut reply).unwrap();
+            reply
+        };
+        let mut arp = vec![0; 42];
+        arp[..6].fill(255);
+        arp[6..12].copy_from_slice(&crate::TEST_MAC);
+        arp[12..22].copy_from_slice(&[8, 6, 0, 1, 8, 0, 6, 4, 0, 1]);
+        arp[22..28].copy_from_slice(&crate::TEST_MAC);
+        arp[28..32].copy_from_slice(&LEASE_IP.octets());
+        arp[38..42].copy_from_slice(&SERVER_IP.octets());
+        let reply = exchange(&arp);
+        assert_eq!(&reply[..6], &crate::TEST_MAC);
+        assert_eq!(&reply[6..12], &SWITCH_MAC);
+        assert_eq!(&reply[20..22], &[0, 2]);
+        assert_eq!(&reply[22..28], &SWITCH_MAC);
+        assert_eq!(&reply[28..32], &SERVER_IP.octets());
+        assert_eq!(&reply[32..38], &crate::TEST_MAC);
+        assert_eq!(&reply[38..42], &LEASE_IP.octets());
+
+        let mut echo = vec![0; 14 + 20 + 8 + 5];
+        echo[..6].copy_from_slice(&SWITCH_MAC);
+        echo[6..12].copy_from_slice(&crate::TEST_MAC);
+        echo[12..14].copy_from_slice(&[8, 0]);
+        echo[14] = 0x45;
+        echo[16..18].copy_from_slice(&33u16.to_be_bytes());
+        echo[22] = 64;
+        echo[23] = 1;
+        echo[26..30].copy_from_slice(&LEASE_IP.octets());
+        echo[30..34].copy_from_slice(&SERVER_IP.octets());
+        echo[34] = 8;
+        echo[38..42].copy_from_slice(&[0x12, 0x34, 0, 1]);
+        echo[42..].copy_from_slice(b"hello");
+        let checksum = ip_checksum(&echo[14..34]);
+        echo[24..26].copy_from_slice(&checksum.to_be_bytes());
+        let checksum = ip_checksum(&echo[34..]);
+        echo[36..38].copy_from_slice(&checksum.to_be_bytes());
+        let reply = exchange(&echo);
+        assert_eq!(&reply[..6], &crate::TEST_MAC);
+        assert_eq!(&reply[6..12], &SWITCH_MAC);
+        assert_eq!(&reply[26..30], &SERVER_IP.octets());
+        assert_eq!(&reply[30..34], &LEASE_IP.octets());
+        assert_eq!(reply[34], 0);
+        assert_eq!(&reply[38..47], &echo[38..]);
+        assert_eq!(ip_checksum(&reply[14..34]), 0);
+        assert_eq!(ip_checksum(&reply[34..47]), 0);
+        assert_eq!(switch.stats().frames_from_guest_mac, 2);
+        echo[20] = 0x20;
+        assert!(echo_reply(&echo).is_none(), "fragmented echo request");
+        echo[20] = 0;
+        for length in 0..echo.len() {
+            assert!(echo_reply(&echo[..length]).is_none());
+        }
+    }
 }

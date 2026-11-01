@@ -133,6 +133,17 @@ def negotiate(fd, rate, channels):
     return max(period, 1)
 
 
+def pcm_diagnostics():
+    """Report PCM state without changing the failed stream."""
+    from pathlib import Path
+
+    for status in Path("/proc/asound").glob("card*/pcm*/sub*/status"):
+        print(f"{status}:\n{status.read_text()}", file=sys.stderr)
+    for line in Path("/proc/interrupts").read_text().splitlines():
+        if "hda" in line.lower():
+            print(line, file=sys.stderr)
+
+
 def play(device, rate, channels):
     """Play raw PCM from stdin. With ALSA_MARKER set to a virtio-serial
     port device, one marker byte is written there immediately before the
@@ -168,6 +179,7 @@ def play(device, rate, channels):
                         # Underrun: reprepare and keep going.
                         fcntl.ioctl(fd, IOCTL_PREPARE)
                         continue
+                    pcm_diagnostics()
                     raise
                 data = data[written:]
         fcntl.ioctl(fd, IOCTL_DRAIN)
@@ -198,6 +210,7 @@ def record(device, rate, channels, seconds):
                     fcntl.ioctl(fd, IOCTL_PREPARE)
                     fcntl.ioctl(fd, IOCTL_START)
                     continue
+                pcm_diagnostics()
                 raise
             if not data:
                 break

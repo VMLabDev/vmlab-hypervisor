@@ -28,6 +28,8 @@ pub struct PciDevice {
 /// Guest-visible topology; RAM ranges contain `(base, length)` in bytes.
 #[derive(Clone, Debug)]
 pub struct Platform {
+    pub applesmc: bool,
+    pub amd_hypertransport: bool,
     pub vcpus: u16,
     pub max_cpus: u16,
     pub ram_regions: Vec<(u64, u64)>,
@@ -43,6 +45,8 @@ pub struct Platform {
 impl Default for Platform {
     fn default() -> Self {
         Self {
+            applesmc: false,
+            amd_hypertransport: true,
             vcpus: 2,
             max_cpus: 2,
             ram_regions: vec![(0, 2 << 30)],
@@ -379,6 +383,9 @@ fn dsdt(p: &Platform) -> Vec<u8> {
         }
         if d.device == 31 && d.function == 0 {
             node.extend_from_slice(&source[0x205d..0x20ac]);
+            if p.applesmc {
+                node.extend(applesmc_device());
+            }
             if p.tpm {
                 node.extend(tpm_device());
             }
@@ -404,6 +411,16 @@ fn dsdt(p: &Platform) -> Vec<u8> {
 fn tpm_device() -> Vec<u8> {
     // Complete TIS and physical-presence namespace observed under OVMF.
     TPM_DSDT[0x2138..0x23a4].to_vec()
+}
+
+fn applesmc_device() -> Vec<u8> {
+    let mut node = b"SMC_\x08_HID\x0c\x06\x10\x00\x01\x08_STA\x0a\x0b\x08_CRS".to_vec();
+    // ACPI IO(Decode16, 0x300, 0x300, 1, 0x20), IRQNoFlags(6), EndTag.
+    let resources = [
+        0x0a, 13, 0x47, 1, 0, 3, 0, 3, 1, 0x20, 0x22, 0x40, 0, 0x79, 0,
+    ];
+    node.extend(package(&[0x11], &resources));
+    package(&[0x5b, 0x82], &node)
 }
 
 pub(crate) fn processor(id: u8, present: bool) -> Vec<u8> {

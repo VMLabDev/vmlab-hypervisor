@@ -96,8 +96,20 @@ impl Video {
     }
     pub(crate) fn pci_id(&self) -> u32 {
         match self {
-            Self::Standard(_) => 0x11111234,
+            Self::Standard(device) => device.lock().pci_identity(),
             Self::Virtio(_) => 0x10501af4,
+        }
+    }
+    pub(crate) fn framebuffer_bar(&self) -> usize {
+        match self {
+            Self::Standard(device) => device.lock().framebuffer_bar(),
+            Self::Virtio(_) => 0,
+        }
+    }
+    pub(crate) fn unsupported_fifo(&self) -> Option<String> {
+        match self {
+            Self::Standard(device) => device.lock().unsupported_fifo(),
+            Self::Virtio(_) => None,
         }
     }
     pub(crate) fn cursor(&self) -> vmlab_hv_display::Cursor {
@@ -283,6 +295,15 @@ impl InputSink for Input {
         };
         match message {
             Message::Key { qcode, down } => {
+                if let Some(xhci) = shared.xhci.lock().as_ref() {
+                    let mut xhci = xhci.lock();
+                    if xhci.has_keyboard() {
+                        if let Err(e) = xhci.inject_key(&qcode, down) {
+                            eprintln!("display key: {e}");
+                        }
+                        return;
+                    }
+                }
                 if let Some(chipset) = shared.chipset.lock().as_ref()
                     && let Err(e) = chipset.ps2.lock().inject_key(&qcode, down)
                 {

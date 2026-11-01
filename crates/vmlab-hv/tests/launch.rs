@@ -87,6 +87,44 @@ fn serial_log_text(dir: &Dir) -> String {
 }
 
 #[test]
+fn malformed_secret_descriptions_do_not_echo_values() {
+    let dir = Dir::new("malformed-secret");
+    let machine = dir.machine();
+    let description: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&machine).unwrap()).unwrap();
+    let fake = "FAKE".repeat(16);
+    let mut wrong_section = description.clone();
+    wrong_section["applesmc"] = fake.clone().into();
+    let mut wrong_field = description;
+    wrong_field["applesmc"] = serde_json::json!({"osk":fake});
+    wrong_field["applesmc"]
+        .as_object_mut()
+        .unwrap()
+        .insert(fake.clone(), 0.into());
+    for value in [
+        wrong_section,
+        wrong_field,
+        serde_json::Value::String(fake.clone()),
+    ] {
+        std::fs::write(&machine, serde_json::to_vec(&value).unwrap()).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+            .arg("--machine")
+            .arg(&machine)
+            .arg("--control")
+            .arg(dir.control())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&fake));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains(&fake));
+        assert!(error.contains("invalid machine description at line "));
+        assert!(error.contains(", column "));
+        assert!(!dir.control().exists());
+    }
+}
+
+#[test]
 fn display_startup_failure_preserves_targets_and_never_advertises_control() {
     if !Path::new("/dev/kvm").exists()
         || !Path::new("/usr/share/qemu/bios-256k.bin").exists()

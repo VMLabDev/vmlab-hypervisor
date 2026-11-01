@@ -56,16 +56,16 @@ impl PointerEvent {
 /// snapshots; the default matches QEMU at PCI 00:01.0, first USB connector.
 pub struct Tablet {
     serial: String,
-    configuration: u8,
+    pub(super) configuration: u8,
     address: u8,
-    idle: u8,
+    pub(super) idle: u8,
     protocol: u8,
     remote_wakeup: bool,
-    halted: bool,
+    pub(super) halted: bool,
     current: [u8; 6],
     reports: VecDeque<[u8; 6]>,
-    idle_elapsed: Duration,
-    clock: Instant,
+    pub(super) idle_elapsed: Duration,
+    pub(super) clock: Instant,
 }
 
 impl Default for Tablet {
@@ -95,7 +95,7 @@ impl Tablet {
             (1, 0) => DEVICE.to_vec(),
             (2, 0) => CONFIG.to_vec(),
             (3, 0) => vec![4, 3, 9, 4],
-            (3, 1..=10) => {
+            (3, 1..=11) => {
                 let s = match index {
                     1 => "QEMU",
                     2 => "QEMU USB Mouse",

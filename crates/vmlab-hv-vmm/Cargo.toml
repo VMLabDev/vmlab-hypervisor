@@ -40,6 +40,7 @@ name = "os-workload"
 required-features = ["tcg-bench"]
 
 [dev-dependencies]
+vmlab-hv-tests = { path = "../vmlab-hv-tests" }
 tempfile = "3"
 virtio-queue = "0.18"
 

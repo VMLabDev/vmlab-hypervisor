@@ -1097,6 +1097,20 @@ fn snapshot_stops_console_dma_before_saving_ram() {
 
 #[test]
 fn rapid_snapshot_loads_roll_back_guest_tsc() {
+    snapshot_tsc_roundtrip(Duration::ZERO, Duration::ZERO);
+}
+
+#[test]
+fn snapshot_tsc_rollback_allows_delayed_save_observation() {
+    snapshot_tsc_roundtrip(Duration::from_millis(150), Duration::ZERO);
+}
+
+#[test]
+fn snapshot_tsc_rollback_allows_delayed_guest_execution() {
+    snapshot_tsc_roundtrip(Duration::ZERO, Duration::from_millis(150));
+}
+
+fn snapshot_tsc_roundtrip(save_delay: Duration, load_delay: Duration) {
     // IN pauses before RDTSC; each resume stores EDX:EAX and pauses again.
     let payload = [
         0xe4, 0x80, 0x0f, 0x31, 0x66, 0xa3, 0x00, 0x90, 0x66, 0x89, 0x16, 0x04, 0x90, 0xeb, 0xf1,
@@ -1118,6 +1132,21 @@ fn rapid_snapshot_loads_roll_back_guest_tsc() {
     wait();
     let cpus = m.handle.shared().vcpus.lock().clone();
     let khz = cpus[0].1.lock().get_tsc_khz().unwrap() as u64;
+    let vm = &m.handle.shared().kvm.vm;
+    let cycles = |ns: u64| (u128::from(ns) * u128::from(khz) / 1_000_000) as u64;
+    let timebase = || {
+        let clock = vm.get_clock().unwrap();
+        assert_ne!(clock.flags & kvm_bindings::KVM_CLOCK_HOST_TSC, 0);
+        let mut offset = 0;
+        snapshot::tsc_offset(&cpus[0].1.lock(), &mut offset, false).unwrap();
+        // The offset is stable while paused, but IA32_TSC keeps advancing.
+        // Compare the guest TSC at kvmclock zero using KVM's paired sample.
+        let origin = clock
+            .host_tsc
+            .wrapping_add(offset)
+            .wrapping_sub(cycles(clock.clock));
+        (clock.clock, origin)
+    };
     let socket = m._dir.path().join("control.sock");
     crate::control::serve(&socket, &m.handle).unwrap();
     let mut client = vmlab_hv_proto::client::Client::connect(socket).unwrap();
@@ -1131,33 +1160,167 @@ fn rapid_snapshot_loads_roll_back_guest_tsc() {
         &mut client,
         vmlab_hv_proto::control::Command::SnapshotSave { name: "tsc".into() },
     );
-    let mut tsc = kvm_bindings::Msrs::from_entries(&[kvm_bindings::kvm_msr_entry {
-        index: 0x10,
-        ..Default::default()
-    }])
-    .unwrap();
-    assert_eq!(cpus[0].1.lock().get_msrs(&mut tsc).unwrap(), 1);
-    let saved = tsc.as_slice()[0].data;
+    // Exceed the old timing tolerance without changing any guest state.
+    std::thread::sleep(save_delay);
+    let (_, saved) = timebase();
+    let tolerance = khz * 50;
     for cycle in 0..3 {
         std::thread::sleep(Duration::from_millis(100));
         call(
             &mut client,
             vmlab_hv_proto::control::Command::SnapshotLoad { name: "tsc".into() },
         );
+        std::thread::sleep(load_delay);
+        let (before, restored) = timebase();
+        let drift = (restored.wrapping_sub(saved) as i64).unsigned_abs();
+        assert!(
+            drift < tolerance,
+            "load {cycle}: guest TSC drifted {} ms relative to kvmclock",
+            drift / khz
+        );
         call(&mut client, vmlab_hv_proto::control::Command::Resume);
         wait();
+        let after = vm.get_clock().unwrap().clock;
         let mut bytes = [0; 8];
         m.vm.ram
             .mem
             .read_slice(&mut bytes, GuestAddress(0x9000))
             .unwrap();
         let observed = u64::from_le_bytes(bytes);
+        // RDTSC executes between these clock samples, even if the host delays
+        // the control reply or deschedules the vCPU before it can run.
+        let observed_clock = observed.wrapping_sub(saved);
         assert!(
-            observed.abs_diff(saved) < khz * 50,
-            "load {cycle}: guest TSC drifted {} ms",
-            observed.abs_diff(saved) / khz
+            observed_clock >= cycles(before).saturating_sub(tolerance)
+                && observed_clock <= cycles(after).saturating_add(tolerance),
+            "load {cycle}: guest RDTSC {observed_clock} is outside kvmclock interval {}..{}",
+            cycles(before),
+            cycles(after)
         );
     }
+}
+
+#[test]
+fn macos_snapshot_preserves_cpuid_msr_log_and_refuses_changed_tsc_frequency() {
+    use vmlab_hv_proto::{
+        client::Client,
+        control::{Command, ErrorCode, Outcome},
+    };
+    if !Path::new("/dev/kvm").exists() {
+        eprintln!("skipping macOS snapshot: /dev/kvm unavailable");
+        return;
+    }
+    let _permit = vmlab_hv_tests::process::VmPermit::acquire().unwrap();
+    let m = machine_with_setup(&[0xeb, 0xfe], 8, |_, cpu| {
+        cpu.set_cpuid2(&crate::macos::skylake_cpuid(0, 1).unwrap())
+            .unwrap();
+        let desc = serde_json::from_value(serde_json::json!({
+            "name":"macos-snapshot", "arch":"x86_64", "accel":"kvm", "vcpus":1, "memory_mib":16,
+            "boot":{"kind":"kernel","kernel":"unused","cmdline":""},
+            "disks":[],"nics":[],"ports":[],"serial_log":"unused",
+            "cpu_model":"Skylake-Client-v4","invtsc":true,"vmware_cpuid_freq":true,
+            "tsc_khz":cpu.get_tsc_khz().unwrap()
+        }))
+        .unwrap();
+        crate::macos::configure_tsc(cpu, &desc, false).unwrap();
+    })
+    .expect("create snapshot test VM");
+    m.handle.pause().unwrap();
+    m.handle
+        .shared()
+        .wait_quiesced(Duration::from_secs(5))
+        .unwrap();
+    let shared = m.handle.shared();
+    shared.ignored_msrs.lock().insert(0x60d);
+    let cpus = shared.vcpus.lock().clone();
+    let frequency = cpus[0].1.lock().get_tsc_khz().unwrap();
+    let initial = cpus[0]
+        .1
+        .lock()
+        .get_cpuid2(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
+        .unwrap();
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = Client::connect(socket).unwrap();
+    assert!(matches!(
+        client
+            .call(Command::SnapshotSave {
+                name: "cpu-policy".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    shared.ignored_msrs.lock().insert(0x3f8);
+    let mut changed_cpuid = initial.clone();
+    changed_cpuid
+        .as_mut_slice()
+        .iter_mut()
+        .find(|entry| entry.function == 0x40000010)
+        .unwrap()
+        .eax = 1;
+    cpus[0].1.lock().set_cpuid2(&changed_cpuid).unwrap();
+    cpus[0].1.lock().set_tsc_khz(frequency - 1000).unwrap();
+    m.vm.ram
+        .mem
+        .write_slice(&[42], GuestAddress(0x9000))
+        .unwrap();
+    let outcome = client
+        .call(Command::SnapshotLoad {
+            name: "cpu-policy".into(),
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Error {
+                code: ErrorCode::SnapshotIncompatible,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    let mut byte = [0];
+    m.vm.ram
+        .mem
+        .read_slice(&mut byte, GuestAddress(0x9000))
+        .unwrap();
+    assert_eq!(byte, [42], "frequency rejection changed guest RAM");
+    cpus[0].1.lock().set_tsc_khz(frequency).unwrap();
+    let changed_tsc = kvm_bindings::Msrs::from_entries(&[kvm_bindings::kvm_msr_entry {
+        index: 0x10,
+        data: 1u64 << 60,
+        ..Default::default()
+    }])
+    .unwrap();
+    assert_eq!(cpus[0].1.lock().set_msrs(&changed_tsc).unwrap(), 1);
+    assert!(matches!(
+        client
+            .call(Command::SnapshotLoad {
+                name: "cpu-policy".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    assert_eq!(
+        *shared.ignored_msrs.lock(),
+        std::collections::BTreeSet::from([0x60d, 0x3f8])
+    );
+    assert_eq!(cpus[0].1.lock().get_tsc_khz().unwrap(), frequency);
+    let mut observed = kvm_bindings::Msrs::from_entries(changed_tsc.as_slice()).unwrap();
+    assert_eq!(cpus[0].1.lock().get_msrs(&mut observed).unwrap(), 1);
+    assert!(
+        observed.as_slice()[0].data < 1u64 << 59,
+        "snapshot did not roll back the synthetic large TSC jump"
+    );
+    assert_eq!(
+        cpus[0]
+            .1
+            .lock()
+            .get_cpuid2(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
+            .unwrap()
+            .as_slice(),
+        initial.as_slice()
+    );
 }
 
 #[test]
