@@ -1101,6 +1101,96 @@ fn rapid_snapshot_loads_roll_back_guest_tsc() {
 }
 
 #[test]
+fn snapshot_load_excludes_device_restore_time_from_guest_clock() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use vmlab_hv_devices::{DeviceError, Snapshot};
+
+    struct SlowRestore {
+        vm: Arc<kvm_ioctls::VmFd>,
+        khz: u64,
+        before: Arc<AtomicU64>,
+        resumed: Arc<AtomicU64>,
+    }
+    impl SlowRestore {
+        fn origin(&self) -> u64 {
+            let clock = self.vm.get_clock().unwrap();
+            assert_ne!(clock.flags & kvm_bindings::KVM_CLOCK_HOST_TSC, 0);
+            let cycles = (u128::from(clock.clock) * u128::from(self.khz) / 1_000_000) as u64;
+            clock.host_tsc.wrapping_sub(cycles)
+        }
+    }
+    impl Snapshot for SlowRestore {
+        fn state_id(&self) -> String {
+            "slow-clock-restore".into()
+        }
+        fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
+            Ok(vec![])
+        }
+        fn restore_state(&mut self, _: &[u8]) -> Result<(), DeviceError> {
+            self.before.store(self.origin(), Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(600));
+            Ok(())
+        }
+        fn resume_snapshot(&mut self) {
+            self.resumed.store(self.origin(), Ordering::SeqCst);
+        }
+    }
+
+    let Some(m) = machine(&[0xe4, 0x80, 0xeb, 0xfc], 8) else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while m.handle.status() != vmlab_hv_proto::control::RunState::Paused {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    m.handle
+        .shared()
+        .wait_quiesced(Duration::from_secs(5))
+        .unwrap();
+    let shared = m.handle.shared();
+    let original = shared.snapshot_registry().unwrap();
+    let khz = shared.vcpus.lock()[0].1.lock().get_tsc_khz().unwrap() as u64;
+    let before = Arc::new(AtomicU64::new(0));
+    let resumed = Arc::new(AtomicU64::new(0));
+    let DeviceNode::Plain(serial) = &original.nodes[0] else {
+        panic!("test machine has a plain serial snapshot node");
+    };
+    shared.set_snapshot_registry(Arc::new(SnapshotRegistry {
+        digest: original.digest,
+        disks: original
+            .disks
+            .iter()
+            .map(|disk| DiskNode {
+                id: disk.id.clone(),
+                writable: disk.writable,
+                vmstate: disk.vmstate,
+                image: disk.image.clone(),
+            })
+            .collect(),
+        nodes: vec![
+            DeviceNode::Plain(serial.clone()),
+            DeviceNode::Plain(Arc::new(PlMutex::new(SlowRestore {
+                vm: shared.kvm.vm.clone(),
+                khz,
+                before: before.clone(),
+                resumed: resumed.clone(),
+            }))),
+        ],
+    }));
+    snapshot::save(&m.handle, "clock").unwrap();
+    snapshot::load(&m.handle, "clock").unwrap();
+    // Paired KVM samples cancel host scheduling delays after the rebase.
+    let excluded = resumed
+        .load(Ordering::SeqCst)
+        .wrapping_sub(before.load(Ordering::SeqCst));
+    assert!(
+        excluded >= khz * 500,
+        "device restore time advanced the guest clock"
+    );
+}
+
+#[test]
 fn snapshot_tsc_rollback_allows_delayed_save_observation() {
     snapshot_tsc_roundtrip(Duration::from_millis(150), Duration::ZERO);
 }

@@ -37,6 +37,7 @@ pub(crate) fn rtc_base(base: Option<&str>) -> Result<i64, VmmError> {
 struct State {
     rtc: Rtc,
     last: u64,
+    snapshot_paused: bool,
 }
 
 /// The timer holds a weak reference so dropping the machine stops it.
@@ -59,6 +60,7 @@ impl KvmRtc {
         let state = Arc::new(Mutex::new(State {
             rtc: Rtc::new(ram_bytes, base, irq),
             last,
+            snapshot_paused: false,
         }));
         let weak = Arc::downgrade(&state);
         let weak_vm = Arc::downgrade(&vm);
@@ -93,6 +95,9 @@ impl KvmRtc {
 }
 
 fn advance(state: &mut State, now: u64) {
+    if state.snapshot_paused {
+        return;
+    }
     let delta = now.saturating_sub(state.last);
     state.last = now;
     state.rtc.advance(delta);
@@ -125,6 +130,14 @@ impl vmlab_hv_devices::Resettable for KvmRtc {
 }
 
 impl Snapshot for KvmRtc {
+    fn quiesce(&mut self) {
+        let mut state = self.state.lock();
+        if let Err(error) = self.sync(&mut state) {
+            eprintln!("RTC clock at snapshot quiesce: {error}");
+        }
+        state.snapshot_paused = true;
+    }
+
     fn state_id(&self) -> String {
         self.state.lock().rtc.state_id()
     }
@@ -145,11 +158,41 @@ impl Snapshot for KvmRtc {
             .clock;
         Ok(())
     }
+
+    fn resume_snapshot(&mut self) {
+        match self.vm.get_clock() {
+            Ok(clock) => {
+                let mut state = self.state.lock();
+                state.last = clock.clock;
+                state.snapshot_paused = false;
+            }
+            Err(error) => eprintln!("RTC KVM_GET_CLOCK at snapshot resume: {error}"),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_quiescence_freezes_the_rtc_clock_anchor() {
+        struct Irq;
+        impl IrqLine for Irq {
+            fn set_level(&self, _: bool) {}
+        }
+        let mut state = State {
+            rtc: Rtc::new(16 << 20, 0, Arc::new(Irq)),
+            last: 123,
+            snapshot_paused: true,
+        };
+        advance(&mut state, 600_000_123);
+        assert_eq!(state.last, 123);
+        state.last = 456;
+        state.snapshot_paused = false;
+        advance(&mut state, 789);
+        assert_eq!(state.last, 789);
+    }
 
     #[test]
     fn parses_utc_and_offsets_and_rejects_invalid_dates() {
