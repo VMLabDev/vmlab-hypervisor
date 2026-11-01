@@ -136,11 +136,14 @@ fn read_machine(path: &PathBuf, control: &std::path::Path) -> Result<MachineDesc
         )
     })?;
     diagnostics::report::configure(control, &value)?;
-    serde_json::from_value(value).map_err(|e| {
+    // Deserializer errors can include input values, including secrets, so only
+    // the location is reported.
+    serde_json::from_str(&text).map_err(|error| {
         format!(
-            "parsing {}: {}",
+            "parsing {}: invalid machine description at line {}, column {}",
             path.display(),
-            diagnostics::report::scrub(&e.to_string())
+            error.line(),
+            error.column()
         )
     })
 }
