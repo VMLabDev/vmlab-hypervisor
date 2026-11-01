@@ -4,6 +4,43 @@
 G1, G2, G7, and G10 fail.**
 The VM default must remain unchanged.
 
+## Round 4 main integration before the bench window
+
+The first post-merge CI attempt exited 101 on a pre-existing CPU-policy
+fixture race. The test started a guest, immediately paused it, then changed
+CPUID. KVM rejects changed CPUID after the first KVM_RUN. An isolated rerun
+passed, but a 150 ms scheduling delay reproduced EINVAL at SET_CPUID2.
+Commit `19676ee` starts that fixture paused, retains the delay, and asserts
+the initial paused state. All original CPUID, MSR-log, TSC rollback, and
+changed-frequency rejection assertions remain. Production code is unchanged
+by that fix. All 202 active VMM unit tests passed before the full rerun.
+
+The full `just ci::check` rerun exited 0 on `19676ee`: 987 tests passed,
+zero failed, and six manual diagnostics remained ignored across 65 result
+groups. Formatting and workspace clippy with `-D warnings` passed. The
+suite ran with RUST_TEST_THREADS=1 and the 1800-second child-process
+deadline, inside the 24 GiB, zero-swap scope. The ignored diagnostics were
+not run explicitly. Physical USB/VFIO opt-ins remained unset.
+
+The requested main `a8fdf05` was merged as `c551327`. Its one conflict was
+in the vCPU post-KVM_RUN hooks. The resolution records opted-in exit
+metadata first, then drains coalesced VGA writes before dispatch or
+parking. VGA delivery remains on machine-events, while rendering stays
+on the incoming display-frames worker. The halted-guest VGA S1 check also
+passed with the exit recorder enabled. All 83 benchmark unit tests passed.
+
+The release binary was rebuilt from `c551327`. The only source change
+between that runtime and validated `19676ee` is the snapshot test fixture.
+`bench/profiles/phase2-round4-main-a8fdf05-20261101.json` records both
+commits, the release binary hash, complete validation logs, the initial
+failure and its reproduction, and the kernel reference for the CPUID rule.
+
+No post-merge D28 cohort has run. The timings below and the original
+round-4 JSON describe the pre-merge runtime and remain historical evidence.
+The display/audio-clock change and diagnostic hooks require fresh QEMU
+and vmlab-hv measurements in the owner's authorized quiet bench window.
+No threshold or default changed, and nothing was pushed.
+
 ## Round 4 development diagnostics
 
 The round-4 changes start at `379c1ca`. These are shared-host diagnostics,
@@ -133,9 +170,9 @@ syscall table, exit counter, and driver source. It explicitly rejects a
 quiet-host claim. G1, G2, G7, and G10 remain open pending the final cohort;
 the historical G7 regression commit remains unassigned.
 
-### Correctness and completion
+### Pre-merge correctness and completion
 
-`just ci::check` exited 0 on the final runtime, inside the 24 GiB,
+`just ci::check` exited 0 on the pre-merge runtime, inside the 24 GiB,
 zero-swap scope with RUST_TEST_THREADS=1 and a 1800-second child-process
 deadline. Its 64 result groups report 945 passing tests, zero failures,
 and three ignored tests. Formatting and workspace clippy with `-D warnings`
@@ -155,7 +192,8 @@ rebound, or reset.
 No scoped `todo!()` or `unimplemented!()` remains. No shared Rust trait,
 control protocol, or snapshot-format signature changed. The net feature
 offer now includes EVENT_IDX. Runtime fixes are separate commits on
-`wp/p2-perf4`; nothing was merged or pushed. All owned measurement VMs,
+`wp/p2-perf4`; the performance branch was not merged into main or pushed.
+All owned measurement VMs,
 peers, profilers, and CI jobs were reaped after recording their results.
 Final quiet-host D28 validation remains unfinished by the task's explicit
 bench-window instruction. The default stays unchanged.
