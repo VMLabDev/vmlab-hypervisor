@@ -722,6 +722,30 @@ fn boot_template(
         assert!(Instant::now() < deadline, "{name} did not exit after quit");
         std::thread::sleep(Duration::from_millis(20));
     }
+    if snapshot && secure {
+        // Inspect only after the child exits, without racing its disk handle.
+        let mut image = vmlab_disk::open(&disk, vmlab_disk::Format::Qcow2, false).unwrap();
+        let info = image.snapshot_apply("firmware").unwrap();
+        let mut bytes = vec![0; info.vm_state_size as usize];
+        image.read_vmstate(0, &mut bytes).unwrap();
+        let (header, mut reader) = vmlab_hv_vmm::snapshot::format::decode_header(&bytes).unwrap();
+        let mut features = None;
+        for _ in 0..header.section_count {
+            let (id, body) = vmlab_hv_vmm::snapshot::format::read_section(&mut reader).unwrap();
+            if id == "smm-fw-cfg" {
+                let (_, negotiation): (Vec<u8>, serde_json::Value) =
+                    serde_json::from_slice(&body).unwrap();
+                features = negotiation["locked"].as_u64();
+            }
+        }
+        let features = features.expect("secure OVMF must negotiate SMI features");
+        assert_ne!(
+            features & !vmlab_hv_vmm::smm::SMI_BROADCAST,
+            0,
+            "this regression must exercise more than broadcast"
+        );
+        eprintln!("{name}: secure OVMF snapshot round-tripped negotiated SMI mask {features:#x}");
+    }
 }
 
 #[test]
@@ -785,11 +809,11 @@ fn debian_13_ovmf_agent() {
 }
 
 #[test]
-fn ubuntu_24_04_secure_ovmf_agent() {
+fn ubuntu_24_04_secure_ovmf_agent_and_snapshot() {
     boot_template(
         "ubuntu-24.04",
         "VMLAB_HV_TEMPLATE_UBUNTU_24_04",
-        false,
+        true,
         vmlab_hv_proto::machine::DiskBus::Virtio,
         DisplayTest::None,
         Firmware::SecureOvmf,

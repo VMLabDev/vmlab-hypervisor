@@ -16,7 +16,9 @@ use crate::VmmError;
 
 pub const SMM_ADDRESS_SPACE: u32 = 1 << 16;
 pub const SMI_BROADCAST: u64 = 1;
-pub const SMI_SUPPORTED: u64 = 7;
+pub const SMI_CPU_HOTPLUG: u64 = 1 << 1;
+pub const SMI_CPU_HOT_UNPLUG: u64 = 1 << 2;
+pub const SMI_SUPPORTED: u64 = SMI_BROADCAST | SMI_CPU_HOTPLUG | SMI_CPU_HOT_UNPLUG;
 
 mod fwcfg;
 pub use fwcfg::SmiFwCfg;

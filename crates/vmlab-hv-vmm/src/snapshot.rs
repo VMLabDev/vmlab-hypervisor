@@ -608,25 +608,113 @@ pub fn load(handle: &VmHandle, name: &str) -> Result<(), SnapshotError> {
     // Refuse what cannot work before touching the run state.
     let reg = registry(handle)?;
     let vmstate_disk = vmstate_disk(&reg)?;
-    shared
+    let checkpoint = load_checkpoint_name(&reg, name)?;
+    let was = shared
         .stop_for_snapshot(QUIESCE_TIMEOUT)
         .map_err(SnapshotError::Internal)?;
 
     let devices = QuiescedDevices::new(&reg);
-    let restored = restore(shared, &reg, vmstate_disk, name);
+    let (run_code, restored) =
+        restore_with_rollback(shared, &reg, vmstate_disk, name, &checkpoint, was);
     drop(devices);
-    match restored {
-        Ok(run_code) => {
-            shared.finish_snapshot(run_code);
-            Ok(())
+    // Failed loads either restored the checkpoint or requested exit.
+    shared.finish_snapshot(run_code);
+    restored
+}
+
+/// Check every disk before stopping the guest, and reserve a collision-free
+/// name for a checkpoint made with the normal snapshot capture path.
+fn load_checkpoint_name(reg: &SnapshotRegistry, name: &str) -> Result<String, SnapshotError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut names = std::collections::BTreeSet::new();
+    for disk in writable_disks(reg) {
+        let snapshots = disk
+            .image
+            .lock()
+            .snapshots()
+            .map_err(|e| SnapshotError::from_disk("snapshots", &disk.id, e))?;
+        let target = snapshots
+            .iter()
+            .find(|snapshot| snapshot.name == name || snapshot.id == name)
+            .ok_or_else(|| {
+                SnapshotError::NotFound(format!("disk `{}` has no snapshot {name:?}", disk.id))
+            })?;
+        if disk.vmstate && target.vm_state_size == 0 {
+            return Err(SnapshotError::Incompatible(format!(
+                "snapshot {name:?} on disk `{}` carries no machine state (an offline snapshot)",
+                disk.id
+            )));
         }
-        // Leave the machine paused: after a half-applied restore, resuming
-        // a corrupted guest is worse than waiting for a host decision.
-        Err(e) => {
-            shared.finish_snapshot(format::RUN_PAUSED);
-            Err(e)
+        for snapshot in snapshots {
+            names.insert(snapshot.name);
+            names.insert(snapshot.id);
         }
     }
+    loop {
+        let checkpoint = format!(
+            "vmlab-hv-rollback-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        if !names.contains(&checkpoint) {
+            return Ok(checkpoint);
+        }
+    }
+}
+
+fn delete_checkpoint(reg: &SnapshotRegistry, checkpoint: &str) -> Result<(), SnapshotError> {
+    let mut errors = Vec::new();
+    for disk in writable_disks(reg) {
+        match disk.image.lock().snapshot_delete(checkpoint) {
+            Ok(()) | Err(DiskError::SnapshotNotFound(_)) => {}
+            Err(error) => errors.push(format!("disk `{}`: {error}", disk.id)),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(SnapshotError::Internal(format!(
+            "deleting rollback checkpoint {checkpoint:?}: {}",
+            errors.join("; ")
+        )))
+    }
+}
+
+fn restore_with_rollback(
+    shared: &crate::vm::VmShared,
+    reg: &SnapshotRegistry,
+    vmstate_disk: &DiskNode,
+    name: &str,
+    checkpoint: &str,
+    was: vmlab_hv_proto::control::RunState,
+) -> (u8, Result<(), SnapshotError>) {
+    if let Err(error) = capture_and_write(shared, reg, vmstate_disk, checkpoint, was) {
+        let result = match delete_checkpoint(reg, checkpoint) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(SnapshotError::Internal(format!("{error}; {cleanup}"))),
+        };
+        return (run_code(was), result);
+    }
+    let restored = restore(shared, reg, vmstate_disk, name);
+    if let Err(error) = &restored
+        && let Err(rollback) = restore(shared, reg, vmstate_disk, checkpoint)
+    {
+        let message = format!(
+            "{error}; rollback failed: {rollback}; stopping VM, checkpoint {checkpoint:?} retained"
+        );
+        shared.request_exit(crate::vm::ExitReason::Error(message.clone()));
+        return (run_code(was), Err(SnapshotError::Internal(message)));
+    }
+    let final_run_code = restored.as_ref().copied().unwrap_or_else(|_| run_code(was));
+    let result = match (restored, delete_checkpoint(reg, checkpoint)) {
+        (result, Ok(())) => result.map(|_| ()),
+        (Ok(_), Err(cleanup)) => Err(SnapshotError::Internal(format!(
+            "snapshot {name:?} loaded, but {cleanup}"
+        ))),
+        (Err(error), Err(cleanup)) => Err(SnapshotError::Internal(format!("{error}; {cleanup}"))),
+    };
+    (final_run_code, result)
 }
 
 /// The stopped part of a load: revert the disks, validate the stream,
