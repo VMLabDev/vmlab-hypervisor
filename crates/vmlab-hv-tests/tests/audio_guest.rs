@@ -72,10 +72,18 @@ impl AudioVm {
         let output = agent
             .exec(argv, Duration::from_secs(240))
             .unwrap_or_else(|e| panic!("`{}`: {e}\n{}", argv.join(" "), self.diagnostics()));
+        let kernel = if output.exit_code != 0 {
+            agent
+                .exec(&["sh", "-c", "dmesg | tail -30"], Duration::from_secs(10))
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_else(|error| error)
+        } else {
+            String::new()
+        };
         assert_eq!(
             output.exit_code,
             0,
-            "{}: stdout={} stderr={}\n{}",
+            "{}: stdout={} stderr={}\n{}\n{kernel}",
             argv[0],
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
@@ -229,15 +237,30 @@ EOF"
 }
 
 /// Wait until the dump holds at least `seconds` of frames past `from`.
-fn wait_for_dump(vm: &AudioVm, from: usize, seconds: u32) -> Vec<u8> {
+fn wait_for_dump(vm: &AudioVm, agent: &mut AgentClient, from: usize, seconds: u32) -> Vec<u8> {
     let want = from + (seconds as usize) * 48000 * 4;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let dump = vm.dump();
         if dump.len() >= want || Instant::now() >= deadline {
+            let guest = if dump.len() < want {
+                agent
+                    .exec(
+                        &[
+                            "sh",
+                            "-c",
+                            "cat /tmp/playback.err 2>/dev/null; dmesg | tail -25",
+                        ],
+                        Duration::from_secs(10),
+                    )
+                    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                    .unwrap_or_else(|error| error)
+            } else {
+                String::new()
+            };
             assert!(
                 dump.len() >= want,
-                "only {} of {want} PCM bytes reached the recording host\n{}",
+                "only {} of {want} PCM bytes reached the recording host\n{}\n{guest}",
                 dump.len(),
                 vm.diagnostics()
             );
@@ -287,7 +310,7 @@ fn guest_audio_plays_records_and_survives_snapshots() {
         &mut agent,
         "python3 /tmp/alsa.py play 48000 2 < /tmp/tone.raw",
     );
-    let dump = wait_for_dump(&vm, 0, 2);
+    let dump = wait_for_dump(&vm, &mut agent, 0, 2);
     assert!(
         (430.0..=450.0).contains(&dominant_frequency(&dump, 48000..96000)),
         "the recording host did not receive the 440 Hz tone"
@@ -330,7 +353,7 @@ fn guest_audio_plays_records_and_survives_snapshots() {
     write_tone(&vm, &mut agent, 880, 6);
     vm.exec(
         &mut agent,
-        "python3 /tmp/alsa.py play 48000 2 < /tmp/tone.raw >/dev/null 2>&1 &",
+        "python3 /tmp/alsa.py play 48000 2 < /tmp/tone.raw >/dev/null 2>/tmp/playback.err &",
     );
     std::thread::sleep(Duration::from_millis(1500));
     vm.call(Ctrl::SnapshotSave {
@@ -346,7 +369,7 @@ fn guest_audio_plays_records_and_survives_snapshots() {
     vm.call(Ctrl::Resume);
     // Restored into the middle of the 880 Hz play: audio resumes and the
     // dump keeps growing with the same tone.
-    let dump = wait_for_dump(&vm, before, 2);
+    let dump = wait_for_dump(&vm, &mut agent, before, 2);
     assert!(
         (870.0..=890.0).contains(&dominant_frequency(
             &dump,

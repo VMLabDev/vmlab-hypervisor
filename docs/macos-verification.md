@@ -9,7 +9,7 @@ hardware references. The owner keeps this host at `kvm.ignore_msrs=N`.
 
 ## Current verification state
 
-P2 and P4 pass. Seven complete lifecycle runs passed with host
+P2 and P4 pass. Eight complete lifecycle runs passed with host
 `kvm.ignore_msrs=N`, but a CI repeat failed after all guest checks when
 agent powerdown left an unsuccessful process status. The exit code or
 signal is unknown because the test omitted the status and stderr from its
@@ -25,6 +25,13 @@ capture EIO, and one repeat produced insufficient PCM after snapshot load.
 Other isolated repeats pass. The audio cause remains under investigation;
 the full workspace gate has not passed.
 
+The audio test now retains PCM status, HDA interrupt counts, kernel messages,
+and background-player stderr on failure. A temporary direct-MMIO diagnostic
+used a vectorized guest read that triggered an invalid opcode; that probe was
+removed. These changes improve diagnostics only. No HDA behavior, PCM buffer
+size, or acceptance assertion changed. Five scalar-probe repeats passed, but
+those passes do not establish a fix for the earlier failures.
+
 The owner closed the intervening benchmark window and raised the host limit
 to four project VMs. Commit `fb507f3` is merged. Direct builds retain
 `CARGO_BUILD_JOBS=4` under `taskset -c 0-7`.
@@ -33,7 +40,7 @@ The successful runs verified agent execution, visible 1280x800 native frames,
 keyboard glyphs, network ping, online snapshot file rollback, reboot with
 a new boot-session UUID, unchanged TSC frequency, and clean agent powerdown.
 Standalone runs took 137.44, 86.99, 100.10, 97.02, 145.49, and 132.75 seconds,
-including shared VM permit waits. The seventh pass was in full CI. Subsequent
+including shared VM permit waits. Two more passes were in full CI. Subsequent
 runs did not reproduce the shutdown failure. Runs from the 100.10-second pass
 onward check keyboard input before networking, as the spec orders, and again
 after reset. Runs from the 97.02-second pass onward confirm focus with a
