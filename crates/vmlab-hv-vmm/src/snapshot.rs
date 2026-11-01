@@ -50,7 +50,11 @@ struct TscState {
     offsets: Vec<(u8, u64)>,
 }
 
-fn tsc_offset(fd: &VcpuFd, value: &mut u64, write: bool) -> Result<(), kvm_ioctls::Error> {
+pub(super) fn tsc_offset(
+    fd: &VcpuFd,
+    value: &mut u64,
+    write: bool,
+) -> Result<(), kvm_ioctls::Error> {
     use std::os::fd::AsRawFd;
     let attr = kvm_bindings::kvm_device_attr {
         group: kvm_bindings::KVM_VCPU_TSC_CTRL,
