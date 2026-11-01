@@ -163,7 +163,24 @@ impl Machine {
         loop {
             std::thread::sleep(Duration::from_millis(10));
             self.client.call(Ctrl::Pause).unwrap();
-            let report = self.dump();
+            // Pause acknowledges the state change, not vCPU quiescence.
+            // Keep it paused while best-effort dumps retry busy state.
+            let report = loop {
+                let report = self.dump();
+                let cpu = &report["vm"]["vcpus"][0];
+                if cpu["exits"].is_array()
+                    && cpu["registers"]["regs"]["rip"].is_u64()
+                    && cpu["registers"]["sregs"]["cr0"].is_u64()
+                    && cpu["registers"]["sync_valid_regs"].is_u64()
+                {
+                    break report;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "paused state stayed unreadable: {report}"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            };
             let cpu = &report["vm"]["vcpus"][0];
             let exits = cpu["exits"].as_array().unwrap();
             let io: Vec<_> = exits
@@ -175,7 +192,11 @@ impl Machine {
                 && io.iter().all(|exit| exit["rip"].is_u64() == exact_rip)
             {
                 // Crash-time registers remain readable in either recorder mode.
-                assert!(cpu["registers"]["regs"]["rip"].is_u64());
+                assert!(
+                    cpu["registers"]["regs"]["rip"].is_u64(),
+                    "registers unavailable after pause: {}",
+                    cpu["registers"]
+                );
                 assert!(cpu["registers"]["sregs"]["cr0"].is_u64());
                 assert_eq!(
                     cpu["registers"]["sync_valid_regs"].as_u64().unwrap() & 1,
