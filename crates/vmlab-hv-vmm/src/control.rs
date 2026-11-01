@@ -52,6 +52,10 @@ impl ControlHandler {
 
     pub fn handle(&self, command: Command) -> Outcome {
         match command {
+            Command::Unsupported => Outcome::Error {
+                code: ErrorCode::Unsupported,
+                message: "unsupported request".into(),
+            },
             Command::SetLogFilter { filter } => match self.vm.set_log_filter(&filter) {
                 Ok(()) => Outcome::Ok { status: None },
                 Err(message) => Outcome::Error {

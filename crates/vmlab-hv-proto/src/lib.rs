@@ -18,5 +18,6 @@ pub mod server;
 
 pub use machine::MachineDescription;
 
-/// Version of the control protocol. Both sides refuse a different version.
+/// Major version of the control protocol. Both sides refuse a different major.
+/// Optional additions keep this value unchanged; see `docs/control-protocol.md`.
 pub const PROTO_VERSION: u32 = 1;

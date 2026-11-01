@@ -627,11 +627,11 @@ fn every_outcome_round_trips() {
         ErrorCode::SnapshotIncompatible,
         ErrorCode::Internal,
     ] {
+        round_trip(&code);
         round_trip(&Outcome::Error {
             code,
             message: "message".to_owned(),
         });
-        round_trip(&code);
     }
 }
 
