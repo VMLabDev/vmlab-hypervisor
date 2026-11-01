@@ -4,6 +4,162 @@
 G1, G2, G7, and G10 fail.**
 The VM default must remain unchanged.
 
+## Round 4 development diagnostics
+
+The round-4 changes start at `379c1ca`. These are shared-host diagnostics,
+not final D28 measurements. The round-2 quiet-host verdict above remains
+unchanged. Final validation waits for the owner's authorized bench window.
+No threshold, readiness phase, workload, default, or firmware was changed.
+
+### G7 historical comparison and notification progress
+
+The first complete interleaved cohort ran QEMU, historical `8bcbf1b`,
+baseline `379c1ca`, and two notification candidates three times each.
+QEMU's UDP TX median was 30553.57 Mbit/s. Historical and baseline medians
+were 18557.61 and 15294.84 Mbit/s, with overlapping ranges. Source review
+identified added per-exit locks, but the measurements assign no regression
+commit. Host load exceeded 230 during this investigation.
+
+The initial TX-suppression and EVENT_IDX candidates timed out. One saved
+guest remained responsive with its sender blocked in `sock_alloc_send_pskb`.
+Source review found a lost continuation: an independent wakeup flush could
+empty staging after TX left guest kicks suppressed. The next poll then had
+neither POLLOUT interest nor a kick to service pending descriptors. The
+extracted wakeup regression failed before the correction and passed after
+TX service was added after that flush. The precise interleaving was not
+observed inside the saved timed-out VM.
+
+The corrected cohort repeated every backend and candidate, interleaved,
+with fresh overlays. All twelve runs completed with validated peer bytes.
+
+| Candidate | UDP TX samples, Mbit/s | Median |
+|---|---|---:|
+| QEMU | 30982.15, 35051.78, 37601.39 | 35051.78 |
+| Baseline | 22710.89, 26522.83, 23471.66 | 23471.66 |
+| Corrected net notifications | 22554.35, 22573.95, 19050.46 | 22554.35 |
+| Corrected net plus PCI decode cache | 22528.34, 28737.59, 22731.14 | 22731.14 |
+
+These distributions do not establish a UDP speedup or close G7.
+
+### Retained changes and profiles
+
+The read-only QEMU comparison covers `hw/net/virtio-net.c`, notification
+ioeventfds in `hw/virtio/virtio-pci.c`, block iovecs and merging in
+`hw/block/virtio-blk.c`, VGA coalescing, PCI ROM backing, and flash ROMD.
+The evidence JSON records the reference revision and each conclusion.
+IOeventfd, direct ROM mapping, and VARS ROMD remain unimplemented candidates,
+not established causes or claimed fixes. No QEMU code was copied or translated.
+
+- F1. The NIC suppresses kicks while draining, rearms with the rust-vmm
+  recheck protocol, and offers EVENT_IDX. Backpressure retains a POLLOUT
+  continuation, including after wakeup flushes. Malformed available indices
+  terminate processing instead of spinning. RX rearms on buffer shortage
+  and retries an already-published buffer after a short descriptor.
+- F2. Four exact-address PCI MMIO decode entries avoid rescanning ROMs,
+  BARs, and command registers on repeated notifications. Configuration,
+  topology, ROM attachment, and restore invalidate the entries. Values
+  remain device reads and writes. In the baseline UDP leaf profile,
+  `find_rom`, `find_bar`, and virtio PCI `config_read` accounted for 7.37%,
+  5.46%, and 5.23% of samples. None appears in the cached profile's top 40.
+  The unit reproduction changes 34 configuration reads to 2.
+- F3. Modern machines batch legacy VGA writes through KVM's coalesced
+  MMIO ring. Consumers serialize delivery before slot release, drain before
+  register accesses and vCPU parking, and poll for writes from halted
+  guests. Software-A20 machines keep their original access path. The ring
+  drains into ordinary VGA state before snapshot, so the snapshot format
+  is unchanged.
+
+The profiles retain unresolved samples and DSO metadata. The baseline net
+profile has 11853 samples, 2960 unresolved; the cached profile has 11979,
+2936 unresolved. These are leaf IP counts, not call counts or elapsed-time
+fractions. QEMU, baseline, and corrected cache candidates also have raw
+`strace -c -f` tables. Tracing heavily changes throughput, so traced rates
+are not gate results or an isolated cache comparison.
+
+Three fresh-pair TCP repeats completed for every backend, with exact
+sender and receiver byte equality. The combined net/cache candidate has
+A-to-B and B-to-A medians of 16020.84 and 16941.49 Mbit/s. Baseline medians
+are 9973.36 and 9470.04; QEMU medians are 20022.21 and 23453.85. The
+combined ratios are 0.800 and 0.722. The comparison cannot separate the
+net policy from the cache, and does not close G10.
+
+### Boot and block evidence
+
+The three-repeat interleaved Ubuntu cohort compares QEMU, corrected
+net/cache, and the same candidate plus VGA batching. First-kernel medians
+are 1.811, 2.686, and 2.486 seconds. Agent-ready medians are 8.20, 12.13,
+and 8.27 seconds. Four-second readiness variation remains visible in the
+raw samples, so these medians do not establish a quiet-host G1 pass.
+
+The exit-counter observer initially mistook the additional ring mapping
+for vCPU 0's `kvm_run` mapping. That coalesced profile is invalid and
+retained as such. After correcting the offset filter, all three backends
+were repeated. Legacy VGA MMIO exits were 18014 for QEMU, 138448 before
+batching, and 14172 after. Total MMIO exits fell from 221958 to 96937.
+The corrected single-repeat agent-ready times were 8.17, 8.18, and 8.29
+seconds. Exit reduction is established; its isolated readiness gain is not.
+
+Windows received an exit-count comparison on unchanged installed OVMF,
+with QEMU at 175.87 seconds and baseline at 133.75 seconds. Some small
+compilation overlapped this diagnostic. OVMF VARS reads remain a candidate
+for future investigation, not a demonstrated G2 cause or a change here.
+
+Block profiles and syscall tables compare the existing 8 GiB direct-read
+path in both hypervisors. Profiled medians were 9751.86 MiB/s for QEMU
+and 13923.05 for baseline. The traced medians were 10574.68 and 9502.56.
+Their disagreement reinforces the measurement limit. No disk worker,
+flush, memory-validation, or cache-policy change was justified by this
+evidence. G3 and G9 margin still need the final cohort.
+
+### Method and retained failures
+
+Single VMs used CPUs 16-23; pairs used 16-19 and 20-23. Every launch
+checked host capacity and used the shared slot locks. All VMs ran inside
+24 GiB, zero-swap scopes, with at most four project VMs host-wide and
+the owner's Android emulator excluded. The requested boot hold was
+honored until `GATE WINDOW CLOSED`. Other sessions' processes were not
+stopped. Diagnostic runs do not append records to benchmark history.
+
+The first baseline executable was renamed, which prevented PID discovery.
+It was reaped and the comparison restarted with the counted `vmlab-hv`
+basename. The initial strace driver treated its own requested SIGINT
+detach, exit -2, as failure. Those command failures and tables remain in
+the evidence. Corrected runs accept only an explicitly requested detach.
+The rejected candidate's UDP timeout is separate from that driver error.
+
+`bench/profiles/phase2-round4-20261101.json` retains every diagnostic
+record, failed candidate, cohort, binary and firmware hash, raw profile,
+syscall table, exit counter, and driver source. It explicitly rejects a
+quiet-host claim. G1, G2, G7, and G10 remain open pending the final cohort;
+the historical G7 regression commit remains unassigned.
+
+### Correctness and completion
+
+`just ci::check` exited 0 on the final runtime, inside the 24 GiB,
+zero-swap scope with RUST_TEST_THREADS=1 and a 1800-second child-process
+deadline. Its 64 result groups report 945 passing tests, zero failures,
+and three ignored tests. Formatting and workspace clippy with `-D warnings`
+passed. The expanded S1 NIC check negotiated EVENT_IDX and delivered all
+900 echoes before save, after save, and after load. The halted-guest VGA
+S1 check and all four ring tests passed, including concurrent consumers.
+Firmware, reset, snapshot, and snapshot-during-fsync checks passed.
+All 23 active S2 checks passed against qemu-img.
+
+The three ignored tests were the 1 GiB S2 throughput baseline, the 4 GiB
+zero-fill diagnostic, and live PipeWire loopback. They were not run
+explicitly this round. All 83 benchmark unit tests also passed; their
+existing mock ResourceWarnings remain. Physical USB/VFIO opt-ins were
+unset, so real-device paths were not exercised. No host device was claimed,
+rebound, or reset.
+
+No scoped `todo!()` or `unimplemented!()` remains. No shared Rust trait,
+control protocol, or snapshot-format signature changed. The net feature
+offer now includes EVENT_IDX. Runtime fixes are separate commits on
+`wp/p2-perf4`; nothing was merged or pushed. All owned measurement VMs,
+peers, profilers, and CI jobs were reaped after recording their results.
+Final quiet-host D28 validation remains unfinished by the task's explicit
+bench-window instruction. The default stays unchanged.
+
 ## Round 3 authorized bench window
 
 The requested runs completed, but external compiler work prevents a
