@@ -9,8 +9,18 @@ hardware references. The owner keeps this host at `kvm.ignore_msrs=N`.
 
 ## Current verification state
 
-P2 and P4 pass. Eight complete lifecycle runs passed with host
-`kvm.ignore_msrs=N`, but a CI repeat failed after all guest checks when
+P1, P2, P4, and `just ci::check` pass. Eight complete lifecycle runs passed
+with host `kvm.ignore_msrs=N`. The final workspace gate used
+`RUST_TEST_THREADS=1`, `CARGO_BUILD_JOBS=4`, and `VMLAB_HV_TEST_VM_LIMIT=4`
+inside the 24-GiB scope. It passed all 40 binary acceptance tests and 391
+device tests, with one existing ignored device test. The firmware, protocol,
+TCG, audio, S1, filesystem-restore, sharing, VMM, and documentation suites
+also passed. The log is `.scratch/macos-ci-interval.log`; its exit status is 0.
+
+A literal host-reboot restore remains unmeasured. The synthetic TSC-jump
+regression does not replace that requirement.
+
+An earlier CI repeat failed after all guest checks when
 agent powerdown left an unsuccessful process status. The exit code or
 signal is unknown because the test omitted the status and stderr from its
 assertion. That diagnostic is corrected; the shutdown failure is not fixed.
@@ -22,8 +32,8 @@ tests passed in full CI. Formatting and clippy also passed. That workspace
 run subsequently failed in the unchanged HDA audio integration test with an
 ALSA capture EIO. Isolated repeats reproduce intermittent playback and
 capture EIO, and one repeat produced insufficient PCM after snapshot load.
-Other isolated repeats pass. The audio cause remains under investigation;
-the full workspace gate has not passed.
+Other isolated repeats pass. The audio cause remains unknown. The final
+workspace gate passes, but that does not resolve the earlier failures.
 
 The audio test now retains PCM status, HDA interrupt counts, kernel messages,
 and background-player stderr on failure. A temporary direct-MMIO diagnostic
@@ -83,8 +93,9 @@ an isolated CI-binary run. Those failures are not counted as passes.
 
 The parallel device suite also hit an unchanged console event-order test
 failure. That test passes alone. The serial device suite before the interval
-regression passed 390 tests,
-with one existing ignored test. No console implementation changed.
+regression passed 390 tests, with one existing ignored test. The final serial
+suite passes 391 tests, with the same ignored test. No console implementation
+changed.
 
 After the failed CI run, formatting, workspace clippy with `-D warnings`,
 the glyph-detector fixture, and the serial device suite pass under the CPU
@@ -129,8 +140,8 @@ requested vCPU count. KVM supplies OSXSAVE from the guest's CR4.
 The reported virtual TSC is 4,291,934 kHz on this host. Leaf `0x40000010`
 uses `KVM_GET_TSC_KHZ` in EAX and KVM's 1,000,000-kHz local APIC rate in
 EBX, matching the capture. The owner corrected the original specification,
-which incorrectly required both fields to contain TSC kHz. Live verification
-confirms that this correction alone does not prevent the guest reset. The
+which incorrectly required both fields to contain TSC kHz. An intermediate
+live run still reset during boot after the timing correction. The
 KVM test also pins a different TSC rate and verifies that EBX remains fixed.
 
 The implementation keeps D2's catch-all policy for KVM's unknown-MSR
@@ -161,9 +172,9 @@ performed.
 
 The existing guest-agent shutdown vocabulary supplies `reboot` and
 `powerdown`. P1 verifies the S1 reset event, a new guest boot-session UUID,
-and clean process exit after `powerdown` in the standalone run. The CI repeat
-passed reset but exited unsuccessfully after `powerdown`; its cause is unknown.
-No new control command has been added.
+and clean process exit after `powerdown` in standalone and full-CI runs.
+One earlier CI repeat passed reset but exited unsuccessfully after
+`powerdown`; its cause is unknown. No new control command has been added.
 
 ## Secret handling and safety
 
@@ -188,8 +199,9 @@ requires complete RAM snapshots and explicitly forbids it in device state.
 These requirements differ because guest RAM can contain OSK responses.
 The implementation follows the specification. The live acceptance test
 automatically removes its private snapshot directory, including on failure.
-The temporary overlays and RAM snapshots from both lifecycle runs were
-removed and cannot be recovered. The original template is unchanged.
+The private snapshot directories used by the lifecycle runs were removed
+and cannot be recovered. Pre-snapshot failure screenshots and overlays remain
+for diagnosis. The original template is unchanged.
 
 All tests use fresh overlays. Every boot uses the shared VM permits and a
 24-GiB systemd scope with no swap. Host KVM settings and physical USB and
