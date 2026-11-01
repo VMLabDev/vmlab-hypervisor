@@ -112,7 +112,7 @@ impl Machine {
                 found = true;
             }
         }
-        assert!(found, "no final exit reason before control EOF");
+        assert!(found, "no final exit reason before control EOF or deadline");
         assert_eq!(
             self.child.wait().unwrap().code(),
             Some(expected.exit_code() as i32)
@@ -142,6 +142,7 @@ impl Machine {
 #[test]
 fn guest_poweroff_is_zero_and_final_event_precedes_eof() {
     // Configure Q35's LPC PMBASE and ACPI decode through CF8/CFC, then enter S5.
+    // Q35's DSDT encodes S5 with SLP_TYP=0.
     let code = [
         0xfa, 0xba, 0xf8, 0x0c, 0x66, 0xb8, 0x40, 0xf8, 0, 0x80, 0x66, 0xef, 0xba, 0xfc, 0x0c,
         0x66, 0xb8, 1, 6, 0, 0, 0x66, 0xef, 0xba, 0xf8, 0x0c, 0x66, 0xb8, 0x44, 0xf8, 0, 0x80,
@@ -152,6 +153,30 @@ fn guest_poweroff_is_zero_and_final_event_precedes_eof() {
     };
     machine.client.call(Ctrl::Resume).unwrap();
     machine.finish(ProcessExitReason::GuestPoweroff);
+}
+
+#[test]
+fn guest_reset_has_its_own_final_reason_and_exits_zero() {
+    let code = [0xba, 0xf9, 0x0c, 0xb0, 2, 0xee, 0xb0, 6, 0xee, 0xf4];
+    let Some(mut machine) = Machine::launch(&code, false) else {
+        return;
+    };
+    machine.client.call(Ctrl::Resume).unwrap();
+    machine.finish(ProcessExitReason::GuestReset);
+}
+
+#[test]
+fn host_signal_has_its_own_final_reason_and_exit_code() {
+    let Some(mut machine) = Machine::launch(&[0xfa, 0xf4, 0xeb, 0xfd], false) else {
+        return;
+    };
+    let report = machine.dump();
+    let pid = i32::try_from(report["pid"].as_u64().unwrap()).unwrap();
+    // SAFETY: the PID comes from this fixture's authenticated local control socket.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    machine.finish(ProcessExitReason::HostSignal {
+        signal: libc::SIGTERM,
+    });
 }
 
 #[test]

@@ -230,8 +230,9 @@ copy; the smaller userspace-only number must not stand in for total cost.
 The accepted design retains exact RIP and accepts the measured exit-loop
 overhead as an exception to the original no-measurable-slowdown requirement.
 
-The four S1 diagnostics tests pass, covering guest poweroff, runtime failure,
-filter changes, on-demand reports, quit, and startup-error redaction.
+The six S1 diagnostics tests pass, covering guest poweroff, guest reset,
+SIGTERM, runtime failure, filter changes, on-demand reports, quit, and
+startup-error redaction.
 
 ### Illustrative report excerpt
 
