@@ -17,6 +17,7 @@ pub mod chipset;
 pub mod display;
 pub mod hda;
 pub mod ide;
+pub mod net;
 pub mod pflash;
 pub mod serial;
 pub mod tpm;
