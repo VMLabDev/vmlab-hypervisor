@@ -61,7 +61,7 @@ def measure(command, environment, timeout=7200):
     return result
 
 
-def build_coremark(iterations=1):
+def build_coremark(iterations=1, arch="riscv64"):
     if iterations < 1:
         raise lib.BenchError("CoreMark iterations must be positive")
     root = Path(lib.REPO_DIR)
@@ -73,10 +73,15 @@ def build_coremark(iterations=1):
     dirty = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"], text=True)
     if revision != COREMARK_REVISION or dirty:
         raise lib.BenchError(f"CoreMark checkout must be clean at {COREMARK_REVISION}: {source}")
-    port = root / "bench/rv64"
+    if arch not in ("riscv64", "aarch64"):
+        raise lib.BenchError(f"unsupported flat-image architecture: {arch}")
+    port = root / "bench" / ("rv64" if arch == "riscv64" else "aarch64")
     output = root / "target/tcg/micro"
+    if arch == "aarch64":
+        output = output / arch
     output.mkdir(parents=True, exist_ok=True)
-    flags = [*rv64_flags(), "-I" + str(port), "-I" + str(source), f"-DITERATIONS={iterations}"]
+    flags = [*(rv64_flags() if arch == "riscv64" else aarch64_flags()),
+             "-I" + str(port), "-I" + str(source), f"-DITERATIONS={iterations}"]
     objects = []
     for name in ("core_main", "core_list_join", "core_matrix", "core_state", "core_util"):
         dest = output / (name + ".o")
@@ -86,7 +91,7 @@ def build_coremark(iterations=1):
     stem = "coremark" if iterations == 1 else f"coremark-{iterations}"
     elf = output / (stem + ".elf")
     subprocess.run([*flags, "-nostdlib", "-static", "-fuse-ld=lld", "-Wl,--gc-sections",
-                    "-T", str(port / "link.ld"), str(port / "start.S"), str(port / "coremark.c"),
+                    "-T", str(port / "link.ld"), str(port / "start.S"), str(root / "bench/rv64/coremark.c"),
                     *objects, "-o", str(elf)], check=True)
     image = output / (stem + ".bin")
     subprocess.run(["llvm-objcopy", "-O", "binary", str(elf), str(image)], check=True)
@@ -99,10 +104,31 @@ def rv64_flags():
             "-ffunction-sections", "-fdata-sections"]
 
 
-def build_loop(iterations):
+def aarch64_flags():
+    """Scalar Armv8-A code, without compiler-inserted SIMD or FP operations."""
+    return ["clang", "--target=aarch64-none-elf", "-march=armv8-a", "-mgeneral-regs-only",
+            "-O2", "-ffreestanding", "-fno-builtin", "-ffunction-sections", "-fdata-sections"]
+
+
+def build_loop(iterations, arch="riscv64"):
     """bench/rv64/loop.S as an ELF (for QEMU's HTIF symbols) plus flat image."""
     if iterations < 1:
         raise lib.BenchError("loop iterations must be positive (0 never exits the bne)")
+    if arch == "aarch64":
+        if iterations > 0xffffffff:
+            raise lib.BenchError("AArch64 loop iterations must fit u32")
+        output = Path(lib.REPO_DIR) / "target/tcg/micro/aarch64"
+        output.mkdir(parents=True, exist_ok=True)
+        port = Path(lib.REPO_DIR) / "bench/aarch64"
+        elf = output / f"loop-{iterations}.elf"
+        subprocess.run([*aarch64_flags(), f"-DLOOP_ITERATIONS={iterations}", "-nostdlib",
+                        "-static", "-fuse-ld=lld", "-Wl,--gc-sections", "-T", str(port / "link.ld"),
+                        str(port / "start.S"), str(port / "loop.S"), "-o", str(elf)], check=True)
+        image = elf.with_suffix(".bin")
+        subprocess.run(["llvm-objcopy", "-O", "binary", str(elf), str(image)], check=True)
+        return elf, image
+    if arch != "riscv64":
+        raise lib.BenchError(f"unsupported flat-image architecture: {arch}")
     root = Path(lib.REPO_DIR)
     output = root / "target/tcg/micro"
     output.mkdir(parents=True, exist_ok=True)
