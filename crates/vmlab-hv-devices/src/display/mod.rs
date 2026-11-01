@@ -779,6 +779,22 @@ impl StandardVga {
             !self.enabled() && (self.regs[SEQ + 1] & 0x20 != 0 || self.attr_index & 0x20 == 0);
         if !blank {
             for y in 0..mode.height as usize {
+                // The common Linux scanout already has XRGB8888 byte order.
+                // Copy rows instead of translating every pixel under the
+                // device lock, which also gates guest VGA register accesses.
+                if self.enabled() && self.dispi[3] == 32 && !self.big_endian {
+                    let start = (y + self.dispi[9] as usize) * self.guest_stride()
+                        + self.dispi[8] as usize * 4;
+                    let width = mode.stride as usize;
+                    if let Some(source) = self.render_vram.get(start..start + width) {
+                        let row = &mut pixels[y * width..(y + 1) * width];
+                        row.copy_from_slice(source);
+                        for pixel in row.as_chunks_mut::<4>().0 {
+                            pixel[3] = 0;
+                        }
+                        continue;
+                    }
+                }
                 for x in 0..mode.width as usize {
                     let pixel = if self.enabled() {
                         self.vbe_pixel(x, y)

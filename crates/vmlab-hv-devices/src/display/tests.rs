@@ -348,6 +348,26 @@ fn p4_bochs_drm_mmio_modeset_linear_scanout_and_pan() {
 }
 
 #[test]
+fn xrgb_scanout_matches_pixel_translation_with_stride_pan_and_vram_end() {
+    let mut dev = device();
+    vbe(&mut dev, 35, 19, 32);
+    dispi(&mut dev, 6, 64);
+    dispi(&mut dev, 8, 3);
+    dispi(&mut dev, 9, 2);
+    let pattern: Vec<u8> = (0..64 * 24 * 4).map(|i| (i * 37) as u8).collect();
+    dev.bar_write(0, 0, &pattern);
+    for y_offset in [2, u16::MAX] {
+        dispi(&mut dev, 9, y_offset);
+        let frame = dev.frame();
+        for y in 0..19 {
+            for x in 0..35 {
+                assert_eq!(pixel(&frame, x, y), dev.vbe_pixel(x, y));
+            }
+        }
+    }
+}
+
+#[test]
 fn p4_seavgabios_dispi_probe_caps_banks_and_noclear() {
     let mut dev = device();
     dispi(&mut dev, 0, 0xb0c0);
