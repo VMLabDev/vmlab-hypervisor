@@ -673,6 +673,51 @@ fn nic_traffic_survives_snapshot_load() {
             "{phase}: no fresh DHCP exchange: {after:?}\n{}",
             guest.diagnostics(phase)
         );
+        let output = agent
+            .exec(
+                &[
+                    BUSYBOX,
+                    "sh",
+                    "-c",
+                    "for device in /sys/bus/virtio/devices/*; do \
+                     kind=$(/.vmlab/busybox cat \"$device/device\"); \
+                     [ \"$((kind))\" -eq 1 ] || continue; \
+                     /.vmlab/busybox cat \"$device/features\"; done",
+                ],
+                Duration::from_secs(15),
+            )
+            .unwrap_or_else(|e| panic!("{phase}: {e}\n{}", guest.diagnostics(phase)));
+        assert_eq!(output.exit_code, 0, "{phase}: {output:?}");
+        assert_eq!(
+            output.stdout.get(29),
+            Some(&b'1'),
+            "{phase}: network EVENT_IDX was not negotiated: {output:?}"
+        );
+        // More packets than ring entries exercise refill and rearm after wrap.
+        let before = switch.stats().frames_from_guest_mac;
+        let server = SERVER_IP.to_string();
+        let output = agent
+            .exec(
+                &[
+                    BUSYBOX, "ping", "-q", "-c", "300", "-i", "0.005", "-W", "3", "-s", "1024",
+                    &server,
+                ],
+                Duration::from_secs(30),
+            )
+            .unwrap_or_else(|e| panic!("{phase}: {e}\n{}", guest.diagnostics(phase)));
+        eprintln!("{phase}: ping {output:?}");
+        assert_eq!(output.exit_code, 0, "{phase}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("300 packets transmitted, 300 packets received, 0% packet loss"),
+            "{phase}: incomplete echo exchange: {output:?}"
+        );
+        let after = switch.stats();
+        assert!(
+            after.frames_from_guest_mac >= before + 300,
+            "{phase}: missing transmitted echo requests: {after:?}\n{}",
+            guest.diagnostics(phase)
+        );
     };
 
     exchange(&mut agent, &guest, "before snapshot save");

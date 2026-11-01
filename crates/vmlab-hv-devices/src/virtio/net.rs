@@ -52,6 +52,8 @@ const F_MRG_RXBUF: u64 = 1 << 15;
 const F_STATUS: u64 = 1 << 16;
 /// `VIRTIO_F_RING_INDIRECT_DESC` (feature bit 28).
 const F_INDIRECT_DESC: u64 = 1 << 28;
+/// `VIRTIO_F_RING_EVENT_IDX` (feature bit 29).
+const F_EVENT_IDX: u64 = 1 << 29;
 /// `VIRTIO_F_VERSION_1` (feature bit 32): this is a modern virtio device.
 const F_VERSION_1: u64 = 1 << 32;
 /// `VIRTIO_NET_S_LINK_UP` (status bit 0).
@@ -289,12 +291,7 @@ fn run(
             }
             // A wakeup is also the device saying shared state changed
             // (activation, restore): give pending work another chance.
-            place_rx_frames(&shared, hdr);
-            if let Some(s) = stream.as_mut()
-                && flush_tx(&shared, s).is_err()
-            {
-                drop_link(&mut stream, &shared);
-            }
+            process_wakeup(&shared, &mut stream, hdr);
         }
 
         if stream.is_some() {
@@ -362,6 +359,17 @@ fn drain_wakeup(mut wake: &UnixStream) {
             Ok(_) => {}
         }
     }
+}
+
+fn process_wakeup(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr: usize) {
+    place_rx_frames(shared, hdr);
+    if let Some(socket) = stream.as_mut()
+        && flush_tx(shared, socket).is_err()
+    {
+        drop_link(stream, shared);
+    }
+    // Draining staging can remove POLLOUT while guest kicks are suppressed.
+    process_tx(shared, stream, hdr);
 }
 
 /// Update the link bit; true when it changed.
@@ -512,30 +520,43 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
         let num_buffers_at = hdr.len().saturating_sub(2);
         hdr[num_buffers_at..].copy_from_slice(&1u16.to_le_bytes());
         let mut used_any = false;
-        while let Some(frame) = sh.rx_pending.front() {
-            let Some(chain) = q.pop_descriptor_chain(mem) else {
-                break;
-            };
-            let head = chain.head_index();
-            let need = hdr.len() + frame.len();
-            let mut written = 0;
-            if let Ok(mut writer) = chain.writer(mem)
-                && writer.available_bytes() >= need
-                && writer.write_all(&hdr).is_ok()
-                && writer.write_all(frame).is_ok()
-            {
-                written = need as u32;
+        let mut invalid = false;
+        loop {
+            let _ = q.disable_notification(mem);
+            while let Some(frame) = sh.rx_pending.front() {
+                let chain = match q.iter(mem) {
+                    Ok(mut available) => available.next(),
+                    Err(_) => {
+                        invalid = true;
+                        break;
+                    }
+                };
+                let Some(chain) = chain else { break };
+                let head = chain.head_index();
+                let need = hdr.len() + frame.len();
+                let mut written = 0;
+                if let Ok(mut writer) = chain.writer(mem)
+                    && writer.available_bytes() >= need
+                    && writer.write_all(&hdr).is_ok()
+                    && writer.write_all(frame).is_ok()
+                {
+                    written = need as u32;
+                }
+                if q.add_used(mem, head, written).is_err() {
+                    invalid = true;
+                    break;
+                }
+                used_any = true;
+                if written == 0 {
+                    break;
+                }
+                sh.rx_pending.pop_front();
             }
-            if q.add_used(mem, head, written).is_err() {
+            // Socket input drives RX while buffers are available. If a frame
+            // is waiting, arm the refill kick and check for a raced refill.
+            if sh.rx_pending.is_empty() || !q.enable_notification(mem).unwrap_or(false) || invalid {
                 break;
             }
-            used_any = true;
-            if written == 0 {
-                // Buffer too small for the frame: the frame is dropped and
-                // the buffer returns empty for the driver to reuse.
-                break;
-            }
-            sh.rx_pending.pop_front();
         }
         if used_any && needs_interrupt(q, mem) {
             irq = sh.interrupt.clone().map(|irq| (irq, RXQ));
@@ -551,6 +572,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
 fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_len: usize) {
     loop {
         let mut blocked = false;
+        let more;
         let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
         {
             let mut guard = lock(shared);
@@ -565,8 +587,18 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             let Some(q) = sh.queues.get_mut(usize::from(TXQ)).and_then(|q| q.as_mut()) else {
                 return;
             };
+            let _ = q.disable_notification(mem);
             let mut used_any = false;
-            while let Some(chain) = q.pop_descriptor_chain(mem) {
+            let mut invalid = false;
+            loop {
+                let chain = match q.iter(mem) {
+                    Ok(mut available) => available.next(),
+                    Err(_) => {
+                        invalid = true;
+                        break;
+                    }
+                };
+                let Some(chain) = chain else { break };
                 if stream.is_some() && sh.tx_out.len() >= MAX_TX_STAGE {
                     q.go_to_previous_position();
                     blocked = true;
@@ -594,10 +626,15 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
                     }
                 }
                 if q.add_used(mem, head, consumed).is_err() {
+                    invalid = true;
                     break;
                 }
                 used_any = true;
             }
+            // POLLOUT resumes a backpressured queue. Otherwise rearm kicks
+            // and check for buffers published before the rearm became visible.
+            blocked |= stream.is_some() && sh.tx_out.len() >= MAX_TX_STAGE;
+            more = !blocked && q.enable_notification(mem).unwrap_or(false) && !invalid;
             if used_any && needs_interrupt(q, mem) {
                 irq = sh.interrupt.clone().map(|irq| (irq, TXQ));
             }
@@ -610,7 +647,7 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
         {
             drop_link(stream, shared);
         }
-        if !blocked || lock(shared).tx_out.len() >= MAX_TX_STAGE {
+        if !more && (!blocked || lock(shared).tx_out.len() >= MAX_TX_STAGE) {
             return;
         }
     }
@@ -658,7 +695,7 @@ impl VirtioDevice for Net {
     }
 
     fn features(&self) -> u64 {
-        let mut features = F_MAC | F_STATUS | F_INDIRECT_DESC | F_VERSION_1;
+        let mut features = F_MAC | F_STATUS | F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1;
         if self.config.mtu != DEFAULT_MTU {
             features |= F_MTU;
         }
@@ -1181,8 +1218,8 @@ mod tests {
                 switch: Some(switch),
                 accepted: None,
             };
-            // What a modern transport negotiates: the whole feature set.
-            f.dev.ack_features(f.dev.features());
+            // Default fixtures exercise classic interrupt suppression.
+            f.dev.ack_features(f.dev.features() & !F_EVENT_IDX);
             f.activate();
             f
         }
@@ -1480,7 +1517,213 @@ mod tests {
                 bytes <= 1024 * 1024 + MAX_FRAME,
                 "iteration {iteration}: staged {bytes} bytes"
             );
+            if bytes >= MAX_TX_STAGE {
+                assert_eq!(
+                    mem.read_obj::<u16>(GuestAddress(ring.used)).unwrap(),
+                    1,
+                    "backpressured TX must suppress redundant guest kicks"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn transmit_rearms_event_index_after_each_drain() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        let shared = f.dev.shared.clone();
+        {
+            let mut state = lock(&shared);
+            state.snapshot_paused = false;
+            state.queues[usize::from(TXQ)]
+                .as_mut()
+                .unwrap()
+                .set_event_idx(true);
+        }
+        let event = GuestAddress(f.vqs[1].used + 4 + 8 * u64::from(f.vqs[1].size));
+        for index in 1..=4 {
+            f.queue_tx(b"next event-index packet");
+            process_tx(&shared, &mut None, 12);
+            assert_eq!(f.vqs[1].used_idx(&f.mem), index);
+            assert_eq!(f.mem.read_obj::<u16>(event).unwrap(), index);
+        }
+    }
+
+    #[test]
+    fn wakeup_flush_resumes_a_suppressed_transmit_queue() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        let pending = b"descriptor waiting behind staged output";
+        let staged = b"already staged frame";
+        f.queue_tx(pending);
+        {
+            let mut state = lock(&f.dev.shared);
+            state.snapshot_paused = false;
+            state.queues[usize::from(TXQ)]
+                .as_mut()
+                .unwrap()
+                .disable_notification(&f.mem)
+                .unwrap();
+            state
+                .tx_out
+                .extend_from_slice(&(staged.len() as u32).to_be_bytes());
+            state.tx_out.extend_from_slice(staged);
+        }
+        let (producer, mut receiver) = UnixStream::pair().unwrap();
+        producer.set_nonblocking(true).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut stream = Some(producer);
+        process_wakeup(&f.dev.shared, &mut stream, 12);
+        assert_eq!(
+            f.vqs[1].used_idx(&f.mem),
+            1,
+            "a flush must not leave pending TX without a kick or POLLOUT"
+        );
+        assert!(lock(&f.dev.shared).tx_out.is_empty());
+        for frame in [staged.as_slice(), pending.as_slice()] {
+            let mut prefix = [0; 4];
+            receiver.read_exact(&mut prefix).unwrap();
+            assert_eq!(u32::from_be_bytes(prefix), frame.len() as u32);
+            let mut received = vec![0; frame.len()];
+            receiver.read_exact(&mut received).unwrap();
+            assert_eq!(received, frame);
+        }
+    }
+
+    #[test]
+    fn malformed_transmit_available_index_does_not_spin() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        f.mem
+            .write_obj(f.vqs[1].size + 1, GuestAddress(f.vqs[1].avail + 2))
+            .unwrap();
+        process_tx(&f.dev.shared, &mut None, 12);
+        assert_eq!(f.vqs[1].used_idx(&f.mem), 0);
+    }
+
+    #[test]
+    fn network_offers_event_index_notifications() {
+        let f = Fixture::new();
+        assert_ne!(f.dev.features() & (1 << 29), 0);
+    }
+
+    #[test]
+    fn receive_rearms_event_index_when_buffers_run_out() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        let shared = f.dev.shared.clone();
+        {
+            let mut state = lock(&shared);
+            state.snapshot_paused = false;
+            state.queues[usize::from(RXQ)]
+                .as_mut()
+                .unwrap()
+                .set_event_idx(true);
+        }
+        let frame = b"receive with event-index refill";
+        for index in 1..=4 {
+            let buffer = f.data(index as u64);
+            f.vqs[0].add_chain(&f.mem, &[(buffer, 128, true)]);
+            lock(&shared).rx_pending.push_back(frame.to_vec());
+            place_rx_frames(&shared, 12);
+            assert_eq!(f.vqs[0].used_idx(&f.mem), index);
+            let mut received = vec![0; frame.len()];
+            f.mem
+                .read_slice(&mut received, GuestAddress(buffer + 12))
+                .unwrap();
+            assert_eq!(received, frame);
+            lock(&shared).rx_pending.push_back(frame.to_vec());
+            place_rx_frames(&shared, 12);
+            let event = GuestAddress(f.vqs[0].used + 4 + 8 * u64::from(f.vqs[0].size));
+            assert_eq!(f.mem.read_obj::<u16>(event).unwrap(), index);
+            lock(&shared).rx_pending.clear();
+        }
+    }
+
+    #[test]
+    fn receive_skips_a_short_buffer_without_waiting_for_another_kick() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        let frame = b"retry the pending receive frame";
+        let short = f.data(1);
+        let full = f.data(2);
+        f.vqs[0].add_chain(&f.mem, &[(short, 8, true)]);
+        f.vqs[0].add_chain(&f.mem, &[(full, 128, true)]);
+        lock(&f.dev.shared).rx_pending.push_back(frame.to_vec());
+        place_rx_frames(&f.dev.shared, 12);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 2);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, 0).1, 0);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, 1).1, 12 + frame.len() as u32);
+        assert!(lock(&f.dev.shared).rx_pending.is_empty());
+    }
+
+    #[test]
+    fn malformed_receive_available_index_does_not_spin() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        {
+            let mut state = lock(&f.dev.shared);
+            state.snapshot_paused = false;
+            state.rx_pending.push_back(b"pending receive".to_vec());
+        }
+        f.mem
+            .write_obj(f.vqs[0].size + 1, GuestAddress(f.vqs[0].avail + 2))
+            .unwrap();
+        place_rx_frames(&f.dev.shared, 12);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
+        assert_eq!(lock(&f.dev.shared).rx_pending.len(), 1);
+    }
+
+    #[test]
+    fn event_index_queue_state_survives_restore_before_activation() {
+        let mut f = Fixture::new();
+        let mut switch = f.take_switch_side();
+        switch
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        f.dev.quiesce();
+        {
+            let mut state = lock(&f.dev.shared);
+            state.snapshot_paused = false;
+            for queue in state.queues.iter_mut().flatten() {
+                queue.set_event_idx(true);
+            }
+        }
+        f.queue_tx(b"before restore");
+        process_tx(&f.dev.shared, &mut None, 12);
+        f.dev.quiesce();
+        let state = f.dev.save_state().unwrap();
+        f.dev.reset();
+        f.dev.restore_state(&state).unwrap();
+        f.dev.ack_features(f.dev.features());
+        f.activate();
+        {
+            let state = lock(&f.dev.shared);
+            assert!(state.queues.iter().flatten().all(QueueT::event_idx_enabled));
+            assert_eq!(state.queues[1].as_ref().unwrap().next_avail(), 1);
+        }
+        let frame = b"after event-index restore";
+        f.queue_tx(frame);
+        f.dev.resume_snapshot();
+        let mut prefix = [0; 4];
+        switch.read_exact(&mut prefix).unwrap();
+        assert_eq!(u32::from_be_bytes(prefix), frame.len() as u32);
+        let mut received = vec![0; frame.len()];
+        switch.read_exact(&mut received).unwrap();
+        assert_eq!(received, frame);
+        wait_for("restored event-index completion", || {
+            f.vqs[1].used_idx(&f.mem) == 2
+        });
     }
 
     #[test]
