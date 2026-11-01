@@ -422,6 +422,10 @@ fn macos_tahoe_p1_agent_display_keyboard_network_reset_snapshot_stop() {
         "macOS USB inventory: {}",
         exec(&mut guest, "ioreg -p IOUSB | head -40")
     );
+    keyboard_input(&native, &input, &mut guest);
+    eprintln!(
+        "macOS P1 USB keyboard produced five and then three password glyphs before network and snapshot checks"
+    );
     exec(
         &mut guest,
         "ifconfig en0 inet 10.42.0.50 netmask 255.255.255.0 up; ping -c 2 -t 10 10.42.0.1",

@@ -9,23 +9,25 @@ hardware references. The owner keeps this host at `kvm.ignore_msrs=N`.
 
 ## Current verification state
 
-P2 and P4 pass. One complete P1 run passed, but its repeat in final
-`just ci::check` failed after all guest checks, when agent powerdown left a
-unsuccessful process status. The exit code or signal is unknown because the
-test omitted the status and stderr from its
+P2 and P4 pass. Three complete lifecycle runs passed with host
+`kvm.ignore_msrs=N`, but a CI repeat failed after all guest checks when
+agent powerdown left an unsuccessful process status. The exit code or
+signal is unknown because the test omitted the status and stderr from its
 assertion. That diagnostic is corrected; the shutdown failure is not fixed.
 The CI binary finished with 38 passing tests and this one failure. The full
 workspace gate stopped there and has not passed.
 
-The owner requested a benchmark window after CI started. The existing run
-finished, and no new VM may boot until `BENCH WINDOW CLOSED`. The CI process
-and its future children were restricted to CPUs 0-7. Further builds use
+The owner closed the intervening benchmark window and raised the host limit
+to four project VMs. Commit `fb507f3` is merged. Builds retain
 `CARGO_BUILD_JOBS=4` under `taskset -c 0-7`.
-The complete P1 run passed with host `kvm.ignore_msrs=N` before boot and
-after shutdown. It verified agent execution, visible 1280x800 native frames,
+
+The successful runs verified agent execution, visible 1280x800 native frames,
 keyboard glyphs, network ping, online snapshot file rollback, reboot with
 a new boot-session UUID, unchanged TSC frequency, and clean agent powerdown.
-The run took 137.44 seconds, including the shared VM permit wait.
+They took 137.44, 86.99, and 100.10 seconds, including shared VM permit waits.
+The two post-window runs did not reproduce the shutdown failure. The last
+run checks keyboard input before networking, as the spec orders, and again
+after reset. It passes both input checks.
 
 One subsequent attempt stopped at OpenCore's prohibited-boot screen. The
 same implementation booted on retry. Another attempt reached agent-ready
@@ -33,9 +35,9 @@ but exceeded the initial 90-second wait for the graphical login screen.
 The acceptance test now allows five minutes and retains a failure screenshot.
 Neither failed attempt is counted as a pass.
 The longer retry also failed. macOS requested an unsolicited chipset reset
-before keyboard input, which returned the display to a boot mode. The guest
-reset is under investigation. WindowServer is blocked in `IOKitWaitQuiet`.
-The registry shows the unmatched SMC device and boot CPU as busy.
+before keyboard input, which returned the display to a boot mode. In that
+run, WindowServer blocked in `IOKitWaitQuiet`, and the registry showed the
+unmatched SMC device and boot CPU as busy.
 
 A fresh fake-key QEMU capture exposed a missing command-acceptance bit in
 the SMC model. READ_KEY must report 0x0c after the command, then 0x04 after
@@ -65,7 +67,8 @@ After the failed CI run, formatting, workspace clippy with `-D warnings`,
 the glyph-detector fixture, and the serial device suite pass under the CPU
 restriction. A real child process exiting with status 17 verifies that the
 corrected shutdown diagnostic retains both its exit status and stderr.
-The macOS shutdown reproduction awaits the benchmark-window release.
+Both post-window macOS shutdown reproductions passed. The earlier
+failure remains unexplained.
 
 The first full `just ci::check` run failed two binary acceptance tests.
 The macOS run stopped before its agent handshake. The unchanged QEMU Ubuntu
