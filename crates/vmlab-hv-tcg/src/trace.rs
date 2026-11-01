@@ -68,6 +68,7 @@ pub(crate) struct Trace {
     pc_slot: Option<usize>,
     compact_loop: std::sync::OnceLock<bool>,
     wide_inputs: Vec<Option<Value>>,
+    wide_versions: Vec<Option<u64>>,
     scalar_input_slots: Vec<Option<usize>>,
     slots: Vec<usize>,
     fast_events: Vec<usize>,
@@ -610,7 +611,10 @@ impl Trace {
                     self.stamps[slot] = self.epoch;
                 }
             }
-            Captured::Value(value) => self.wide_inputs[id] = Some(value),
+            Captured::Value(value) => {
+                self.wide_inputs[id] = Some(value);
+                self.wide_versions[id] = None;
+            }
             Captured::Verified => {}
         }
     }
@@ -799,6 +803,7 @@ impl Trace {
             slot_count,
         );
         let wide_inputs = (0..recorded.inputs.len()).map(|_| None).collect();
+        let wide_versions = vec![None; recorded.inputs.len()];
         let stages: Vec<Stage> = vmlab_hv_tcg_ir::native::schedule::schedule(&recorded.block)
             .into_iter()
             .map(|stage| lower_stage(&recorded.block.graph, &slots, stage))
@@ -943,6 +948,7 @@ impl Trace {
             pc_slot: interpreter.globals.slot("zPC"),
             compact_loop: std::sync::OnceLock::new(),
             wide_inputs,
+            wide_versions,
             scalar_input_slots,
             slots,
             fast_events,
@@ -1060,6 +1066,9 @@ impl Trace {
                 {
                     continue;
                 }
+                if pass == 1 && self.wide_global_unchanged(id, interpreter) {
+                    continue;
+                }
                 let resolved = if INDEXED && self.recorded.inputs[id].source.has_entry_index() {
                     let Some(source) = self.resolve_source(id)? else {
                         return Ok(Outcome::Miss);
@@ -1101,6 +1110,10 @@ impl Trace {
                     return Ok(Outcome::Miss);
                 };
                 self.bind_capture(id, value);
+                if full {
+                    self.wide_versions[id] =
+                        self.input_slots[id].map(|slot| interpreter.globals.version(slot));
+                }
             }
             if self.defer_wide_values
                 && pass == 0
@@ -1123,6 +1136,17 @@ impl Trace {
             Ok(true)
         })
         .0
+    }
+
+    fn wide_global_unchanged<M: Memory>(
+        &self,
+        id: usize,
+        interpreter: &Interpreter<'_, M>,
+    ) -> bool {
+        self.wide_inputs[id].is_some()
+            && self.input_slots[id].is_some_and(|slot| {
+                self.wide_versions[id] == Some(interpreter.globals.version(slot))
+            })
     }
 
     fn entry_valid<M: Memory>(&mut self, interpreter: &Interpreter<'_, M>) -> bool {
@@ -1316,6 +1340,9 @@ impl Trace {
                 {
                     continue;
                 }
+                if pass == 1 && self.wide_global_unchanged(id, interpreter) {
+                    continue;
+                }
                 let resolved = if INDEXED && self.recorded.inputs[id].source.has_entry_index() {
                     let Some(source) = self.resolve_source(id)? else {
                         return Ok(Outcome::Miss);
@@ -1382,6 +1409,10 @@ impl Trace {
                     return Ok(Outcome::Miss);
                 };
                 self.bind_capture(id, value);
+                if full {
+                    self.wide_versions[id] =
+                        self.input_slots[id].map(|slot| interpreter.globals.version(slot));
+                }
             }
             if self.defer_wide_values
                 && pass == 0
@@ -1926,6 +1957,61 @@ mod tests {
     use crate::FlatMemory;
     use std::collections::{BTreeMap, BTreeSet};
     use vmlab_hv_tcg_ir::{Expr, Location, Op, Program, Target, Type};
+
+    #[test]
+    fn unchanged_wide_global_inputs_reuse_their_snapshot() {
+        let function = Function {
+            name: "read".into(),
+            args: vec![],
+            result: Type::Vector(Box::new(Type::Integer(None))),
+            locals: BTreeMap::new(),
+            code: vec![
+                Op::Assign(Location::Id("return".into()), Expr::Id("items".into())),
+                Op::Return,
+            ],
+        };
+        let program = Program {
+            globals: BTreeMap::from([(
+                "items".into(),
+                Type::Vector(Box::new(Type::Integer(None))),
+            )]),
+            ..Program::default()
+        };
+        let mut interpreter = Interpreter::new(&program, FlatMemory::new(0, vec![]));
+        interpreter.initialize().unwrap();
+        interpreter.globals.insert(
+            "items".into(),
+            Value::Vector((0..4096).map(Value::int).collect()),
+        );
+        let options = Options {
+            dynamic_globals: BTreeSet::from(["items".into()]),
+            ..Options::default()
+        };
+        let (mut trace, expected) =
+            Trace::record(&mut interpreter, &function, vec![], options).unwrap();
+        let root = trace.recorded.inputs.iter().position(|input| matches!(&input.source, InputSource::Global(name, path) if name == "items" && path.is_empty())).unwrap();
+        assert!(
+            matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(value, 1) if value == expected)
+        );
+        let pointer = match &trace.wide_inputs[root] {
+            Some(Value::Vector(values)) => values.as_ptr(),
+            _ => panic!("missing snapshot"),
+        };
+        assert!(
+            matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(value, 1) if value == expected)
+        );
+        assert!(
+            matches!(&trace.wide_inputs[root], Some(Value::Vector(values)) if values.as_ptr() == pointer),
+            "unchanged global snapshot was cloned again"
+        );
+        let Some(Value::Vector(values)) = interpreter.globals.get_mut("items") else {
+            panic!("missing global")
+        };
+        values[0] = Value::int(42);
+        assert!(
+            matches!(trace.run(&mut interpreter, &[], 1).unwrap(), Outcome::Returned(Value::Vector(values), 1) if values[0] == Value::int(42))
+        );
+    }
 
     #[test]
     fn rejected_entry_guard_does_not_capture_wide_values() {
