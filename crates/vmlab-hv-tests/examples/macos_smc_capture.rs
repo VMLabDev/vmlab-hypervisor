@@ -41,16 +41,19 @@ impl Qtest {
     }
     fn smc(&mut self, command: u8, key: &[u8; 4], length: u8) -> serde_json::Value {
         self.out(0x304, command);
+        let mut sequence = vec![self.input(0x304)];
         for byte in key {
             self.out(0x300, *byte);
+            sequence.push(self.input(0x304));
         }
         self.out(0x300, length);
         let status = self.input(0x304);
+        sequence.push(status);
         let mut data = Vec::new();
         while self.input(0x304) & 1 != 0 && data.len() < usize::from(length) {
             data.push(self.input(0x300));
         }
-        serde_json::json!({"status":status,"error":self.input(0x31e),"data":data})
+        serde_json::json!({"status":status,"error":self.input(0x31e),"data":data,"sequence":sequence,"completed":self.input(0x304)})
     }
 }
 fn main() {
@@ -89,6 +92,12 @@ fn main() {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let mut qtest = Qtest(BufReader::new(stream));
+    let mut commands = serde_json::Map::new();
+    for command in [0x10, 0x11, 0x12, 0x13, 0xff] {
+        qtest.out(0x304, command);
+        let statuses: Vec<_> = (0..8).map(|_| qtest.input(0x304)).collect();
+        commands.insert(format!("{command:02x}"), serde_json::json!(statuses));
+    }
     let mut records = serde_json::Map::new();
     for key in [b"#KEY", b"BEMB", b"MSSD", b"MSSW", b"NATJ", b"OSWD"] {
         let length = if key == b"#KEY" { 4 } else { 1 };
@@ -110,7 +119,7 @@ fn main() {
     let size = u32::from_be_bytes(e820[..4].try_into().unwrap());
     qtest.call(&format!("outw 0x510 {selector:#x}"));
     let e820: Vec<_> = (0..size).map(|_| qtest.input(0x511)).collect();
-    let result = serde_json::json!({"qemu":"11.1.2","fake_osk":true,"keys":records,"e820":e820});
+    let result = serde_json::json!({"qemu":"11.1.2","fake_osk":true,"keys":records,"command_status":commands,"e820":e820});
     std::fs::write(output, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
     drop(child);
     println!("SMC nonsecret reads and e820 captured; OSK keys were not queried");

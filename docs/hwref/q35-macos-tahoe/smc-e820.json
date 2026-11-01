@@ -1,4 +1,56 @@
 {
+  "command_status": {
+    "10": [
+      12,
+      12,
+      12,
+      12,
+      12,
+      12,
+      12,
+      12
+    ],
+    "11": [
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8
+    ],
+    "12": [
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8
+    ],
+    "13": [
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8
+    ],
+    "ff": [
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8
+    ]
+  },
   "e820": [
     0,
     192,
@@ -64,37 +116,91 @@
   "fake_osk": true,
   "keys": {
     "#KEY": {
+      "completed": 0,
       "data": [],
       "error": 132,
+      "sequence": [
+        12,
+        4,
+        4,
+        4,
+        4,
+        0
+      ],
       "status": 0
     },
     "BEMB": {
+      "completed": 0,
       "data": [],
       "error": 132,
+      "sequence": [
+        12,
+        4,
+        4,
+        4,
+        4,
+        0
+      ],
       "status": 0
     },
     "MSSD": {
+      "completed": 0,
       "data": [
         3
       ],
       "error": 0,
+      "sequence": [
+        12,
+        4,
+        4,
+        4,
+        4,
+        5
+      ],
       "status": 5
     },
     "MSSW": {
+      "completed": 0,
       "data": [],
       "error": 132,
+      "sequence": [
+        12,
+        4,
+        4,
+        4,
+        4,
+        0
+      ],
       "status": 0
     },
     "NATJ": {
+      "completed": 0,
       "data": [
         0
       ],
       "error": 0,
+      "sequence": [
+        12,
+        4,
+        4,
+        4,
+        4,
+        5
+      ],
       "status": 5
     },
     "OSWD": {
+      "completed": 0,
       "data": [],
       "error": 132,
+      "sequence": [
+        12,
+        4,
+        4,
+        4,
+        4,
+        0
+      ],
       "status": 0
     }
   },

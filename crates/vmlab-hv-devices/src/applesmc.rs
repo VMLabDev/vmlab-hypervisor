@@ -88,6 +88,21 @@ impl AppleSmc {
         if s.argument < 4 {
             s.key[s.argument] = value;
             s.argument += 1;
+            s.status = 4;
+            if s.argument == 4 && matches!(s.command, 0x12 | 0x13) {
+                s.length = if s.command == 0x12 { 4 } else { 6 };
+                let valid = if s.command == 0x12 {
+                    (u32::from_be_bytes(s.key) as usize) < KEYS.len()
+                } else {
+                    Self::key_info(&s.key).is_some()
+                };
+                if valid {
+                    s.status = 5;
+                } else {
+                    s.error = 0x84;
+                    s.status = 0;
+                }
+            }
         } else if s.argument == 4 {
             s.argument += 1;
             s.length = value;
@@ -149,7 +164,7 @@ impl BusDevice for AppleSmc {
                     let values = self.state.values;
                     self.state = State {
                         command: value,
-                        status: 4,
+                        status: 0x0c,
                         values,
                         ..Default::default()
                     };
@@ -189,7 +204,7 @@ impl Snapshot for AppleSmc {
         if state.argument > 5
             || state.position > 32
             || state.length > 32
-            || !matches!(state.status, 0 | 4 | 5)
+            || !matches!(state.status, 0 | 4 | 5 | 0x0c)
         {
             return Err(DeviceError::State("invalid SMC state".into()));
         }
@@ -208,12 +223,70 @@ mod tests {
     }
     fn request(device: &mut AppleSmc, command: u8, key: &[u8; 4], length: u8) {
         device.write(4, &[command]);
-        assert_eq!(read(device, 4), 4);
+        assert_eq!(read(device, 4), 0x0c);
         for byte in key {
             device.write(0, &[*byte]);
         }
         device.write(0, &[length]);
     }
+    #[test]
+    fn fixed_size_commands_reply_without_a_length_byte() {
+        let mut smc = AppleSmc::new(&"FAKE".repeat(16)).unwrap();
+        for (command, key, length) in [(0x13, *b"MSSD", 6), (0x12, 0u32.to_be_bytes(), 4)] {
+            smc.write(4, &[command]);
+            for byte in key {
+                smc.write(0, &[byte]);
+            }
+            assert_eq!(
+                read(&mut smc, 4),
+                5,
+                "fixed-size command needs no length byte"
+            );
+            let saved = smc.save_state().unwrap();
+            smc.reset().unwrap();
+            smc.restore_state(&saved).unwrap();
+            for _ in 0..length {
+                read(&mut smc, 0);
+            }
+            assert_eq!(read(&mut smc, 4), 0);
+        }
+        smc.write(4, &[0x13]);
+        smc.write(0, b"????");
+        assert_eq!(read(&mut smc, 4), 0);
+        assert_eq!(read(&mut smc, 0x1e), 0x84);
+    }
+
+    #[test]
+    fn read_command_status_sequence_matches_qemu() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/hwref/q35-macos-tahoe/smc-e820.json"
+        ))
+        .unwrap();
+        let mut smc = AppleSmc::new(&"FAKE".repeat(16)).unwrap();
+        for key in [b"MSSD", b"NATJ", b"BEMB", b"MSSW", b"OSWD"] {
+            smc.write(4, &[0x10]);
+            let saved = smc.save_state().unwrap();
+            smc.reset().unwrap();
+            smc.restore_state(&saved).unwrap();
+            let mut sequence = vec![read(&mut smc, 4)];
+            for byte in key {
+                smc.write(0, &[*byte]);
+                sequence.push(read(&mut smc, 4));
+            }
+            smc.write(0, &[1]);
+            sequence.push(read(&mut smc, 4));
+            let expected = &capture["keys"][std::str::from_utf8(key).unwrap()];
+            assert_eq!(serde_json::json!(sequence), expected["sequence"]);
+            for _ in expected["data"].as_array().unwrap() {
+                read(&mut smc, 0);
+            }
+            assert_eq!(
+                u64::from(read(&mut smc, 4)),
+                expected["completed"].as_u64().unwrap()
+            );
+        }
+    }
+
     #[test]
     fn nonsecret_reads_match_qemu_and_osk_restore_uses_the_new_description() {
         let capture: serde_json::Value = serde_json::from_str(include_str!(
@@ -246,13 +319,13 @@ mod tests {
     }
     #[test]
     fn key_reads_types_indices_and_snapshot_never_contain_secret_bytes() {
-        let key = "FAKE".repeat(16);
+        let key = format!("{}{}", "FAKE".repeat(8), "TEST".repeat(8));
         let mut smc = AppleSmc::new(&key).unwrap();
-        for name in [b"OSK0", b"OSK1"] {
+        for (name, offset) in [(b"OSK0", 0), (b"OSK1", 32)] {
             request(&mut smc, 0x10, name, 32);
             for index in 0..32 {
                 assert_eq!(read(&mut smc, 4), 5);
-                assert_eq!(read(&mut smc, 0), key.as_bytes()[index]);
+                assert_eq!(read(&mut smc, 0), key.as_bytes()[offset + index]);
                 let saved = smc.save_state().unwrap();
                 assert!(!saved.windows(8).any(|bytes| bytes == &key.as_bytes()[..8]));
                 smc.restore_state(&saved).unwrap();
