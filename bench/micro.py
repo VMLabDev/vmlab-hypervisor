@@ -19,9 +19,10 @@ import lib
 COREMARK_REVISION = "1f483d5b8316753a742cbf5590caf5bd0a4e4777"
 OS_WORKLOADS = ("ram", "ram-after-mmio", "same-page-data", "self-modifying",
                 "sv39-tlb", "sv48-tlb", "m-traps", "s-traps", "clint-timer",
-                "clint-software", "mmio", "large-code", "fresh-code")
+                "clint-software", "mmio", "large-code", "fresh-code", "cache-pressure",
+                "store-heavy", "store-heavy-after-mmio")
 OS_ROUNDS = {case: (1024 if case.startswith("ram") else
-                    1 if case in ("self-modifying", "large-code", "fresh-code") else 8)
+                    1 if case in ("self-modifying", "large-code", "fresh-code", "cache-pressure") else 8)
              for case in OS_WORKLOADS}
 
 # The flat QEMU machine: spike (HTIF tohost/fromhost exit), one rv64 hart,
@@ -327,14 +328,23 @@ def run(args, commit, dirty, host, log):
         workloads.update({f"os_v1_{case}_{OS_ROUNDS[case]}":
                           ([os_binary, case, str(OS_ROUNDS[case])], "os-rv64gc")
                           for case in OS_WORKLOADS})
+        if args.replay_fixture:
+            fixture = Path(args.replay_fixture)
+            manifest = json.loads((fixture / "manifest.json").read_text())
+            digest = manifest["sha256"]
+            if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+                raise lib.BenchError("invalid replay fixture digest")
+            workloads[f"edk2_slice_{digest}_8192_128_warm"] = (
+                [os_binary, "replay", str(fixture), "8192", "128"], "os-rv64gc")
     environment = execution_environment(args.backend, os.environ)
+    coremark_mips = None
     for name, (command, guest) in workloads.items():
         samples = []
         raw = []
         noise = {"governor": lib.read_governor(), "loadavg_start": lib.read_loadavg(),
                  "pin": pin, "memory_max": lib.MEMORY_MAX, "host_cpus": os.cpu_count(),
                  "coremark_revision": COREMARK_REVISION, "backend_version": "guarded scalar blocks" if specialized else "generated IR interpreter",
-                 "warmup_excluded": specialized}
+                 "warmup_excluded": specialized and not name.startswith("os_v1_fresh-code_")}
         for repeat in range(args.repeats):
             result = measure([*lib.systemd_run_prefix(), *lib.taskset_prefix(pin), *command], environment)
             if specialized and guest == "flat-rv64gc" and result["native_instructions"] == 0:
@@ -344,6 +354,15 @@ def run(args, commit, dirty, host, log):
             log(f"{name} repeat {repeat + 1}: {result['mips']:.6f} MIPS, {result['instructions']} instructions")
         if len({r["instructions"] for r in raw}) != 1:
             raise lib.BenchError(f"nondeterministic instruction count: {name}")
+        median_mips = statistics.median(result["mips"] for result in raw)
+        if name == "coremark_algorithms_1000_warm":
+            coremark_mips = median_mips
+        if guest == "os-rv64gc" and coremark_mips is not None:
+            ratio = median_mips / coremark_mips
+            noise["matched_coremark_mips"] = coremark_mips
+            noise["coremark_ratio"] = ratio
+            log(f"{name}: {ratio:.3f}x matched CoreMark; "
+                f"{'meets' if ratio >= 0.5 else 'FAILS'} the 0.5x target")
         noise["loadavg_end"] = lib.read_loadavg()
         record = {"recorded": datetime.datetime.now().isoformat(timespec="seconds"),
                   "commit": commit, "dirty": dirty, "host": host, "backend": args.backend,

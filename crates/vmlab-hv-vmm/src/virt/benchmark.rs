@@ -10,6 +10,9 @@ use vmlab_hv_tcg::{Memory, Privilege, Riscv64, Value};
 use super::{RAM_BASE, cpu::configure_memory, memory::PhysicalMemory};
 use crate::{bus::MmioBus, pci::PciRoot};
 
+mod replay;
+pub use replay::measure_replay;
+
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const RAM_SIZE: u64 = 16 << 20;
 const HANDLER: u64 = RAM_BASE + 0x100;
@@ -91,8 +94,21 @@ impl Workload {
                 work.clint.lock().advance(42);
                 work.sync_clint();
             }
-            "large-code" | "fresh-code" => {
-                for block in 0..4097 {
+            "store-heavy" | "store-heavy-after-mmio" => {
+                let mut words = Vec::new();
+                for _ in 0..16 {
+                    words.extend([0x00108093, 0x00113023]);
+                }
+                words.push(0xf81ff06f); // jal x0, -128
+                work.words(RAM_BASE, &words)?;
+                work.cpu.set_gpr(2, RAM_BASE + 0x8000)?;
+            }
+            "large-code" | "fresh-code" | "cache-pressure" => {
+                if kind == "cache-pressure" {
+                    work.cpu.set_trace_cache_limit(128_000)?;
+                }
+                let blocks = if kind == "cache-pressure" { 257 } else { 4097 };
+                for block in 0..blocks {
                     work.words(
                         RAM_BASE + block * 16,
                         &[0x00108093, 0x00108093, 0x00108093, 0x00108093],
@@ -101,7 +117,7 @@ impl Workload {
             }
             _ => return Err(format!("unknown workload: {kind}").into()),
         }
-        if kind == "ram-after-mmio" {
+        if matches!(kind, "ram-after-mmio" | "store-heavy-after-mmio") {
             // A PCI configuration write takes the production untracked-DMA path.
             work.cpu
                 .interpreter
@@ -256,8 +272,26 @@ impl Workload {
                     self.expected += 8192;
                     self.events += 8192;
                 }
-                "large-code" | "fresh-code" => {
-                    for block in 0..4097 {
+                "store-heavy" | "store-heavy-after-mmio" => {
+                    self.cpu.run(33 * 1024)?;
+                    self.expected += 16 * 1024;
+                    self.events += 16 * 1024;
+                    let mut bytes = [0; 8];
+                    self.cpu
+                        .interpreter
+                        .memory
+                        .read(RAM_BASE + 0x8000, &mut bytes)?;
+                    if u64::from_le_bytes(bytes) != self.expected || self.cpu.pc()? != RAM_BASE {
+                        return Err("store-heavy RAM or PC mismatch".into());
+                    }
+                }
+                "large-code" | "fresh-code" | "cache-pressure" => {
+                    let blocks = if self.kind == "cache-pressure" {
+                        257
+                    } else {
+                        4097
+                    };
+                    for block in 0..blocks {
                         let address = RAM_BASE + block * 16;
                         if self.kind == "fresh-code" {
                             self.words(address, &[0x00108093; 4])?;

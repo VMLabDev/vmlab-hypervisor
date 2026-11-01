@@ -60,8 +60,10 @@ controls under `flat-rv64gc`, then the following cases under `os-rv64gc`:
 | `mmio` | 8,192 reads of the real CLINT time register in 24,576 steps |
 | `large-code` | Four instructions at each of 4,097 distinct sites, 65,552 bytes of code |
 | `fresh-code` | The same sites loaded and executed without translation warmup |
+| `cache-pressure` | Four instructions at 257 sites with an explicit 128,000-unit metadata budget, forcing capacity eviction |
+| `store-heavy`, `store-heavy-after-mmio` | 1,024 guest loops of 16 increments, 16 RAM stores, and a jump; the latter disables the code-epoch shortcut first |
 
-RAM cases use 1,024 rounds. Self-modifying, large-code, and fresh-code cases
+RAM cases use 1,024 rounds. Self-modifying, large-code, fresh-code, and cache-pressure cases
 use one round; the other cases use eight. Fixture setup and two warmup rounds
 are excluded, except `fresh-code`, which has no warmup. Each case checks its
 register result; paged loads also check every page's value and return PC.
@@ -72,6 +74,23 @@ and checksum. Interrupt entry and faulting ECALL steps are not counted as
 retired instructions. Workload keys include the version and round count, so
 `just bench-check` compares like configurations. These bounded cases do not
 establish S1 boot acceptance or a whole-OS performance gate.
+
+Each OS case also reports its retired-instruction rate divided by the same
+run's median flat CoreMark rate. A ratio below 0.5 fails the investigation's
+speed target. Measurements are still retained when that target is missed;
+`bench-check` separately checks historical regressions.
+
+An optional `--replay-fixture DIRECTORY` adds an early-edk2 snapshot slice.
+The directory contains `manifest.json`, a serialized `CpuState`, sparse RAM,
+and the two captured pflash banks and command states. The manifest supplies
+RAM data runs, ROM addresses, file paths, and a SHA-256 digest. The replay
+verifies that digest, uses readonly flash files, and refuses uncaptured MMIO
+or flash writes. It checks the endpoint's complete CPU state and every dirty
+RAM page against source execution before measuring 128 repetitions of the
+same 8,192-step interval. Reset, hashing, and validation time are excluded.
+Every repetition must reach the same endpoint without WFI or an outstanding
+LR/SC reservation. This is a frozen-clock single-hart component replay, not
+an SMP boot. The fixture digest forms part of its history key.
 
 Per guest arch (aarch64, riscv64), per vCPU count (1 and 4), N repeats,
 from the local vmlab templates (`~/.local/share/vmlab/templates/<arch>/`;

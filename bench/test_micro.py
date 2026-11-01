@@ -65,6 +65,10 @@ class MicroTests(unittest.TestCase):
                     run.main(["--backend", backend, "--suite", "os", "--dry-run"])
                 sweep.assert_not_called()
 
+    def test_replay_requires_the_bounded_os_suite(self):
+        with self.assertRaises(lib.BenchError):
+            run.main(["--backend", "vmlab-hv", "--replay-fixture", "missing", "--dry-run"])
+
     def test_os_suite_retains_flat_controls_and_os_counters(self):
         args = run.parse_args(["--backend", "interpreter-specialized", "--arch", "riscv64",
                                "--vcpus", "1", "--suite", "os", "--repeats", "2"])
@@ -84,6 +88,8 @@ class MicroTests(unittest.TestCase):
             self.assertEqual(record["guest"], "os-rv64gc")
             self.assertEqual(record["samples"], [0.25, 0.25])
             self.assertEqual(record["measurements"][0]["ir_operations"], 123)
+            self.assertEqual(record["env"]["coremark_ratio"], 1.0)
+            self.assertEqual(record["env"]["warmup_excluded"], "fresh-code" not in record["workload"])
 
     def test_qemu_flat_backend_routes_without_template_lookup(self):
         self.assertEqual(run.main(["--backend", "qemu", "--arch", "riscv64", "--vcpus", "1",

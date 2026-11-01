@@ -61,7 +61,8 @@ def parse_args(argv):
     p.add_argument("--repeats", type=int, default=3, help="repeats per configuration")
     p.add_argument("--guest", default="debian-13", help="template name")
     p.add_argument("--suite", choices=("full", "g2g", "boot", "os"), default="full",
-                   help="full workload set; g2g: x86_64 net pair; boot: TCG boot time only")
+                   help="full workload set; g2g: x86_64 net pair; boot: TCG boot time; os: bounded interpreter workloads")
+    p.add_argument("--replay-fixture", help="captured RAM/ROM replay directory for --suite os")
     p.add_argument("--cpus", default=None, help="taskset window override (e.g. 16-19)")
     p.add_argument("--hv-bin", default=os.path.join(lib.REPO_DIR, "target/release/vmlab-hv"))
     p.add_argument("--timeout-scale", type=float, default=1.0)
@@ -1062,6 +1063,8 @@ def main(argv=None):
     args = parse_args(argv)
     if args.suite == "os" and args.backend != "interpreter-specialized":
         raise lib.BenchError("--suite os requires --backend interpreter-specialized")
+    if args.replay_fixture and args.suite != "os":
+        raise lib.BenchError("--replay-fixture requires --suite os")
     if args.backend in ("interpreter", "interpreter-reference", "interpreter-specialized") or (
             args.backend == "qemu" and args.guest == "flat-rv64gc"):
         import micro
