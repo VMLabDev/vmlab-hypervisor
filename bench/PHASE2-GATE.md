@@ -1,8 +1,140 @@
 # Phase-2 performance gate (HV-D28)
 
-**Verdict: NOT passed. The last valid quiet-host run meets six of ten bars;
-G1, G2, G7, and G10 fail.**
+**Verdict: NOT passed. The 2026-11-02 quiet window meets six of ten core bars;
+G1, G2, G7, and G9 fail.**
 The VM default must remain unchanged.
+
+## Round 4 authorized quiet bench window (2026-11-02)
+
+CI was deliberately not run in this window, as instructed by the owner.
+The orchestrator reserves the combined merge gate. The benchmark harness's
+83 unit tests passed before timed measurements began.
+
+The owner reported other projects SIGSTOPped, no project VMs running, and
+every other session idle. Measurements use branch source `55301ef`, which
+contains main `a8fdf05` through merge `c551327` and the test-only fixture fix
+`19676ee`. The only new harness change registers Server 2025 as a boot-only
+Windows guest. Runtime code, thresholds, readiness phases, and workload
+sizes stayed fixed throughout the measurements.
+
+Both backends ran the actual `just bench-run-kvm` recipes for Ubuntu,
+Windows 10, and Server 2025, plus `just bench-run-g2g` for Ubuntu. Each
+configuration has three fresh-overlay repeats. A scratch coordinator
+alternated QEMU then vmlab-hv for each repeat, while preserving the original
+recipes and three-sample aggregation. All eight benchmark commands exited
+0. `just bench-report x86_64` also exited 0 and applied the unchanged D28
+bounds. All 24 aggregate records and their samples are appended to
+`bench/history/x86_64.jsonl`.
+
+### Full bar table
+
+Values are medians. Boot requires hv/qemu <= 1.0000; throughput requires
+hv/qemu >= 0.8000. S25 is supplementary and does not replace Windows 10 G2.
+
+| Bar | Workload | QEMU | vmlab-hv | hv/qemu | Result |
+|---|---|---:|---:|---:|---|
+| G1 | Ubuntu boot (s) | 6.54 | 8.12 | 1.2416 | FAIL |
+| G2 | Windows 10 boot (s) | 85.31 | 157.22 | 1.8429 | FAIL |
+| G3 | sequential read (MiB/s) | 19671.17 | 16572.80 | 0.8425 | PASS |
+| G4 | sequential write (MiB/s) | 4793.65 | 3843.93 | 0.8019 | PASS |
+| G5 | random read 4 KiB (IOPS) | 50002.90 | 69281.10 | 1.3855 | PASS |
+| G6 | random write 4 KiB (IOPS) | 30354.80 | 35546.80 | 1.1710 | PASS |
+| G7 | UDP TX (Mbit/s) | 30936.27 | 23378.52 | 0.7557 | FAIL |
+| G8 | UDP RX (Mbit/s) | 86595.75 | 91521.51 | 1.0569 | PASS |
+| G9 | guest TCP A to B (Mbit/s) | 27822.22 | 21686.65 | 0.7795 | FAIL |
+| G10 | guest TCP B to A (Mbit/s) | 26524.78 | 21818.77 | 0.8226 | PASS |
+| S25 | Server 2025 boot (s) | 59.09 | 54.91 | 0.9293 | PASS |
+
+G4 has little margin above the floor. No spread or noise allowance changes
+the verdict. Idle host CPU, which has no D28 bar, was 0.95% for QEMU and
+2.55% for vmlab-hv, measured as a percentage of one core.
+
+### Server 2025 boot
+
+The shipped template was `26100.1742.8`. Both backends used q35, 4 vCPUs,
+8192 MiB, the same installed OVMF pair, Hyper-V enlightenments, virtio-blk,
+virtio-vga, USB tablet, and no network interface. Readiness uses the existing
+Windows specialize-marker, user-OOBE, AppX-settle, and in-guest reboot
+sequence. It is not an early Hello-only measurement. The existing boot-ID
+probes changed from 8 to 9 across all six requested reboots; retaining those
+return values added no guest probes.
+
+| Backend | Repeat 1 (s) | Repeat 2 (s) | Repeat 3 (s) | Median (s) |
+|---|---:|---:|---:|---:|
+| QEMU | 60.46 | 59.09 | 58.44 | 59.09 |
+| vmlab-hv | 54.99 | 54.91 | 54.86 | 54.91 |
+
+This profile does not reproduce the reported loaded-soak gap of 674 s
+versus 418 s. That earlier observation is context, not a matched baseline
+for this cohort. These measurements do not establish that any difference
+from the soak was caused solely by host load or by a particular patch.
+
+### Per-run host load and limits
+
+The table records one-minute load at the actual start and end of each
+repeat, after its interleaving wait. Full one-, five-, and fifteen-minute
+values are retained per run in the evidence JSON. Rolling averages include
+the preceding benchmark's own work.
+
+| Configuration | Repeat 1 start->end | Repeat 2 start->end | Repeat 3 start->end |
+|---|---|---|---|
+| Ubuntu QEMU | 0.43->0.52 | 0.61->0.75 | 0.63->0.87 |
+| Ubuntu vmlab-hv | 0.52->0.61 | 0.75->0.63 | 0.87->0.84 |
+| Windows 10 QEMU | 0.20->1.76 | 1.41->1.27 | 1.80->2.51 |
+| Windows 10 vmlab-hv | 1.76->1.41 | 1.27->1.80 | 2.51->1.55 |
+| g2g QEMU | 1.55->2.36 | 2.20->2.50 | 2.95->3.34 |
+| g2g vmlab-hv | 2.36->2.20 | 2.50->2.95 | 3.34->3.51 |
+| Server 2025 QEMU | 3.51->3.00 | 2.79->2.22 | 2.40->2.35 |
+| Server 2025 vmlab-hv | 3.00->2.79 | 2.22->2.40 | 2.35->2.19 |
+
+The one-second monitor has 1949 observations for the successful cohorts,
+with one-minute load ranging from 0.20 to 3.82. It observed at most two
+project VMs, only for g2g, and no foreign project VM. Every observed VM had
+memory.max 25769803776 and memory.swap.max 0. The coordinator reserved all
+four shared admission locks; the original harness still checked actual
+host capacity before every launch. Android was excluded from the count.
+Single VMs used CPUs 16-23; pairs used 16-19 and 20-23. The governor was
+performance. No debug recorder override or LD_PRELOAD profiler was active.
+All 18 single-VM repeats exited cleanly, and every g2g transfer had exact
+sender/receiver byte equality.
+
+### Interrupted attempts and evidence
+
+An initial recipe dependency rebuilt the HV binary for 3.62 s while the
+first QEMU boot was starting. That attempt was interrupted before any
+aggregate records and retained as invalid. The replacement cohort used a
+prebuilt binary. Its SHA-256 is
+`ec76f5838098ff2db24c51bf3c736337785bc1494047477e8d046aadac546764`.
+
+After Ubuntu completed, the 94 GiB /tmp tmpfs filled during the first HV
+Windows 10 repeat. The monitor hit ENOSPC and left a truncated final line.
+That entire Windows comparison was invalidated before aggregate records.
+The orchestrator removed 239 stale, unopened scratch directories from
+finished sessions and restored 68 GiB free. Windows 10 was restarted with
+three fresh repeats per backend, followed by g2g and Server 2025 on /tmp.
+The complete Ubuntu cohort predates the resource failure and was retained.
+The failed-attempt images and logs were not manually deleted or moved;
+subsequent single-VM runs used the harness's normal overlay cleanup.
+
+Herdr could not recover the final completed pane marker, and its waiter
+raised a no-marker error. Individual command receipts show all eight
+benchmarks and the report exited 0. The complete dataset, clean single-VM
+exits, reboot checks, and memory caps were validated independently. This
+runner issue is retained in the execution record, not presented as a clean
+top-level receipt.
+
+`bench/profiles/phase2-round4-final-20261102.json` contains the full bar
+table, all samples and aggregate records, per-repeat load triples, monitor,
+command logs, firmware and binary hashes, coordinator sources, and both
+interrupted attempts. The g2g environment's pre-wait load is retained;
+the coordinator observations supply its actual per-run start load. Dirty
+flags in later history records reflect the appended history file, not
+runtime source edits. All owned VMs, peers, and measurement jobs were
+stopped after recording the results. Nothing was pushed or merged into
+main. No threshold, default, flush requirement, or repeat count changed.
+
+The earlier sections below are historical. This cohort supersedes their
+gate verdicts and pending-window statements.
 
 ## Round 4 main integration before the bench window
 
