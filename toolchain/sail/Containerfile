@@ -96,3 +96,13 @@ RUN sail --version \
     && test -x /opt/isla/isla-sail/isla-sail \
     && test -x /opt/opam/toolchain/bin/sail \
     && test -f "/work/build/config/${RISCV_CONFIG}.json"
+
+# The published Sail translation is the sole Arm semantics source. Retain
+# its BSD-3-Clause-Clear licence; do not fetch Arm XML/ASL releases.
+ARG SAIL_ARM_COMMIT=7d0581642d0e3aaca367bbc5650aca7c53057543
+RUN git init -q /opt/sail-arm \
+    && git -C /opt/sail-arm remote add origin https://github.com/rems-project/sail-arm.git \
+    && git -C /opt/sail-arm fetch -q --depth 1 origin "${SAIL_ARM_COMMIT}" \
+    && git -C /opt/sail-arm checkout -q --detach FETCH_HEAD
+ENV SAIL_ARM=/opt/sail-arm/arm-v9.4-a \
+    SAIL_ARM_COMMIT=${SAIL_ARM_COMMIT}

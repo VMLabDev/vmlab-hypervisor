@@ -136,7 +136,30 @@ periodically — if the `OPAM_REPO_COMMIT` pin stops fetching ("not our
 ref"), re-pin to the current master tip and record it; sail and OCaml
 are exact-pinned so only transitive build deps can drift.
 
-Licences: Sail, sail-riscv and isla are BSD-2-Clause (sail-arm is
-BSD-3-Clause-Clear and unused here); see `THIRD_PARTY_NOTICES`. The
+Licences: Sail, sail-riscv and isla are BSD-2-Clause; sail-arm is
+BSD-3-Clause-Clear. See `THIRD_PARTY_NOTICES`. The
 generated C++ model and the IR are derivative works of those models and
 keep that notice.
+
+## AArch64 model inputs
+
+The container also fetches https://github.com/rems-project/sail-arm at
+`7d0581642d0e3aaca367bbc5650aca7c53057543`, pinned by `SAIL_ARM_COMMIT`.
+The selected model is `arm-v9.4-a`, derived upstream from Arm's 2023-03
+ASL snapshot. This project consumes the published Sail translation; it
+does not extract ASL from Arm XML releases.
+
+The owner's phase-3 decision D14 accepts the published BSD-3-Clause-Clear
+terms for generated derivatives, with notices retained and no patent grant
+assumed. `LICENSE.sail-arm` retains the complete upstream notice.
+
+`just tcg-arm-ir-generate` runs `scripts/gen-ir-arm.sh` and writes
+`target/tcg/aarch64.ir`, its SHA-256, generation log, and input versions.
+The script uses the upstream Makefile's source order, `-mono_rewrites`,
+and Isla splice. Each run has a fresh working directory and cache.
+The model checkout remains read-only during generation.
+
+`scripts/gen-cpp-arm.sh` generates independent C++ oracle sources using
+Sail's C++ backend. It preserves `__InitSystem`, `__InstructionExecute`,
+and `__CycleEnd`. Source generation alone does not establish instruction
+lockstep agreement.

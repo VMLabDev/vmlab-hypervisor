@@ -78,6 +78,15 @@ tcg-ir-generate: tcg-image-build
 		-v "$PWD/target/tcg":/out {{tcg_image}} /opt/scripts/gen-ir.sh
 	cd target/tcg && sha256sum -c riscv64.ir.sha256
 
+# Emit textual Jib for the pinned published Armv9.4-A model
+[group('tcg')]
+tcg-arm-ir-generate: tcg-image-build
+	@mkdir -p target/tcg
+	systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
+		docker run --rm --memory 12g --memory-swap 12g --user "$(id -u):$(id -g)" \
+		-v "$PWD/target/tcg":/out {{tcg_image}} bash /opt/scripts/gen-ir-arm.sh
+	cd target/tcg && sha256sum -c aarch64.ir.sha256
+
 # Prove the Jib IR generation is deterministic: two runs, identical bytes
 [group('tcg')]
 tcg-ir-repro-check: tcg-image-build
