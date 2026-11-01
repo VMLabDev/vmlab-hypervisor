@@ -33,7 +33,50 @@ pub struct UsbAttachment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitReason {
     Shutdown(ShutdownReason),
+    HostSignal(i32),
     Error(String),
+    ErrorChain(Vec<String>),
+}
+
+impl ExitReason {
+    pub fn process_reason(&self) -> vmlab_hv_proto::control::ProcessExitReason {
+        use vmlab_hv_proto::control::ProcessExitReason as P;
+        match self {
+            Self::Shutdown(ShutdownReason::GuestShutdown) => P::GuestPoweroff,
+            Self::Shutdown(ShutdownReason::GuestReset) => P::GuestReset,
+            Self::Shutdown(ShutdownReason::HostRequest) => P::Quit,
+            Self::Shutdown(ShutdownReason::GuestPanic) => P::GuestPanic,
+            Self::HostSignal(signal) => P::HostSignal { signal: *signal },
+            Self::Error(_) | Self::ErrorChain(_) => P::RuntimeError,
+        }
+    }
+
+    pub fn error_chain(&self) -> Vec<String> {
+        match self {
+            Self::Error(message) => vec![crate::diagnostics::report::scrub(message)],
+            Self::ErrorChain(errors) => errors
+                .iter()
+                .map(|e| crate::diagnostics::report::scrub(e))
+                .collect(),
+            _ => vec![],
+        }
+    }
+
+    pub(crate) fn runtime(context: String, error: &dyn std::error::Error) -> Self {
+        let mut errors = vec![context, error.to_string()];
+        let mut cause = error.source();
+        while let Some(error) = cause {
+            errors.push(error.to_string());
+            cause = error.source();
+        }
+        Self::ErrorChain(errors)
+    }
+
+    fn cleanup_error(&mut self, context: &str, error: &dyn std::error::Error) {
+        let mut errors = self.error_chain();
+        errors.extend(Self::runtime(context.into(), error).error_chain());
+        *self = Self::ErrorChain(errors);
+    }
 }
 
 /// Broadcasts machine events to the control connections.
@@ -66,8 +109,9 @@ impl Drop for MemoryUpdateGuard<'_> {
 
 /// Everything the vCPU threads and the control threads share.
 pub struct VmShared {
+    pub(crate) exit_rings: Vec<std::sync::OnceLock<Arc<crate::diagnostics::flight::ExitRing>>>,
+    finalized: std::sync::atomic::AtomicBool,
     pub(crate) vfio: Mutex<Vec<Arc<Mutex<crate::vfio::AssignedDevice>>>>,
-    io_trace: Option<Mutex<std::collections::VecDeque<String>>>,
     pub(crate) display: Mutex<Option<Arc<vmlab_hv_display::DisplayServer>>>,
     pub(crate) display_generation: std::sync::atomic::AtomicU64,
     vga_mapping: Mutex<Option<u64>>,
@@ -78,7 +122,7 @@ pub struct VmShared {
     pub(crate) kvm: Arc<KvmVm>,
     io_bus: Mutex<IoBus>,
     mmio_bus: Mutex<MmioBus>,
-    pci_root: Arc<Mutex<PciRoot>>,
+    pub(crate) pci_root: Arc<Mutex<PciRoot>>,
     pm: Arc<Mutex<PmDevice>>,
     sleep_signal: Arc<SleepSignal>,
     /// Window checks for PCI BAR dispatch: (mmio32, mmio64) as (base, end).
@@ -98,7 +142,7 @@ pub struct VmShared {
     parked: Mutex<usize>,
     parked_cv: Condvar,
     /// Guest RAM, shared with the snapshot path and later vhost-user.
-    ram: Mutex<Option<Arc<GuestRam>>>,
+    pub(crate) ram: Mutex<Option<Arc<GuestRam>>>,
     /// What snapshot orchestration needs: machine digest, writable disks,
     /// and every device with guest-visible state.
     snapshot: Mutex<Option<Arc<crate::snapshot::SnapshotRegistry>>>,
@@ -140,9 +184,9 @@ impl VmShared {
         mmio64_base: u64,
     ) -> Arc<Self> {
         Arc::new(VmShared {
+            exit_rings: (0..256).map(|_| std::sync::OnceLock::new()).collect(),
+            finalized: std::sync::atomic::AtomicBool::new(false),
             vfio: Mutex::new(Vec::new()),
-            io_trace: std::env::var_os("VMLAB_HV_DIAGNOSTICS")
-                .map(|_| Mutex::new(std::collections::VecDeque::new())),
             display: Mutex::new(None),
             display_generation: std::sync::atomic::AtomicU64::new(0),
             vga_mapping: Mutex::new(None),
@@ -204,15 +248,27 @@ impl VmShared {
         }
     }
 
+    pub(crate) fn finalized(&self) -> bool {
+        self.finalized.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn final_event(&self, reason: vmlab_hv_proto::control::ProcessExitReason, errors: Vec<String>) {
+        if let Some(sink) = self.event_sink.try_lock().and_then(|s| s.clone()) {
+            sink(Event::Exiting {
+                code: reason.exit_code(),
+                reason,
+                error_chain: errors,
+            });
+        }
+    }
+
     pub(crate) fn set_reset_description(&self, desc: vmlab_hv_proto::machine::MachineDescription) {
         *self.reset_description.lock() = Some(desc);
     }
 
     #[track_caller]
     pub(crate) fn request_reset(&self) {
-        if std::env::var_os("VMLAB_HV_DIAGNOSTICS").is_some() {
-            eprintln!("reset requested at {}", std::panic::Location::caller());
-        }
+        log::debug!("reset requested at {}", std::panic::Location::caller());
         if self
             .reset_description
             .lock()
@@ -650,7 +706,6 @@ impl VmShared {
             self.advance_serials(None);
         }
         self.dispatch_io_read(port, data);
-        self.trace_io(port, data, false);
     }
 
     fn dispatch_io_read(&self, port: u16, data: &mut [u8]) {
@@ -690,7 +745,6 @@ impl VmShared {
         if matches!(port, 0x2f8..=0x2ff | 0x3f8..=0x3ff) {
             self.advance_serials(None);
         }
-        self.trace_io(port, data, true);
         if matches!(port, 0x1f0 | 0x170) {
             self.io_bus.lock().write(port, data);
             return;
@@ -1018,12 +1072,12 @@ impl VmShared {
         }
         if let Some(display) = self.display.lock().as_ref() {
             if let Err(e) = display.publish() {
-                eprintln!("display frame: {e}");
+                log::warn!("display frame: {e}");
             }
             if let Some(vga) = self.vga.lock().as_ref()
                 && let Err(e) = display.set_cursor(vga.cursor())
             {
-                eprintln!("display cursor: {e}");
+                log::warn!("display cursor: {e}");
             }
             if let Some(chipset) = self.chipset.lock().as_ref() {
                 display.set_leds(chipset.ps2.lock().leds() as u32);
@@ -1147,21 +1201,6 @@ impl VmShared {
         Ok(())
     }
 
-    fn trace_io(&self, port: u16, data: &[u8], write: bool) {
-        if let Some(trace) = &self.io_trace {
-            let mut trace = trace.lock();
-            if trace.len() == 12 {
-                trace.pop_front();
-            }
-            trace.push_back(format!(
-                "{} {port:#x} {} bytes {:x?}",
-                if write { "out" } else { "in" },
-                data.len(),
-                &data[..data.len().min(16)]
-            ));
-        }
-    }
-
     /// No CPU may execute through a temporarily removed PAM memslot. Exit
     /// KVM_RUN on every CPU before changing readonly permissions.
     fn memory_update(&self) -> MemoryUpdateGuard<'_> {
@@ -1276,6 +1315,24 @@ impl Vm {
         VmHandle(self.shared.clone())
     }
 
+    /// Install weak diagnostic callbacks so crash reporting does not keep a VM alive.
+    pub fn attach_diagnostics(&self) {
+        let state = Arc::downgrade(&self.shared);
+        let sink = state.clone();
+        crate::diagnostics::report::set_state_reader(
+            Arc::new(move || {
+                state.upgrade().map_or(serde_json::Value::Null, |s| {
+                    crate::diagnostics::vm_state(&s)
+                })
+            }),
+            Some(Arc::new(move |reason, errors| {
+                if let Some(shared) = sink.upgrade() {
+                    shared.final_event(reason, errors);
+                }
+            })),
+        );
+    }
+
     /// Start or resume the vCPUs (the `resume` command, or first start).
     pub fn start(&mut self) {
         let _ = self.handle().resume();
@@ -1283,106 +1340,31 @@ impl Vm {
 
     /// Block until the machine exits, joining the vCPU threads; returns why.
     pub fn wait(mut self) -> ExitReason {
-        let reason = self.shared.wait_exit();
+        let mut reason = self.shared.wait_exit();
         self.join_workers();
         if let Some(flash) = self.shared.pflash.lock().as_ref()
             && let Err(error) = flash.lock().flush()
         {
-            return ExitReason::Error(format!("pflash flush at VM exit: {error}"));
+            reason.cleanup_error("pflash flush at VM exit", &error);
         }
         for device in self.shared.vfio.lock().iter() {
             if let Err(error) = device.lock().reset() {
-                return ExitReason::Error(format!("VFIO reset at VM exit: {error}"));
+                reason.cleanup_error("VFIO reset at VM exit", &VmmError::Other(error));
             }
         }
         if let Some(tpm) = self.shared.tpm.lock().as_ref()
-            && let Err(e) = tpm.lock().shutdown()
+            && let Err(error) = tpm.lock().shutdown()
         {
-            return ExitReason::Error(format!("TPM shutdown: {e}"));
+            reason.cleanup_error("TPM shutdown", &error);
         }
-        if std::env::var_os("VMLAB_HV_DIAGNOSTICS").is_some() {
-            if let Some(mch) = self.shared.mch.lock().as_ref() {
-                use vmlab_hv_devices::PciDevice;
-                let mut mch = mch.lock();
-                eprintln!(
-                    "MCH SMRAM: {:x?}",
-                    [
-                        mch.config_read(0x50 / 4),
-                        mch.config_read(0x9c / 4),
-                        mch.config_read(0xac / 4)
-                    ]
-                );
-            }
-            for (id, vcpu) in self.shared.vcpus.lock().iter() {
-                let fd = vcpu.lock();
-                if let (Ok(regs), Ok(sregs)) = (fd.get_regs(), fd.get_sregs()) {
-                    eprintln!(
-                        "vcpu {id}: cs={:#x} rip={:#x} ax={:#x} cx={:#x} dx={:#x} si={:#x} di={:#x} cr0={:#x}",
-                        sregs.cs.base,
-                        regs.rip,
-                        regs.rax,
-                        regs.rcx,
-                        regs.rdx,
-                        regs.rsi,
-                        regs.rdi,
-                        sregs.cr0
-                    );
-                    eprintln!("vcpu {id} MP state: {:?}", fd.get_mp_state());
-                }
-                eprintln!(
-                    "vcpu {id} SMI state: {:?}",
-                    fd.get_vcpu_events().map(|e| e.smi)
-                );
-            }
-            crate::diagnostics::dump_timer_state(&self.shared, &self.ram.mem);
-            if let Some(trace) = &self.shared.io_trace {
-                eprintln!("last IO: {:?}", trace.lock());
-            }
-            let mut root = self.shared.pci_root.lock();
-            eprintln!("PCI BAR state: {:?}", root.save_bar_states());
-            for (slot, function) in root.addresses() {
-                if root.config_read(0, slot, function, 0) != 0x1001_1af4 {
-                    continue;
-                }
-                let base = (root.config_read(0, slot, function, 8) as u64 & !15)
-                    | ((root.config_read(0, slot, function, 9) as u64) << 32);
-                let mut common = [0; 64];
-                root.dispatch_mmio_read(base, &mut common);
-                eprintln!("block common config: {common:x?}");
-                let avail = u64::from_le_bytes(common[40..48].try_into().unwrap());
-                let used = u64::from_le_bytes(common[48..56].try_into().unwrap());
-                use vm_memory::Bytes;
-                let mut rings = [0; 8];
-                let _ = self
-                    .ram
-                    .mem
-                    .read_slice(&mut rings[..4], vm_memory::GuestAddress(avail));
-                let _ = self
-                    .ram
-                    .mem
-                    .read_slice(&mut rings[4..], vm_memory::GuestAddress(used));
-                eprintln!("block avail/used: {rings:x?}");
-            }
-            drop(root);
-            if let Some(vga) = self.shared.vga.lock().as_ref() {
-                let mut text = [0; 4000];
-                vga.legacy_read(0x18000, &mut text);
-                let text: Vec<_> = text
-                    .iter()
-                    .step_by(2)
-                    .copied()
-                    .filter(|b| *b != 0)
-                    .collect();
-                eprintln!(
-                    "VGA text: {}",
-                    String::from_utf8_lossy(&text)
-                        .replace('\u{fffd}', "")
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
-        }
+        let state = crate::diagnostics::vm_state(&self.shared);
+        // Keep the last joined state after the VM handle goes out of scope.
+        crate::diagnostics::report::set_state_reader(Arc::new(move || state.clone()), None);
+        self.shared
+            .final_event(reason.process_reason(), reason.error_chain());
+        self.shared
+            .finalized
+            .store(true, std::sync::atomic::Ordering::Release);
         reason
     }
 
@@ -1404,12 +1386,17 @@ impl Vm {
 
 impl Drop for Vm {
     fn drop(&mut self) {
+        let finished = self.shared.finalized();
         self.handle().quit();
         self.join_workers();
-        if let Some(flash) = self.shared.pflash.lock().as_ref()
+        self.shared
+            .finalized
+            .store(true, std::sync::atomic::Ordering::Release);
+        if !finished
+            && let Some(flash) = self.shared.pflash.lock().as_ref()
             && let Err(error) = flash.lock().flush()
         {
-            eprintln!("pflash flush while dropping VM: {error}");
+            log::error!("pflash flush while dropping VM: {error}");
         }
         if let Some(display) = self.shared.display.lock().as_ref() {
             display.shutdown();
@@ -1462,6 +1449,11 @@ impl VmHandle {
 
     /// `resume`: start execution; emits `resumed` (or `wakeup` from S3).
     pub fn resume(&self) -> Result<RunState, String> {
+        #[cfg(feature = "testing")]
+        if std::env::var_os("VMLAB_HV_TEST_RUNTIME_ERROR").is_some() {
+            self.runtime_error("deliberate runtime error at resume (testing feature)".into());
+            return Err("deliberate runtime error at resume (testing feature)".into());
+        }
         let _op = self.0.snapshot_op.lock();
         let mut state = self.0.state.lock();
         if self.0.exit.lock().is_some() {
@@ -1510,6 +1502,23 @@ impl VmHandle {
             .request_exit(ExitReason::Shutdown(ShutdownReason::HostRequest));
     }
 
+    pub fn host_signal(&self, signal: i32) {
+        self.0.request_exit(ExitReason::HostSignal(signal));
+    }
+
+    pub fn runtime_error(&self, message: String) {
+        self.0.request_exit(ExitReason::Error(message));
+    }
+
+    pub(crate) fn dump_diagnostics(&self) -> Result<(), String> {
+        let path = crate::diagnostics::report::dump_report()?;
+        self.0.emit(Event::DiagnosticsDumped {
+            path: path.to_string_lossy().into_owned(),
+        });
+        log::info!("diagnostic report: {}", path.display());
+        Ok(())
+    }
+
     /// Block until the machine exits.
     pub fn wait_exit(&self) -> ExitReason {
         self.0.wait_exit()
@@ -1544,6 +1553,31 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use vm_memory::{Bytes, GuestAddress};
+
+    #[test]
+    fn runtime_error_chain_survives_cleanup_failures() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("outer failure")]
+        struct Failure(#[source] std::io::Error);
+        let error = Failure(std::io::Error::other("inner failure"));
+        let mut reason = ExitReason::runtime("runtime context".into(), &error);
+        assert_eq!(
+            reason.error_chain(),
+            vec!["runtime context", "outer failure", "inner failure"]
+        );
+        reason.cleanup_error("device cleanup", &std::io::Error::other("cleanup failed"));
+        assert_eq!(
+            reason.error_chain(),
+            vec![
+                "runtime context",
+                "outer failure",
+                "inner failure",
+                "device cleanup",
+                "cleanup failed"
+            ]
+        );
+        assert_eq!(reason.process_reason().exit_code(), 1);
+    }
 
     struct NullIrq;
     impl vmlab_hv_devices::IrqLine for NullIrq {

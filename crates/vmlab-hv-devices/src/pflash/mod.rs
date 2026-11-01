@@ -228,7 +228,7 @@ impl BusDevice for Pflash {
     }
     fn write(&mut self, offset: u64, data: &[u8]) {
         if let Err(e) = self.write_access(offset, data, false) {
-            eprintln!("pflash persistence: {e}");
+            log::warn!("pflash persistence: {e}");
         }
     }
 }

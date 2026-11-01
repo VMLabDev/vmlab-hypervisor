@@ -66,6 +66,10 @@ impl VcpuThread {
         let handle = std::thread::Builder::new()
             .name(format!("vcpu-{id}"))
             .spawn(move || {
+                if let Err(error) = crate::diagnostics::signal::ensure_alt_stack() {
+                    shared.request_exit(crate::vm::ExitReason::Error(error));
+                    return;
+                }
                 // SAFETY: pthread_self(3) reads the calling thread's own id.
                 let tid = unsafe { libc::pthread_self() };
                 shared.register_vcpu(tid);
@@ -91,6 +95,18 @@ impl VcpuThread {
 /// The KVM_RUN loop of one vCPU. The fd is locked across the ioctl only, so
 /// the snapshot path can hold it while this thread is parked.
 fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
+    let sync_regs = shared
+        .kvm
+        .kvm
+        .check_extension_int(kvm_ioctls::Cap::SyncRegs)
+        & kvm_bindings::KVM_SYNC_X86_REGS as i32
+        != 0;
+    if sync_regs {
+        vcpu.lock()
+            .set_sync_valid_reg(kvm_ioctls::SyncReg::Register);
+    }
+    let recorder = shared.exit_rings[id as usize]
+        .get_or_init(|| Arc::new(crate::diagnostics::flight::ExitRing::default()));
     let mut pending_completion = false;
     loop {
         let running = shared.should_run();
@@ -123,6 +139,12 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
         let permit = shared.enter_kvm();
         let result = guard.run();
         drop(permit);
+        // Metadata is disjoint from the exit's borrowed data slice. Sync regs
+        // avoid a KVM_GET_REGS ioctl on every exit; old kernels report no RIP.
+        // SAFETY: run_ptr is the live KVM mapping; the exit reason selects the union.
+        recorder.record(unsafe {
+            exit_record(run_ptr, result.as_ref().err().map(|e| e.errno()), sync_regs)
+        });
         pending_completion = matches!(
             &result,
             Ok(VcpuExit::IoIn(..)
@@ -161,6 +183,14 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                     let permit = shared.enter_kvm();
                     let completion = guard.run();
                     drop(permit);
+                    // SAFETY: same stable mapping and exit-discriminated metadata.
+                    recorder.record(unsafe {
+                        exit_record(
+                            run_ptr,
+                            completion.as_ref().err().map(|e| e.errno()),
+                            sync_regs,
+                        )
+                    });
                     if !matches!(completion, Err(ref e) if e.errno() == libc::EINTR) {
                         shared.request_exit(crate::vm::ExitReason::Error(format!(
                             "completing APMC output before SMI: {completion:?}"
@@ -171,9 +201,10 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                     pending_completion = false;
                     if shared.dispatch_smi(id) {
                         if let Err(e) = guard.smi() {
-                            shared.request_exit(crate::vm::ExitReason::Error(format!(
-                                "KVM_SMI: {e}"
-                            )));
+                            shared.request_exit(crate::vm::ExitReason::runtime(
+                                format!("vcpu {id}: KVM_SMI"),
+                                &e,
+                            ));
                             return;
                         }
                         shared.take_pending_smi(id);
@@ -232,10 +263,15 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                 .expect("five MSRs");
                 let _ = guard.get_msrs(&mut msrs);
                 let values: Vec<_> = msrs.as_slice().iter().map(|e| e.data).collect();
-                eprintln!("vcpu {id}: guest crash {values:#x?}");
+                log::error!("vcpu {id}: guest crash {values:#x?}");
             }
             Ok(VcpuExit::SystemEvent(kvm_bindings::KVM_SYSTEM_EVENT_RESET, _)) => {
                 shared.request_reset();
+            }
+            Ok(VcpuExit::SystemEvent(kvm_bindings::KVM_SYSTEM_EVENT_SHUTDOWN, _)) => {
+                shared.request_exit(crate::vm::ExitReason::Shutdown(
+                    vmlab_hv_proto::control::ShutdownReason::GuestShutdown,
+                ));
             }
             Ok(VcpuExit::Shutdown) => {
                 // Triple fault: the guest reset. `reboot=t` and `panic=-1`
@@ -265,18 +301,155 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                 // before the kernel's INIT-SIPI-SIPI wakes it — retry.
             }
             Err(e) => {
-                shared.request_exit(crate::vm::ExitReason::Error(format!(
-                    "vcpu {id}: KVM_RUN: {e}"
-                )));
+                shared.request_exit(crate::vm::ExitReason::runtime(
+                    format!("vcpu {id}: KVM_RUN"),
+                    &e,
+                ));
                 return;
             }
         }
     }
 }
 
+unsafe fn exit_record(
+    run: *const kvm_bindings::kvm_run,
+    errno: Option<i32>,
+    sync_regs: bool,
+) -> crate::diagnostics::flight::ExitRecord {
+    use crate::diagnostics::flight::{ExitRecord, unix_ns};
+    let mut record = ExitRecord {
+        unix_ns: unix_ns(),
+        // SAFETY: only metadata is read; exit payload slices may be mutably borrowed.
+        reason: unsafe { (*run).exit_reason },
+        errno,
+        ..Default::default()
+    };
+    // Interrupted ioctls do not publish a new KVM exit or register sample.
+    if errno.is_some() {
+        record.reason = u32::MAX;
+        return record;
+    }
+    if sync_regs {
+        // SAFETY: KVM_SYNC_X86_REGS was requested on a supporting kernel.
+        record.rip = Some(unsafe { (*run).s.regs.regs.rip });
+    }
+    match record.reason {
+        kvm_bindings::KVM_EXIT_IO => {
+            // SAFETY: KVM_EXIT_IO selects the io union member.
+            let io = unsafe { (*run).__bindgen_anon_1.io };
+            record.address = Some(io.port as u64);
+            record.size = io.size as u32;
+            record.write = Some(io.direction == kvm_bindings::KVM_EXIT_IO_OUT as u8);
+        }
+        kvm_bindings::KVM_EXIT_MMIO => {
+            // SAFETY: KVM_EXIT_MMIO selects the mmio union member.
+            // SAFETY: read only metadata, since VcpuExit may mutably borrow mmio.data.
+            record.address = Some(unsafe { (*run).__bindgen_anon_1.mmio.phys_addr });
+            // SAFETY: KVM_EXIT_MMIO selects metadata outside the payload.
+            record.size = unsafe { (*run).__bindgen_anon_1.mmio.len };
+            // SAFETY: KVM_EXIT_MMIO selects metadata outside the payload.
+            record.write = Some(unsafe { (*run).__bindgen_anon_1.mmio.is_write } != 0);
+        }
+        _ => {}
+    }
+    record
+}
+
 #[cfg(test)]
 mod tests {
     use super::io_dispatch_width;
+
+    #[test]
+    #[ignore = "manual release-mode vCPU recorder microbenchmark; no VM boot"]
+    fn recorder_exit_hook_overhead() {
+        use crate::diagnostics::flight::ExitRing;
+        use std::hint::black_box;
+        const N: u32 = 2_000_000;
+        let ring = ExitRing::default();
+        let mut run = kvm_bindings::kvm_run {
+            exit_reason: kvm_bindings::KVM_EXIT_IO,
+            ..Default::default()
+        };
+        run.__bindgen_anon_1.io = kvm_bindings::kvm_run__bindgen_ty_1__bindgen_ty_4 {
+            direction: kvm_bindings::KVM_EXIT_IO_OUT as u8,
+            size: 2,
+            port: 0x3f8,
+            count: 1,
+            data_offset: 4096,
+        };
+        run.s.regs = kvm_bindings::kvm_sync_regs {
+            regs: kvm_bindings::kvm_regs {
+                rip: 0x1234,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let pointer = &run as *const kvm_bindings::kvm_run;
+        let begin = std::time::Instant::now();
+        for _ in 0..N {
+            black_box(pointer);
+        }
+        let baseline = begin.elapsed();
+        let begin = std::time::Instant::now();
+        for _ in 0..N {
+            // SAFETY: the synthetic mapping has initialized the selected metadata.
+            ring.record(unsafe { super::exit_record(black_box(pointer), None, true) });
+        }
+        let recorded = begin.elapsed();
+        eprintln!(
+            "vCPU exit hook: baseline {:.2} ns/exit; recorded {:.2} ns/exit; delta {:.2} ns/exit (N={N}); excludes kernel sync-reg copy",
+            baseline.as_nanos() as f64 / N as f64,
+            recorded.as_nanos() as f64 / N as f64,
+            (recorded.as_nanos() as f64 - baseline.as_nanos() as f64) / N as f64
+        );
+        black_box(ring.snapshot());
+    }
+
+    #[test]
+    fn exit_metadata_does_not_include_payload_and_rejects_stale_ioctl_state() {
+        let mut run = kvm_bindings::kvm_run {
+            exit_reason: kvm_bindings::KVM_EXIT_IO,
+            ..Default::default()
+        };
+        run.__bindgen_anon_1.io = kvm_bindings::kvm_run__bindgen_ty_1__bindgen_ty_4 {
+            direction: kvm_bindings::KVM_EXIT_IO_OUT as u8,
+            size: 2,
+            port: 0x3f8,
+            count: 3,
+            data_offset: 4096,
+        };
+        run.s.regs = kvm_bindings::kvm_sync_regs {
+            regs: kvm_bindings::kvm_regs {
+                rip: 0x1234,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // SAFETY: the synthetic mapping has initialized the selected union members.
+        let record = unsafe { super::exit_record(&run, None, true) };
+        assert_eq!(record.address, Some(0x3f8));
+        assert_eq!(record.size, 2);
+        assert_eq!(record.write, Some(true));
+        assert_eq!(record.rip, Some(0x1234));
+        // SAFETY: errno paths ignore the old exit's union metadata.
+        let record = unsafe { super::exit_record(&run, Some(libc::EINTR), true) };
+        assert_eq!(record.reason, u32::MAX);
+        assert_eq!(record.rip, None);
+        assert_eq!(record.address, None);
+        run.exit_reason = kvm_bindings::KVM_EXIT_MMIO;
+        run.__bindgen_anon_1.mmio = kvm_bindings::kvm_run__bindgen_ty_1__bindgen_ty_6 {
+            phys_addr: 0xe000_0000,
+            data: [0xa5; 8],
+            len: 4,
+            is_write: 1,
+        };
+        // SAFETY: the selected MMIO union member is initialized.
+        let record = unsafe { super::exit_record(&run, None, false) };
+        assert_eq!(record.address, Some(0xe000_0000));
+        assert_eq!(record.size, 4);
+        assert_eq!(record.write, Some(true));
+        assert_eq!(record.rip, None);
+    }
 
     #[test]
     fn repeated_ide_fifo_io_keeps_batches_and_other_registers_keep_width() {

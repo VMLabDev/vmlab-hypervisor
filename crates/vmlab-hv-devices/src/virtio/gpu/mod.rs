@@ -239,7 +239,7 @@ impl Gpu {
                 Ok(Some(frame)) => return Some(frame),
                 Ok(None) => {}
                 Err(error) => {
-                    eprintln!("GPU readback failed: {error:#x}");
+                    log::warn!("GPU readback failed: {error:#x}");
                     return None;
                 }
             }
@@ -801,7 +801,7 @@ impl VirtioDevice for Gpu {
         if let Some(renderer) = &s.renderer
             && let Err(error) = renderer.reset()
         {
-            eprintln!("GPU reset failed: {error:#x}");
+            log::error!("GPU reset failed: {error:#x}");
         }
         s.fences.clear();
         s.acked = 0;

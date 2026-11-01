@@ -52,6 +52,22 @@ impl ControlHandler {
 
     pub fn handle(&self, command: Command) -> Outcome {
         match command {
+            Command::SetLogFilter { filter } => {
+                match crate::diagnostics::report::set_log_filter(&filter) {
+                    Ok(()) => Outcome::Ok { status: None },
+                    Err(message) => Outcome::Error {
+                        code: ErrorCode::InvalidArgument,
+                        message,
+                    },
+                }
+            }
+            Command::DumpDiagnostics => match self.vm.dump_diagnostics() {
+                Ok(()) => Outcome::Ok { status: None },
+                Err(message) => Outcome::Error {
+                    code: ErrorCode::Internal,
+                    message,
+                },
+            },
             Command::Status => Outcome::Ok {
                 status: Some(self.vm.status()),
             },
@@ -185,6 +201,9 @@ pub fn serve(path: &Path, vm: &VmHandle) -> Result<std::thread::JoinHandle<()>, 
 
     let weak = Arc::downgrade(vm.shared());
     let mut capabilities = vec![Capability::Snapshots];
+    if crate::diagnostics::report::configured() {
+        capabilities.push(Capability::Diagnostics);
+    }
     if vm.shared().vga.lock().is_some() {
         capabilities.extend([Capability::Display, Capability::Input]);
     }
@@ -210,10 +229,15 @@ pub fn serve(path: &Path, vm: &VmHandle) -> Result<std::thread::JoinHandle<()>, 
     std::thread::Builder::new()
         .name("control-serve".to_string())
         .spawn(move || {
+            let _ = crate::diagnostics::signal::ensure_alt_stack();
             if let Err(e) = server.serve_until(listener, || {
-                weak.upgrade().is_none_or(|shared| shared.exited())
+                weak.upgrade().is_none_or(|shared| shared.finalized())
             }) {
-                eprintln!("control: accept loop ended: {e}");
+                log::error!("control: accept loop ended: {e}");
+                if let Some(shared) = weak.upgrade() {
+                    VmHandle::from_shared(shared)
+                        .runtime_error(format!("control accept loop: {e}"));
+                }
             }
         })
         .map_err(|e| VmmError::Control(format!("spawning control thread: {e}")))

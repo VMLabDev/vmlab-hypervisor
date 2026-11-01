@@ -423,7 +423,7 @@ impl VirtioSnd {
                 match self.open_host(index, false) {
                     Ok(()) => {}
                     Err(error) => {
-                        eprintln!("vmlab-hv: virtio-snd host stream: {error}");
+                        log::warn!("vmlab-hv: virtio-snd host stream: {error}");
                         return status(S_IO_ERR);
                     }
                 }

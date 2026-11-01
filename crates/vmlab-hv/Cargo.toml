@@ -7,6 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+log = "0.4"
 vmlab-hv-proto.workspace = true
 vmlab-hv-vmm.workspace = true
 vmlab-hv-devices.workspace = true

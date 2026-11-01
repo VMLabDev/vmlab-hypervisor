@@ -353,7 +353,7 @@ impl vmlab_hv_devices::IrqLine for KvmIrqLine {
         if let Err(e) = self.vm.set_irq_line(self.gsi, high) {
             // A failed line assertion means the VM is going away; log and
             // carry on rather than unwinding on a device path.
-            eprintln!("kvm: KVM_IRQ_LINE({}) failed: {}", self.gsi, e);
+            log::error!("kvm: KVM_IRQ_LINE({}) failed: {}", self.gsi, e);
         }
     }
 }
@@ -378,7 +378,7 @@ impl vmlab_hv_devices::MsiSink for KvmMsiSink {
             ..Default::default()
         };
         if let Err(e) = self.vm.signal_msi(msi) {
-            eprintln!("kvm: KVM_SIGNAL_MSI failed: {}", e);
+            log::error!("kvm: KVM_SIGNAL_MSI failed: {}", e);
         }
     }
 }
