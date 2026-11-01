@@ -1,7 +1,101 @@
 # Phase-2 performance gate (HV-D28)
 
-**Verdict: NOT passed. Six of ten bars meet D28; G1, G2, G7, and G10 fail.**
+**Verdict: NOT passed. The last valid quiet-host run meets six of ten bars;
+G1, G2, G7, and G10 fail.**
 The VM default must remain unchanged.
+
+## Round 3 authorized bench window
+
+The requested runs completed, but external compiler work prevents a
+quiet-host claim. The owner opened the window with no other project VMs
+running and other sessions holding new boots. Main `fb507f3` was merged
+as `4f5984de636a193930f7da123a131a67915cffe9` before building and testing.
+That commit is the measured runtime source; no runtime code changed
+during the cohort. The imported harness and benchmark default permits
+four project VMs. The timed cohort reserved all four shared slot locks
+and used at most two VMs, only for guest-to-guest transfers.
+
+All six benchmark configurations exited 0: both backends' full Ubuntu
+suite, Windows boot suite, and Ubuntu guest-to-guest suite, with three
+fresh-overlay repeats each. All 22 aggregate records and every sample
+are appended to `bench/history/x86_64.jsonl`. No bar, repeat, readiness
+phase, flush requirement, or workload was dropped or relaxed.
+
+The following are **observed medians under interference**, not a new
+quiet-host D28 verdict. Three meet their numerical thresholds. The
+round 2 cohort remains the latest valid quiet-host comparison.
+
+| Bar | Workload | QEMU | vmlab-hv | hv/qemu | Required | Observed result |
+|---|---|---:|---:|---:|---|---|
+| G1 | Ubuntu boot (s) | 6.74 | 8.29 | 1.230 | <= 1.000 | FAIL |
+| G2 | Windows boot (s) | 90.71 | 151.37 | 1.669 | <= 1.000 | FAIL |
+| G3 | sequential read (MiB/s) | 16993.81 | 12824.73 | 0.755 | >= 0.800 | FAIL |
+| G4 | sequential write (MiB/s) | 5159.52 | 3390.91 | 0.657 | >= 0.800 | FAIL |
+| G5 | random read 4 KiB (IOPS) | 48261.50 | 64689.30 | 1.340 | >= 0.800 | PASS |
+| G6 | random write 4 KiB (IOPS) | 31083.10 | 33009.30 | 1.062 | >= 0.800 | PASS |
+| G7 | UDP TX (Mbit/s) | 38711.78 | 14207.56 | 0.367 | >= 0.800 | FAIL |
+| G8 | UDP RX (Mbit/s) | 73887.71 | 66092.34 | 0.894 | >= 0.800 | PASS |
+| G9 | guest TCP A to B (Mbit/s) | 26025.66 | 20705.88 | 0.796 | >= 0.800 | FAIL |
+| G10 | guest TCP B to A (Mbit/s) | 26502.41 | 19761.46 | 0.746 | >= 0.800 | FAIL |
+
+### Host observations and validity
+
+The VM-count monitor observed only this cohort's VMs, at most two at
+once. Every observed VM had memory.max 25769803776 and memory.swap.max
+0. The governor was `performance`; single VMs used CPUs 16-23 and
+pairs used 16-19 plus 20-23. Ubuntu remained 2 vCPUs/4 GiB and Windows
+4 vCPUs/8 GiB, with the existing firmware, templates, and MTU 65520.
+
+During vmlab-hv's Ubuntu samples, the one-minute host load reached
+30.42. Live rustc, rust-lld, and clippy-driver processes were observed;
+a saved process/cwd check identified builds in `/home/wil/dev/wcl` and
+`/home/wil/dev/opticlang-wt`. They were not this worktree's processes
+and were not stopped. A request to pause external builds and restart
+the full cohort was sent while measurements continued; no answer had
+arrived when the cohort finished. This invalidates a quiet-host claim,
+not the recorded byte counters or timestamps. The data cannot establish
+an isolated regression or gain from the net changes.
+
+The low samples remain: vmlab-hv UDP TX was 22029.34, 10737.13,
+14207.56 Mbit/s; its TCP B-to-A samples were 19761.46, 7816.78,
+20344.47 Mbit/s. Windows readiness was 98.52, 151.37, 151.37 seconds.
+A rerun needs other CPU-heavy builds and tests held, as well as new VM
+boots. No selective rerun has replaced these measurements.
+
+### Verification and execution records
+
+`just ci::check` exited 0 on the merged source, inside the 24 GiB,
+zero-swap scope with RUST_TEST_THREADS=1 and a 1800-second harness
+process deadline. It took 1627.20 seconds and reported 896 passing
+tests, zero failures, and three ignored tests. Formatting and workspace
+clippy with `-D warnings` passed. CI finished before timed benchmarks
+began; no acceptance/test VM overlapped a timed benchmark VM.
+
+The ignored tests were the 1 GiB S2 throughput baseline, the 4 GiB
+zero-fill diagnostic, and live PipeWire loopback. They were not run
+explicitly in this window. Physical USB/VFIO opt-ins were unset, so
+those real-device paths were not exercised. No host device was claimed,
+rebound, or reset. All 83 benchmark unit tests also passed; their
+existing mock ResourceWarnings remain.
+
+Two setup failures are retained. An unsupported `--version` metadata
+probe stopped the first runner before any VM launch. The next attempt
+used retained paths longer than Unix sockets accept; all six benchmark
+commands failed without aggregate records, then its full CI command
+passed. The corrected cohort used a short `/tmp/vp3-final-*` root and
+reran every benchmark configuration. Its command exit codes are all 0;
+the earlier batch's nonzero status is not treated as success.
+
+`bench/profiles/phase2-round3-final-20261101.json` contains the full bar
+table, all 22 records, command statuses, logs, scope observations,
+firmware/binary hashes, CI counts, and external-build evidence. It marks
+`quiet_host_claim_supported: false`. Full runtime artifacts remain in
+`/tmp/vp3-final-3oxwzw1w`; driver records are under
+`.scratch/perf3/final-quiet.k6FYYL` and
+`.scratch/perf3/final-quiet.fhsPvS`. All owned VMs and jobs were stopped
+after recording results. No shared protocol, trait, or snapshot-format
+signature changed. Quiet-host D28 validation, G7's regression commit,
+and G10's cause remain unfinished; the thresholds stay unchanged.
 
 ## Round 3 development diagnostics
 
@@ -131,12 +225,10 @@ idle slot. It produced no transfer samples and was stopped before any
 pair launch when preparing the required bench-window handoff. G10 has
 not been remeasured or diagnosed in this round.
 
-G7's regression commit, G10's cause, the final G1/G2/G7/G10 verdicts,
-and the complete `just ci::check` run remain unresolved. The changed
-paths have targeted S1/S2 checks; these do not replace full CI. The
-final gate and full serial CI are deferred to the owner's bench window,
-where other sessions can hold new boots, including while in-process
-KVM tests run. No final numbers have been run without authorization.
+At the development handoff, G7's regression commit, G10's cause, the
+final G1/G2/G7/G10 verdicts, and full CI were unresolved. The authorized
+window above subsequently supplied full CI and all requested measurements.
+Quiet-host validation remains unresolved because of external CPU work.
 
 ## Round 2 final run
 
