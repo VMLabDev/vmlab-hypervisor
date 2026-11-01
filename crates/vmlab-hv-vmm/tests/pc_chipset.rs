@@ -143,6 +143,87 @@ fn pc_chipset_pci_state_replays_the_recorded_guest_programming() {
 }
 
 #[test]
+fn p2_legacy_nic_config_bytes_and_bar_sizes_match_the_superset_capture() {
+    use vmlab_hv_devices::net::{e1000::E1000, pcnet::Pcnet};
+    use vmlab_hv_vmm::pci::PciRoot;
+    let mac = [0x52, 0x54, 0, 1, 2, 3];
+    let mem = vmlab_hv_devices::GuestMemory::new();
+    let cards: Vec<(u8, Arc<Mutex<dyn PciDevice>>)> = vec![
+        (
+            2,
+            Arc::new(Mutex::new(E1000::new(
+                "intel",
+                mac,
+                mem.clone(),
+                Arc::new(Line::default()),
+            ))),
+        ),
+        (
+            3,
+            Arc::new(Mutex::new(Pcnet::new(
+                "amd",
+                mac,
+                mem,
+                Arc::new(Line::default()),
+            ))),
+        ),
+    ];
+    for (slot, card) in cards {
+        let mut root = PciRoot::q35(1 << 40);
+        let mut expected = capture_config(&format!("00:{slot:02x}.0"));
+        root.add_device_at(slot, 0, card.clone()).unwrap();
+        for (reg, bytes) in expected.as_chunks::<4>().0.iter().enumerate() {
+            root.config_write(0, slot, 0, reg * 4, bytes);
+        }
+        // This is the only config-byte exception: captures attach QEMU's
+        // iPXE image; the requested machine has not supplied an option ROM.
+        expected[0x30..0x34].fill(0);
+        for (reg, bytes) in expected.as_chunks::<4>().0.iter().enumerate() {
+            assert_eq!(
+                root.config_read(0, slot, 0, reg),
+                u32::from_le_bytes(*bytes),
+                "slot {slot} config offset {:#x}",
+                reg * 4
+            );
+        }
+        let bars = card.lock().bars();
+        for bar in bars {
+            let offset = 0x10 + usize::from(bar.index) * 4;
+            root.config_write(0, slot, 0, offset, &u32::MAX.to_le_bytes());
+            let mask = root.config_read(0, slot, 0, offset / 4);
+            let address_mask = if bar.kind == vmlab_hv_devices::BarKind::Io {
+                !3u32
+            } else {
+                !15u32
+            };
+            assert_eq!((!(mask & address_mask)).wrapping_add(1), bar.size as u32);
+        }
+        root.config_write(0, slot, 0, 0x30, &u32::MAX.to_le_bytes());
+        assert_eq!(
+            root.config_read(0, slot, 0, 12),
+            0,
+            "absent option ROM must not size"
+        );
+        let mut rom = vec![0; 256 * 1024];
+        rom[..3].copy_from_slice(&[0x55, 0xaa, 1]);
+        root.attach_option_rom(slot, 0, &rom).unwrap();
+        assert_eq!(
+            root.config_read(0, slot, 0, 12),
+            0,
+            "supplied option ROM starts disabled"
+        );
+        root.config_write(0, slot, 0, 0x30, &u32::MAX.to_le_bytes());
+        assert_eq!(root.config_read(0, slot, 0, 12), 0xfffc_0000);
+        root.config_write(0, slot, 0, 0x30, &0xfeb4_0000u32.to_le_bytes());
+        assert!(!root.dispatch_mmio_read(0xfeb4_0000, &mut [0; 3]));
+        root.config_write(0, slot, 0, 0x30, &0xfeb4_0001u32.to_le_bytes());
+        let mut signature = [0; 3];
+        assert!(root.dispatch_mmio_read(0xfeb4_0000, &mut signature));
+        assert_eq!(signature, [0x55, 0xaa, 1]);
+    }
+}
+
+#[test]
 fn piix4_identity_and_write_masks_do_not_expose_ich9_registers() {
     let mut f = PmFixture::new();
     assert_eq!(f.device.config_read(0), 0x7113_8086);

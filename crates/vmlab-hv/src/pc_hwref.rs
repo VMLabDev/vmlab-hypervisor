@@ -341,7 +341,7 @@ impl Case {
         staged.pci_devices.clear();
         for (device, description) in devices.iter().zip(&full.pci_devices) {
             let class = device["class_info"]["class"].as_u64().unwrap();
-            if class == 0x200 || (description.device, description.function) == (1, 2) {
+            if (description.device, description.function) == (1, 2) {
                 continue;
             }
             let mut kept = description.clone();
@@ -399,6 +399,17 @@ impl Case {
             "display":{"device":"std-vga","pci":{"bus":0,"device":display.device,"function":display.function},"rom":vga},
             "nics":[],"serial_log":path.join("probe.log"),"ports":[]
         });
+        if self.name != "pc-templeos" {
+            let (model, device) = if self.name == "pc-windows-7" {
+                ("e1000", 3)
+            } else {
+                ("pcnet", 2)
+            };
+            description["nics"] = serde_json::json!([{
+                "model":model,"pci":{"bus":0,"device":device,"function":0},
+                "mac":"52:54:00:12:34:56","attachment":{"kind":"stream","socket":path.join("unused-network.sock")}
+            }]);
+        }
         if self.cdrom {
             description["disks"]
                 .as_array_mut()
@@ -655,9 +666,6 @@ fn compare(case: &Case, dump: &Dump) -> Result<Vec<String>, String> {
         "D3: genroms/kvmvapic.bin is absent".into(),
         "the original boot disk has fixture contents/capacity; CMOS disk geometry describes that disk".into(),
     ];
-    if case.name != "pc-templeos" {
-        differences.push("4b: captured e1000/PCnet function and its AML are absent".into());
-    }
     if matches!(case.name, "pc-freedos-1.3" | "pc-windows-98-se") {
         differences.push("4d: captured Cirrus is replaced at the same BDF by std-VGA, including its three ACPI sleep methods".into());
     }
@@ -714,6 +722,61 @@ fn compare(case: &Case, dump: &Dump) -> Result<Vec<String>, String> {
         &std::fs::read_to_string(fixture("pc-seabios-legacy").join("guest/lspci-nnnvvvxxxx.txt"))
             .map_err(|e| e.to_string())?,
     )?;
+    for device in reference_pci[0]["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["class_info"]["class"] == 0x200)
+    {
+        let bdf = device["slot"].as_u64().unwrap() as u16 * 8
+            + device["function"].as_u64().unwrap() as u16;
+        let actual = &dump.pci[&bdf];
+        let expected = baseline
+            .values()
+            .find(|config| config[..4] == actual[..4])
+            .ok_or("NIC missing from superset capture")?;
+        for offset in 0..256 {
+            if actual[offset] == expected[offset] {
+                continue;
+            }
+            let allowed = match offset {
+                4 => (actual[offset] ^ expected[offset]) & !4 == 0,
+                0x10..=0x17 => true,
+                0x30..=0x33 => le32(actual, 0x30) == 0,
+                0x3c => matches!(actual[offset], 10 | 11),
+                _ => false,
+            };
+            if !allowed {
+                problems.push(format!(
+                    "{} NIC config[{offset:#x}]={:#04x}, captured {:#04x}",
+                    case.name, actual[offset], expected[offset]
+                ));
+            }
+        }
+        for region in device["regions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["bar"] != 6)
+        {
+            let offset = 0x10 + region["bar"].as_u64().unwrap() as usize * 4;
+            let bar = le32(actual, offset);
+            let size = region["size"].as_u64().unwrap() as u32;
+            let io = region["type"] == "io";
+            let address_mask = if io { !3 } else { !15 };
+            if bar & !address_mask != u32::from(io)
+                || bar & address_mask == 0
+                || bar & address_mask & (size - 1) != 0
+            {
+                problems.push(format!(
+                    "{} NIC BAR at {offset:#x} is not an aligned captured-size {} window: {bar:#x}",
+                    case.name,
+                    if io { "I/O" } else { "MMIO32" }
+                ));
+            }
+        }
+        differences.push("NIC BAR addresses and IRQ line follow this staged topology; the BIOS-only probe leaves bus mastering off. The captured iPXE ROM is disabled and absent unless supplied".into());
+    }
     for bdf in [0, 8, 9, 11] {
         let actual = &dump.pci[&bdf];
         let mut expected = baseline[&bdf].clone();

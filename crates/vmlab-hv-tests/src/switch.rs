@@ -37,6 +37,7 @@ pub struct SwitchStats {
     pub dhcp_request: bool,
     /// The lease was ACKed (the exchange completed).
     pub dhcp_acked: bool,
+    pub icmp_echo_replies: usize,
     /// Every (source MAC, ethertype) seen, for diagnostics.
     pub seen: Vec<([u8; 6], u16)>,
 }
@@ -215,6 +216,7 @@ fn handle_frame(frame: &[u8], inner: &Arc<Mutex<Inner>>) -> Option<Vec<u8>> {
         return None;
     }
     if let Some(reply) = echo_reply(frame) {
+        inner.lock().stats.icmp_echo_replies += 1;
         return Some(reply);
     }
     let dhcp = parse_dhcp(frame)?;
@@ -353,7 +355,7 @@ fn build_dhcp_reply(req: &DhcpRequest, message_type: u8, yiaddr: Ipv4Addr) -> Ve
     }
     opt(&mut bootp, 53, &[message_type]);
     opt(&mut bootp, 54, &SERVER_IP.octets()); // server id
-    opt(&mut bootp, 51, &3600u32.to_be_bytes()); // lease time
+    opt(&mut bootp, 51, &86400u32.to_be_bytes()); // lease time
     opt(&mut bootp, 1, &MASK.octets()); // subnet mask
     opt(&mut bootp, 3, &SERVER_IP.octets()); // router
     opt(&mut bootp, 6, &SERVER_IP.octets()); // dns
