@@ -5,7 +5,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use log::{LevelFilter, Log, Metadata, Record};
@@ -19,7 +19,10 @@ static LOGGER: OnceLock<Recorder> = OnceLock::new();
 static CONTEXT: OnceLock<Context> = OnceLock::new();
 static STDERR: Mutex<()> = Mutex::new(());
 static FINISHED: AtomicBool = AtomicBool::new(false);
-static EXIT_RIP: AtomicBool = AtomicBool::new(false);
+pub(crate) const RECORD_OFF: u8 = 0;
+pub(crate) const RECORD_METADATA: u8 = 1;
+pub(crate) const RECORD_RIP: u8 = 2;
+static EXIT_RECORDER_MODE: AtomicU8 = AtomicU8::new(RECORD_OFF);
 const RECORDER_TARGET: &str = "vmlab_hv_vmm::diagnostics::flight";
 type StateReader = Arc<dyn Fn() -> Value + Send + Sync>;
 type ExitSink = Arc<dyn Fn(ProcessExitReason, Vec<String>) + Send + Sync>;
@@ -52,10 +55,29 @@ fn recorder_debug(filter: &env_filter::Filter) -> bool {
     )
 }
 
+fn recorder_mode(filter: &env_filter::Filter) -> u8 {
+    if recorder_debug(filter) {
+        RECORD_RIP
+    } else if filter.enabled(
+        &Metadata::builder()
+            .level(log::Level::Debug)
+            .target("vmlab_hv_vmm::diagnostics::flight::metadata")
+            .build(),
+    ) {
+        RECORD_METADATA
+    } else {
+        RECORD_OFF
+    }
+}
+
 /// Cached target/level selection; the exit loop never locks the log filter.
 #[inline]
+pub(crate) fn exit_recorder_mode() -> u8 {
+    EXIT_RECORDER_MODE.load(Ordering::Relaxed)
+}
+
 pub(crate) fn capture_exit_rip() -> bool {
-    EXIT_RIP.load(Ordering::Relaxed)
+    exit_recorder_mode() == RECORD_RIP
 }
 
 pub fn init_logging() -> Result<(), String> {
@@ -67,7 +89,7 @@ pub fn init_logging() -> Result<(), String> {
     };
     let logger = LOGGER.get_or_init(|| recorder);
     log::set_logger(logger).map_err(|e| e.to_string())?;
-    EXIT_RIP.store(recorder_debug(&logger.filter.read()), Ordering::Relaxed);
+    EXIT_RECORDER_MODE.store(recorder_mode(&logger.filter.read()), Ordering::Relaxed);
     // All log records go to the ring, independently of the stderr filter.
     log::set_max_level(LevelFilter::Trace);
     Ok(())
@@ -77,7 +99,7 @@ pub(crate) fn set_log_filter(filter: &str) -> Result<(), String> {
     let parsed = parse_filter(filter)?;
     let logger = LOGGER.get().ok_or("logging is not initialized")?;
     let mut filter = logger.filter.write();
-    EXIT_RIP.store(recorder_debug(&parsed), Ordering::Relaxed);
+    EXIT_RECORDER_MODE.store(recorder_mode(&parsed), Ordering::Relaxed);
     *filter = parsed;
     drop(filter);
     log::info!("stderr log filter changed");
@@ -568,6 +590,26 @@ mod tests {
         ] {
             assert!(recorder_debug(&parse_filter(filter).unwrap()), "{filter}");
         }
+    }
+
+    #[test]
+    fn recorder_can_be_disabled_or_enabled_without_register_copying() {
+        assert_eq!(recorder_mode(&parse_filter("info").unwrap()), RECORD_OFF);
+        assert_eq!(recorder_mode(&parse_filter("off").unwrap()), RECORD_OFF);
+        assert_eq!(
+            recorder_mode(&parse_filter("info,vmlab_hv_vmm::diagnostics::flight=off").unwrap()),
+            RECORD_OFF
+        );
+        assert_eq!(
+            recorder_mode(
+                &parse_filter("off,vmlab_hv_vmm::diagnostics::flight::metadata=debug").unwrap()
+            ),
+            RECORD_METADATA
+        );
+        assert_eq!(
+            recorder_mode(&parse_filter("off,vmlab_hv_vmm::diagnostics::flight=debug").unwrap()),
+            RECORD_RIP
+        );
     }
 
     #[test]

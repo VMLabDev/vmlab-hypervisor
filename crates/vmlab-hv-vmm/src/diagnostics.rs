@@ -27,12 +27,13 @@ pub(crate) fn vm_state(shared: &VmShared) -> serde_json::Value {
                         "sync_valid_regs":fd.get_kvm_run().kvm_valid_regs,
                     })
                 });
-                let exits = shared
+                let ring = shared
                     .exit_rings
                     .get(*id as usize)
-                    .and_then(|ring| ring.get())
-                    .and_then(|ring| ring.snapshot());
-                json!({"id":id, "registers":registers, "exits":exits})
+                    .and_then(|ring| ring.get());
+                let exits = ring.and_then(|ring| ring.snapshot());
+                let exit_clock = ring.map(|ring| ring.clock_info());
+                json!({"id":id, "registers":registers, "exits":exits, "exit_clock":exit_clock})
             })
             .collect::<Vec<_>>()
     });
@@ -54,7 +55,9 @@ pub(crate) fn vm_state(shared: &VmShared) -> serde_json::Value {
         "supported":shared.kvm.kvm.check_extension_int(kvm_ioctls::Cap::SyncRegs)
             & kvm_bindings::KVM_SYNC_X86_REGS as i32 != 0,
     });
-    json!({"vcpus":vcpus, "exit_rip":exit_rip, "pci_bars":bars, "timers":timers, "mch_smram":smram,
+    json!({"vcpus":vcpus, "exit_rip":exit_rip,
+        "exit_recorder":{"enabled":report::exit_recorder_mode() != report::RECORD_OFF},
+        "pci_bars":bars, "timers":timers, "mch_smram":smram,
         "usb_attachments":shared.usb_attachments.try_lock().map(|a| a.iter().map(|a| a.id.clone()).collect::<Vec<_>>())})
 }
 

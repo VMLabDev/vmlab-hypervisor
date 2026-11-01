@@ -24,32 +24,49 @@ Messages are formatted once for the recorder, redacted, and truncated to
 It previously selected an ad-hoc timer dump. Timer information now appears in
 every report under `vm.timers`.
 
-### Exact per-exit RIP
+### Per-exit flight recorder
 
-The per-vCPU ring always retains the last 256 exits: reason, port or MMIO
-address, size, direction, timestamp, and ioctl error when present. Its default
-mode has `rip: null`. It requests no `KVM_SYNC_X86_REGS` copy and performs no
-`KVM_GET_REGS` ioctl in the exit loop.
+The per-vCPU flight recorder is off by default. The exit loop reads a cached
+mode and skips recording: no ring allocation, timestamp read, metadata decoding,
+history stores, `KVM_SYNC_X86_REGS` copy, or `KVM_GET_REGS` ioctl. Structured
+logging and its all-level log ring, exit outcomes, panic and fatal-signal hooks,
+`MADV_DONTDUMP`, and crash reports remain enabled independently.
 
-Exact per-exit RIP is opt-in. This startup filter enables it:
+This startup filter enables the last 256 exits with exact per-exit RIP:
 
 ```sh
 VMLAB_HV_LOG=info,vmlab_hv_vmm::diagnostics::flight=debug
 ```
 
-Debug or trace on the recorder target enables RIP capture. A global `debug`
+This filter enables metadata recording without per-exit register copying:
+
+```sh
+VMLAB_HV_LOG=info,vmlab_hv_vmm::diagnostics::flight::metadata=debug
+```
+
+Both modes retain reason, port or MMIO address, size, direction, timestamp,
+and ioctl error when present. Metadata-only entries have `rip: null`.
+Debug or trace on the base recorder target enables RIP capture. A global `debug`
 or `trace`, or a matching parent target such as `vmlab_hv_vmm=debug`, also
-enables it. `info` or lower on the recorder target disables it. For example,
+enables it. `info` or lower disables the recorder unless the metadata child
+target enables it. For example,
 `VMLAB_HV_LOG=debug,vmlab_hv_vmm::diagnostics::flight=info` retains other debug
-logs without per-exit register copying. Debug on an unrelated device target
-does not enable RIP capture. Message regexes do not affect this target/level
+logs without per-exit recording. Debug on an unrelated device target
+does not enable recording. Message regexes do not affect this target/level
 selection, and the all-level log ring does not enable it.
 
 The `set_log_filter` control request switches the same mode on and off at
 runtime, as shown below. vCPUs are kicked and apply the selection before their
-next `KVM_RUN`. Existing history is preserved: old RIP samples remain until
-the ring overwrites them, and enabling capture does not fill earlier entries.
+next `KVM_RUN`. Existing history is preserved and stops changing when recording
+is disabled. Enabling capture does not fill earlier entries, and changing
+between metadata and RIP modes leaves older entries until overwritten.
 Unsupported kernels retain `rip: null` even when capture is requested.
+
+Each ring has one vCPU writer. Records use atomic stores, without locks,
+atomic read-modify-write operations, allocation, or formatting. Entries and
+publication state occupy separate 64-byte cache lines. Dump readers copy
+complete generations without blocking the writer; an overwritten or unfinished
+copy returns null history rather than waiting.
 
 Reports still attempt to read every vCPU's general and special registers,
 independently of this switch. Fatal-signal reports retain the checkpoint
@@ -95,10 +112,10 @@ for an established control connection:
 {"type":"request","id":11,"command":{"command":"dump_diagnostics"}}
 ```
 
-`set_log_filter` replaces the stderr filter and its exact-RIP selection.
-Both rings remain enabled. Success returns the normal `ok` reply with no
-status. An invalid filter returns `invalid_argument` and preserves both
-the previous filter and RIP selection.
+`set_log_filter` replaces the stderr filter and its flight-recorder selection.
+The log ring remains enabled. Success returns the normal `ok` reply with no
+status. An invalid filter returns `invalid_argument` and preserves the previous
+filter and recorder mode.
 
 These requests enable exact RIP, then disable it while retaining the default
 info logs. They use the same version-1 handshake and `diagnostics` capability;
@@ -142,20 +159,39 @@ The schema-version-1 report contains these fields:
 | `panic.message`, `panic.backtrace` | Panic details, independent of `RUST_BACKTRACE` |
 | `logs` | Bounded, redacted records, including debug and trace |
 | `vm.vcpus[].registers` | General registers, special registers, MP state, and `sync_valid_regs` KVM mask |
-| `vm.vcpus[].exits` | Last 256 KVM_RUN outcomes for that vCPU |
+| `vm.vcpus[].exits` | Last 256 recorded KVM_RUN outcomes, null if never enabled or a copy was busy |
+| `vm.vcpus[].exit_clock` | Timestamp source and calibrated TSC frequency, null if never enabled |
+| `vm.exit_recorder.enabled` | Whether new exit records are currently requested |
 | `vm.exit_rip.requested`, `vm.exit_rip.supported` | Recorder debug selection and kernel sync-register support |
 | `vm.timers` | Hyper-V MSRs and SIMP timer headers, LAPIC, PIT, PIC, IOAPIC, HPET |
 | `vm.pci_bars`, `vm.mch_smram`, `vm.usb_attachments` | Cheap device summaries |
 | `process_status`, `thread_count`, `threads` | Linux memory, scheduling, and thread statistics |
 
-Exit records contain a Unix timestamp in nanoseconds, numeric `KVM_EXIT_*`
+Exit records contain `unix_ns`, `host_tsc`, numeric `KVM_EXIT_*`
 reason, `rip`, `address`, `size`, `write`, and `errno`. `address` is a port or
 MMIO address; `size` is the access width. No I/O payload is retained.
 An interrupted or failed ioctl uses reason 4294967295 and carries `errno`.
-Per-exit `rip` is null by default. When exact RIP is enabled on a supporting
+Per-exit `rip` is null in metadata mode. When exact RIP is enabled on a supporting
 kernel, `KVM_SYNC_X86_REGS` copies general registers through the shared KVM
 mapping, without an extra ioctl per exit. Older kernels retain null RIP.
 The `regs` and `sregs` report fields are read independently of exit recording.
+
+On hosts with an invariant TSC selected as Linux's current clocksource,
+recording uses an unfenced `RDTSC`. Its sample is approximate, not an instruction
+ordering barrier. First enable calibrates the host counter against `Instant`
+over at least 20 ms, outside the steady-state exit loop. At dump time,
+`unix_ns` is estimated from the calibrated frequency and a fresh wall-clock
+anchor; `host_tsc` preserves the raw sample. Clock steps, calibration drift,
+host suspend, or migration can affect the estimate. Repeated dumps can estimate
+different Unix times for unchanged history. Sequence order defines exit order.
+
+If Linux stops using TSC, the counter appears ahead of the dump anchor, or
+conversion overflows, `unix_ns` is null and raw `host_tsc` remains available.
+If TSC is unsuitable at first enable, `exit_clock.kind` is `system_time`:
+records use `SystemTime` per exit, retain `unix_ns` directly, and have null
+`host_tsc`. This compatibility mode costs more. Clock selection is process-wide;
+disabling recording does not recalibrate it. Neither clock path runs while the
+recorder is off.
 
 Busy locks and unreadable KVM registers produce null fields or explicit busy
 entries. Reports never wait for a device lock held by a panicking thread.
@@ -239,16 +275,25 @@ CARGO_BUILD_JOBS=4 taskset -c 0-7 cargo test --release -p vmlab-hv-vmm \
   vcpu::tests::recorder_exit_hook_overhead -- --ignored --nocapture
 ```
 
-On the development host, 2,000,000 iterations measured 0.32 ns per baseline
-iteration and 30.52 ns with exit decoding, timestamp, and ring insertion,
-a 30.20 ns delta. The benchmark calls the default-mode hook with synthetic KVM
-metadata. It excludes KVM register-copy cost, checkpoint contention, and guest
-throughput; it is not a whole-VM performance claim.
+On the development host, 2,000,000 iterations measured 0.33 ns per baseline
+iteration and 9.36 ns with exit decoding, a counter read, and ring insertion,
+a 9.04 ns delta. Earlier optimized runs measured 7.13 and 7.55 ns deltas, compared
+with 30.20 ns for the previous mutex plus `SystemTime` implementation. These
+are userspace hook measurements with synthetic KVM metadata. They exclude
+kernel register-copy cost, concurrent dump readers, and guest throughput.
 
-The real KVM loop benchmark compares recording disabled, default metadata,
-opt-in exact RIP, and a timestamp-only control without ring insertion. It
-includes the cached-mode check in both recording modes and kernel
-register-copy cost only in the opt-in mode. It requires
+Profiling controls in the previous KVM loop measured 3.24% to 3.92% for
+`SystemTime` alone, against 4.14% to 4.41% for its metadata ring. The new
+optional path replaces that per-exit clock read with `RDTSC` where supported
+and replaces the mutex with a single-writer atomic-store ring. Remaining
+recording work is metadata decoding, a counter read, generation publication,
+and cache-line stores. Exact RIP additionally copies kernel general registers.
+The default-off path does none of that recording work.
+
+The real KVM loop benchmark compares a bypass baseline, actual recorder-off,
+opt-in metadata, opt-in exact RIP, and wall-clock-only and counter-only controls
+without ring insertion. It includes the cached-mode check in off and recording
+modes and kernel register-copy cost only in RIP mode. It requires
 `/dev/kvm`, sync-register support, and a memory-capped scope. It creates a KVM
 VM inside the test binary, without a `vmlab-hv` or `qemu-system` process.
 The host's test-window policy must permit in-process KVM tests. Its command is:
@@ -260,40 +305,50 @@ systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- \
   vcpu::tests::recorder_kvm_loop_overhead -- --ignored --nocapture
 ```
 
-Three repetitions on CPU 14, outside CI's CPU 0-7 affinity, each discarded a
-warm-up quartet and used nine alternating quartets of 200,000 exits per sample.
-The guest repeatedly wrote one byte to port 80h. The default-mode samples
-asserted that `KVM_SYNC_X86_REGS` was clear and every recorded RIP was null.
-The opt-in samples asserted the opposite. Results were:
+Three repetitions on CPU 14 discarded a warm-up group and used nine groups
+of 200,000 exits per sample. Each mode sample was bracketed by two bypass
+baseline samples; its paired delta uses their mean. Mode order reverses each
+group, and all modes use one ioctl call site to avoid loop-layout differences.
+The guest repeatedly wrote one byte to port 80h. Tests assert a clear sync-reg
+mask in off and metadata modes, null RIP in metadata, and populated RIP with
+the sync mask set in RIP mode. Linux selected invariant TSC at about 4.292 GHz.
 
-| Repetition | Mode | Baseline ns/exit | Recorded ns/exit | Delta ns/exit | Overhead |
-| --- | --- | ---: | ---: | ---: | ---: |
-| 1 | Default metadata | 3358.56 | 3506.74 | 148.19 | 4.41% |
-| 1 | Opt-in exact RIP | 3358.56 | 3549.22 | 190.67 | 5.68% |
-| 1 | Timestamp only | 3358.56 | 3490.07 | 131.51 | 3.92% |
-| 2 | Default metadata | 3389.74 | 3532.38 | 142.63 | 4.21% |
-| 2 | Opt-in exact RIP | 3389.74 | 3582.99 | 193.24 | 5.70% |
-| 2 | Timestamp only | 3389.74 | 3499.56 | 109.82 | 3.24% |
-| 3 | Default metadata | 3376.00 | 3515.84 | 139.84 | 4.14% |
-| 3 | Opt-in exact RIP | 3376.00 | 3574.03 | 198.03 | 5.87% |
-| 3 | Timestamp only | 3376.00 | 3496.17 | 120.17 | 3.56% |
+| Mode | Paired median, run 1 | Run 2 | Run 3 | Individual paired range, all runs |
+| --- | ---: | ---: | ---: | ---: |
+| Default recorder off | +1.51% | -3.59% | -8.46% | -40.44% to +53.97% |
+| Opt-in metadata | -3.87% | +1.75% | +2.30% | -25.10% to +79.92% |
+| Opt-in exact RIP | -1.33% | -0.04% | +3.36% | -15.45% to +32.98% |
+| Wall-clock-only control | +0.26% | +3.25% | +3.24% | -18.82% to +36.21% |
+| Counter-only control | +0.27% | -1.02% | +0.10% | -21.17% to +18.76% |
 
-The default no longer copies general registers, but its measured overhead
-is not near zero in this exit-saturated workload. The timestamp-only control
-also has measurable cost, without register copying or a ring. The
-userspace-only microbenchmark excludes the KVM transition context and must
-not stand in for the full-loop result. Representative guest throughput has
-not been measured.
+Default-off median baseline/sample times were 3977.85/4037.98,
+4275.18/4121.63, and 4144.74/3570.49 ns per exit. The median paired deltas
+were +60.13, -153.55, and -468.85 ns. A median of paired differences need not
+equal the difference of independently calculated medians.
+
+These shared-host runs had heavy concurrent work, including CPU 14's SMT
+sibling. The second and third repetitions also overlapped CI on CPU 0-7.
+Their noise floor is much larger than 1%; negative deltas are noise, not
+speedups. No consistent positive default-off overhead is resolved, but these
+measurements cannot certify a sub-1% bound or establish a stable KVM recording
+cost floor. Since the optional ring did not demonstrate a reliable sub-1%
+result, the whole per-exit recorder is off by default, as the owner requested.
+The enabled-path userspace floor measured about 7 to 9 ns for counter sampling,
+metadata decoding, and stores. It does not establish a whole-loop bound.
+Representative guest throughput has not been measured.
 
 The seven S1 diagnostics tests cover guest poweroff, guest reset,
 SIGTERM, runtime failure, filter changes, on-demand reports, quit, and
-startup-error redaction. They also check default metadata, startup debug,
-runtime RIP capture in both directions, unchanged selection after an invalid
-filter, and crash-time register reads for both vCPUs with per-exit RIP off.
+startup-error redaction. They also check startup-off with no allocated history,
+startup debug, runtime metadata and RIP modes, frozen history after disabling,
+unchanged selection after an invalid filter, converted timestamps, and crash-time
+register reads for both vCPUs with the recorder off.
 
 ### Illustrative report excerpt
 
-This default-mode excerpt omits large arrays and is not a complete captured report:
+This metadata-enabled excerpt omits large arrays and is not a complete captured
+report. With the default filter and no prior enable, `exits` and `exit_clock`
+would be null and `exit_recorder.enabled` would be false:
 
 ```json
 {
@@ -307,8 +362,11 @@ This default-mode excerpt omits large arrays and is not a complete captured repo
   "logs": [{"level": "DEBUG", "thread": "vcpu-0", "vcpu": 0,
             "unix_ns": 1793491200000000000, "target": "vmlab_hv_vmm",
             "message": "device dispatch completed"}],
-  "vm": {"vcpus": [{"id": 0, "exits": [
-    {"unix_ns": 1793491200000000000, "reason": 2, "rip": null,
+  "vm": {"exit_recorder": {"enabled": true},
+    "vcpus": [{"id": 0,
+    "exit_clock": {"kind": "invariant_tsc", "hz": 4291912000}, "exits": [
+    {"unix_ns": 1793491200000000000, "host_tsc": 123456789000000,
+     "reason": 2, "rip": null,
      "address": 1016, "size": 1, "write": true, "errno": null}
   ]}]}
 }

@@ -144,7 +144,7 @@ impl Machine {
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
     }
 
-    fn wait_for_exit_mode(&mut self, exact_rip: bool) {
+    fn wait_for_exit_mode(&mut self, enabled: bool, exact_rip: bool) -> Value {
         let deadline = Instant::now() + Duration::from_secs(10);
         match self.client.call(Ctrl::Status).unwrap() {
             Outcome::Ok {
@@ -168,8 +168,7 @@ impl Machine {
             let report = loop {
                 let report = self.dump();
                 let cpu = &report["vm"]["vcpus"][0];
-                if cpu["exits"].is_array()
-                    && cpu["registers"]["regs"]["rip"].is_u64()
+                if cpu["registers"]["regs"]["rip"].is_u64()
                     && cpu["registers"]["sregs"]["cr0"].is_u64()
                     && cpu["registers"]["sync_valid_regs"].is_u64()
                 {
@@ -182,7 +181,11 @@ impl Machine {
                 std::thread::sleep(Duration::from_millis(1));
             };
             let cpu = &report["vm"]["vcpus"][0];
-            let exits = cpu["exits"].as_array().unwrap();
+            assert_eq!(report["vm"]["exit_recorder"]["enabled"], enabled);
+            if !enabled && cpu["registers"]["sync_valid_regs"].as_u64().unwrap() & 1 == 0 {
+                return report;
+            }
+            let exits = cpu["exits"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             let io: Vec<_> = exits
                 .iter()
                 .filter(|exit| exit["reason"] == 2 && exit["address"] == 0x80)
@@ -203,7 +206,14 @@ impl Machine {
                     u64::from(exact_rip),
                     "KVM_SYNC_X86_REGS must follow the requested recording mode",
                 );
-                return;
+                for exit in exits {
+                    assert!(exit["unix_ns"].is_u64(), "unconvertible timestamp: {exit}");
+                    assert_eq!(
+                        exit["host_tsc"].is_u64(),
+                        cpu["exit_clock"]["kind"] == "invariant_tsc"
+                    );
+                }
+                return report;
             }
             assert!(
                 Instant::now() < deadline,
@@ -217,6 +227,7 @@ impl Machine {
 #[test]
 fn recorder_rip_is_opt_in_at_startup_and_switches_both_directions() {
     const DEBUG: &str = "info,vmlab_hv_vmm::diagnostics::flight=debug";
+    const METADATA: &str = "info,vmlab_hv_vmm::diagnostics::flight::metadata=debug";
     // CLI; MOV DX,80h; OUT DX,AL; JMP back to OUT.
     let code = [0xfa, 0xba, 0x80, 0, 0xee, 0xeb, 0xfd];
     for startup in ["info", DEBUG] {
@@ -225,43 +236,66 @@ fn recorder_rip_is_opt_in_at_startup_and_switches_both_directions() {
         };
         let report = machine.dump();
         assert_eq!(report["vm"]["exit_rip"]["requested"], startup == DEBUG);
-        if report["vm"]["exit_rip"]["supported"] == false {
-            eprintln!("SKIP exact RIP assertions: KVM sync registers are unavailable");
-            machine.wait_for_exit_mode(false);
-        } else {
-            machine.wait_for_exit_mode(startup == DEBUG);
-            for (filter, expected) in [
-                (DEBUG, true),
-                ("info", false),
-                (DEBUG, true),
-                ("off", false),
-            ] {
-                // Change the filter while KVM_RUN is active, rather than only while paused.
-                assert!(matches!(
-                    machine.client.call(Ctrl::Resume).unwrap(),
-                    Outcome::Ok { .. }
-                ));
-                assert!(matches!(
-                    machine
-                        .client
-                        .call(Ctrl::SetLogFilter {
-                            filter: filter.into()
+        let supported = report["vm"]["exit_rip"]["supported"] == true;
+        let initial = machine.wait_for_exit_mode(startup == DEBUG, startup == DEBUG && supported);
+        if startup == "info" {
+            assert!(initial["vm"]["vcpus"][0]["exits"].is_null());
+            assert!(initial["vm"]["vcpus"][0]["exit_clock"].is_null());
+        }
+        for (filter, enabled, exact) in [
+            (DEBUG, true, true),
+            (METADATA, true, false),
+            ("info", false, false),
+            (DEBUG, true, true),
+            ("off", false, false),
+        ] {
+            // Change the filter while KVM_RUN is active, rather than only while paused.
+            assert!(matches!(
+                machine.client.call(Ctrl::Resume).unwrap(),
+                Outcome::Ok { .. }
+            ));
+            assert!(matches!(
+                machine
+                    .client
+                    .call(Ctrl::SetLogFilter {
+                        filter: filter.into()
+                    })
+                    .unwrap(),
+                Outcome::Ok { .. }
+            ));
+            let before = machine.wait_for_exit_mode(enabled, exact && supported);
+            if !enabled {
+                machine.client.call(Ctrl::Resume).unwrap();
+                let after = machine.wait_for_exit_mode(false, false);
+                // TSC-derived Unix estimates can shift with the dump anchor.
+                let stable = |report: &Value| {
+                    report["vm"]["vcpus"][0]["exits"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|exit| {
+                            let mut exit = exit.clone();
+                            if exit["host_tsc"].is_u64() {
+                                exit.as_object_mut().unwrap().remove("unix_ns");
+                            }
+                            exit
                         })
-                        .unwrap(),
-                    Outcome::Ok { .. }
-                ));
-                machine.wait_for_exit_mode(expected);
-                assert!(matches!(
-                    machine
-                        .client
-                        .call(Ctrl::SetLogFilter {
-                            filter: "foo=invalid".into()
-                        })
-                        .unwrap(),
-                    Outcome::Error { .. }
-                ));
-                assert_eq!(machine.dump()["vm"]["exit_rip"]["requested"], expected);
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(stable(&before), stable(&after));
             }
+            assert!(matches!(
+                machine
+                    .client
+                    .call(Ctrl::SetLogFilter {
+                        filter: "foo=invalid".into()
+                    })
+                    .unwrap(),
+                Outcome::Error { .. }
+            ));
+            let unchanged = machine.dump();
+            assert_eq!(unchanged["vm"]["exit_rip"]["requested"], exact);
+            assert_eq!(unchanged["vm"]["exit_recorder"]["enabled"], enabled);
         }
         machine.client.call(Ctrl::Quit).unwrap();
         machine.finish(ProcessExitReason::Quit);
@@ -379,8 +413,10 @@ fn deliberate_runtime_error_writes_report_and_exits_one() {
     assert!(report["vm"]["vcpus"].is_array());
     assert!(report["logs"].is_array());
     assert_eq!(report["vm"]["exit_rip"]["requested"], false);
+    assert_eq!(report["vm"]["exit_recorder"]["enabled"], false);
     let cpus = report["vm"]["vcpus"].as_array().unwrap();
     assert_eq!(cpus.len(), 2);
+    assert!(cpus.iter().all(|cpu| cpu["exits"].is_null()));
     assert!(
         cpus.iter()
             .all(|cpu| cpu["registers"]["regs"]["rip"].is_u64()
