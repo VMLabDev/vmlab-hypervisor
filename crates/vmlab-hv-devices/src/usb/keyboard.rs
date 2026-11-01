@@ -19,7 +19,7 @@ pub const KEYBOARD_REPORT_DESCRIPTOR: &[u8] = &[
 ];
 const CONFIG: &[u8] = &[
     9, 2, 34, 0, 1, 1, 8, 0xa0, 50, 9, 4, 0, 0, 1, 3, 1, 1, 0, 9, 0x21, 0x11, 1, 0, 1, 0x22, 63, 0,
-    7, 5, 0x81, 3, 8, 0, 10,
+    7, 5, 0x81, 3, 8, 0, 7,
 ];
 
 pub struct Keyboard {
@@ -256,6 +256,48 @@ impl Snapshot for Keyboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn high_speed_poll_interval_matches_the_captured_guest_inventory() {
+        let mut keyboard = Keyboard::new("fake");
+        let mut descriptors = Vec::new();
+        for value in [0x100, 0x200] {
+            let UsbTransfer::Ack(bytes) = keyboard.control(
+                SetupPacket {
+                    request_type: 0x80,
+                    request: 6,
+                    value,
+                    index: 0,
+                    length: 255,
+                },
+                &[],
+            ) else {
+                panic!("keyboard descriptor request failed");
+            };
+            descriptors.extend(bytes);
+        }
+        let tree = crate::usb::host::descriptor::parse_usbfs_descriptors(&descriptors).unwrap();
+        let endpoint = tree
+            .get_config_descriptor(1)
+            .unwrap()
+            .get_interface_descriptor(0, 0)
+            .unwrap()
+            .get_endpoint_descriptor(0)
+            .unwrap();
+        assert_eq!(endpoint.bEndpointAddress, 0x81);
+        let interval_us = 125u32 << (endpoint.bInterval - 1);
+        let capture: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../../docs/hwref/q35-macos-tahoe/hid-exercise.json"
+        ))
+        .unwrap();
+        assert!(capture.iter().any(|record| {
+            record["stdout"].as_str().is_some_and(|stdout| {
+                stdout.contains("\"Product\" = \"QEMU USB Keyboard\"")
+                    && stdout.contains("\"ReportInterval\" = 8000")
+            })
+        }));
+        assert_eq!(interval_us, 8000);
+    }
 
     #[test]
     fn report_descriptor_matches_the_captured_guest_inventory() {

@@ -9,7 +9,7 @@ hardware references. The owner keeps this host at `kvm.ignore_msrs=N`.
 
 ## Current verification state
 
-P2 and P4 pass. Four complete lifecycle runs passed with host
+P2 and P4 pass. Seven complete lifecycle runs passed with host
 `kvm.ignore_msrs=N`, but a CI repeat failed after all guest checks when
 agent powerdown left an unsuccessful process status. The exit code or
 signal is unknown because the test omitted the status and stderr from its
@@ -17,7 +17,13 @@ assertion. That diagnostic is corrected; the shutdown failure is not fixed.
 That CI binary finished with 38 passing tests and this one failure. A later
 run finished with 39 passing tests and an initial keyboard failure. Its
 failure matches an isolated run of the same CI-built binary: the password
-field remained empty. The full workspace gate has not passed.
+field remained empty. After the focus correction, all 40 binary acceptance
+tests passed in full CI. Formatting and clippy also passed. That workspace
+run subsequently failed in the unchanged HDA audio integration test with an
+ALSA capture EIO. Isolated repeats reproduce intermittent playback and
+capture EIO, and one repeat produced insufficient PCM after snapshot load.
+Other isolated repeats pass. The audio cause remains under investigation;
+the full workspace gate has not passed.
 
 The owner closed the intervening benchmark window and raised the host limit
 to four project VMs. Commit `fb507f3` is merged. Direct builds retain
@@ -26,11 +32,12 @@ to four project VMs. Commit `fb507f3` is merged. Direct builds retain
 The successful runs verified agent execution, visible 1280x800 native frames,
 keyboard glyphs, network ping, online snapshot file rollback, reboot with
 a new boot-session UUID, unchanged TSC frequency, and clean agent powerdown.
-They took 137.44, 86.99, 100.10, and 97.02 seconds, including shared VM permit
-waits. The three post-window runs did not reproduce the shutdown failure.
-The last two runs check keyboard input before networking, as the spec orders,
-and again after reset. The latest also confirms focus with a visible glyph
-before each key sequence. It passes the entire lifecycle.
+Standalone runs took 137.44, 86.99, 100.10, 97.02, 145.49, and 132.75 seconds,
+including shared VM permit waits. The seventh pass was in full CI. Subsequent
+runs did not reproduce the shutdown failure. Runs from the 100.10-second pass
+onward check keyboard input before networking, as the spec orders, and again
+after reset. Runs from the 97.02-second pass onward confirm focus with a
+visible glyph before each key sequence.
 
 One subsequent attempt stopped at OpenCore's prohibited-boot screen. The
 same implementation booted on retry. Another attempt reached agent-ready
@@ -53,9 +60,13 @@ Fresh live boots reach the graphical login screen.
 
 The xHCI interrupt path also ignored the endpoint service interval. A new
 controller test reproduced two keyboard reports completing within one
-64-ms service interval. It passes after interval enforcement, including a
+configured service interval. It passes after interval enforcement, including a
 snapshot between reports. Another regression covers standalone Event Data
-TDs, which must complete without consuming a USB report. All 47 USB tests pass.
+TDs, which must complete without consuming a USB report. The keyboard's
+high-speed descriptor originally requested 64 ms. The captured guest inventory
+requires 8 ms, so its bInterval is now 7. A descriptor-parser regression
+reproduced the discrepancy and passes after the correction. All 48 USB tests
+and the complete live macOS lifecycle pass with the corrected interval.
 The native input test waits for the password field and holds the pointer
 button for 50 ms. It then requires one visible probe glyph to confirm focus,
 retrying the focus request for at most 20 seconds. After clearing the probe,
@@ -64,7 +75,8 @@ The earlier one-shot click and fixed 100-ms wait failed in both full CI and
 an isolated CI-binary run. Those failures are not counted as passes.
 
 The parallel device suite also hit an unchanged console event-order test
-failure. That test passes alone. The final serial device suite passes 390 tests,
+failure. That test passes alone. The serial device suite before the interval
+regression passed 390 tests,
 with one existing ignored test. No console implementation changed.
 
 After the failed CI run, formatting, workspace clippy with `-D warnings`,
