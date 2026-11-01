@@ -171,6 +171,81 @@ fn edk2_stream_negotiation_rejection_lock_and_snapshot() {
     assert!(restored.broadcast());
 }
 
+#[test]
+fn every_supported_smi_mask_roundtrips_negotiation() {
+    for features in 0..=SMI_SUPPORTED {
+        let (mut fw, _) = firmware();
+        let request = selector(&mut fw, "etc/smi/requested-features");
+        let ok = selector(&mut fw, "etc/smi/features-ok");
+        fw.write(0, &request.to_le_bytes());
+        for byte in features.to_le_bytes() {
+            fw.write(1, &[byte]);
+        }
+        fw.write(0, &ok.to_le_bytes());
+        let mut result = [0];
+        fw.read(1, &mut result);
+        assert_eq!(result, [1], "negotiating mask {features}");
+        let state = fw.save_state().unwrap();
+        let (mut restored, _) = firmware();
+        restored
+            .restore_state(&state)
+            .unwrap_or_else(|error| panic!("restoring mask {features}: {error}"));
+        assert_eq!(restored.save_state().unwrap(), state);
+        assert_eq!(restored.broadcast(), features & SMI_BROADCAST != 0);
+
+        // Reading features-ok again must preserve the lock after restore.
+        restored.write(0, &ok.to_le_bytes());
+        restored.read(1, &mut result);
+        assert_eq!(result, [1]);
+        restored.write(0, &request.to_le_bytes());
+        for byte in (features ^ SMI_BROADCAST).to_le_bytes() {
+            restored.write(1, &[byte]);
+        }
+        restored.write(0, &ok.to_le_bytes());
+        restored.read(1, &mut result);
+        assert_eq!(result, [0], "mask {features} lost its negotiation lock");
+        assert_eq!(restored.broadcast(), features & SMI_BROADCAST != 0);
+    }
+}
+
+#[test]
+fn unsupported_smi_snapshot_is_rejected_without_changing_state() {
+    let (mut fw, _) = firmware();
+    let before = fw.save_state().unwrap();
+    for features in [8, 9, 1 << 63, u64::MAX] {
+        let mut state: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        state[1]["locked"] = features.into();
+        let error = fw
+            .restore_state(&serde_json::to_vec(&state).unwrap())
+            .unwrap_err();
+        assert!(error.to_string().contains("unsupported SMI features"));
+        assert_eq!(fw.save_state().unwrap(), before);
+    }
+}
+
+#[test]
+fn unfinished_smi_request_continues_after_restore() {
+    let (mut fw, _) = firmware();
+    let request = selector(&mut fw, "etc/smi/requested-features");
+    let ok = selector(&mut fw, "etc/smi/features-ok");
+    fw.write(0, &request.to_le_bytes());
+    fw.write(1, &[SMI_SUPPORTED as u8]);
+    fw.write(4, &1u32.to_be_bytes());
+    let state = fw.save_state().unwrap();
+    let (mut restored, _) = firmware();
+    restored.restore_state(&state).unwrap();
+    assert_eq!(restored.save_state().unwrap(), state);
+    assert!(!restored.broadcast());
+    for _ in 1..8 {
+        restored.write(1, &[0]);
+    }
+    restored.write(0, &ok.to_le_bytes());
+    let mut result = [0];
+    restored.read(1, &mut result);
+    assert_eq!(result, [1]);
+    assert!(restored.broadcast());
+}
+
 fn dma(
     fw: &mut SmiFwCfg,
     memory: &vmlab_hv_devices::GuestMemory,
@@ -210,6 +285,16 @@ fn edk2_dma_negotiation() {
         .unwrap();
     assert_eq!(result, [1]);
     assert!(fw.broadcast());
+    let state = fw.save_state().unwrap();
+    let (mut restored, restored_memory) = firmware();
+    restored.restore_state(&state).unwrap();
+    assert_eq!(restored.save_state().unwrap(), state);
+    assert!(restored.broadcast());
+    dma(&mut restored, &restored_memory, ok, 2, 1);
+    restored_memory
+        .read_slice(&mut result, GuestAddress(0x2000))
+        .unwrap();
+    assert_eq!(result, [1]);
 }
 
 #[test]

@@ -14,8 +14,10 @@ struct Negotiation {
 }
 
 /// Wrap the platform fw_cfg before registering it on the I/O bus. Only
-/// broadcast and the CPU-hotplug SMI protocol are advertised. The machine's
+/// broadcast, CPU-hotplug and CPU-hot-unplug SMI protocols are advertised.
+/// The hotplug bits request firmware notification through SMI. The machine's
 /// CPU inventory is fixed, so no insertion or removal events are generated.
+/// Their snapshot state is the negotiated bitmap, not a mutable CPU inventory.
 pub struct SmiFwCfg {
     inner: FwCfg,
     memory: vmlab_hv_devices::GuestMemory,
@@ -220,7 +222,7 @@ impl Snapshot for SmiFwCfg {
     fn restore_state(&mut self, state: &[u8]) -> Result<(), DeviceError> {
         let (inner, negotiation): (Vec<u8>, Negotiation) =
             serde_json::from_slice(state).map_err(|e| DeviceError::State(e.to_string()))?;
-        if negotiation.locked.is_some_and(|v| v & !SMI_BROADCAST != 0) {
+        if negotiation.locked.is_some_and(|v| v & !SMI_SUPPORTED != 0) {
             return Err(DeviceError::State("unsupported SMI features".into()));
         }
         self.inner.restore_state(&inner)?;
