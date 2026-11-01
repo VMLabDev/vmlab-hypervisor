@@ -12,6 +12,7 @@ lockstep = ["dep:vmlab-hv-lockstep"]
 sail = ["lockstep", "vmlab-hv-lockstep/sail"]
 
 [dependencies]
+log = "0.4"
 vmlab-hv-tcg-ir = { path = "../vmlab-hv-tcg-ir" }
 vmlab-hv-tcg-riscv64 = { path = "../vmlab-hv-tcg-riscv64" }
 num-bigint = "0.4.8"

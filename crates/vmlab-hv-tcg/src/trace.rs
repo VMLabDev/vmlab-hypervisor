@@ -1048,9 +1048,10 @@ impl Trace {
                         .native_matches(&guard.name, &self.recorded.constants[guard.expected])
                     {
                         if std::env::var_os("VMLAB_TCG_TRACE_PC").is_some() {
-                            eprintln!(
+                            log::debug!(
                                 "entry context mismatch pc={:?}: {}",
-                                self.options.pc, guard.name
+                                self.options.pc,
+                                guard.name
                             );
                         }
                         return false;
@@ -1511,7 +1512,7 @@ impl Trace {
     }
 
     pub fn dump(&self) {
-        eprintln!(
+        log::debug!(
             "known waiting: {}/{}",
             self.waiting
                 .iter()
@@ -1519,7 +1520,7 @@ impl Trace {
                 .count(),
             self.waiting.len()
         );
-        eprintln!(
+        log::debug!(
             "trace pc={:?} steps={} inputs={} scheduled={}",
             self.options.pc,
             self.trained_steps,
@@ -1527,19 +1528,20 @@ impl Trace {
             self.stages.iter().map(Vec::len).sum::<usize>()
         );
         for (id, input) in self.recorded.inputs.iter().enumerate() {
-            eprintln!("input {id}: {input:?}");
+            log::trace!("input {id}: {input:?}");
         }
         for (id, scalar) in self.recorded.block.graph.scalars.iter().enumerate() {
-            eprintln!("scalar {id}: {scalar:?}");
+            log::trace!("scalar {id}: {scalar:?}");
         }
         for event in &self.recorded.block.events {
-            eprintln!("event: {event:?}");
+            log::trace!("event: {event:?}");
         }
         if let Some(checkpoint) = self.recorded.block.checkpoints.last() {
             for binding in checkpoint.globals.iter() {
-                eprintln!(
+                log::trace!(
                     "global {}: {:?}",
-                    binding.name, self.recorded.block.values[binding.value]
+                    binding.name,
+                    self.recorded.block.values[binding.value]
                 );
             }
         }

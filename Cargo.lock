@@ -1295,6 +1295,7 @@ name = "vmlab-hv-tcg"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "log",
  "num-bigint",
  "num-traits",
  "parking_lot",
