@@ -11,6 +11,21 @@ use vmlab_hv_proto::{
 };
 use vmlab_hv_tests::process::ManagedChild;
 
+fn guest_directory(prefix: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in("/var/tmp")
+        .unwrap()
+}
+
+#[test]
+fn riscv_artifacts_use_disk_backed_directory() {
+    for prefix in ["hv-riscv-", "hv-riscv-direct-"] {
+        let directory = guest_directory(prefix);
+        assert_eq!(directory.path().parent(), Some(Path::new("/var/tmp")));
+    }
+}
+
 #[test]
 fn riscv_firmware_boots_opensbi_and_edk2() {
     boot(false, false);
@@ -46,10 +61,7 @@ fn direct_kernel(reset: bool, exit_on_reset: bool) {
         eprintln!("skipping RISC-V direct boot: OpenSBI fw_dynamic is unavailable");
         return;
     }
-    let directory = tempfile::Builder::new()
-        .prefix("hv-riscv-direct-")
-        .tempdir()
-        .unwrap();
+    let directory = guest_directory("hv-riscv-direct-");
     let kernel = directory.path().join("kernel.bin");
     let serial = directory.path().join("serial.log");
     let stderr = directory.path().join("stderr.log");
@@ -220,10 +232,7 @@ fn boot(linux: bool, paused_snapshot: bool) {
         eprintln!("skipping RISC-V firmware boot: OpenSBI fw_dynamic is unavailable");
         return;
     }
-    let mut directory = tempfile::Builder::new()
-        .prefix("hv-riscv-")
-        .tempdir()
-        .unwrap();
+    let mut directory = guest_directory("hv-riscv-");
     if std::env::var_os("VMLAB_HV_ACCEPTANCE_KEEP").is_some() {
         directory.disable_cleanup(true);
         eprintln!(

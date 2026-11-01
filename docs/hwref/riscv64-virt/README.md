@@ -217,8 +217,22 @@ its last diagnostic line was truncated. The systemd scope recorded a
 7.5 GiB memory peak, and the kernel journal contained no OOM record for
 the interval. The exit cause is unknown. Revision `97a14de` includes the
 child's exit status in this assertion so a repeat failure preserves it.
-The failed log remains at `target/p3b-linux-pc-budget.log`. A fresh,
-serialized `just ci::check` run is in progress; it is not yet a pass.
+The failed log remains at `target/p3b-linux-pc-budget.log`.
+
+The system journal subsequently showed three `/tmp` writes failing with
+`ENOSPC` immediately before the exit, and an unrelated linker crashing with
+SIGBUS. The guest's stderr ended on a 4 KiB boundary. This supports temporary
+storage exhaustion, although the original child exit status was not retained.
+The recorded driver command used a 7,200-second boot timeout and a
+7,500-second child watchdog; the benchmark's 1,800-second deadline does not
+apply to this direct test command.
+
+The RISC-V fixture constructors now use `/var/tmp`, matching the existing
+PC fixture pattern. The no-VM regression first failed with parent `/tmp`,
+then passed with `/var/tmp` for both firmware and direct-kernel fixtures.
+The intervening CI run was stopped with no owned VM active before RISC-V
+acceptance. Its interrupted log remains at `target/p3b-ci-pc-budget.log`;
+it is not a full CI pass. Fresh serialized CI must verify the fixture change.
 
 The benchmark runner's TCG path referenced an undefined `BOOT_DEADLINE`,
 removed by an earlier x86 readiness change. The original 1,800-second
