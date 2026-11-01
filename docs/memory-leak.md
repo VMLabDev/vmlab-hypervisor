@@ -9,7 +9,7 @@ successful end-to-end test below.
 Each scenario ran for 600 seconds with a fresh overlay on the local Ubuntu
 26.04.3 template, two vCPUs, and 4096 MiB RAM. RSS and cgroup v2 memory were
 sampled every five seconds. Every VM command ran in a scope with
-`MemoryMax=48G` and `MemorySwapMax=0`, with at most two booting test processes.
+`MemoryMax=48G` and `MemorySwapMax=0`, with at most two booting test processes at the time (the default is now four, see `crates/vmlab-hv-tests/src/process.rs`).
 
 | ID | Scenario | RSS range, final 300 seconds, KiB | Peak scope memory, MiB | Final fds / threads |
 |---|---|---:|---:|---:|
@@ -62,7 +62,7 @@ the filesystem PCI device; successful filesystem I/O is not claimed.
   Parent-death signalling covers abrupt runner exits in Rust and Python.
   Tests cover a SIGTERM-ignoring helper, a descendant after its parent exits,
   injected startup panic, a 30 ms watchdog deadline, and abrupt runner exit.
-  Shared file locks default to two VMs across S1, acceptance, and hwref
+  Shared file locks default to four VMs (`VMLAB_HV_TEST_VM_LIMIT`) across S1, acceptance, and hwref
   processes. A third slot request times out while both slots are held.
 - F5: Continuous frame capture did not retain frame history in these probes.
   A regression publishes 4,000 frames with no client and with three held

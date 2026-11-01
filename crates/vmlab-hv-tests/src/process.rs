@@ -10,6 +10,11 @@ use std::process::{Child, Command};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+/// Project VMs allowed on the host at once unless `VMLAB_HV_TEST_VM_LIMIT`
+/// says otherwise. Every VM runs under a 24 GiB memory cap, so four fit the
+/// development host with headroom.
+const DEFAULT_VM_LIMIT: usize = 4;
+
 /// A slot shared by all S1 and acceptance test processes for this user.
 pub struct VmPermit(File);
 
@@ -58,12 +63,12 @@ fn project_vm_count(processes: &Path) -> io::Result<usize> {
     Ok(count)
 }
 
-fn wait_for_vm_capacity(processes: &Path, timeout: Duration) -> io::Result<()> {
+fn wait_for_vm_capacity(processes: &Path, limit: usize, timeout: Duration) -> io::Result<()> {
     let deadline = Instant::now() + timeout;
     let mut waiting = false;
-    while project_vm_count(processes)? >= 2 {
+    while project_vm_count(processes)? >= limit {
         if !waiting {
-            eprintln!("waiting for fewer than two project VMs before boot");
+            eprintln!("waiting for fewer than {limit} project VMs before boot");
             waiting = true;
         }
         if Instant::now() >= deadline {
@@ -77,20 +82,25 @@ fn wait_for_vm_capacity(processes: &Path, timeout: Duration) -> io::Result<()> {
     Ok(())
 }
 
+fn vm_limit() -> io::Result<usize> {
+    let limit = std::env::var("VMLAB_HV_TEST_VM_LIMIT")
+        .unwrap_or_else(|_| DEFAULT_VM_LIMIT.to_string())
+        .parse::<usize>()
+        .map_err(io::Error::other)?;
+    if limit == 0 {
+        return Err(io::Error::other("VMLAB_HV_TEST_VM_LIMIT must be positive"));
+    }
+    Ok(limit)
+}
+
 impl VmPermit {
     pub fn acquire() -> io::Result<Self> {
-        let limit = std::env::var("VMLAB_HV_TEST_VM_LIMIT")
-            .unwrap_or_else(|_| "2".into())
-            .parse::<usize>()
-            .map_err(io::Error::other)?;
-        if limit == 0 {
-            return Err(io::Error::other("VMLAB_HV_TEST_VM_LIMIT must be positive"));
-        }
+        let limit = vm_limit()?;
         let directory = vm_slot_directory();
         std::fs::create_dir_all(&directory)?;
         let timeout = ManagedChild::timeout()?;
         let permit = Self::acquire_in(&directory, limit, timeout)?;
-        wait_for_vm_capacity(Path::new("/proc"), timeout)?;
+        wait_for_vm_capacity(Path::new("/proc"), limit, timeout)?;
         Ok(permit)
     }
 
@@ -185,7 +195,7 @@ impl ManagedChild {
         timeout: Duration,
     ) -> io::Result<Self> {
         if permit.is_some() {
-            wait_for_vm_capacity(Path::new("/proc"), timeout)?;
+            wait_for_vm_capacity(Path::new("/proc"), vm_limit()?, timeout)?;
         }
         // SAFETY: the pre-exec closure calls only async-signal-safe syscalls.
         // A killed test runner must not leave a VM running without its guard.
@@ -306,17 +316,17 @@ mod tests {
         }
         assert_eq!(project_vm_count(directory.path()).unwrap(), 3);
         assert_eq!(
-            wait_for_vm_capacity(directory.path(), Duration::ZERO)
+            wait_for_vm_capacity(directory.path(), 2, Duration::ZERO)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::TimedOut
         );
         std::fs::write(directory.path().join("2/cmdline"), b"").unwrap();
         assert_eq!(project_vm_count(directory.path()).unwrap(), 2);
-        assert!(wait_for_vm_capacity(directory.path(), Duration::ZERO).is_err());
+        assert!(wait_for_vm_capacity(directory.path(), 2, Duration::ZERO).is_err());
         std::fs::write(directory.path().join("5/cmdline"), b"").unwrap();
         assert_eq!(project_vm_count(directory.path()).unwrap(), 1);
-        wait_for_vm_capacity(directory.path(), Duration::ZERO).unwrap();
+        wait_for_vm_capacity(directory.path(), 2, Duration::ZERO).unwrap();
     }
 
     #[test]
