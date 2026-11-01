@@ -66,6 +66,7 @@ impl Drop for MemoryUpdateGuard<'_> {
 
 /// Everything the vCPU threads and the control threads share.
 pub struct VmShared {
+    coalesced_vga: std::sync::OnceLock<crate::coalesced::CoalescedVga>,
     pub(crate) msr_policy: Mutex<vmlab_hv_proto::machine::MsrPolicy>,
     pub(crate) ignored_msrs: Mutex<std::collections::BTreeSet<u32>>,
     pub(crate) vfio: Mutex<Vec<Arc<Mutex<crate::vfio::AssignedDevice>>>>,
@@ -142,6 +143,7 @@ impl VmShared {
         mmio64_base: u64,
     ) -> Arc<Self> {
         Arc::new(VmShared {
+            coalesced_vga: std::sync::OnceLock::new(),
             msr_policy: Mutex::new(Default::default()),
             ignored_msrs: Mutex::new(Default::default()),
             vfio: Mutex::new(Vec::new()),
@@ -1058,6 +1060,7 @@ impl VmShared {
     }
 
     fn poll_chipset(&self) {
+        self.drain_coalesced_vga();
         self.advance_serials(None);
         self.poll_display();
         if self.status() == RunState::Running
@@ -1197,6 +1200,20 @@ impl VmShared {
         gate.in_kvm += 1;
         KvmRunGuard(self)
     }
+
+    pub(crate) fn drain_coalesced_vga(&self) {
+        let Some(coalesced) = self.coalesced_vga.get().filter(|ring| ring.pending()) else {
+            return;
+        };
+        let vga = self.vga.lock();
+        let Some(vga) = vga.as_ref() else {
+            self.request_exit(ExitReason::Error("coalesced VGA device is absent".into()));
+            return;
+        };
+        if let Err(error) = coalesced.drain(|offset, bytes| vga.legacy_write(offset, bytes)) {
+            self.request_exit(ExitReason::Error(error.to_string()));
+        }
+    }
 }
 
 /// A running machine: the shared state plus the vCPU threads.
@@ -1216,6 +1233,16 @@ impl Vm {
     ) -> Result<Self, VmmError> {
         let ram = Arc::new(ram);
         *shared.ram.lock() = Some(ram.clone());
+        if ram.a20.is_none()
+            && shared.vga.lock().is_some()
+            && let Some((_, vcpu)) = vcpu_fds.first()
+            && let Some(coalesced) = crate::coalesced::CoalescedVga::new(&shared.kvm, vcpu)?
+        {
+            shared
+                .coalesced_vga
+                .set(coalesced)
+                .map_err(|_| VmmError::Other("coalesced VGA already initialized".into()))?;
+        }
         let fds: Vec<(u8, Arc<Mutex<VcpuFd>>)> = vcpu_fds
             .into_iter()
             .map(|(id, fd)| (id, Arc::new(Mutex::new(fd))))

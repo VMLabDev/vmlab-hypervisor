@@ -123,6 +123,8 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
         let permit = shared.enter_kvm();
         let result = guard.run();
         drop(permit);
+        // Deliver buffered VGA writes before reads, register changes, or parking.
+        shared.drain_coalesced_vga();
         pending_completion = matches!(
             &result,
             Ok(VcpuExit::IoIn(..)
