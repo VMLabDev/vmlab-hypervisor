@@ -1,0 +1,241 @@
+//! S1 process outcomes and runtime diagnostics through the real control socket.
+
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use vmlab_hv_proto::client::Client;
+use vmlab_hv_proto::control::{Capability, Command as Ctrl, Event, Outcome, ProcessExitReason};
+use vmlab_hv_tests::process::ManagedChild;
+
+struct Machine {
+    directory: tempfile::TempDir,
+    child: ManagedChild,
+    client: Client,
+}
+
+impl Machine {
+    fn launch(code: &[u8], runtime_error: bool) -> Option<Self> {
+        if !Path::new("/dev/kvm").exists() {
+            eprintln!("SKIP S1 crash diagnostics: /dev/kvm is absent");
+            return None;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        // A reset-vector far jump enters our own 16-bit firmware at F000:0000.
+        // No downloaded guest, host device, or kernel asset is needed.
+        let mut rom = vec![0xf4; 0x10000];
+        rom[..code.len()].copy_from_slice(code);
+        rom[0xfff0..0xfff5].copy_from_slice(&[0xea, 0, 0, 0, 0xf0]);
+        let firmware = directory.path().join("firmware.bin");
+        std::fs::write(&firmware, rom).unwrap();
+        let machine = directory.path().join("machine.json");
+        let control = directory.path().join("control.sock");
+        std::fs::write(
+            &machine,
+            serde_json::to_vec(&json!({
+                "name":"diagnostics-test", "machine":"q35", "arch":"x86_64", "accel":"kvm",
+                "vcpus":1, "memory_mib":16, "exit_on_reset":true,
+                "boot":{"kind":"firmware", "firmware":"seabios", "code":firmware},
+                "disks":[], "nics":[], "ports":[], "shares":[],
+                "serial_log":directory.path().join("serial.log"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let binary = if runtime_error {
+            vmlab_hv_tests::hv_binary_with(&["testing"])
+        } else {
+            PathBuf::from(env!("CARGO_BIN_EXE_vmlab-hv"))
+        };
+        // Each VM has its own cgroup cap as well as the harness's host-wide slot.
+        let mut command = Command::new("systemd-run");
+        command
+            .args([
+                "--user",
+                "--scope",
+                "-q",
+                "-p",
+                "MemoryMax=24G",
+                "-p",
+                "MemorySwapMax=0",
+                "--",
+            ])
+            .arg(binary)
+            .arg("--machine")
+            .arg(machine)
+            .arg("--control")
+            .arg(&control)
+            .arg("--paused")
+            .env("VMLAB_HV_LOG", "off")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(
+                File::create(directory.path().join("stderr.log")).unwrap(),
+            ));
+        if runtime_error {
+            command.env("VMLAB_HV_TEST_RUNTIME_ERROR", "1");
+        }
+        let mut child = ManagedChild::spawn(&mut command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let client = loop {
+            if let Ok(client) = Client::connect(&control) {
+                break client;
+            }
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "startup failed: {}",
+                std::fs::read_to_string(directory.path().join("stderr.log")).unwrap()
+            );
+            assert!(Instant::now() < deadline, "control startup timeout");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(client.capabilities().contains(&Capability::Diagnostics));
+        Some(Self {
+            directory,
+            child,
+            client,
+        })
+    }
+
+    fn finish(&mut self, expected: ProcessExitReason) {
+        let mut found = false;
+        while let Some(event) = self.client.wait_event().unwrap() {
+            if let Event::Exiting { reason, code, .. } = event {
+                assert_eq!(reason, expected);
+                assert_eq!(code, expected.exit_code());
+                assert!(!found, "duplicate final event");
+                found = true;
+            }
+        }
+        assert!(found, "no final exit reason before control EOF");
+        assert_eq!(
+            self.child.wait().unwrap().code(),
+            Some(expected.exit_code() as i32)
+        );
+    }
+
+    fn dump(&mut self) -> Value {
+        assert!(matches!(
+            self.client.call(Ctrl::DumpDiagnostics).unwrap(),
+            Outcome::Ok { .. }
+        ));
+        let event = self.client.take_events().into_iter().find_map(|e| match e {
+            Event::DiagnosticsDumped { path } => Some(path),
+            _ => None,
+        });
+        let path = match event {
+            Some(path) => path,
+            None => match self.client.wait_event().unwrap().unwrap() {
+                Event::DiagnosticsDumped { path } => path,
+                other => panic!("unexpected event: {other:?}"),
+            },
+        };
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+}
+
+#[test]
+fn guest_poweroff_is_zero_and_final_event_precedes_eof() {
+    // Configure Q35's LPC PMBASE and ACPI decode through CF8/CFC, then enter S5.
+    let code = [
+        0xfa, 0xba, 0xf8, 0x0c, 0x66, 0xb8, 0x40, 0xf8, 0, 0x80, 0x66, 0xef, 0xba, 0xfc, 0x0c,
+        0x66, 0xb8, 1, 6, 0, 0, 0x66, 0xef, 0xba, 0xf8, 0x0c, 0x66, 0xb8, 0x44, 0xf8, 0, 0x80,
+        0x66, 0xef, 0xba, 0xfc, 0x0c, 0xb0, 0x80, 0xee, 0xba, 4, 6, 0xb8, 0, 0x34, 0xef, 0xf4,
+    ];
+    let Some(mut machine) = Machine::launch(&code, false) else {
+        return;
+    };
+    machine.client.call(Ctrl::Resume).unwrap();
+    machine.finish(ProcessExitReason::GuestPoweroff);
+}
+
+#[test]
+fn runtime_filter_dump_and_quit_round_trip() {
+    let Some(mut machine) = Machine::launch(&[0xfa, 0xf4, 0xeb, 0xfd], false) else {
+        return;
+    };
+    assert!(matches!(
+        machine
+            .client
+            .call(Ctrl::SetLogFilter {
+                filter: "info,vmlab_hv_devices=debug".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    assert!(matches!(
+        machine
+            .client
+            .call(Ctrl::SetLogFilter {
+                filter: "foo=invalid".into()
+            })
+            .unwrap(),
+        Outcome::Error { .. }
+    ));
+    let report = machine.dump();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["machine"]["name"], "diagnostics-test");
+    assert!(report["vm"]["vcpus"][0]["registers"]["regs"]["rip"].is_u64());
+    machine.client.call(Ctrl::Quit).unwrap();
+    machine.finish(ProcessExitReason::Quit);
+}
+
+#[test]
+fn deliberate_runtime_error_writes_report_and_exits_one() {
+    let Some(mut machine) = Machine::launch(&[0xf4], true) else {
+        return;
+    };
+    machine.client.call(Ctrl::Resume).unwrap();
+    machine.finish(ProcessExitReason::RuntimeError);
+    let stderr = std::fs::read_to_string(machine.directory.path().join("stderr.log")).unwrap();
+    let last: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+    let path = last["message"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("crash report: ")
+        .unwrap();
+    let report: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(report["exit_code"], 1);
+    assert_eq!(report["reason"]["kind"], "runtime_error");
+    assert!(
+        report["error_chain"][0]
+            .as_str()
+            .unwrap()
+            .contains("deliberate runtime error")
+    );
+    assert!(report["vm"]["vcpus"].is_array());
+    assert!(report["logs"].is_array());
+}
+
+#[test]
+fn startup_error_has_an_explicit_reason_without_echoing_secret_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    let fake = (0..64)
+        .map(|n| char::from(b'A' + n % 26))
+        .collect::<String>();
+    let machine = directory.path().join("invalid.json");
+    std::fs::write(
+        &machine,
+        serde_json::to_vec(&json!({"name":"bad", "applesmc":{"osk":fake}})).unwrap(),
+    )
+    .unwrap();
+    // Validation fails before /dev/kvm is opened, so this never boots a guest.
+    let result = Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+        .arg("--machine")
+        .arg(machine)
+        .arg("--control")
+        .arg(directory.path().join("control.sock"))
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert!(!stderr.contains(&fake));
+    assert!(stderr.contains("startup_error"));
+    assert!(
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|e| e.path().extension().is_none_or(|e| e != "pending"))
+    );
+}
