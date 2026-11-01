@@ -274,6 +274,33 @@ impl Memory for PhysicalMemory {
         }
         Some((self.identity, epoch))
     }
+    fn code_epoch_for(&self, ranges: &[(u64, usize)]) -> Option<(u64, u64)> {
+        if ranges.is_empty() {
+            return None;
+        }
+        let mut epoch = 0u64;
+        for &(address, len) in ranges {
+            if len == 0 {
+                return None;
+            }
+            if self.is_ram(address, len) {
+                if !self.cache_safe.load(std::sync::atomic::Ordering::SeqCst) {
+                    return None;
+                }
+                epoch = epoch.checked_add(self.access_generation(address, len)?)?;
+            } else {
+                let end = address.checked_add(len as u64)?;
+                let index = self
+                    .flash
+                    .iter()
+                    .position(|(base, _)| address >= *base && end <= base + (32 << 20))?;
+                epoch = epoch.checked_add(
+                    self.flash_epochs[index].load(std::sync::atomic::Ordering::Acquire),
+                )?;
+            }
+        }
+        Some((self.identity, epoch))
+    }
     fn ram_bounds(&self, address: u64) -> Option<(u64, u64)> {
         self.is_ram(address, 1)
             .then_some((RAM_BASE, RAM_BASE + self.size - 1))
@@ -368,6 +395,21 @@ mod tests {
     }
 
     #[test]
+    fn scoped_epochs_track_requested_pages_and_keep_dma_ram_conservative() {
+        let mut memory = memory();
+        let ranges = [(RAM_BASE, 8), (RAM_BASE + 8192, 8)];
+        let initial = memory.code_epoch_for(&ranges).unwrap();
+        memory.write(RAM_BASE + 4096, &[1]).unwrap();
+        assert_eq!(memory.code_epoch_for(&ranges), Some(initial));
+        memory.write(RAM_BASE + 8192, &[1]).unwrap();
+        assert_ne!(memory.code_epoch_for(&ranges), Some(initial));
+        memory.write(0x30008004, &[7]).unwrap();
+        assert!(memory.code_epoch_for(&ranges).is_none());
+        assert!(memory.code_epoch_for(&[]).is_none());
+        assert!(memory.code_epoch_for(&[(0x10000000, 4)]).is_none());
+    }
+
+    #[test]
     fn flash_mode_changes_cannot_reuse_an_array_execution_epoch() {
         use std::os::unix::fs::FileExt;
         use vmlab_hv_devices::BusDevice;
@@ -389,6 +431,9 @@ mod tests {
             .register(0x20000000, 32 << 20, flash.clone())
             .unwrap();
         memory.map_flash(0x20000000, flash.clone());
+        memory.write(0x30008004, &[7]).unwrap();
+        assert!(memory.code_epoch().is_none());
+        assert!(memory.code_epoch_for(&[(0x20000000, 8)]).is_some());
         let mut cpu = vmlab_hv_tcg::Riscv64::new(memory).unwrap();
         super::super::cpu::configure_memory(&mut cpu, 4 * 4096).unwrap();
         cpu.use_external_clock().unwrap();
@@ -454,6 +499,13 @@ mod tests {
             before,
             "unchanged code revalidated every window"
         );
+        cpu.interpreter.memory.write(RAM_BASE + 4096, &[1]).unwrap();
+        cpu.run(4096).unwrap();
+        assert_eq!(
+            queries.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "unrelated data page invalidated code"
+        );
         cpu.interpreter.memory.write(RAM_BASE + 128, &[1]).unwrap();
         cpu.run(4096).unwrap();
         assert!(queries.load(std::sync::atomic::Ordering::Relaxed) > before);
@@ -463,7 +515,7 @@ mod tests {
             .write(RAM_BASE, &0x00208093u32.to_le_bytes())
             .unwrap();
         cpu.run(4096).unwrap();
-        assert_eq!(cpu.gpr(1).unwrap(), 10240);
+        assert_eq!(cpu.gpr(1).unwrap(), 12288);
         cpu.interpreter.memory.write(0x30008004, &[7]).unwrap();
         cpu.interpreter
             .memory
@@ -471,7 +523,7 @@ mod tests {
             .write_slice(&0x00308093u32.to_le_bytes(), GuestAddress(RAM_BASE))
             .unwrap();
         cpu.run(4096).unwrap();
-        assert_eq!(cpu.gpr(1).unwrap(), 16384);
+        assert_eq!(cpu.gpr(1).unwrap(), 18432);
     }
 
     #[test]

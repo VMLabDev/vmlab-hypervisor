@@ -38,6 +38,13 @@ pub trait Memory {
     fn code_epoch(&self) -> Option<(u64, u64)> {
         None
     }
+    /// A monotonic epoch covering the bytes and mappings protected by code
+    /// stamps for these accesses. Coverage may be conservative. Return None
+    /// if a writer can change that coverage without advancing this token.
+    /// The default retains the whole-memory epoch.
+    fn code_epoch_for(&self, _ranges: &[(u64, usize)]) -> Option<(u64, u64)> {
+        self.code_epoch()
+    }
     /// Inclusive numeric bounds of the RAM or firmware-ROM region containing
     /// this address. Specialization must guard the range and retain memory
     /// effects, including flash command modes. This does not authorize folding

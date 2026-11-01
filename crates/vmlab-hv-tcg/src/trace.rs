@@ -12,6 +12,27 @@ use vmlab_hv_tcg_ir::native::{
 
 type Stage = Vec<vmlab_hv_tcg_ir::native::packed::Packed>;
 
+fn merge_code_ranges(ranges: impl Iterator<Item = (u64, usize)>) -> Vec<(u64, usize)> {
+    let Some(mut ranges) = ranges
+        .map(|(address, len)| Some((address, address.checked_add(len as u64)?)))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Vec::new();
+    };
+    ranges.sort_unstable();
+    let mut merged: Vec<(u64, usize)> = Vec::new();
+    for (address, end) in ranges {
+        if let Some((base, len)) = merged.last_mut()
+            && address <= *base + *len as u64
+        {
+            *len = (end.max(*base + *len as u64) - *base) as usize;
+        } else {
+            merged.push((address, (end - address) as usize));
+        }
+    }
+    merged
+}
+
 fn lower_stage(graph: &Graph, slots: &[usize], stage: Vec<ScalarId>) -> Stage {
     stage
         .into_iter()
@@ -41,6 +62,8 @@ pub(crate) struct Trace {
     recorded: Recorded,
     revision: Option<u64>,
     code_epoch: Cell<Option<(u64, u64)>>,
+    scoped_epoch: Cell<Option<(u64, u64)>>,
+    code_ranges: Vec<(u64, usize)>,
     context_slots: Vec<usize>,
     stages: Vec<Stage>,
     checkpoint_stages: Vec<Stage>,
@@ -804,6 +827,13 @@ impl Trace {
         );
         let wide_inputs = (0..recorded.inputs.len()).map(|_| None).collect();
         let wide_versions = vec![None; recorded.inputs.len()];
+        let code_ranges = merge_code_ranges(
+            recorded
+                .block
+                .code_guards
+                .iter()
+                .map(|guard| (guard.address, guard.len)),
+        );
         let stages: Vec<Stage> = vmlab_hv_tcg_ir::native::schedule::schedule(&recorded.block)
             .into_iter()
             .map(|stage| lower_stage(&recorded.block.graph, &slots, stage))
@@ -921,6 +951,8 @@ impl Trace {
             recorded,
             revision: None,
             code_epoch: Cell::new(None),
+            scoped_epoch: Cell::new(None),
+            code_ranges,
             context_slots,
             stages,
             checkpoint_stages,
@@ -992,6 +1024,13 @@ impl Trace {
         if epoch.is_some() && epoch == self.code_epoch.get() {
             return true;
         }
+        let scoped = (!self.code_ranges.is_empty())
+            .then(|| memory.code_epoch_for(&self.code_ranges))
+            .flatten();
+        if scoped.is_some() && scoped == self.scoped_epoch.get() {
+            self.code_epoch.set(epoch);
+            return true;
+        }
         let valid = self.recorded.block.code_guards.iter().all(|guard| {
             memory
                 .code_stamp(guard.address, guard.len)
@@ -1004,6 +1043,7 @@ impl Trace {
                 })
         });
         self.code_epoch.set(if valid { epoch } else { None });
+        self.scoped_epoch.set(if valid { scoped } else { None });
         valid
     }
 
@@ -1928,6 +1968,7 @@ impl Trace {
             + self.fast_events.len()
             + self.fast_code.len()
             + self.entry_guards.len()
+            + self.code_ranges.len() * 2
             + self.event_steps.len()
             + self.slots.len()
             + self.stages.iter().map(Vec::len).sum::<usize>()
@@ -1957,6 +1998,15 @@ mod tests {
     use crate::FlatMemory;
     use std::collections::{BTreeMap, BTreeSet};
     use vmlab_hv_tcg_ir::{Expr, Location, Op, Program, Target, Type};
+
+    #[test]
+    fn code_ranges_merge_overlap_without_covering_physical_gaps() {
+        assert_eq!(
+            merge_code_ranges([(0x9000, 2), (0x102, 4), (0x100, 4), (0x106, 2)].into_iter()),
+            vec![(0x100, 8), (0x9000, 2)]
+        );
+        assert!(merge_code_ranges([(u64::MAX, 2)].into_iter()).is_empty());
+    }
 
     #[test]
     fn unchanged_wide_global_inputs_reuse_their_snapshot() {
