@@ -4,6 +4,7 @@ use crate::acpi::Platform;
 
 #[derive(Clone, Debug)]
 pub struct SmbiosConfig {
+    pub baseboard: bool,
     pub bios_vendor: String,
     pub bios_version: String,
     pub bios_date: String,
@@ -16,6 +17,7 @@ pub struct SmbiosConfig {
 impl Default for SmbiosConfig {
     fn default() -> Self {
         Self {
+            baseboard: false,
             bios_vendor: "SeaBIOS".into(),
             bios_version: "Arch Linux 1.17.0-2-2".into(),
             bios_date: "04/01/2014".into(),
@@ -147,6 +149,14 @@ fn generate_records(
     system[8..24].copy_from_slice(&config.uuid);
     system[24] = 6;
     records.push(finish(system, &["QEMU", product, version])?);
+    if config.baseboard {
+        let mut board = structure(2, 15, 0x0200);
+        board[4..7].copy_from_slice(&[1, 2, 3]);
+        board[9] = 1;
+        word(&mut board, 11, 0x0300);
+        board[13] = 10;
+        records.push(finish(board, &["QEMU", product, version])?);
+    }
     let mut chassis = structure(3, 22, 0x0300);
     chassis[4..7].copy_from_slice(&[1, 1, 2]);
     chassis[9..13].copy_from_slice(&[3, 3, 3, 2]);

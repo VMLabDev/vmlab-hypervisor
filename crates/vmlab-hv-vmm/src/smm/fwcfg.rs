@@ -234,6 +234,122 @@ mod pc_tests {
     use super::*;
 
     #[test]
+    fn macos_p2_fwcfg_inventory_and_e820_match_reference_with_named_differences() {
+        use vmlab_hv_devices::BusDevice;
+        let memory = vmlab_hv_devices::GuestMemory::new();
+        let platform = vmlab_hv_firmware::Platform {
+            applesmc: true,
+            amd_hypertransport: false,
+            vcpus: 4,
+            max_cpus: 4,
+            ram_regions: vec![(0, 0x80000000), (0x100000000, 0x180000000)],
+            ecam_base: 0xe0000000,
+            pci64_base: Some(32 << 30),
+            pci_devices: [
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (4, 0),
+                (31, 0),
+                (31, 2),
+                (31, 3),
+            ]
+            .into_iter()
+            .map(|(device, function)| vmlab_hv_firmware::PciDevice {
+                device,
+                function,
+                vga: false,
+            })
+            .collect(),
+            tpm: false,
+            smm: false,
+        };
+        let options = vmlab_hv_firmware::FirmwareOptions {
+            smbios: vmlab_hv_firmware::smbios::SmbiosConfig {
+                baseboard: true,
+                processor_id: [0xe3, 6, 5, 0, 0xff, 0xfb, 0x8b, 0x17],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let inner = FwCfg::for_platform(memory.clone(), &platform, &options).unwrap();
+        let mut device = SmiFwCfg::new(inner, memory).unwrap();
+        device.write(0, &0x19u16.to_le_bytes());
+        let mut count = [0; 4];
+        for byte in &mut count {
+            device.read(1, std::slice::from_mut(byte));
+        }
+        let mut entries = vec![0; u32::from_be_bytes(count) as usize * 64];
+        for byte in &mut entries {
+            device.read(1, std::slice::from_mut(byte));
+        }
+        let mut actual = std::collections::BTreeMap::new();
+        for entry in entries.as_chunks::<64>().0 {
+            let end = entry[8..].iter().position(|byte| *byte == 0).unwrap();
+            let name = std::str::from_utf8(&entry[8..8 + end]).unwrap().to_owned();
+            actual.insert(
+                name,
+                u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize,
+            );
+        }
+        let reference: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../../docs/hwref/q35-macos-tahoe/fwcfg-files.json"
+        ))
+        .unwrap();
+        for entry in reference {
+            let name = entry["name"].as_str().unwrap();
+            let size = entry["size"].as_u64().unwrap() as usize;
+            match name {
+                "genroms/kvmvapic.bin" => {
+                    // QEMU's optional APIC option ROM is not shipped or used.
+                    assert_eq!(size, 9216);
+                    assert!(!actual.contains_key(name));
+                }
+                "etc/tpm/log" => {
+                    // A zero-length log with no TPM has no consumer.
+                    assert_eq!(size, 0);
+                    assert!(!actual.contains_key(name));
+                }
+                _ => assert_eq!(actual.remove(name), Some(size), "fw_cfg {name}"),
+            }
+        }
+        assert!(actual.is_empty(), "unexpected fw_cfg files: {actual:?}");
+        let e820 = device.inner.file("etc/e820").unwrap();
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/hwref/q35-macos-tahoe/smc-e820.json"
+        ))
+        .unwrap();
+        let captured: Vec<_> = capture["e820"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_u64().unwrap() as u8)
+            .collect();
+        assert_eq!(e820, captured);
+        let ranges: Vec<_> = e820
+            .as_chunks::<20>()
+            .0
+            .iter()
+            .map(|entry| {
+                (
+                    u64::from_le_bytes(entry[..8].try_into().unwrap()),
+                    u64::from_le_bytes(entry[8..16].try_into().unwrap()),
+                    u32::from_le_bytes(entry[16..].try_into().unwrap()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![
+                (0xfeffc000, 0x4000, 2),
+                (0, 0x80000000, 1),
+                (0x100000000, 0x180000000, 1)
+            ]
+        );
+    }
+
+    #[test]
     fn pc_preserves_fw_cfg_inventory_without_q35_smi_negotiation() {
         let memory = vmlab_hv_devices::GuestMemory::new();
         let config = vmlab_hv_firmware::FwCfg::for_pc(

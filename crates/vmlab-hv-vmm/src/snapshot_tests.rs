@@ -1161,6 +1161,129 @@ fn rapid_snapshot_loads_roll_back_guest_tsc() {
 }
 
 #[test]
+fn macos_snapshot_preserves_cpuid_msr_log_and_refuses_changed_tsc_frequency() {
+    use vmlab_hv_proto::{
+        client::Client,
+        control::{Command, ErrorCode, Outcome},
+    };
+    if !Path::new("/dev/kvm").exists() {
+        eprintln!("skipping macOS snapshot: /dev/kvm unavailable");
+        return;
+    }
+    let _permit = vmlab_hv_tests::process::VmPermit::acquire().unwrap();
+    let m = machine_with_setup(&[0xeb, 0xfe], 8, |_, cpu| {
+        cpu.set_cpuid2(&crate::macos::skylake_cpuid(0, 1).unwrap())
+            .unwrap();
+        let desc = serde_json::from_value(serde_json::json!({
+            "name":"macos-snapshot", "arch":"x86_64", "accel":"kvm", "vcpus":1, "memory_mib":16,
+            "boot":{"kind":"kernel","kernel":"unused","cmdline":""},
+            "disks":[],"nics":[],"ports":[],"serial_log":"unused",
+            "cpu_model":"Skylake-Client-v4","invtsc":true,"vmware_cpuid_freq":true,
+            "tsc_khz":cpu.get_tsc_khz().unwrap()
+        }))
+        .unwrap();
+        crate::macos::configure_tsc(cpu, &desc, false).unwrap();
+    })
+    .expect("create snapshot test VM");
+    m.handle.pause().unwrap();
+    m.handle
+        .shared()
+        .wait_quiesced(Duration::from_secs(5))
+        .unwrap();
+    let shared = m.handle.shared();
+    shared.ignored_msrs.lock().insert(0x60d);
+    let cpus = shared.vcpus.lock().clone();
+    let frequency = cpus[0].1.lock().get_tsc_khz().unwrap();
+    let initial = cpus[0]
+        .1
+        .lock()
+        .get_cpuid2(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
+        .unwrap();
+    let socket = m._dir.path().join("control.sock");
+    crate::control::serve(&socket, &m.handle).unwrap();
+    let mut client = Client::connect(socket).unwrap();
+    assert!(matches!(
+        client
+            .call(Command::SnapshotSave {
+                name: "cpu-policy".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    shared.ignored_msrs.lock().insert(0x3f8);
+    let mut changed_cpuid = initial.clone();
+    changed_cpuid
+        .as_mut_slice()
+        .iter_mut()
+        .find(|entry| entry.function == 0x40000010)
+        .unwrap()
+        .eax = 1;
+    cpus[0].1.lock().set_cpuid2(&changed_cpuid).unwrap();
+    cpus[0].1.lock().set_tsc_khz(frequency - 1000).unwrap();
+    m.vm.ram
+        .mem
+        .write_slice(&[42], GuestAddress(0x9000))
+        .unwrap();
+    let outcome = client
+        .call(Command::SnapshotLoad {
+            name: "cpu-policy".into(),
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Error {
+                code: ErrorCode::SnapshotIncompatible,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    let mut byte = [0];
+    m.vm.ram
+        .mem
+        .read_slice(&mut byte, GuestAddress(0x9000))
+        .unwrap();
+    assert_eq!(byte, [42], "frequency rejection changed guest RAM");
+    cpus[0].1.lock().set_tsc_khz(frequency).unwrap();
+    let changed_tsc = kvm_bindings::Msrs::from_entries(&[kvm_bindings::kvm_msr_entry {
+        index: 0x10,
+        data: 1u64 << 60,
+        ..Default::default()
+    }])
+    .unwrap();
+    assert_eq!(cpus[0].1.lock().set_msrs(&changed_tsc).unwrap(), 1);
+    assert!(matches!(
+        client
+            .call(Command::SnapshotLoad {
+                name: "cpu-policy".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    assert_eq!(
+        *shared.ignored_msrs.lock(),
+        std::collections::BTreeSet::from([0x60d, 0x3f8])
+    );
+    assert_eq!(cpus[0].1.lock().get_tsc_khz().unwrap(), frequency);
+    let mut observed = kvm_bindings::Msrs::from_entries(changed_tsc.as_slice()).unwrap();
+    assert_eq!(cpus[0].1.lock().get_msrs(&mut observed).unwrap(), 1);
+    assert!(
+        observed.as_slice()[0].data < 1u64 << 59,
+        "snapshot did not roll back the synthetic large TSC jump"
+    );
+    assert_eq!(
+        cpus[0]
+            .1
+            .lock()
+            .get_cpuid2(kvm_bindings::KVM_MAX_CPUID_ENTRIES)
+            .unwrap()
+            .as_slice(),
+        initial.as_slice()
+    );
+}
+
+#[test]
 fn snapshot_restores_tsc_deadline_after_lapic() {
     use kvm_bindings::{Msrs, kvm_msr_entry};
     let Some(m) = machine(&counter_payload(), 8) else {

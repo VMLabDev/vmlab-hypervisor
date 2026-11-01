@@ -6,11 +6,13 @@
 //! `usb/README.md` beside this module.
 
 mod host;
+mod keyboard;
 mod ring;
 mod state;
 mod tablet;
 mod xhci;
 pub use host::HostUsbDevice;
+pub use keyboard::{KEYBOARD_PORT, KEYBOARD_REPORT_DESCRIPTOR, Keyboard};
 
 pub use tablet::{PointerEvent, TABLET_REPORT_DESCRIPTOR, Tablet};
 pub use xhci::{BAR_SIZE, TABLET_PORT, XhciController};
@@ -64,6 +66,11 @@ pub enum UsbTransfer {
 /// Implementations must not block. Physical backends can refuse snapshots
 /// through `Snapshot`; the controller propagates that refusal.
 pub trait UsbDevice: Snapshot {
+    fn inject_key(&mut self, _qcode: &str, _down: bool) -> Result<(), DeviceError> {
+        Err(DeviceError::Other(
+            "USB device does not accept keyboard input".into(),
+        ))
+    }
     fn speed(&self) -> UsbSpeed;
     fn reset(&mut self);
     fn control(&mut self, setup: SetupPacket, data: &[u8]) -> UsbTransfer;

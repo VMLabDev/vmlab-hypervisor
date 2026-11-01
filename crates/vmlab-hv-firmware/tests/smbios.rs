@@ -8,6 +8,47 @@ fn checksum(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte))
 }
 
+#[test]
+fn macos_p2_smbios_type2_and_complete_fwcfg_table_match_capture() {
+    let platform = Platform {
+        vcpus: 4,
+        max_cpus: 4,
+        ram_regions: vec![(0, 0x80000000), (0x100000000, 0x180000000)],
+        ..Default::default()
+    };
+    let options = FirmwareOptions {
+        smbios: SmbiosConfig {
+            baseboard: true,
+            processor_id: [0xe3, 0x06, 0x05, 0, 0xff, 0xfb, 0x8b, 0x17],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let files: BTreeMap<_, _> = ancillary_files(&platform, &options)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let capture = include_bytes!("../../../docs/hwref/q35-macos-tahoe/fwcfg-smbios-tables.bin");
+    let actual = &files["etc/smbios/smbios-tables"];
+    let differences: Vec<_> = actual
+        .iter()
+        .zip(capture)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(offset, (a, b))| (offset, *a, *b))
+        .collect();
+    assert!(
+        actual == capture,
+        "SMBIOS lengths {} vs {}, differences {differences:x?}",
+        actual.len(),
+        capture.len()
+    );
+    assert_eq!(
+        files["etc/smbios/smbios-anchor"],
+        include_bytes!("../../../docs/hwref/q35-macos-tahoe/fwcfg-smbios-anchor.bin")
+    );
+}
+
 fn records(mut data: &[u8]) -> Vec<&[u8]> {
     let mut result = Vec::new();
     while !data.is_empty() {

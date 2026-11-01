@@ -51,7 +51,7 @@ impl ResetState {
         for (key, bytes) in sections {
             // Reset starts a new TSC epoch, rather than migrating the saved
             // TSC/reference-clock relation. Its MSR writes synchronize at zero.
-            if key != "tsc-offsets" {
+            if key != "tsc-offsets" && key != "ignored-msrs" {
                 kernel.insert(key, bytes);
             }
         }

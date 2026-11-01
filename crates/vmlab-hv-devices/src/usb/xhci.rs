@@ -37,11 +37,33 @@ const STALL: u32 = 6;
 const CONTEXT_ERROR: u32 = 19;
 const BUDGET: usize = 256;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Endpoint {
     context: [u32; 8],
     ring: Ring,
     kicked: bool,
+    service_counter: u32,
+    service_clock: Instant,
+}
+
+impl Default for Endpoint {
+    fn default() -> Self {
+        Self {
+            context: [0; 8],
+            ring: Ring::default(),
+            kicked: false,
+            service_counter: 0,
+            service_clock: Instant::now(),
+        }
+    }
+}
+
+impl Endpoint {
+    fn service_remaining(&self) -> u32 {
+        let elapsed =
+            (self.service_clock.elapsed().as_micros() / 125).min(u128::from(u32::MAX)) as u32;
+        self.service_counter.saturating_sub(elapsed)
+    }
 }
 
 #[derive(Clone)]
@@ -330,10 +352,25 @@ impl XhciController {
     }
 
     pub fn inject_pointer(&mut self, event: PointerEvent) -> Result<(), DeviceError> {
-        self.devices[TABLET_PORT as usize - 1]
-            .as_mut()
+        self.devices
+            .iter_mut()
+            .flatten()
+            .find(|device| device.state_id() == "usb-tablet")
             .ok_or_else(|| DeviceError::Other("USB tablet disconnected".into()))?
             .inject_pointer(event)?;
+        self.poll();
+        Ok(())
+    }
+    pub fn has_keyboard(&self) -> bool {
+        self.devices[super::KEYBOARD_PORT as usize - 1]
+            .as_ref()
+            .is_some_and(|device| device.state_id() == "usb-keyboard")
+    }
+    pub fn inject_key(&mut self, qcode: &str, down: bool) -> Result<(), DeviceError> {
+        self.devices[super::KEYBOARD_PORT as usize - 1]
+            .as_mut()
+            .ok_or_else(|| DeviceError::Other("USB keyboard disconnected".into()))?
+            .inject_key(qcode, down)?;
         self.poll();
         Ok(())
     }
@@ -385,6 +422,10 @@ impl XhciController {
         }
     }
     fn flush_events(&mut self) -> Result<(), DeviceError> {
+        if self.state.interrupters[self.interrupter].pending.is_empty() {
+            self.update_interrupt();
+            return Ok(());
+        }
         let segments = self.segments()?;
         if segments.is_empty() {
             return Ok(());
@@ -425,6 +466,9 @@ impl XhciController {
         Ok(())
     }
     fn acknowledge_events(&mut self, old: u64, new: u64) -> Result<(), DeviceError> {
+        if !self.running() {
+            return Ok(());
+        }
         let seg = self.segments()?;
         let index = |ptr: u64| -> Option<usize> {
             let mut n = 0;
@@ -769,12 +813,16 @@ impl XhciController {
                         if (ctx[1] >> 10) & 31 != 0 {
                             return Ok(TRB_ERROR);
                         }
+                        if matches!((ctx[1] >> 3) & 7, 3 | 7) && (ctx[0] >> 16) & 255 > 15 {
+                            return Ok(CONTEXT_ERROR);
+                        }
                         let ring = Ring::new(u64::from(ctx[2]) | (u64::from(ctx[3]) << 32));
                         ctx[0] = (ctx[0] & !7) | 1;
                         self.state.slots[slot].endpoints[ep] = Endpoint {
                             context: ctx,
                             ring,
                             kicked: false,
+                            ..Endpoint::default()
                         };
                     }
                 }
@@ -804,6 +852,8 @@ impl XhciController {
             if !self.state.slots[slot].enabled || !matches!(endpoint.context[0] & 7, 1 | 3) {
                 break;
             }
+            let interrupt = matches!((endpoint.context[1] >> 3) & 7, 3 | 7);
+            let interval = (endpoint.context[0] >> 16) & 15;
             let mut ring = endpoint.ring;
             let mut td = Vec::new();
             let control = ep == 1;
@@ -881,6 +931,10 @@ impl XhciController {
             if length > 1024 * 1024 {
                 valid = false;
             }
+            let bus_transfer = control || !td.iter().all(|(_, t)| matches!(t.kind(), 7 | 8));
+            if interrupt && bus_transfer && endpoint.service_remaining() != 0 {
+                break;
+            }
             let mut data = Vec::new();
             if valid && !input {
                 for &(_, t) in &buffers {
@@ -909,7 +963,7 @@ impl XhciController {
             {
                 if let Some(s) = setup {
                     d.control(s, &data)
-                } else if td.iter().all(|(_, t)| t.kind() == 8) {
+                } else if !bus_transfer {
                     UsbTransfer::Ack(vec![])
                 } else {
                     let address = ((ep / 2) as u8) | if input { 0x80 } else { 0 };
@@ -925,6 +979,12 @@ impl XhciController {
             } else {
                 UsbTransfer::Stall
             };
+            if interrupt && bus_transfer {
+                // xHCI 6.2.3.6: one interrupt transaction per 2^Interval microframes.
+                let endpoint = &mut self.state.slots[slot].endpoints[ep];
+                endpoint.service_counter = 1 << interval;
+                endpoint.service_clock = Instant::now();
+            }
             let (cc, actual) = match outcome {
                 UsbTransfer::Nak => break,
                 UsbTransfer::Stall => (if valid { STALL } else { TRB_ERROR }, 0),
@@ -1330,7 +1390,7 @@ impl Snapshot for XhciController {
     }
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
         let s = &self.state;
-        let mut w = Writer(b"VHVXHC02".to_vec());
+        let mut w = Writer(b"VHVXHC03".to_vec());
         w.bytes(&s.pci);
         for &v in &s.regs {
             w.u64(u64::from(v));
@@ -1349,6 +1409,7 @@ impl Snapshot for XhciController {
                 }
                 ep.ring.save(&mut w);
                 w.u64(u64::from(ep.kicked));
+                w.u64(u64::from(ep.service_remaining()));
             }
         }
         w.u64(u64::from(self.microframe()));
@@ -1380,7 +1441,8 @@ impl Snapshot for XhciController {
     }
     fn restore_state(&mut self, bytes: &[u8]) -> Result<(), DeviceError> {
         let mut r = Reader(bytes);
-        if r.take(8)? != b"VHVXHC02" {
+        let version = r.take(8)?;
+        if version != b"VHVXHC02" && version != b"VHVXHC03" {
             return Err(invalid());
         }
         let mut state = Self::initial_state();
@@ -1405,6 +1467,15 @@ impl Snapshot for XhciController {
                 }
                 ep.ring = Ring::restore(&mut r)?;
                 ep.kicked = r.bool()?;
+                if version == b"VHVXHC03" {
+                    ep.service_counter = r.u32()?;
+                    if ep.service_counter > 32768 {
+                        return Err(invalid());
+                    }
+                }
+                if matches!((ep.context[1] >> 3) & 7, 3 | 7) && (ep.context[0] >> 16) & 255 > 15 {
+                    return Err(invalid());
+                }
             }
         }
         state.mfindex = r.u32()? & 0x3fff;
