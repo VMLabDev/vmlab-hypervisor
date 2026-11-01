@@ -66,9 +66,10 @@ def project_vm_pids(proc_root="/proc"):
 
 
 def require_vm_slots(count=1):
-    """Check the host-wide two-VM cap immediately before every launch."""
+    """Check the host-wide VM cap immediately before every launch."""
     pids = project_vm_pids()
-    if len(pids) + count > 2:
+    limit = int(os.environ.get("VMLAB_HV_TEST_VM_LIMIT", "4"))
+    if len(pids) + count > limit:
         raise BenchError(f"need {count} VM slots; running project VM PIDs: {pids}")
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Own capture process groups and share the Rust harness's two VM slots."""
+"""Own capture process groups and share the Rust harness's VM slots."""
 
 import fcntl
 import ctypes
@@ -25,7 +25,7 @@ def spawn_process(argv, **kwargs):
 
 class VmPermit:
     def __init__(self):
-        limit = int(os.environ.get("VMLAB_HV_TEST_VM_LIMIT", "2"))
+        limit = int(os.environ.get("VMLAB_HV_TEST_VM_LIMIT", "4"))
         if limit < 1:
             raise ValueError("VMLAB_HV_TEST_VM_LIMIT must be positive")
         directory = Path(tempfile.gettempdir()) / f"vmlab-hv-vm-slots-{os.geteuid()}"
