@@ -52,18 +52,21 @@ def project_vm_count(processes="/proc"):
 
 
 class VmSlot:
-    """Share the Rust test launcher's two file permits and count live guests."""
+    """Share the Rust test launcher's file permits and count live guests."""
 
     def __init__(self, file):
         self.file = file
 
     @classmethod
     def acquire(cls, timeout=600, processes="/proc", directory=None):
+        limit = int(os.environ.get("VMLAB_HV_TEST_VM_LIMIT", "4"))
+        if limit < 1:
+            raise ValueError("VMLAB_HV_TEST_VM_LIMIT must be positive")
         directory = Path(directory or f"/tmp/vmlab-hv-vm-slots-{os.geteuid()}")
         directory.mkdir(exist_ok=True)
         deadline = time.monotonic() + timeout
         while True:
-            for slot in range(2):
+            for slot in range(limit):
                 file = open(directory / f"{slot}.lock", "a+b")
                 try:
                     fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -71,9 +74,9 @@ class VmSlot:
                     file.close()
                     continue
                 try:
-                    while project_vm_count(processes) >= 2:
+                    while project_vm_count(processes) >= limit:
                         if time.monotonic() >= deadline:
-                            raise TimeoutError("waiting for fewer than two project VMs")
+                            raise TimeoutError(f"waiting for fewer than {limit} project VMs")
                         time.sleep(0.1)
                     return cls(file)
                 except BaseException:

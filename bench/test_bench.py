@@ -371,7 +371,8 @@ class HvMachineTests(unittest.TestCase):
 
 class NoiseControlTests(unittest.TestCase):
     def test_host_vm_count_excludes_android_and_counts_test_binaries(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with mock.patch.dict(os.environ, {"VMLAB_HV_TEST_VM_LIMIT": "2"}), \
+                tempfile.TemporaryDirectory() as tmp:
             for pid, args in enumerate([
                 b"/usr/bin/qemu-system-riscv64\0-name\0vmlab:test\0",
                 b"/run/vmlab-hv-test-plain\0--machine\0machine.json\0",
@@ -386,7 +387,8 @@ class NoiseControlTests(unittest.TestCase):
                 lib.VmSlot.acquire(timeout=0, processes=tmp, directory=os.path.join(tmp, "slots"))
 
     def test_vm_slots_release_and_limit_concurrent_launches(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with mock.patch.dict(os.environ, {"VMLAB_HV_TEST_VM_LIMIT": "2"}), \
+                tempfile.TemporaryDirectory() as tmp:
             processes = os.path.join(tmp, "processes")
             os.mkdir(processes)
             slots = os.path.join(tmp, "slots")
@@ -401,6 +403,47 @@ class NoiseControlTests(unittest.TestCase):
             finally:
                 first.close()
                 second.close()
+
+    def test_vm_slots_allow_a_fourth_guest_by_default_and_override(self):
+        for configured in [None, "4"]:
+            with self.subTest(configured=configured), \
+                    mock.patch.dict(os.environ), tempfile.TemporaryDirectory() as tmp:
+                if configured is None:
+                    os.environ.pop("VMLAB_HV_TEST_VM_LIMIT", None)
+                else:
+                    os.environ["VMLAB_HV_TEST_VM_LIMIT"] = configured
+                for pid in range(1, 4):
+                    os.mkdir(os.path.join(tmp, str(pid)))
+                    with open(os.path.join(tmp, str(pid), "cmdline"), "wb") as file:
+                        file.write(b"/run/vmlab-hv\0--machine\0machine.json\0")
+                slots = os.path.join(tmp, "slots")
+                slot = lib.VmSlot.acquire(timeout=0, processes=tmp, directory=slots)
+                slot.close()
+                os.mkdir(os.path.join(tmp, "4"))
+                with open(os.path.join(tmp, "4", "cmdline"), "wb") as file:
+                    file.write(b"/run/vmlab-hv\0--machine\0machine.json\0")
+                with self.assertRaises(TimeoutError):
+                    lib.VmSlot.acquire(timeout=0, processes=tmp, directory=slots)
+
+    def test_vm_slots_honor_four_file_permits_and_reject_invalid_limits(self):
+        with mock.patch.dict(os.environ, {"VMLAB_HV_TEST_VM_LIMIT": "4"}), \
+                tempfile.TemporaryDirectory() as tmp:
+            processes = os.path.join(tmp, "processes")
+            os.mkdir(processes)
+            slots = os.path.join(tmp, "slots")
+            permits = []
+            try:
+                for _ in range(4):
+                    permits.append(lib.VmSlot.acquire(timeout=0, processes=processes, directory=slots))
+                with self.assertRaises(TimeoutError):
+                    lib.VmSlot.acquire(timeout=0, processes=processes, directory=slots)
+            finally:
+                for permit in permits:
+                    permit.close()
+            os.environ["VMLAB_HV_TEST_VM_LIMIT"] = "0"
+            with self.assertRaisesRegex(ValueError, "must be positive"):
+                lib.VmSlot.acquire(timeout=0, processes=processes, directory=slots)
+
     def test_g2g_samples_are_named_for_the_sender_and_receiver(self):
         import run
         agent_a, agent_b = object(), object()
