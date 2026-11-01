@@ -125,20 +125,22 @@ fn kvm_or_skip() -> Option<KvmVm> {
 }
 
 fn machine(payload: &[u8], disk_mib: u64) -> Option<Machine> {
-    machine_with_setup(payload, disk_mib, |_, _| {})
+    machine_with_setup(payload, disk_mib, false, |_, _| {})
 }
 
 fn machine_with_setup(
     payload: &[u8],
     disk_mib: u64,
+    paused: bool,
     setup: impl FnOnce(&KvmVm, &mut kvm_ioctls::VcpuFd),
 ) -> Option<Machine> {
-    machine_with_ram_setup(payload, disk_mib, setup, |_, _| {})
+    machine_with_ram_setup(payload, disk_mib, paused, setup, |_, _| {})
 }
 
 fn machine_with_ram_setup(
     payload: &[u8],
     disk_mib: u64,
+    paused: bool,
     setup: impl FnOnce(&KvmVm, &mut kvm_ioctls::VcpuFd),
     setup_ram: impl FnOnce(&KvmVm, &mut GuestRam),
 ) -> Option<Machine> {
@@ -223,7 +225,9 @@ fn machine_with_ram_setup(
     setup(&shared.kvm, &mut vcpu);
     let mut vm = Vm::from_parts(shared, vec![(0, vcpu)], ram).ok()?;
     *pause_target.lock() = Some(vm.handle());
-    vm.start();
+    if !paused {
+        vm.start();
+    }
     let handle = vm.handle();
     Some(Machine {
         vm,
@@ -862,6 +866,7 @@ fn control_snapshot_restores_ram_outside_the_boot_layout() {
     let Some(m) = machine_with_ram_setup(
         &[0xeb, 0xfe],
         8,
+        false,
         |_, _| {},
         |kvm, ram| {
             let region =
@@ -1024,7 +1029,7 @@ fn snapshot_load_completes_deferred_hyperv_hypercalls() {
     payload.push(0xe9);
     let displacement = (loop_at as u16).wrapping_sub(payload.len() as u16 + 2);
     payload.extend(displacement.to_le_bytes());
-    let Some(m) = machine_with_setup(&payload, 8, |kvm, cpu| {
+    let Some(m) = machine_with_setup(&payload, 8, false, |kvm, cpu| {
         crate::hyperv::configure_vcpu(&kvm.kvm, cpu, crate::hyperv::WINDOWS_FEATURES).unwrap();
         crate::loader::init_protected_16(cpu, 0x8000).unwrap();
         let msrs = kvm_bindings::Msrs::from_entries(&[
@@ -1474,7 +1479,7 @@ fn macos_snapshot_preserves_cpuid_msr_log_and_refuses_changed_tsc_frequency() {
         return;
     }
     let _permit = vmlab_hv_tests::process::VmPermit::acquire().unwrap();
-    let m = machine_with_setup(&[0xeb, 0xfe], 8, |_, cpu| {
+    let m = machine_with_setup(&[0xeb, 0xfe], 8, true, |_, cpu| {
         cpu.set_cpuid2(&crate::macos::skylake_cpuid(0, 1).unwrap())
             .unwrap();
         let desc = serde_json::from_value(serde_json::json!({
@@ -1488,7 +1493,10 @@ fn macos_snapshot_preserves_cpuid_msr_log_and_refuses_changed_tsc_frequency() {
         crate::macos::configure_tsc(cpu, &desc, false).unwrap();
     })
     .expect("create snapshot test VM");
-    m.handle.pause().unwrap();
+    // CPUID changes must precede the first KVM_RUN. Let the vCPU thread
+    // be scheduled before checking that the fixture stayed paused.
+    std::thread::sleep(SETTLE);
+    assert_eq!(m.handle.status(), vmlab_hv_proto::control::RunState::Paused);
     m.handle
         .shared()
         .wait_quiesced(Duration::from_secs(5))

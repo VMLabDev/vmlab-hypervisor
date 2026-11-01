@@ -157,6 +157,8 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
                 exit_record(run_ptr, result.as_ref().err().map(|e| e.errno()), sync_regs)
             });
         }
+        // Deliver buffered VGA writes before reads, register changes, or parking.
+        shared.drain_coalesced_vga();
         pending_completion = matches!(
             &result,
             Ok(VcpuExit::IoIn(..)

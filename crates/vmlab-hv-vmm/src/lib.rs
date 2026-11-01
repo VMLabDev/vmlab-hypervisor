@@ -8,6 +8,7 @@ pub mod builder;
 pub mod bus;
 pub mod chipset;
 mod clock;
+mod coalesced;
 pub mod control;
 pub mod diagnostics;
 mod display;

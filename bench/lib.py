@@ -108,6 +108,12 @@ X86_GUESTS = {
         "memory_mib": 8192,
         "hyperv": True,
     },
+    "windows-server-2025": {
+        "firmware": "ovmf",
+        "vcpus": 4,
+        "memory_mib": 8192,
+        "hyperv": True,
+    },
 }
 
 # The benchmark network: both backends attach the NIC as a stream-socket
@@ -167,7 +173,7 @@ def workloads(arch, guest="debian-13", suite="full"):
         return TCG_WORKLOADS
     if suite == "g2g":
         return X86_G2G_WORKLOADS
-    return X86_WINDOWS_WORKLOADS if guest == "windows-10" else X86_UBUNTU_WORKLOADS
+    return X86_WINDOWS_WORKLOADS if guest.startswith("windows-") else X86_UBUNTU_WORKLOADS
 
 
 # HV-D28 bars for the x86_64 suite: boot no slower than QEMU (ratio <= 1.00),

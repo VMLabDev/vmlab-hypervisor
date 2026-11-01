@@ -149,6 +149,17 @@ pub struct PciRoot {
     slots: Vec<Option<Function>>,
     alloc: BarAllocator,
     firmware: bool,
+    // Cache decoded targets, never register values. Exact addresses retain
+    // ROM/BAR overlap priority until a config or topology change invalidates it.
+    mmio_cache: [Option<CachedMmioBar>; 4],
+}
+
+#[derive(Clone, Copy)]
+struct CachedMmioBar {
+    address: u64,
+    slot: usize,
+    bar: u8,
+    offset: u64,
 }
 
 impl PciRoot {
@@ -165,6 +176,7 @@ impl PciRoot {
             slots: (0..PCI_SLOTS * 8).map(|_| None).collect(),
             alloc: BarAllocator::new(mmio64_base),
             firmware: false,
+            mmio_cache: [None; 4],
         }
     }
 
@@ -259,6 +271,7 @@ impl PciRoot {
             });
         }
         self.slots[index] = Some(Function { dev, bars, rom });
+        self.mmio_cache.fill(None);
         Ok(())
     }
 
@@ -289,6 +302,7 @@ impl PciRoot {
             value: 0,
             sizing: false,
         });
+        self.mmio_cache.fill(None);
         Ok(())
     }
 
@@ -330,6 +344,7 @@ impl PciRoot {
 
     /// Write config bytes at `offset` (0..256) of `(bus, slot, function)`.
     pub fn config_write(&mut self, bus: u8, slot: u8, function: u8, offset: usize, data: &[u8]) {
+        self.mmio_cache.fill(None);
         if bus != 0
             || function >= 8
             || slot as usize >= PCI_SLOTS
@@ -441,25 +456,70 @@ impl PciRoot {
     /// Dispatch an MMIO read inside a BAR window. Returns whether a BAR
     /// covered it.
     pub fn dispatch_mmio_read(&mut self, addr: u64, data: &mut [u8]) -> bool {
+        if let Some((mut dev, bar, offset)) = self.cached_mmio_bar(addr) {
+            dev.bar_read(bar, offset, data);
+            return true;
+        }
         if let Some((rom, offset)) = self.find_rom(addr) {
             for (i, byte) in data.iter_mut().enumerate() {
                 *byte = rom.get(offset + i).copied().unwrap_or(0xff);
             }
             return true;
         }
-        self.find_bar(addr, false)
-            .map(|(mut dev, bar, offset)| dev.bar_read(bar, offset, data))
-            .is_some()
+        let decoded = self
+            .find_bar(addr, false)
+            .map(|(mut dev, bar, offset, slot)| {
+                dev.bar_read(bar, offset, data);
+                CachedMmioBar {
+                    address: addr,
+                    slot,
+                    bar,
+                    offset,
+                }
+            });
+        if let Some(decoded) = decoded {
+            self.mmio_cache[(addr >> 2) as usize & 3] = Some(decoded);
+            true
+        } else {
+            false
+        }
     }
 
     /// Dispatch an MMIO write inside a BAR window.
     pub fn dispatch_mmio_write(&mut self, addr: u64, data: &[u8]) -> bool {
+        if let Some((mut dev, bar, offset)) = self.cached_mmio_bar(addr) {
+            dev.bar_write(bar, offset, data);
+            return true;
+        }
         if self.find_rom(addr).is_some() {
             return true;
         }
-        self.find_bar(addr, false)
-            .map(|(mut dev, bar, offset)| dev.bar_write(bar, offset, data))
-            .is_some()
+        let decoded = self
+            .find_bar(addr, false)
+            .map(|(mut dev, bar, offset, slot)| {
+                dev.bar_write(bar, offset, data);
+                CachedMmioBar {
+                    address: addr,
+                    slot,
+                    bar,
+                    offset,
+                }
+            });
+        if let Some(decoded) = decoded {
+            self.mmio_cache[(addr >> 2) as usize & 3] = Some(decoded);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cached_mmio_bar(&self, addr: u64) -> Option<(MutexGuard<'_, dyn PciDevice>, u8, u64)> {
+        let cached = self.mmio_cache[(addr >> 2) as usize & 3]?;
+        if cached.address != addr {
+            return None;
+        }
+        let function = self.slots[cached.slot].as_ref()?;
+        Some((function.dev.lock(), cached.bar, cached.offset))
     }
 
     fn find_rom(&self, addr: u64) -> Option<(&[u8], usize)> {
@@ -481,14 +541,14 @@ impl PciRoot {
     /// Dispatch a port-I/O read inside a BAR window.
     pub fn dispatch_io_read(&mut self, port: u16, data: &mut [u8]) -> bool {
         self.find_bar(u64::from(port), true)
-            .map(|(mut dev, bar, offset)| dev.bar_read(bar, offset, data))
+            .map(|(mut dev, bar, offset, _)| dev.bar_read(bar, offset, data))
             .is_some()
     }
 
     /// Dispatch a port-I/O write inside a BAR window.
     pub fn dispatch_io_write(&mut self, port: u16, data: &[u8]) -> bool {
         self.find_bar(u64::from(port), true)
-            .map(|(mut dev, bar, offset)| dev.bar_write(bar, offset, data))
+            .map(|(mut dev, bar, offset, _)| dev.bar_write(bar, offset, data))
             .is_some()
     }
 
@@ -497,8 +557,11 @@ impl PciRoot {
         &mut self,
         addr: u64,
         io: bool,
-    ) -> Option<(MutexGuard<'_, dyn PciDevice>, u8, u64)> {
-        for func in self.slots.iter_mut().filter_map(|s| s.as_mut()) {
+    ) -> Option<(MutexGuard<'_, dyn PciDevice>, u8, u64, usize)> {
+        for (slot, function) in self.slots.iter_mut().enumerate() {
+            let Some(func) = function.as_mut() else {
+                continue;
+            };
             if self.firmware && func.dev.lock().config_read(1) & if io { 1 } else { 2 } == 0 {
                 continue;
             }
@@ -511,7 +574,7 @@ impl PciRoot {
                 {
                     let offset = addr - bar.addr;
                     let dev = func.dev.lock();
-                    return Some((dev, bar.info.index, offset));
+                    return Some((dev, bar.info.index, offset, slot));
                 }
             }
         }
@@ -549,6 +612,7 @@ impl PciRoot {
     /// and BAR layout must match, which the machine-description digest
     /// guarantees for a compatible snapshot.
     pub fn restore_bar_states(&mut self, saved: &[(u8, Vec<(u64, bool)>)]) -> Result<(), String> {
+        self.mmio_cache.fill(None);
         for (slot, bars) in saved {
             let index = if self.firmware {
                 *slot as usize
@@ -747,6 +811,8 @@ mod tests {
     /// and config traffic.
     struct FakePci {
         bars: Vec<BarInfo>,
+        command: u32,
+        config_reads: usize,
         bar_log: Mutex<Vec<Access>>,
         config_log: Mutex<Vec<(usize, u64, Vec<u8>)>>,
     }
@@ -755,6 +821,8 @@ mod tests {
         fn new(bars: Vec<BarInfo>) -> Arc<Mutex<FakePci>> {
             Arc::new(Mutex::new(FakePci {
                 bars,
+                command: 0,
+                config_reads: 0,
                 bar_log: Mutex::new(Vec::new()),
                 config_log: Mutex::new(Vec::new()),
             }))
@@ -763,8 +831,10 @@ mod tests {
 
     impl PciDevice for FakePci {
         fn config_read(&mut self, reg: usize) -> u32 {
+            self.config_reads += 1;
             match reg {
                 0 => 0xABCD_1234,
+                1 => self.command,
                 2 => 0x1000_0000, // class code in the top byte
                 _ => 0,
             }
@@ -772,6 +842,12 @@ mod tests {
 
         fn config_write(&mut self, reg: usize, offset: u64, data: &[u8]) {
             self.config_log.lock().push((reg, offset, data.to_vec()));
+            if reg == 1 {
+                let mut command = self.command.to_le_bytes();
+                let offset = offset as usize;
+                command[offset..offset + data.len()].copy_from_slice(data);
+                self.command = u32::from_le_bytes(command);
+            }
         }
 
         fn bars(&self) -> Vec<BarInfo> {
@@ -864,6 +940,70 @@ mod tests {
         assert_eq!(log.last().unwrap(), &(0, 8, vec![0x55, 0x66], true));
         // Outside any BAR: unhandled.
         assert!(!root.dispatch_mmio_read(0xDEAD_0000, &mut data));
+    }
+
+    #[test]
+    fn repeated_mmio_dispatch_does_not_rescan_pci_config() {
+        let device = FakePci::new(test_bars());
+        let mut root = PciRoot::q35(1 << 32);
+        root.add_device_at(3, 0, device.clone()).unwrap();
+        root.config_write(0, 3, 0, 16, &0xc200_0000u32.to_le_bytes());
+        root.config_write(0, 3, 0, 4, &2u16.to_le_bytes());
+        assert!(root.dispatch_mmio_write(0xc200_0040, &[1, 2]));
+        let reads = device.lock().config_reads;
+        for _ in 0..16 {
+            assert!(root.dispatch_mmio_write(0xc200_0040, &[3, 4]));
+            let mut bytes = [0; 2];
+            assert!(root.dispatch_mmio_read(0xc200_0040, &mut bytes));
+            assert_eq!(bytes, [0xaa; 2]);
+        }
+        assert_eq!(device.lock().config_reads, reads);
+        assert_eq!(device.lock().bar_log.lock().len(), 33);
+    }
+
+    #[test]
+    fn mmio_dispatch_rechecks_command_sizing_relocation_and_restore() {
+        let device = FakePci::new(test_bars());
+        let mut root = PciRoot::q35(1 << 32);
+        root.add_device_at(3, 0, device).unwrap();
+        root.config_write(0, 3, 0, 16, &0xc200_0000u32.to_le_bytes());
+        root.config_write(0, 3, 0, 4, &2u16.to_le_bytes());
+        let saved = root.save_bar_states();
+        assert!(root.dispatch_mmio_write(0xc200_0040, &[1]));
+        root.config_write(0, 3, 0, 4, &[0]);
+        assert!(!root.dispatch_mmio_write(0xc200_0040, &[2]));
+        root.config_write(0, 3, 0, 4, &[2]);
+        assert!(root.dispatch_mmio_write(0xc200_0040, &[3]));
+        root.config_write(0, 3, 0, 16, &u32::MAX.to_le_bytes());
+        assert!(!root.dispatch_mmio_write(0xc200_0040, &[4]));
+        root.config_write(0, 3, 0, 16, &0xc300_0000u32.to_le_bytes());
+        assert!(root.dispatch_mmio_write(0xc300_0040, &[5]));
+        assert!(!root.dispatch_mmio_write(0xc200_0040, &[6]));
+        root.restore_bar_states(&saved).unwrap();
+        assert!(!root.dispatch_mmio_write(0xc300_0040, &[7]));
+        assert!(root.dispatch_mmio_write(0xc200_0040, &[8]));
+    }
+
+    #[test]
+    fn mmio_dispatch_keeps_rom_priority_over_an_overlapping_bar() {
+        let device = FakePci::new(test_bars());
+        let mut root = PciRoot::q35(1 << 32);
+        root.add_device_at(3, 0, device.clone()).unwrap();
+        root.config_write(0, 3, 0, 16, &0xc200_0000u32.to_le_bytes());
+        root.config_write(0, 3, 0, 4, &2u16.to_le_bytes());
+        let mut bytes = [0; 2];
+        assert!(root.dispatch_mmio_read(0xc200_0000, &mut bytes));
+        assert_eq!(bytes, [0xaa; 2]);
+        root.attach_option_rom(3, 0, &[0x55, 0xaa, 1]).unwrap();
+        root.config_write(0, 3, 0, 0x30, &0xc200_0001u32.to_le_bytes());
+        assert!(root.dispatch_mmio_read(0xc200_0000, &mut bytes));
+        assert_eq!(bytes, [0x55, 0xaa]);
+        let writes = device.lock().bar_log.lock().len();
+        assert!(root.dispatch_mmio_write(0xc200_0000, &[0; 2]));
+        assert_eq!(device.lock().bar_log.lock().len(), writes);
+        root.config_write(0, 3, 0, 0x30, &0xc200_0000u32.to_le_bytes());
+        assert!(root.dispatch_mmio_read(0xc200_0000, &mut bytes));
+        assert_eq!(bytes, [0xaa; 2]);
     }
 
     #[test]

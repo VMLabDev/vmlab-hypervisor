@@ -87,6 +87,129 @@ fn serial_log_text(dir: &Dir) -> String {
 }
 
 #[test]
+fn legacy_vga_writes_are_visible_while_the_guest_is_halted() {
+    use std::fs::File;
+    use std::os::unix::fs::FileExt;
+    use vmlab_hv_display::{Capabilities, Client as DisplayClient, Message, SurfaceKind};
+
+    if !Path::new("/dev/kvm").exists() || !Path::new("/usr/share/qemu/vgabios-stdvga.bin").is_file()
+    {
+        eprintln!("SKIP VGA S1: /dev/kvm or SeaVGABIOS missing");
+        return;
+    }
+    let dir = Dir::new("coalesced-vga");
+    let mut bios = vec![0; 0x10000];
+    let mut code = vec![0xfa]; // cli
+    for (index, value) in [(1u16, 64u16), (2, 64), (3, 32), (4, 0x41)] {
+        code.extend_from_slice(&[0xba, 0xce, 0x01, 0xb8]); // mov dx, 0x1ce; mov ax, index
+        code.extend_from_slice(&index.to_le_bytes());
+        code.extend_from_slice(&[0xef, 0x42, 0xb8]); // out dx, ax; inc dx; mov ax, value
+        code.extend_from_slice(&value.to_le_bytes());
+        code.push(0xef); // out dx, ax
+    }
+    code.extend_from_slice(&[0xb8, 0x00, 0xa0, 0x8e, 0xc0]); // mov ax, 0xa000; mov es, ax
+    // mov dword es:[0], 0x00112233; hlt; jmp hlt. No I/O follows this write.
+    code.extend_from_slice(&[
+        0x26, 0x66, 0xc7, 0x06, 0, 0, 0x33, 0x22, 0x11, 0, 0xf4, 0xeb, 0xfd,
+    ]);
+    bios[..code.len()].copy_from_slice(&code);
+    bios[0xfff0..0xfff5].copy_from_slice(&[0xea, 0, 0, 0, 0xf0]);
+    let firmware = dir.path.join("bios.bin");
+    std::fs::write(&firmware, bios).unwrap();
+    let machine = dir.machine();
+    let mut description: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&machine).unwrap()).unwrap();
+    description["machine"] = "q35".into();
+    description["boot"] = serde_json::json!({
+        "kind":"firmware", "firmware":"seabios", "code":firmware
+    });
+    description["display"] = serde_json::json!({
+        "device":"std-vga", "pci":{"bus":0,"device":4,"function":0}, "rom":null,
+        "socket":dir.path.join("display.sock"), "vnc_socket":dir.path.join("vnc.sock")
+    });
+    std::fs::write(&machine, serde_json::to_vec(&description).unwrap()).unwrap();
+    let log = File::create(dir.path.join("hv.log")).unwrap();
+    let mut child = ManagedChild::spawn(
+        Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+            .arg("--machine")
+            .arg(machine)
+            .arg("--control")
+            .arg(dir.control())
+            .arg("--paused")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(log)),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut control = loop {
+        if let Ok(control) = Client::connect(dir.control()) {
+            break control;
+        }
+        assert!(
+            Instant::now() < deadline && child.try_wait().unwrap().is_none(),
+            "VGA VM failed to start: {}",
+            std::fs::read_to_string(dir.path.join("hv.log")).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(matches!(
+        control.call(Ctrl::Resume).unwrap(),
+        Outcome::Ok { .. }
+    ));
+    let display = DisplayClient::connect(
+        dir.path.join("display.sock"),
+        Capabilities(Capabilities::FRAMES | Capabilities::CPU_COPY),
+    )
+    .unwrap();
+    display
+        .stream()
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut buffers = Vec::new();
+    let mut dimensions = (0, 0);
+    loop {
+        let packet = display.receive().unwrap();
+        match packet.message {
+            Message::SurfaceConfigure {
+                width,
+                height,
+                kind: SurfaceKind::Shm,
+                ..
+            } => {
+                dimensions = (width, height);
+                buffers = packet.fds;
+            }
+            Message::FrameReady {
+                surface_id,
+                buffer,
+                seq,
+                ..
+            } => {
+                let mut pixel = [0; 4];
+                if dimensions == (64, 64) {
+                    let file = File::from(buffers[buffer as usize].try_clone().unwrap());
+                    file.read_exact_at(&mut pixel, 0).unwrap();
+                }
+                display.release(surface_id, buffer, seq).unwrap();
+                if dimensions == (64, 64) && pixel[..3] == [0x33, 0x22, 0x11] {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "halted guest's VGA write was not published"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(matches!(
+        control.call(Ctrl::Quit).unwrap(),
+        Outcome::Ok { .. }
+    ));
+    assert!(wait_for_exit(child, Duration::from_secs(10)).success());
+}
+
+#[test]
 fn malformed_secret_descriptions_do_not_echo_values() {
     let dir = Dir::new("malformed-secret");
     let machine = dir.machine();

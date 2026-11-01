@@ -560,7 +560,7 @@ def wait_x86_ready(backend, args, guest, run_dir, t0):
     the respawn path supports older vmlab-hv binaries. The clock starts at
     the first spawn and never resets.
     """
-    if guest == "windows-10":
+    if guest.startswith("windows-"):
         return WindowsReady(backend, args, run_dir, t0).run()
     deadline = t0 + X86_BOOT_DEADLINE[guest] * args.timeout_scale
     while time.monotonic() < deadline:
@@ -635,7 +635,7 @@ def x86_one_repeat(args, guest, smp, pin, version, index):
     os.makedirs(run_dir)
     overlay, code_fd, vars_fd = lib.prepare_run_dir(run_dir, "x86_64", guest, version)
     net = lib.BENCH_NET
-    windows = guest == "windows-10"
+    windows = guest.startswith("windows-")
     # The boot-only windows guest runs vmlab's no-network shape exactly
     # (the reference lab boots this template without a NIC; a jumbo-MTU
     # NIC on it wedges the first-boot reboot).
