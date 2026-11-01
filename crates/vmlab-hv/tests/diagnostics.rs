@@ -174,6 +174,16 @@ fn host_signal_has_its_own_final_reason_and_exit_code() {
     let pid = i32::try_from(report["pid"].as_u64().unwrap()).unwrap();
     // SAFETY: the PID comes from this fixture's authenticated local control socket.
     assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    assert_eq!(
+        machine
+            .client
+            .wait_event_timeout(Duration::from_secs(30))
+            .unwrap(),
+        Some(Event::Shutdown {
+            reason: vmlab_hv_proto::control::ShutdownReason::HostRequest
+        }),
+        "host signals must preserve the existing shutdown event before the final event",
+    );
     machine.finish(ProcessExitReason::HostSignal {
         signal: libc::SIGTERM,
     });

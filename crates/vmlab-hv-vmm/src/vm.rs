@@ -130,6 +130,7 @@ pub struct VmShared {
     state: Mutex<RunState>,
     state_cv: Condvar,
     exit: Mutex<Option<ExitReason>>,
+    exit_announced: std::sync::atomic::AtomicBool,
     exit_cv: Condvar,
     kicks: Mutex<Vec<libc::pthread_t>>,
     event_sink: Mutex<Option<EventSink>>,
@@ -207,6 +208,7 @@ impl VmShared {
             state: Mutex::new(RunState::Paused),
             state_cv: Condvar::new(),
             exit: Mutex::new(None),
+            exit_announced: std::sync::atomic::AtomicBool::new(false),
             exit_cv: Condvar::new(),
             kicks: Mutex::new(Vec::new()),
             event_sink: Mutex::new(None),
@@ -253,6 +255,18 @@ impl VmShared {
     }
 
     fn final_event(&self, reason: vmlab_hv_proto::control::ProcessExitReason, errors: Vec<String>) {
+        self.emit(Event::Exiting {
+            code: reason.exit_code(),
+            reason,
+            error_chain: errors,
+        });
+    }
+
+    fn try_final_event(
+        &self,
+        reason: vmlab_hv_proto::control::ProcessExitReason,
+        errors: Vec<String>,
+    ) {
         if let Some(sink) = self.event_sink.try_lock().and_then(|s| s.clone()) {
             sink(Event::Exiting {
                 code: reason.exit_code(),
@@ -650,7 +664,11 @@ impl VmShared {
     pub(crate) fn wait_exit(&self) -> ExitReason {
         let mut exit = self.exit.lock();
         loop {
-            if let Some(reason) = exit.clone() {
+            if self
+                .exit_announced
+                .load(std::sync::atomic::Ordering::Acquire)
+                && let Some(reason) = exit.clone()
+            {
                 return reason;
             }
             self.exit_cv.wait(&mut exit);
@@ -669,11 +687,20 @@ impl VmShared {
         *self.state.lock() = RunState::ShuttingDown;
         self.clock_running(false);
         self.state_cv.notify_all();
-        self.exit_cv.notify_all();
         self.kick_all();
-        if let ExitReason::Shutdown(shutdown) = reason {
-            self.emit(Event::Shutdown { reason: shutdown });
+        match reason {
+            ExitReason::Shutdown(shutdown) => self.emit(Event::Shutdown { reason: shutdown }),
+            ExitReason::HostSignal(_) => self.emit(Event::Shutdown {
+                reason: ShutdownReason::HostRequest,
+            }),
+            _ => {}
         }
+        // Waiters must not finalize before the legacy event is delivered.
+        // Take the condition's mutex while publishing to avoid a lost wakeup.
+        let _exit = self.exit.lock();
+        self.exit_announced
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.exit_cv.notify_all();
     }
 
     pub(crate) fn take_guest_sleep(&self) -> Option<SleepState> {
@@ -1327,7 +1354,7 @@ impl Vm {
             }),
             Some(Arc::new(move |reason, errors| {
                 if let Some(shared) = sink.upgrade() {
-                    shared.final_event(reason, errors);
+                    shared.try_final_event(reason, errors);
                 }
             })),
         );
@@ -1585,6 +1612,53 @@ mod tests {
     }
 
     #[test]
+    fn exit_waiter_observes_the_legacy_shutdown_before_finalization() {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("SKIP exit-event ordering: /dev/kvm is unavailable");
+            return;
+        }
+        let signal = Arc::new(SleepSignal::default());
+        let shared = VmShared::new(
+            KvmVm::new().unwrap(),
+            IoBus::new(),
+            MmioBus::new(),
+            Arc::new(Mutex::new(PciRoot::new(1 << 32))),
+            Arc::new(Mutex::new(PmDevice::new(Arc::new(NullIrq), signal.sink()))),
+            signal,
+            1 << 32,
+        );
+        let (entered, receiving) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let blocked = Mutex::new(blocked);
+        shared.set_event_sink(Arc::new(move |event| {
+            if matches!(event, Event::Shutdown { .. }) {
+                entered.send(()).unwrap();
+                blocked.lock().recv().unwrap();
+            }
+        }));
+        let exiting = shared.clone();
+        let exiter = std::thread::spawn(move || {
+            exiting.request_exit(ExitReason::Shutdown(ShutdownReason::HostRequest))
+        });
+        receiving.recv_timeout(Duration::from_secs(2)).unwrap();
+        let waiting = shared.clone();
+        let (finished, completion) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || finished.send(waiting.wait_exit()).unwrap());
+        let premature = completion.recv_timeout(Duration::from_millis(50)).ok();
+        release.send(()).unwrap();
+        exiter.join().unwrap();
+        let reason = premature
+            .clone()
+            .unwrap_or_else(|| completion.recv_timeout(Duration::from_secs(2)).unwrap());
+        waiter.join().unwrap();
+        assert!(
+            premature.is_none(),
+            "exit finalization overtook the legacy shutdown event"
+        );
+        assert_eq!(reason, ExitReason::Shutdown(ShutdownReason::HostRequest));
+    }
+
+    #[test]
     fn ordinary_io_does_not_scan_pci_errors_without_vfio() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use vmlab_hv_devices::{BarInfo, BarKind, PciDevice};
@@ -1775,6 +1849,9 @@ mod tests {
             // consumed just before the blocked KVM_RUN.
             *shared.state.lock() = RunState::ShuttingDown;
             *shared.exit.lock() = Some(ExitReason::Shutdown(ShutdownReason::HostRequest));
+            shared
+                .exit_announced
+                .store(true, std::sync::atomic::Ordering::Release);
             let start = std::time::Instant::now();
             vm.wait();
             assert!(start.elapsed() < Duration::from_millis(250));
