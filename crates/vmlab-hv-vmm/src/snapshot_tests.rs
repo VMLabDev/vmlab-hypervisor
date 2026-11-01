@@ -463,6 +463,163 @@ fn delete_removes_and_missing_snapshots_error() {
 }
 
 #[test]
+fn failed_smi_restore_rolls_back_disks_ram_cpu_devices_and_run_state() {
+    use snapshot::format;
+    use vmlab_hv_devices::{BusDevice, Snapshot};
+    use vmlab_hv_proto::{
+        client::Client,
+        control::{Command, Outcome, RunState},
+    };
+
+    let _permit = vmlab_hv_tests::process::VmPermit::acquire().unwrap();
+    for running in [false, true] {
+        let Some(m) = machine(&[0xeb, 0xfe], 8) else {
+            return;
+        };
+        m.handle.pause().unwrap();
+        let shared = m.handle.shared();
+        shared.wait_quiesced(Duration::from_secs(5)).unwrap();
+        let fw = Arc::new(PlMutex::new(
+            crate::smm::SmiFwCfg::new(
+                vmlab_hv_firmware::FwCfg::new(m.vm.ram.mem.clone()),
+                m.vm.ram.mem.clone(),
+            )
+            .unwrap(),
+        ));
+        let original = shared.snapshot_registry().unwrap();
+        let second = m._dir.path().join("second.qcow2");
+        vmlab_disk::ops::create_qcow2(&second, 8 << 20, None, None).unwrap();
+        let reg = Arc::new(SnapshotRegistry {
+            digest: original.digest,
+            disks: vec![
+                DiskNode {
+                    id: "scratch".into(),
+                    writable: true,
+                    vmstate: true,
+                    image: original.disks[0].image.clone(),
+                },
+                DiskNode {
+                    id: "second".into(),
+                    writable: true,
+                    vmstate: false,
+                    image: Arc::new(PlMutex::new(
+                        vmlab_disk::open(&second, vmlab_disk::Format::Qcow2, false).unwrap(),
+                    )),
+                },
+            ],
+            nodes: vec![
+                DeviceNode::Plain(shared.serials.lock()[0].clone()),
+                DeviceNode::Plain(fw.clone()),
+            ],
+        });
+        shared.set_snapshot_registry(reg.clone());
+        for disk in &reg.disks {
+            disk.image.lock().write_at(0, &[0x11]).unwrap();
+        }
+        snapshot::save(&m.handle, "source").unwrap();
+
+        // Corrupt only the SMI section, so rejection happens after RAM, CPU
+        // and the preceding UART have already been restored.
+        let mut image = reg.disks[0].image.lock();
+        let info = image.snapshot_apply("source").unwrap();
+        let mut bytes = vec![0; info.vm_state_size as usize];
+        image.read_vmstate(0, &mut bytes).unwrap();
+        let (header, mut reader) = format::decode_header(&bytes).unwrap();
+        let mut sections = Vec::new();
+        for _ in 0..header.section_count {
+            let (id, mut body) = format::read_section(&mut reader).unwrap();
+            if id == "smm-fw-cfg" {
+                let mut value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                value[1]["locked"] = 8.into();
+                body = serde_json::to_vec(&value).unwrap();
+            }
+            sections.push((id, body));
+        }
+        let mut corrupt = format::encode_header_sections(
+            header.run_state,
+            env!("CARGO_PKG_VERSION"),
+            &reg.digest,
+            &sections,
+        );
+        corrupt.extend_from_slice(reader.remaining());
+        image.write_vmstate(0, &corrupt).unwrap();
+        image
+            .snapshot_create("bad", corrupt.len() as u64, 0)
+            .unwrap();
+        drop(image);
+        reg.disks[1]
+            .image
+            .lock()
+            .snapshot_create("bad", 0, 0)
+            .unwrap();
+
+        for disk in &reg.disks {
+            disk.image.lock().write_at(0, &[0x42]).unwrap();
+        }
+        m.vm.ram
+            .mem
+            .write_slice(&[0x42], GuestAddress(0x9000))
+            .unwrap();
+        shared.serials.lock()[0].lock().write(7, &[0x42]);
+        let cpus = shared.vcpus.lock().clone();
+        let mut regs = cpus[0].1.lock().get_regs().unwrap();
+        regs.rax = 0x42;
+        cpus[0].1.lock().set_regs(&regs).unwrap();
+        let fw_before = fw.lock().save_state().unwrap();
+        let socket = m._dir.path().join("control.sock");
+        crate::control::serve(&socket, &m.handle).unwrap();
+        let mut client = Client::connect(socket).unwrap();
+        if running {
+            m.handle.resume().unwrap();
+        }
+        let expected = if running {
+            RunState::Running
+        } else {
+            RunState::Paused
+        };
+        let outcome = client
+            .call(Command::SnapshotLoad { name: "bad".into() })
+            .unwrap();
+        assert!(
+            matches!(outcome, Outcome::Error { ref message, .. } if message.contains("unsupported SMI features")),
+            "{outcome:?}"
+        );
+        assert_eq!(m.handle.status(), expected, "failed load changed run state");
+        m.handle.pause().unwrap();
+        shared.wait_quiesced(Duration::from_secs(5)).unwrap();
+        let mut byte = [0];
+        m.vm.ram
+            .mem
+            .read_slice(&mut byte, GuestAddress(0x9000))
+            .unwrap();
+        assert_eq!(byte, [0x42], "failed load changed RAM");
+        assert_eq!(cpus[0].1.lock().get_regs().unwrap().rax, 0x42);
+        shared.serials.lock()[0].lock().read(7, &mut byte);
+        assert_eq!(byte, [0x42], "failed load changed UART");
+        assert_eq!(fw.lock().save_state().unwrap(), fw_before);
+        for disk in &reg.disks {
+            let mut image = disk.image.lock();
+            image.read_at(0, &mut byte).unwrap();
+            assert_eq!(byte, [0x42], "failed load changed disk {}", disk.id);
+            assert_eq!(
+                image.snapshots().unwrap().len(),
+                2,
+                "rollback checkpoint leaked"
+            );
+        }
+        assert!(matches!(
+            client
+                .call(Command::SnapshotLoad {
+                    name: "missing".into()
+                })
+                .unwrap(),
+            Outcome::Error { .. }
+        ));
+        assert_eq!(m.handle.status(), RunState::Paused);
+    }
+}
+
+#[test]
 fn paused_snapshots_stay_paused() {
     let Some(m) = machine(&counter_payload(), 8) else {
         return;
@@ -965,14 +1122,30 @@ fn snapshot_stops_console_dma_before_saving_ram() {
         wrote: Arc<AtomicBool>,
     }
     impl ConnectDuringSave {
-        fn connect_and_observe(&self) -> Result<(), DeviceError> {
+        fn connect_and_observe(&self, restoring: bool) -> Result<(), DeviceError> {
+            // A rollback capture can start with an earlier DMA result in RAM.
+            // Detect new writes, including another completion of the same data.
+            // Restore must retain the saved empty buffer and used ring, even
+            // if a broken device resumes DMA before this callback begins.
+            let before = if restoring {
+                (0, 0)
+            } else {
+                (
+                    self.mem.read_obj::<u32>(GuestAddress(0x9000)).unwrap(),
+                    self.mem.read_obj::<u16>(GuestAddress(0x32002)).unwrap(),
+                )
+            };
             self.client.lock().take();
             *self.client.lock() = Some(UnixStream::connect(&self.path)?);
             // A host connection queues PORT_OPEN after the console state has
             // been captured, but before the VMM captures RAM. No guest runs.
             let deadline = std::time::Instant::now() + Duration::from_millis(200);
             while std::time::Instant::now() < deadline {
-                if self.mem.read_obj::<u32>(GuestAddress(0x9000)).unwrap() != 0 {
+                let current = (
+                    self.mem.read_obj::<u32>(GuestAddress(0x9000)).unwrap(),
+                    self.mem.read_obj::<u16>(GuestAddress(0x32002)).unwrap(),
+                );
+                if current != before {
                     self.wrote.store(true, Ordering::SeqCst);
                     break;
                 }
@@ -986,11 +1159,11 @@ fn snapshot_stops_console_dma_before_saving_ram() {
             "connect-during-save".into()
         }
         fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
-            self.connect_and_observe()?;
+            self.connect_and_observe(false)?;
             Ok(Vec::new())
         }
         fn restore_state(&mut self, _: &[u8]) -> Result<(), DeviceError> {
-            self.connect_and_observe()
+            self.connect_and_observe(true)
         }
     }
     let Some(m) = machine(&[0xe4, 0x80, 0xeb, 0xfc], 8) else {
