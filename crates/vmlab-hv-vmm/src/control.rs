@@ -52,6 +52,7 @@ impl ControlHandler {
 
     pub fn handle(&self, command: Command) -> Outcome {
         match command {
+            Command::Debug { request } => crate::debug::handle(self.vm.shared(), request),
             Command::Unsupported => Outcome::Error {
                 code: ErrorCode::Unsupported,
                 message: "unsupported request".into(),
@@ -203,6 +204,14 @@ pub fn serve(path: &Path, vm: &VmHandle) -> Result<std::thread::JoinHandle<()>, 
 
     let weak = Arc::downgrade(vm.shared());
     let mut capabilities = vec![Capability::Snapshots];
+    if vm
+        .shared()
+        .kvm
+        .kvm
+        .check_extension(kvm_ioctls::Cap::SetGuestDebug)
+    {
+        capabilities.push(Capability::Debug);
+    }
     if crate::diagnostics::report::configured() {
         capabilities.push(Capability::Diagnostics);
     }

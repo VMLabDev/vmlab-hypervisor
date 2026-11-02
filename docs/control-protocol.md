@@ -29,6 +29,9 @@ id, and the connection remains open.
 A request has `type: "request"`, a numeric `id`, and a `command` object
 whose `command` field names the operation. A reply has `type: "reply"`,
 the same `id`, and `outcome: "ok"` or `outcome: "error"`.
+An optional debugger request instead receives `outcome: "debug"` and its
+typed `response`. Only peers using the advertised `debug` capability send
+those requests. Existing commands retain their existing outcomes.
 An error outcome carries string fields `code` and `message`.
 An ok outcome may carry `status`. Missing `status` means no run state was
 reported, not that the machine has a particular state.
@@ -50,6 +53,7 @@ success or failure.
 
 Unknown capability strings decode as `Capability::Unknown(String)`.
 Consumers may log the name but do not enable a feature for it.
+The `debug` capability enables the commands described in `docs/debug-feature.md`.
 A missing capability is absent, including when the entire `capabilities`
 field is missing. Clients only send optional commands when their capability
 is advertised. An absent capability never implies support.

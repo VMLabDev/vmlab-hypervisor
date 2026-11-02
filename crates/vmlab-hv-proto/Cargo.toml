@@ -10,6 +10,11 @@ rust-version.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+gdbstub = { version = "0.7", optional = true }
+gdbstub_arch = { version = "0.3", optional = true }
+
+[features]
+gdb = ["dep:gdbstub", "dep:gdbstub_arch"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -338,16 +338,45 @@ fn initrd_with_init_script(dir: &Dir) -> PathBuf {
         "cpio failed to build {archive:?}: {status}"
     );
     let combined = dir.path.join("initrd.img");
-    let mut out = File::create(&combined).unwrap();
-    let mut base = File::open(INITRD).unwrap();
-    let length = std::io::copy(&mut base, &mut out).unwrap();
-    // Raw newc headers require four-byte alignment in the initramfs buffer.
-    let padding = (length.next_multiple_of(4) - length) as usize;
-    out.write_all(&[0; 3][..padding]).unwrap();
-    let mut extra = File::open(&archive).unwrap();
+    append_cpio_archive(Path::new(INITRD), &archive, &combined);
+    combined
+}
+
+fn append_cpio_archive(base: &Path, archive: &Path, combined: &Path) {
+    let mut out = File::create(combined).unwrap();
+    let mut base = File::open(base).unwrap();
+    let base_length = std::io::copy(&mut base, &mut out).unwrap();
+    // Raw newc headers stay four-byte aligned across compressed members.
+    let padding = (4 - base_length % 4) % 4;
+    out.write_all(&[0; 3][..padding as usize]).unwrap();
+    let mut extra = File::open(archive).unwrap();
     std::io::copy(&mut extra, &mut out).unwrap();
     std::io::Write::flush(&mut out).unwrap();
-    combined
+}
+
+#[test]
+fn appended_cpio_is_aligned_after_every_compressed_image_length() {
+    let dir = Dir::new("alignment");
+    let archive = Command::new("cpio")
+        .args(["-o", "-H", "newc", "--quiet"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("build an empty cpio archive");
+    assert!(archive.status.success());
+    assert!(archive.stdout.starts_with(b"070701"));
+    let archive_path = dir.path.join("extra.cpio");
+    fs::write(&archive_path, &archive.stdout).unwrap();
+    let base = dir.path.join("base");
+    let combined = dir.path.join("combined");
+    for length in 1usize..=8 {
+        fs::write(&base, vec![0x55; length]).unwrap();
+        append_cpio_archive(&base, &archive_path, &combined);
+        let bytes = fs::read(&combined).unwrap();
+        let offset = length.next_multiple_of(4);
+        assert_eq!(&bytes[..length], vec![0x55; length]);
+        assert!(bytes[length..offset].iter().all(|byte| *byte == 0));
+        assert_eq!(&bytes[offset..], archive.stdout);
+    }
 }
 
 /// chmod 0o755 on a path (cpio -o cannot take the mode from the fs when we
@@ -369,24 +398,16 @@ fn initrd_overlay_is_complete_before_returning() {
         let builds: Vec<_> = (0..8)
             .map(|_| {
                 scope.spawn(|| {
-                    use std::io::{Read, Seek, SeekFrom};
+                    use std::io::{Seek, SeekFrom};
 
                     let dir = Dir::new("archive");
                     let combined = initrd_with_init_script(&dir);
                     let mut archive = File::open(combined).unwrap();
-                    let base_len = fs::metadata(INITRD).unwrap().len();
-                    let aligned = base_len.next_multiple_of(4);
-                    archive.seek(SeekFrom::Start(base_len)).unwrap();
-                    let mut padding = vec![0xff; (aligned - base_len) as usize];
-                    archive.read_exact(&mut padding).unwrap();
-                    assert!(
-                        padding.iter().all(|byte| *byte == 0),
-                        "raw cpio must start at a four-byte boundary"
-                    );
-                    let mut magic = [0; 6];
-                    archive.read_exact(&mut magic).unwrap();
-                    assert_eq!(&magic, b"070701");
-                    archive.seek(SeekFrom::Start(aligned)).unwrap();
+                    archive
+                        .seek(SeekFrom::Start(
+                            fs::metadata(INITRD).unwrap().len().next_multiple_of(4),
+                        ))
+                        .unwrap();
                     let output = Command::new("cpio")
                         .args(["-i", "--quiet", "--to-stdout"])
                         .stdin(archive)
@@ -413,7 +434,6 @@ fn initrd_overlay_is_complete_before_returning() {
 /// One machine description with a single share on `socket`.
 fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
     MachineDescription {
-        fw_cfg: vec![],
         exit_on_reset: false,
         vfio: vec![],
         machine: Default::default(),

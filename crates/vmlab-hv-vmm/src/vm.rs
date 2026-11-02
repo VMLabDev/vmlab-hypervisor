@@ -109,6 +109,7 @@ impl Drop for MemoryUpdateGuard<'_> {
 
 /// Everything the vCPU threads and the control threads share.
 pub struct VmShared {
+    pub(crate) debugger: crate::debug::Debugger,
     coalesced_vga: std::sync::OnceLock<crate::coalesced::CoalescedVga>,
     pub(crate) msr_policy: Mutex<vmlab_hv_proto::machine::MsrPolicy>,
     pub(crate) ignored_msrs: Mutex<std::collections::BTreeSet<u32>>,
@@ -188,6 +189,7 @@ impl VmShared {
         mmio64_base: u64,
     ) -> Arc<Self> {
         Arc::new(VmShared {
+            debugger: crate::debug::Debugger::default(),
             coalesced_vga: std::sync::OnceLock::new(),
             msr_policy: Mutex::new(Default::default()),
             ignored_msrs: Mutex::new(Default::default()),
@@ -250,7 +252,7 @@ impl VmShared {
         *self.event_sink.lock() = Some(sink);
     }
 
-    fn emit(&self, event: Event) {
+    pub(crate) fn emit(&self, event: Event) {
         if let Some(sink) = self.event_sink.lock().as_ref() {
             sink(event);
         }
@@ -516,17 +518,41 @@ impl VmShared {
             && !self.reset_pending.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub(crate) fn should_run_vcpu(&self, id: u8) -> bool {
+        if self.exit.lock().is_some() {
+            return false;
+        }
+        !self.reset_pending.load(std::sync::atomic::Ordering::SeqCst)
+            && ((*self.state.lock() == RunState::Running && self.debugger.allowed(id))
+                || self.debugger.stepping(id))
+    }
+
+    pub(crate) fn debug_wake(&self) {
+        self.state_cv.notify_all();
+    }
+
+    /// Called by the exiting vCPU without taking the snapshot-operation lock.
+    pub(crate) fn debug_stop(&self) {
+        self.debugger.cancel_step();
+        *self.state.lock() = RunState::Paused;
+        self.clock_running(false);
+        self.kick_all();
+        self.state_cv.notify_all();
+        self.emit(Event::Stopped);
+    }
+
     /// Block until the machine runs again or exits; called by parked vCPU
     /// threads. Parking is counted in `parked` so a snapshot can wait for
     /// every vCPU to leave KVM_RUN before it reads machine state.
-    pub(crate) fn park(&self) {
+    pub(crate) fn park(&self, id: u8) {
         {
             let mut parked = self.parked.lock();
             *parked += 1;
             self.parked_cv.notify_all();
         }
         let mut state = self.state.lock();
-        while (*state != RunState::Running
+        while (((*state != RunState::Running || !self.debugger.allowed(id))
+            && !self.debugger.stepping(id))
             || self.reset_pending.load(std::sync::atomic::Ordering::SeqCst))
             && self.exit.lock().is_none()
         {
@@ -1552,6 +1578,7 @@ impl VmHandle {
     /// `pause`: stop issuing guest execution; emits `stopped`.
     pub fn pause(&self) -> Result<RunState, String> {
         let _op = self.0.snapshot_op.lock();
+        self.0.debugger.cancel_step();
         let mut state = self.0.state.lock();
         match *state {
             RunState::Running => {
@@ -1576,6 +1603,7 @@ impl VmHandle {
             return Err("deliberate runtime error at resume (testing feature)".into());
         }
         let _op = self.0.snapshot_op.lock();
+        crate::debug::prepare_continue(&self.0)?;
         let mut state = self.0.state.lock();
         if self.0.exit.lock().is_some() {
             return Err("the machine is shutting down".to_string());

@@ -120,6 +120,7 @@ code keeps its upstream notices. Every such file is listed in
 ## Further reading
 
 - `docs/control-protocol.md`: versioning, optional additions, and strict launch fields.
+- `docs/debug-feature.md`: whole-VM debugger operations and limits.
 - vmlab, the lab runner this hypervisor serves: https://github.com/VMLabDev/vmlab
 - `docs/hwref/` — black-box QEMU hardware captures and the P2 differential.
 - `docs/research/` — the grounding notes and the QEMU-viability study behind
