@@ -38,6 +38,9 @@ pub enum ServerMsg {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
+    Debug {
+        request: crate::debug::DebugRequest,
+    },
     Status,
     Resume,
     Pause,
@@ -87,6 +90,9 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
+    Debug {
+        response: crate::debug::DebugResponse,
+    },
     Ok {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<RunState>,
@@ -134,6 +140,7 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
+    Debug,
     Diagnostics,
     Snapshots,
     Display,
@@ -147,6 +154,9 @@ pub enum Capability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
+    DebugStopped {
+        stop: crate::debug::DebugStop,
+    },
     /// The process's final reason, after worker and device cleanup.
     Exiting {
         reason: ProcessExitReason,
@@ -184,7 +194,7 @@ fn unknown_event_name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, 
     // Unit variants decode without payload, so only data variants need guarding.
     if matches!(
         name.as_str(),
-        "exiting" | "diagnostics_dumped" | "shutdown" | "device_deleted"
+        "exiting" | "diagnostics_dumped" | "shutdown" | "device_deleted" | "debug_stopped"
     ) {
         return Err(serde::de::Error::custom("malformed known event"));
     }

@@ -105,7 +105,7 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
     let mut recorder = None;
     let mut pending_completion = false;
     loop {
-        let running = shared.should_run();
+        let running = shared.should_run_vcpu(id);
         // I/O, MMIO and Hyper-V hypercalls finish on the next KVM_RUN.
         // Their pending state
         // is not included in GET_REGS or migration state (KVM API section 5).
@@ -115,7 +115,7 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             if shared.exited() {
                 return;
             }
-            shared.park();
+            shared.park(id);
             continue;
         }
         // The exit borrows the fd's kvm_run area, so the guard lives through
@@ -183,6 +183,9 @@ fn run_vcpu(id: u8, vcpu: Arc<Mutex<VcpuFd>>, shared: &Arc<VmShared>) {
             return;
         }
         match result {
+            Ok(VcpuExit::Debug(exit)) => {
+                crate::debug::stopped(shared, id, exit);
+            }
             Ok(VcpuExit::X86Rdmsr(exit)) => {
                 *exit.error = u8::from(!crate::macos::ignored_msr(shared, exit.index, exit.reason));
                 *exit.data = 0;

@@ -13,6 +13,9 @@
 pub mod client;
 pub mod codec;
 pub mod control;
+pub mod debug;
+#[cfg(feature = "gdb")]
+pub mod gdb;
 pub mod machine;
 pub mod server;
 

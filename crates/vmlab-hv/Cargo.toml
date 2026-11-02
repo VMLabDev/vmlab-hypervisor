@@ -30,5 +30,5 @@ workspace = true
 vmlab-hv-firmware.workspace = true
 vmlab-hv-display = { path = "../vmlab-hv-display" }
 tempfile = "3"
-vmlab-hv-proto.workspace = true
+vmlab-hv-proto = { workspace = true, features = ["gdb"] }
 vmlab-hv-tests = { path = "../vmlab-hv-tests" }
