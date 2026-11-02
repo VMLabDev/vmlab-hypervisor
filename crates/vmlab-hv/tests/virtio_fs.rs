@@ -240,7 +240,10 @@ fn initrd_with_init_script(dir: &Dir) -> PathBuf {
     let combined = dir.path.join("initrd.img");
     let mut out = File::create(&combined).unwrap();
     let mut base = File::open(INITRD).unwrap();
-    std::io::copy(&mut base, &mut out).unwrap();
+    let length = std::io::copy(&mut base, &mut out).unwrap();
+    // Raw newc headers require four-byte alignment in the initramfs buffer.
+    let padding = (length.next_multiple_of(4) - length) as usize;
+    out.write_all(&[0; 3][..padding]).unwrap();
     let mut extra = File::open(&archive).unwrap();
     std::io::copy(&mut extra, &mut out).unwrap();
     out.flush().unwrap();
@@ -250,6 +253,7 @@ fn initrd_with_init_script(dir: &Dir) -> PathBuf {
 /// One machine description with a single in-process share on `path`.
 fn machine(dir: &Dir, share: &Path, initrd: &Path, read_only: bool) -> MachineDescription {
     MachineDescription {
+        fw_cfg: vec![],
         exit_on_reset: false,
         vfio: vec![],
         machine: Default::default(),

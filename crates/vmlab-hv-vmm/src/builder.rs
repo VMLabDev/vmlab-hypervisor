@@ -24,6 +24,7 @@ use crate::vm::{Vm, VmShared};
 
 /// Static checks that do not need KVM; each error names what is wrong.
 pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
+    validate_fw_cfg(desc)?;
     let mut hosts = std::collections::BTreeSet::new();
     for device in &desc.vfio {
         crate::vfio::validate_address(&device.host).map_err(VmmError::InvalidMachine)?;
@@ -147,6 +148,82 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
             "boot image {} does not exist",
             image.display()
         )));
+    }
+    Ok(())
+}
+
+fn validate_fw_cfg(desc: &MachineDescription) -> Result<(), VmmError> {
+    use vmlab_hv_proto::machine::FwCfgSource;
+    if !desc.fw_cfg.is_empty() && !matches!(desc.boot, Boot::Firmware { .. }) {
+        return Err(VmmError::InvalidMachine(
+            "fw_cfg requires firmware boot".into(),
+        ));
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for file in &desc.fw_cfg {
+        vmlab_hv_firmware::fw_cfg::validate_extra_file_name(&file.name)
+            .map_err(VmmError::InvalidMachine)?;
+        if !names.insert(&file.name) {
+            return Err(VmmError::InvalidMachine(format!(
+                "duplicate fw_cfg file {}",
+                file.name
+            )));
+        }
+        let size = match &file.source {
+            FwCfgSource::Inline { bytes } => bytes.len() as u64,
+            FwCfgSource::File { path } => {
+                let metadata = std::fs::metadata(path).map_err(|error| {
+                    VmmError::InvalidMachine(format!(
+                        "fw_cfg file {} ({}): {error}",
+                        file.name,
+                        path.display()
+                    ))
+                })?;
+                if !metadata.is_file() {
+                    return Err(VmmError::InvalidMachine(format!(
+                        "fw_cfg file {} requires a regular host file",
+                        file.name
+                    )));
+                }
+                metadata.len()
+            }
+        };
+        if size > u32::MAX as u64 {
+            return Err(VmmError::InvalidMachine(format!(
+                "fw_cfg file {} exceeds u32 length",
+                file.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn add_fw_cfg_files(
+    device: &mut vmlab_hv_firmware::FwCfg,
+    desc: &MachineDescription,
+) -> Result<(), VmmError> {
+    use std::io::Read;
+    use vmlab_hv_proto::machine::FwCfgSource;
+    for file in &desc.fw_cfg {
+        let data = match &file.source {
+            FwCfgSource::Inline { bytes } => bytes.clone(),
+            FwCfgSource::File { path } => {
+                let mut data = Vec::new();
+                std::fs::File::open(path)
+                    .and_then(|input| input.take(u32::MAX as u64 + 1).read_to_end(&mut data))
+                    .map_err(|error| {
+                        VmmError::InvalidMachine(format!(
+                            "fw_cfg file {} ({}): {error}",
+                            file.name,
+                            path.display()
+                        ))
+                    })?;
+                data
+            }
+        };
+        device
+            .add_file(&file.name, data, false)
+            .map_err(VmmError::InvalidMachine)?;
     }
     Ok(())
 }
@@ -1238,7 +1315,12 @@ pub fn build(
         None
     };
     let mut smi_fwcfg = None;
-    if let Boot::Firmware { bootorder, .. } = &desc.boot {
+    if let Boot::Firmware {
+        bootorder,
+        boot_menu,
+        ..
+    } = &desc.boot
+    {
         let mut ram_regions = vec![(0, physical_low_end)];
         ram_regions.extend(
             layout
@@ -1277,6 +1359,7 @@ pub fn build(
             smm: secure_smm,
         };
         let mut options = vmlab_hv_firmware::FirmwareOptions {
+            boot_menu: *boot_menu,
             bootorder: if pc && bootorder.is_empty() {
                 crate::pc::bootorder(&desc.disks)
             } else {
@@ -1290,7 +1373,7 @@ pub fn build(
             options.smbios.processor_id =
                 kvm.processor_id(desc.vcpus, desc.cpu, desc.cpu_model.as_deref())?;
         }
-        let fw_cfg = if pc {
+        let mut fw_cfg = if pc {
             let platform = vmlab_hv_firmware::pc::Platform {
                 vcpus: platform.vcpus,
                 max_cpus: platform.max_cpus,
@@ -1309,6 +1392,7 @@ pub fn build(
             vmlab_hv_firmware::FwCfg::for_platform(ram.mem.clone(), &platform, &options)
         }
         .map_err(VmmError::Other)?;
+        add_fw_cfg_files(&mut fw_cfg, desc)?;
         let fw_cfg = Arc::new(Mutex::new(if pc {
             crate::smm::SmiFwCfg::without_negotiation(fw_cfg, ram.mem.clone())
         } else {
@@ -1422,6 +1506,98 @@ fn machine_digest(desc: &MachineDescription) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn fw_cfg_validates_and_loads_immutable_launch_inputs() {
+        use vmlab_hv_proto::machine::{FwCfgFile, FwCfgSource};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("splash.jpg");
+        std::fs::write(&path, b"launch bytes").unwrap();
+        let mut machine = desc();
+        machine.fw_cfg = vec![
+            FwCfgFile {
+                name: "bootsplash.jpg".into(),
+                source: FwCfgSource::File { path: path.clone() },
+            },
+            FwCfgFile {
+                name: "opt/vmlab/gop-width".into(),
+                source: FwCfgSource::Inline {
+                    bytes: b"1024".to_vec(),
+                },
+            },
+        ];
+        assert!(
+            validate_fw_cfg(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("firmware boot")
+        );
+        machine.boot = Boot::Firmware {
+            firmware: FirmwareKind::Seabios,
+            boot_menu: false,
+            code: path.clone(),
+            vars: None,
+            secure_boot: false,
+            bootorder: vec![],
+        };
+        validate_fw_cfg(&machine).unwrap();
+        let mem =
+            vmlab_hv_devices::GuestMemory::from_ranges(&[(Default::default(), 0x10000)]).unwrap();
+        let mut device = vmlab_hv_firmware::FwCfg::new(mem.clone());
+        add_fw_cfg_files(&mut device, &machine).unwrap();
+        use vmlab_hv_devices::Snapshot;
+        let saved = device.save_state().unwrap();
+        std::fs::write(&path, b"edited bytes").unwrap();
+        device.restore_state(&saved).unwrap();
+        assert_eq!(
+            device.file("bootsplash.jpg"),
+            Some(b"launch bytes".as_slice())
+        );
+        assert_eq!(device.file("opt/vmlab/gop-width"), Some(b"1024".as_slice()));
+        let mut changed = vmlab_hv_firmware::FwCfg::new(mem);
+        add_fw_cfg_files(&mut changed, &machine).unwrap();
+        assert!(changed.restore_state(&saved).is_err());
+        machine.fw_cfg[1].name = "bootsplash.jpg".into();
+        assert!(
+            validate_fw_cfg(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+        machine.fw_cfg[1].name = "etc/smi/features-ok".into();
+        assert!(
+            validate_fw_cfg(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("reserved")
+        );
+        machine.fw_cfg[1].name = "x".repeat(56);
+        assert!(validate_fw_cfg(&machine).is_err());
+        machine.fw_cfg.pop();
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            validate_fw_cfg(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("splash.jpg")
+        );
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            validate_fw_cfg(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("regular host file")
+        );
+        std::fs::remove_dir(&path).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(u32::MAX as u64 + 1).unwrap();
+        assert!(
+            validate_fw_cfg(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("u32 length")
+        );
+    }
+
+    #[test]
     fn vfio_requires_q35_unique_host_and_unoccupied_guest_addresses() {
         let dir = tempfile::tempdir().unwrap();
         let mut machine = desc();
@@ -1442,6 +1618,7 @@ mod tests {
         machine.machine = Machine::Q35;
         machine.boot = Boot::Firmware {
             firmware: FirmwareKind::Seabios,
+            boot_menu: false,
             code: tiny_bzimage(dir.path()),
             vars: None,
             secure_boot: false,
@@ -1503,6 +1680,7 @@ mod tests {
 
     fn desc() -> MachineDescription {
         MachineDescription {
+            fw_cfg: vec![],
             exit_on_reset: false,
             vfio: vec![],
             machine: Default::default(),
@@ -1623,6 +1801,7 @@ mod tests {
         machine.machine = Machine::Q35;
         machine.boot = Boot::Firmware {
             firmware: FirmwareKind::Seabios,
+            boot_menu: false,
             code: tiny_bzimage(dir.path()),
             vars: None,
             secure_boot: false,
@@ -1729,6 +1908,7 @@ mod tests {
         machine.machine = Machine::Q35;
         machine.boot = Boot::Firmware {
             firmware: FirmwareKind::Seabios,
+            boot_menu: false,
             code: tiny_bzimage(dir.path()),
             vars: None,
             secure_boot: false,
@@ -1869,6 +2049,7 @@ mod tests {
         machine.machine = Machine::Q35;
         machine.boot = Boot::Firmware {
             firmware: FirmwareKind::Seabios,
+            boot_menu: false,
             code: tiny_bzimage(dir.path()),
             vars: None,
             secure_boot: false,

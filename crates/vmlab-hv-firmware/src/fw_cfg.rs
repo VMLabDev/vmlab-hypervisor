@@ -11,6 +11,39 @@ pub const IO_SIZE: u16 = 12;
 const DIRECTORY: u16 = 0x19;
 const FIRST_FILE: u16 = 0x20;
 
+pub fn validate_file_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() >= 56 || !name.is_ascii() || name.contains('\0') {
+        return Err("fw_cfg filename must contain 1..55 non-NUL ASCII bytes".into());
+    }
+    Ok(())
+}
+
+/// Reserve platform and SMI files even when this machine does not expose them.
+pub fn validate_extra_file_name(name: &str) -> Result<(), String> {
+    validate_file_name(name)?;
+    if matches!(
+        name,
+        "etc/acpi/rsdp"
+            | "etc/acpi/tables"
+            | "etc/table-loader"
+            | "etc/e820"
+            | "bootorder"
+            | "etc/boot-fail-wait"
+            | "etc/system-states"
+            | "etc/smbios/smbios-anchor"
+            | "etc/smbios/smbios-tables"
+            | "bios-geometry"
+            | "etc/tpm/config"
+            | "etc/tpm/log"
+            | "etc/smi/supported-features"
+            | "etc/smi/requested-features"
+            | "etc/smi/features-ok"
+    ) {
+        return Err(format!("reserved fw_cfg file {name}"));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     data: Vec<u8>,
@@ -119,9 +152,7 @@ impl FwCfg {
 
     /// Add a fixed-size file. DMA writes are permitted only when `writable`.
     pub fn add_file(&mut self, name: &str, data: Vec<u8>, writable: bool) -> Result<u16, String> {
-        if name.is_empty() || name.len() >= 56 || !name.is_ascii() || name.contains('\0') {
-            return Err("fw_cfg filename must contain 1..55 non-NUL ASCII bytes".into());
-        }
+        validate_file_name(name)?;
         if data.len() > u32::MAX as usize {
             return Err("fw_cfg file exceeds u32 length".into());
         }

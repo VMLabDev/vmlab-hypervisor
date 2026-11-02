@@ -340,7 +340,10 @@ fn initrd_with_init_script(dir: &Dir) -> PathBuf {
     let combined = dir.path.join("initrd.img");
     let mut out = File::create(&combined).unwrap();
     let mut base = File::open(INITRD).unwrap();
-    std::io::copy(&mut base, &mut out).unwrap();
+    let length = std::io::copy(&mut base, &mut out).unwrap();
+    // Raw newc headers require four-byte alignment in the initramfs buffer.
+    let padding = (length.next_multiple_of(4) - length) as usize;
+    out.write_all(&[0; 3][..padding]).unwrap();
     let mut extra = File::open(&archive).unwrap();
     std::io::copy(&mut extra, &mut out).unwrap();
     std::io::Write::flush(&mut out).unwrap();
@@ -366,14 +369,24 @@ fn initrd_overlay_is_complete_before_returning() {
         let builds: Vec<_> = (0..8)
             .map(|_| {
                 scope.spawn(|| {
-                    use std::io::{Seek, SeekFrom};
+                    use std::io::{Read, Seek, SeekFrom};
 
                     let dir = Dir::new("archive");
                     let combined = initrd_with_init_script(&dir);
                     let mut archive = File::open(combined).unwrap();
-                    archive
-                        .seek(SeekFrom::Start(fs::metadata(INITRD).unwrap().len()))
-                        .unwrap();
+                    let base_len = fs::metadata(INITRD).unwrap().len();
+                    let aligned = base_len.next_multiple_of(4);
+                    archive.seek(SeekFrom::Start(base_len)).unwrap();
+                    let mut padding = vec![0xff; (aligned - base_len) as usize];
+                    archive.read_exact(&mut padding).unwrap();
+                    assert!(
+                        padding.iter().all(|byte| *byte == 0),
+                        "raw cpio must start at a four-byte boundary"
+                    );
+                    let mut magic = [0; 6];
+                    archive.read_exact(&mut magic).unwrap();
+                    assert_eq!(&magic, b"070701");
+                    archive.seek(SeekFrom::Start(aligned)).unwrap();
                     let output = Command::new("cpio")
                         .args(["-i", "--quiet", "--to-stdout"])
                         .stdin(archive)
@@ -400,6 +413,7 @@ fn initrd_overlay_is_complete_before_returning() {
 /// One machine description with a single share on `socket`.
 fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
     MachineDescription {
+        fw_cfg: vec![],
         exit_on_reset: false,
         vfio: vec![],
         machine: Default::default(),
