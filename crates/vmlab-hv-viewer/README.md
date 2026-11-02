@@ -62,8 +62,9 @@ Shared-memory uploads pack only damaged rectangles into staging buffers. The
 first frame after configure initializes the whole image. Cursor pixels are
 premultiplied ARGB and are composited at the protocol position and hotspot.
 
-The swapchain uses MAILBOX when available, otherwise FIFO. Only one GPU
-submission is in flight. Physical display latency still needs the manual check
+The swapchain uses MAILBOX when available, otherwise FIFO with two images where
+the surface permits it. `VMLAB_VIEWER_PRESENT_MODE=fifo` forces FIFO for testing.
+Only one GPU submission is in flight. Physical display latency still needs the manual check
 below. No timing claim is inferred from a passing unit test.
 
 ## Run automated checks

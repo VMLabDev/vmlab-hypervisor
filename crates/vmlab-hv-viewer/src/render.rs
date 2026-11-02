@@ -729,12 +729,19 @@ impl Renderer {
             let modes = gpu
                 .surface_api
                 .get_physical_device_surface_present_modes(gpu.physical, gpu.surface)?;
-            let mode = if modes.contains(&vk::PresentModeKHR::MAILBOX) {
+            let mode = if std::env::var("VMLAB_VIEWER_PRESENT_MODE").as_deref() != Ok("fifo")
+                && modes.contains(&vk::PresentModeKHR::MAILBOX)
+            {
                 vk::PresentModeKHR::MAILBOX
             } else {
                 vk::PresentModeKHR::FIFO
             };
-            let count = (caps.min_image_count + 1).min(if caps.max_image_count == 0 {
+            let requested = if mode == vk::PresentModeKHR::FIFO {
+                caps.min_image_count.max(2)
+            } else {
+                caps.min_image_count.saturating_add(1)
+            };
+            let count = requested.min(if caps.max_image_count == 0 {
                 u32::MAX
             } else {
                 caps.max_image_count

@@ -46,6 +46,12 @@ fn wait(mut condition: impl FnMut() -> bool) {
 
 #[test]
 fn executable_presents_letterbox_cursor_input_and_resize_on_private_display() {
+    for mode in ["mailbox", "fifo"] {
+        exercise(mode);
+    }
+}
+
+fn exercise(mode: &str) {
     if !Command::new("Xvfb").arg("-help").output().is_ok() {
         eprintln!("SKIP viewer window: Xvfb unavailable");
         return;
@@ -105,6 +111,7 @@ fn executable_presents_letterbox_cursor_input_and_resize_on_private_display() {
             .env("DISPLAY", &display)
             .env_remove("WAYLAND_DISPLAY")
             .env("WINIT_UNIX_BACKEND", "x11")
+            .env("VMLAB_VIEWER_PRESENT_MODE", mode)
             .stdout(Stdio::null())
             .stderr(File::create(&stderr).unwrap()),
     )
