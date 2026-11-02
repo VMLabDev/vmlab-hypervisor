@@ -1,8 +1,125 @@
 # Phase-2 performance gate (HV-D28)
 
-**Verdict: NOT passed. The 2026-11-02 quiet window meets six of ten core bars;
-G1, G2, G7, and G9 fail.**
+**Verdict: NOT passed. The final 2026-11-02 quiet window meets six of ten core bars;
+G1, G4, G7, and G10 fail.**
 The VM default must remain unchanged.
+
+## Round 5 authorized final quiet bench window (2026-11-02)
+
+The final measurement passes six of ten core bars. G1, G4, G7, and G10 fail.
+The default remains unchanged. This window supersedes the round-4 verdict
+and the development sections' pending-window statements below.
+
+The owner authorized the window with the other project SIGSTOPped, every
+other session idle, no project VMs, and 68 GiB free in /tmp. Both backends
+ran from source `a1eb3ec`. The tested HV binary's SHA-256 is
+`eae67f98cdf14d89a3d19b86a02b808e07fff4dc9dcaa5c573021d641d8d388f`.
+
+Both backends ran the actual `just bench-run-kvm` recipes for Ubuntu
+26.04 and Windows 10, plus `just bench-run-g2g` for Ubuntu. Each has three
+fresh-overlay repeats, alternating QEMU then vmlab-hv per repeat. Recipe
+dependencies finish before either backend starts its first VM. Runtime
+source, firmware, workload sizes, flushes, readiness, repeat counts, and
+D28 thresholds stay unchanged.
+
+All six benchmark commands and `just bench-report x86_64` exit 0. The
+report prints the failed bars; its exit status does not enforce D28.
+All 22 new aggregate records and their raw samples are appended to
+`bench/history/x86_64.jsonl`. The earlier supplementary Server 2025
+result is historical and is not included in these ten bars.
+
+### Full bar table
+
+Values are medians. Boot requires hv/qemu <= 1.0000. Throughput requires
+hv/qemu >= 0.8000. Neither rounding nor spread changes the verdict.
+
+| Bar | Workload | QEMU | vmlab-hv | hv/qemu | Result |
+|---|---|---:|---:|---:|---|
+| G1 | Ubuntu boot (s) | 6.59 | 6.61 | 1.0030 | FAIL |
+| G2 | Windows 10 boot (s) | 85.46 | 79.13 | 0.9259 | PASS |
+| G3 | Sequential read (MiB/s) | 17197.94 | 14990.46 | 0.8716 | PASS |
+| G4 | Sequential write (MiB/s) | 5337.45 | 3986.11 | 0.7468 | FAIL |
+| G5 | Random read 4 KiB (iops) | 49844.60 | 68271.20 | 1.3697 | PASS |
+| G6 | Random write 4 KiB (iops) | 30947.90 | 36018.80 | 1.1639 | PASS |
+| G7 | UDP TX (Mbit/s) | 38828.77 | 24502.28 | 0.6310 | FAIL |
+| G8 | UDP RX (Mbit/s) | 86589.76 | 82292.74 | 0.9504 | PASS |
+| G9 | TCP A to B (Mbit/s) | 26395.45 | 21429.40 | 0.8119 | PASS |
+| G10 | TCP B to A (Mbit/s) | 26695.35 | 21286.79 | 0.7974 | FAIL |
+
+G2 and G9 now pass. G1 remains 0.02 seconds slower. G10 is below the floor
+at 0.7974, while G4 and G7 have larger deficits. These measurements do not
+identify the cause of the remaining gaps. Idle host CPU has no D28 bar:
+QEMU measures 1.03% and vmlab-hv 2.57% of one core.
+
+### Windows readiness and TCP checks
+
+Windows 10 samples are 86.16, 85.46, and 85.30 seconds for QEMU, and
+81.17, 79.13, and 78.84 for vmlab-hv. The unchanged marker, OOBE, AppX,
+and guest-reboot readiness sequence completes. Existing boot-ID probes
+change from `0x9` to `0xa` across all six requested reboots. Capturing
+those return values adds no guest commands.
+
+All 12 TCP transfers have matching sender and receiver byte counts.
+Payload hashes were not collected. All 12 single-VM repeats exit cleanly;
+the g2g teardown also stops every owned VM and peer.
+
+### Load averages per run
+
+Each triple contains the one-, five-, and fifteen-minute load averages.
+Start observations are taken after the interleaving wait. Rolling averages
+include preceding benchmark work. The original history environment's
+pre-wait observations are retained separately.
+
+| Run | Start load [1, 5, 15 min] | End load [1, 5, 15 min] |
+|---|---|---|
+| ubuntu qemu r1 | [0.34, 2.24, 3.79] | [0.55, 1.85, 3.49] |
+| ubuntu vmlab-hv r1 | [0.55, 1.85, 3.49] | [0.52, 1.50, 3.19] |
+| ubuntu qemu r2 | [0.52, 1.50, 3.19] | [0.57, 1.28, 2.94] |
+| ubuntu vmlab-hv r2 | [0.57, 1.28, 2.94] | [0.48, 1.11, 2.70] |
+| ubuntu qemu r3 | [0.48, 1.11, 2.70] | [0.62, 1.06, 2.53] |
+| ubuntu vmlab-hv r3 | [0.62, 1.06, 2.53] | [0.60, 0.97, 2.34] |
+| windows10 qemu r1 | [0.60, 0.97, 2.34] | [1.34, 1.15, 2.27] |
+| windows10 vmlab-hv r1 | [1.34, 1.15, 2.27] | [1.85, 1.36, 2.25] |
+| windows10 qemu r2 | [1.85, 1.36, 2.25] | [1.43, 1.36, 2.17] |
+| windows10 vmlab-hv r2 | [1.43, 1.36, 2.17] | [2.05, 1.57, 2.17] |
+| windows10 qemu r3 | [2.05, 1.57, 2.17] | [2.48, 1.79, 2.19] |
+| windows10 vmlab-hv r3 | [2.48, 1.79, 2.19] | [1.75, 1.72, 2.13] |
+| g2g qemu r1 | [1.75, 1.72, 2.13] | [2.36, 1.88, 2.17] |
+| g2g vmlab-hv r1 | [2.36, 1.88, 2.17] | [3.05, 2.11, 2.23] |
+| g2g qemu r2 | [3.05, 2.11, 2.23] | [3.05, 2.23, 2.27] |
+| g2g vmlab-hv r2 | [3.05, 2.23, 2.27] | [3.02, 2.33, 2.30] |
+| g2g qemu r3 | [3.02, 2.33, 2.30] | [3.12, 2.45, 2.34] |
+| g2g vmlab-hv r3 | [3.12, 2.45, 2.34] | [2.90, 2.48, 2.36] |
+
+The one-second monitor records 1361 observations, a one-minute load range
+of 0.31 to 3.41, at most two owned VMs, and no foreign project VM. Android
+is excluded. Every observed VM has memory.max 25769803776 and
+memory.swap.max 0. The coordinator holds all four shared admission locks;
+the harness also checks capacity before every launch.
+
+Single VMs use CPUs 16-23, and g2g uses 16-19 plus 20-23. The governor is
+performance. The existing Ananicy policy remains unchanged: QEMU is moved
+to nice 9 while vmlab-hv inherits nice -4. No profiler or exit-recorder
+override is active.
+
+### Evidence and cleanup
+
+`bench/profiles/phase2-round5-final-20261102.json` contains the complete
+bar table, all records and samples, load triples, monitor, command logs,
+firmware and binary hashes, existing boot-ID probes, TCP counters, and
+coordinator sources. The measurement job has a clean exit-0 receipt.
+There are no discarded attempts or resource failures in this window.
+
+Every owned temporary VM directory is removed as its run finishes, with
+logs retained on disk. The minimum observed /tmp free space is
+71086792704 bytes, about 66.2 GiB. The empty temporary root and the
+measurement job are removed after completion. No project VM remains.
+
+`just ci::check` is deliberately not run in this window, as instructed.
+The orchestrator owns the subsequent integration gate. Later history
+dirty flags reflect appended history, not runtime edits. The window changes
+no default, threshold, shared interface, or snapshot format. Nothing is
+merged or pushed.
 
 ## Round 5 development diagnostics (2026-11-02)
 
