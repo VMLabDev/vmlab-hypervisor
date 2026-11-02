@@ -57,11 +57,14 @@ Pointer coordinates use the same viewport as rendering and clamp at its edges.
 If the display connection closes, the window clears to black and its title
 shows `waiting for display`. The viewer releases host keyboard capture and
 restores the host cursor. It reconnects with delays from 100 ms to 2 s while
-the original hypervisor process lives. A Linux pidfd tracks that process, so
-socket removal alone does not end the viewer or attach it to another machine.
+the hypervisor process lives. A Linux pidfd detects process exit. The viewer
+allows a five-second restart grace period for a replacement process to bind
+the same configured socket. If none appears, the viewer exits. The configured
+socket path identifies the machine across process replacement.
 Reconnect clears cached surfaces and cursor images, renegotiates the protocol,
 and sends releases for previously held guest keys and buttons. Closing the
-window cancels retries. Hypervisor process exit ends the viewer.
+window cancels retries. Surface reconfiguration also clears the previous image
+before a new frame arrives, so expose events cannot redraw a stale desktop.
 
 Clipboard synchronization runs only while focused. Host text is sent on focus
 gain and when a 100 ms selection check detects a change. Guest text is polled
@@ -113,7 +116,10 @@ The Windows S1 test discovers the Windows 11 standard template, or uses
 directory containing secure OVMF code and Microsoft-enrolled variable defaults.
 It checks tablet enumeration and Windows' parsing of the mouse usage and input
 report size through SetupAPI and HidP_GetCaps. It sends pointer, button, and key
-input and checks that the first Ctrl+Alt press releases the viewer. It does not
+input and checks that the first Ctrl+Alt press releases the viewer. A burst
+of 20,000 moves with 80 button transitions and
+40 wheel events must preserve the display connection and continued non-black
+frames, without tablet overflow. It does not
 observe desktop movement or buttons in Windows' interactive session; those
 remain manual checks. No logged-in user, scheduled task, or restart is required.
 The investigation and physical-desktop retest steps are in

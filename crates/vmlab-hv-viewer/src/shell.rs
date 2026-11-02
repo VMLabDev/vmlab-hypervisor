@@ -143,7 +143,11 @@ impl App {
     }
 
     fn display(&mut self, packet: Packet) -> Result<()> {
+        let configure = matches!(packet.message, Message::SurfaceConfigure { .. });
         let frame = self.core.receive(packet)?;
+        if configure && let Some(renderer) = &mut self.renderer {
+            renderer.reset_display();
+        }
         self.update_cursor();
         if let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer) {
             if let Some(frame) = frame {
@@ -369,6 +373,9 @@ impl ApplicationHandler<Event> for App {
                 self.display(packet)
             }
             Event::Connected(generation, client) => (|| -> Result<()> {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.reset_display();
+                }
                 self.core = Core::new(client, &self.options.release_chord)?;
                 self.generation = generation;
                 self.connected = true;

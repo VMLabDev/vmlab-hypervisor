@@ -47,6 +47,37 @@ fn wait(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
+fn replacement_peer_relay() {
+    let Some(path) = std::env::var_os("VMLAB_VIEWER_REPLACEMENT_SOCKET") else {
+        return;
+    };
+    let listener = UnixListener::bind(path).unwrap();
+    let backend = std::os::unix::net::UnixStream::connect(
+        std::env::var_os("VMLAB_VIEWER_RELAY_SOCKET").unwrap(),
+    )
+    .unwrap();
+    let (viewer, _) = listener.accept().unwrap();
+    fn forward(
+        source: std::os::unix::net::UnixStream,
+        destination: std::os::unix::net::UnixStream,
+    ) {
+        while let Ok(packet) = receive(&source) {
+            let descriptors: Vec<_> = packet.fds.iter().map(AsRawFd::as_raw_fd).collect();
+            if send(&destination, &packet.message, &descriptors).is_err() {
+                break;
+            }
+        }
+        let _ = source.shutdown(std::net::Shutdown::Both);
+        let _ = destination.shutdown(std::net::Shutdown::Both);
+    }
+    let source = backend.try_clone().unwrap();
+    let destination = viewer.try_clone().unwrap();
+    let thread = std::thread::spawn(move || forward(source, destination));
+    forward(viewer, backend);
+    thread.join().unwrap();
+}
+
+#[test]
 fn executable_presents_letterbox_cursor_input_and_resize_on_private_display() {
     for mode in ["mailbox", "fifo"] {
         exercise(mode);
@@ -673,6 +704,7 @@ fn exercise(mode: &str) {
     )
     .unwrap();
     wait(host_visible);
+    wait(|| pixel(500, 300)[..3] == [0, 0, 0]);
     send(
         &writer,
         &Message::FrameReady {
@@ -860,8 +892,17 @@ fn exercise(mode: &str) {
             .unwrap();
     }
     connection.flush().unwrap();
-    let listener = UnixListener::bind(&socket).unwrap();
+    let relay = directory.path().join("relay.sock");
+    let listener = UnixListener::bind(&relay).unwrap();
     listener.set_nonblocking(true).unwrap();
+    let mut replacement_peer = ManagedChild::helper(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "replacement_peer_relay"])
+            .env("VMLAB_VIEWER_REPLACEMENT_SOCKET", &socket)
+            .env("VMLAB_VIEWER_RELAY_SOCKET", &relay)
+            .stdout(Stdio::null()),
+    )
+    .unwrap();
     let mut resumed = None;
     wait(|| {
         if let Ok((stream, _)) = listener.accept() {
@@ -967,4 +1008,5 @@ fn exercise(mode: &str) {
         "viewer close failed: {}",
         std::fs::read_to_string(stderr).unwrap()
     );
+    assert!(replacement_peer.wait().unwrap().success());
 }

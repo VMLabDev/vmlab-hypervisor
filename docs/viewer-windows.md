@@ -154,9 +154,10 @@ executable reproduced the owner's `Error: unexpected end of file` in private
 Xvfb when its display peer closed. The new viewer keeps the same window, clears
 its image, and shows `waiting for display` in the title. It releases host
 keyboard capture, restores the host cursor, and reconnects off the UI thread.
-Retries grow from 100 ms to 2 s. A pidfd tracks the original socket peer, so
+In `60b9c86`, retries grew from 100 ms to 2 s. A pidfd tracked the original socket peer, so
 removing or rebinding the socket does not mean the machine has exited.
-The viewer exits when that process dies or the user closes the window.
+That build exited when the original process died or the user closed the window.
+The replacement-process policy below supersedes that behavior.
 Initial connection and local renderer setup errors still fail startup.
 
 Reconnect resets surface IDs, buffer imports, repaint images, cursor state,
@@ -213,3 +214,71 @@ workspace Clippy pass. The full workspace suite was not rerun, as requested.
 The optional hardware dma-buf test still skips without a selected render node.
 The owner's Windows Venus first-boot reboot and physical KDE clipboard retest
 remain manual checks. No owner VM or desktop was changed.
+
+## Pointer overload and stale-frame correction
+
+F7. Two bounded queues failed independently. The display server's 256-message
+channel closed the client when full. The tablet's 1024-report queue logged and
+dropped new input. Neither path coalesced motion. The display overflow policy
+already existed in `23fd452`. The `60b9c86` change exposed native input errors
+to logging; it did not introduce the disconnect. Tablet warnings cannot
+propagate through InputSink, whose callback returns `()`.
+
+The old hypervisor reproduced BrokenPipe during a 20,000-move burst against a
+disposable Windows 11 standard-template guest with virtio-vga 2D. A slow-sink
+native-protocol test independently reproduced BrokenPipe. A tablet test filled
+the report queue before interrupt polling could drain it.
+
+Both queues now coalesce consecutive motion, with button and wheel events as
+ordering boundaries. A tablet report containing a button or wheel transition
+keeps its original coordinates. Full queues apply backpressure instead of
+dropping transitions or closing the display client. The tablet returns typed
+WouldBlock without consuming an event, and the VMM retries outside controller
+locks. Warnings are limited to one per five seconds. Input-only messages no
+longer wake frame workers or take their publication lock.
+
+The bounds remain 256 display messages and 1024 tablet reports. If transitions
+alone fill the display queue, transport backpressure can delay following
+messages, including Release. Shutdown cancels queue waiters. Message layouts,
+USB report descriptors, shared trait signatures, and snapshot formats are
+unchanged. The overload behavior and tablet retry contract are documented in
+`crates/vmlab-hv-display/PROTOCOL.md` and the UsbDevice trait.
+
+F8. SurfaceConfigure cleared the headless Core but left the renderer's owned
+repaint image intact until another frame arrived. Private Xvfb reproduced the
+old desktop persisting during that gap. Configure and reconnect now clear
+imports, cursor images, and repaint images immediately. Waiting pixels are
+black, with a waiting title and the host cursor restored.
+
+The reader also accepts a replacement hypervisor process at the same configured
+socket. A pidfd detects process exit, then allows a five-second restart grace
+period before exiting if no replacement appears. This replaces the old
+original-PID restriction. A real helper process rebinds the socket in the Xvfb
+test, which checks the same native window, cleared pixels, reused surface IDs,
+resumed pixels, and key/button releases. An independent reader test kills one
+peer process and reconnects to another.
+
+T7. Tablet tests send 20,000 moves with button and wheel transitions, then check
+every transition, its coordinates, the final position, and snapshot restore.
+A full queue of wheel events verifies lossless retry. Native tests use 10,000
+moves, 200 button transitions, 100 wheel events, and a slow sink, then verify
+every transition, the final position, and a live LED response. Queue tests
+verify bounded waiting and shutdown cancellation.
+
+T8. Windows S1 passed after the fix. During the final 20,000-move burst, frame count
+advanced from 77 to 130 and the final active frame was non-black. Its 80 button
+transitions and 40 wheel events caused no disconnect or tablet overflow.
+The burst and two-second observation completed in 2.02 s. The full Windows test
+passed in 29.31 s. Linux S1 input, resize, and in-place reboot passed in 28.59 s.
+This does not measure
+physical pointer latency or establish which internal queue closed the owner's
+original connection. The Windows agent and HID capability checks also pass.
+
+Evidence is in `.scratch/viewer-windows/pointer-tablet-before.log`,
+`pointer-display-before.log`, `pointer-windows-before.log`, `stale-before.log`,
+`new-peer-before.log`, `pointer-windows-final.log`, `pointer-linux-final.log`, and the corresponding
+`pointer-*-after.log` files. The owner's reported queue-not-ready error comes
+from virtio-queue's descriptor iterator, which logs and returns None. That
+message alone does not establish a fatal GPU failure. Its crash-ring files
+could not be parsed as complete JSON, so no causal claim relies on them.
+The full suite and physical KDE desktop checks remain outside this focused run.

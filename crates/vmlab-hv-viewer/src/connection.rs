@@ -1,4 +1,4 @@
-//! Reconnect display transport while the original hypervisor process is alive.
+//! Reconnect display transport, including replacement processes at the same socket.
 
 use std::io;
 use std::net::Shutdown;
@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use vmlab_hv_display::{Client, Message, Packet};
 
 pub(crate) enum Event {
@@ -18,7 +18,6 @@ pub(crate) enum Event {
 }
 
 struct Peer {
-    pid: libc::pid_t,
     fd: OwnedFd,
 }
 
@@ -50,7 +49,6 @@ impl Peer {
             return Err(io::Error::last_os_error());
         }
         Ok(Self {
-            pid,
             // SAFETY: the successful syscall returned a new descriptor.
             fd: unsafe { OwnedFd::from_raw_fd(fd as i32) },
         })
@@ -79,7 +77,7 @@ impl Connection {
         initial: Arc<Client>,
         mut notify: impl FnMut(Event) -> bool + Send + 'static,
     ) -> io::Result<Self> {
-        let peer = Peer::new(initial.stream())?;
+        let mut peer = Peer::new(initial.stream())?;
         initial
             .stream()
             .set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -119,8 +117,10 @@ impl Connection {
                             break error;
                         }
                         if descriptors[1].revents != 0 {
-                            notify(Event::Gone);
-                            return;
+                            break io::Error::new(
+                                io::ErrorKind::ConnectionReset,
+                                "display process exited",
+                            );
                         }
                         let packet = source.receive().and_then(|packet| {
                             if matches!(packet.message, Message::FrameReady { .. }) {
@@ -144,21 +144,22 @@ impl Connection {
                         return;
                     }
                     let mut delay = Duration::from_millis(100);
+                    let mut gone_at = None;
                     loop {
                         if !peer.alive() {
-                            notify(Event::Gone);
-                            return;
+                            let since = gone_at.get_or_insert_with(Instant::now);
+                            if since.elapsed() >= Duration::from_secs(5) {
+                                notify(Event::Gone);
+                                return;
+                            }
                         }
                         if cancelled.recv_timeout(delay) != Err(mpsc::RecvTimeoutError::Timeout) {
                             return;
                         }
                         delay = (delay * 2).min(Duration::from_secs(2));
-                        let attempt = (|| -> io::Result<Client> {
+                        let attempt = (|| -> io::Result<(Client, Peer)> {
                             let stream = UnixStream::connect(&path)?;
-                            // Do not attach to a replacement process reusing the socket path.
-                            if peer_pid(&stream)? != peer.pid || !peer.alive() {
-                                return Err(io::ErrorKind::ConnectionAborted.into());
-                            }
+                            let replacement = Peer::new(&stream)?;
                             stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                             stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                             *current.lock().unwrap() = stream.try_clone()?;
@@ -170,13 +171,14 @@ impl Connection {
                                 return Err(crate::invalid("server did not negotiate frames"));
                             }
                             client.stream().set_read_timeout(None)?;
-                            Ok(client)
+                            Ok((client, replacement))
                         })();
-                        if let Ok(client) = attempt {
+                        if let Ok((client, replacement)) = attempt {
                             if cancelled.try_recv().is_ok() {
                                 return;
                             }
                             source = Arc::new(client);
+                            peer = replacement;
                             generation += 1;
                             if !notify(Event::Connected(generation, source.clone())) {
                                 return;
@@ -288,6 +290,53 @@ mod tests {
     }
 
     #[test]
+    fn replacement_process_at_the_same_socket_gets_a_fresh_connection() {
+        fn spawn(path: &std::path::Path) -> vmlab_hv_tests::process::ManagedChild {
+            let child = vmlab_hv_tests::process::ManagedChild::helper(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "connection::tests::peer_helper"])
+                    .env("VMLAB_VIEWER_PEER_HELPER", path)
+                    .stdout(std::process::Stdio::null()),
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !path.exists() {
+                assert!(Instant::now() < deadline);
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
+            child
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("display.sock");
+        let mut old = spawn(&path);
+        let client = Arc::new(Client::connect(&path, Capabilities::ALL).unwrap());
+        let (sender, events) = mpsc::channel();
+        let connection = Connection::start(path.clone(), client, move |event| {
+            sender.send(event).is_ok()
+        })
+        .unwrap();
+        old.kill().unwrap();
+        old.wait().unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let mut replacement = spawn(&path);
+        loop {
+            match events.recv_timeout(Duration::from_secs(3)).unwrap() {
+                Event::Disconnected(0, _) => {}
+                Event::Connected(1, client) => {
+                    assert_eq!(
+                        peer_pid(client.stream()).unwrap(),
+                        replacement.id() as libc::pid_t
+                    );
+                    break;
+                }
+                _ => panic!("replacement process was not reconnected"),
+            }
+        }
+        drop(connection);
+        assert!(replacement.wait().unwrap().success());
+    }
+
+    #[test]
     fn original_process_exit_is_distinct_from_a_display_disconnect() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("display.sock");
@@ -310,7 +359,7 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         loop {
-            match events.recv_timeout(Duration::from_secs(3)).unwrap() {
+            match events.recv_timeout(Duration::from_secs(8)).unwrap() {
                 Event::Gone => break,
                 Event::Disconnected(..) => {}
                 _ => panic!("unexpected reconnect to a dead machine"),
