@@ -118,7 +118,7 @@ fn viewer_input_and_resize_reach_guest_via_s1() {
     vmlab_disk::ops::create_linked_clone(&template, &disk).unwrap();
     let control = directory.path().join("control.sock");
     let display = directory.path().join("display.sock");
-    let agent = directory.path().join("agent.sock");
+    let agent_path = directory.path().join("agent.sock");
     let serial = directory.path().join("serial.log");
     let stderr = directory.path().join("stderr.log");
     let machine = directory.path().join("machine.json");
@@ -129,7 +129,7 @@ fn viewer_input_and_resize_reach_guest_via_s1() {
         "console_pci":{"bus":0,"device":1,"function":0},
         "display":{"device":"virtio-vga","pci":{"bus":0,"device":4,"function":0},"socket":display},
         "tablet":{"bus":0,"device":5,"function":0}, "usb":{"bus":0,"device":5,"function":0},
-        "ports":[{"name":"vmlab.agent.0","socket":agent}],"nics":[],"serial_log":serial
+        "ports":[{"name":"vmlab.agent.0","socket":agent_path}],"nics":[],"serial_log":serial
     })).unwrap()).unwrap();
     let binary = std::env::var_os("VMLAB_HV_BINARY")
         .map(PathBuf::from)
@@ -186,7 +186,7 @@ fn viewer_input_and_resize_reach_guest_via_s1() {
         control.call(Control::Resume).unwrap(),
         Outcome::Ok { .. }
     ));
-    let mut agent = AgentClient::connect(&agent, Duration::from_secs(120))
+    let mut agent = AgentClient::connect(&agent_path, Duration::from_secs(120))
         .unwrap_or_else(|e| panic!("{e}: {}", diagnostics()));
     observer.wait(|core| core.current.is_some());
     let script = include_str!("../../vmlab-hv/tests/guest_display.py");
@@ -264,6 +264,51 @@ else: raise AssertionError({'expected':expected,'received':events})
         "viewer S1 guest input: {}",
         String::from_utf8_lossy(&events)
     );
+    let before = observer
+        .core
+        .lock()
+        .unwrap()
+        .current
+        .as_ref()
+        .unwrap()
+        .surface;
+    let pid = process.id();
+    guest(
+        &mut agent,
+        &[
+            "sh",
+            "-c",
+            "nohup sh -c 'sleep 2; reboot' >/dev/null 2>&1 </dev/null &",
+        ],
+    );
+    drop(agent);
+    loop {
+        match control
+            .wait_event()
+            .unwrap()
+            .expect("control must survive reset")
+        {
+            vmlab_hv_proto::control::Event::Reset => break,
+            vmlab_hv_proto::control::Event::Shutdown { reason } => {
+                panic!("reset shut down: {reason:?}")
+            }
+            _ => {}
+        }
+    }
+    let mut agent = AgentClient::connect(&agent_path, Duration::from_secs(120)).unwrap();
+    guest(&mut agent, &["sh", "-c", "echo rebooted"]);
+    observer.wait(|core| {
+        core.current
+            .as_ref()
+            .is_some_and(|frame| frame.surface > before)
+    });
+    assert_eq!(process.id(), pid);
+    assert!(process.try_wait().unwrap().is_none());
+    assert!(matches!(
+        control.call(Control::Status).unwrap(),
+        Outcome::Ok { .. }
+    ));
+    eprintln!("viewer S1: reset retained PID {pid}, control and the original display connection");
     drop(observer);
     assert!(matches!(
         control.call(Control::Quit).unwrap(),

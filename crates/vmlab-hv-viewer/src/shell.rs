@@ -3,14 +3,14 @@
 use crate::{
     Core, Options,
     clipboard::{LabClipboard, Worker},
+    connection::{Connection, Event},
     grab::KeyboardGrab,
     render::Renderer,
 };
 use anyhow::{Context, Result};
 use std::net::Shutdown;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use vmlab_hv_display::{Client, Message, Packet, SurfaceKind};
+use vmlab_hv_display::{Message, Packet, SurfaceKind};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -18,10 +18,6 @@ use winit::{
     platform::scancode::PhysicalKeyExtScancode,
     window::{Window, WindowId},
 };
-
-enum Event {
-    Display(std::io::Result<Packet>),
-}
 
 struct App {
     options: Options,
@@ -37,13 +33,49 @@ struct App {
     fallback_cursor: crate::Cursor,
     wheel: f64,
     last_title: String,
+    connected: bool,
+    generation: u64,
+    pending_releases: Vec<Message>,
 }
 
 impl App {
     fn fail(&mut self, event_loop: &ActiveEventLoop, result: Result<()>) {
         if let Err(error) = result {
+            if self.window.is_some() && error.chain().any(|error| error.is::<std::io::Error>()) {
+                if self.connected {
+                    eprintln!("display connection failed; waiting to reconnect: {error:#}");
+                }
+                self.disconnected();
+                return;
+            }
             self.error = Some(error);
             event_loop.exit();
+        }
+    }
+
+    fn disconnected(&mut self) {
+        if !self.connected {
+            return;
+        }
+        self.connected = false;
+        let _ = self.core.client.stream().shutdown(Shutdown::Both);
+        self.pending_releases.extend(self.core.input.focus_lost());
+        self.keyboard.take();
+        self.core.current = None;
+        self.core.surfaces.clear();
+        self.core.cursor = crate::Cursor::default();
+        self.core.leds = 0;
+        self.wheel = 0.;
+        if let Some(clipboard) = &self.clipboard {
+            clipboard.focus(false);
+        }
+        if let Some(renderer) = &mut self.renderer {
+            renderer.reset_display();
+        }
+        self.update_cursor();
+        self.title();
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 
@@ -61,7 +93,9 @@ impl App {
         let title = format!(
             "{} - {} - release {} - {}",
             self.options.machine.as_deref().unwrap_or("vmlab-hv"),
-            if self.core.input.grabbed {
+            if !self.connected || self.core.current.is_none() {
+                "waiting for display"
+            } else if self.core.input.grabbed {
                 "keyboard grabbed"
             } else {
                 "click to grab keyboard"
@@ -82,7 +116,9 @@ impl App {
         self.keyboard.take();
         self.update_cursor();
         self.title();
-        self.core.send(messages)?;
+        if self.connected {
+            self.core.send(messages)?;
+        }
         Ok(())
     }
 
@@ -145,6 +181,16 @@ impl App {
     }
 
     fn window_event(&mut self, event: WindowEvent) -> Result<()> {
+        if !self.connected
+            && matches!(
+                event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+            )
+        {
+            return Ok(());
+        }
         match event {
             WindowEvent::Resized(size) => {
                 self.core.resize(Instant::now(), size.width, size.height);
@@ -158,12 +204,14 @@ impl App {
             }
             WindowEvent::Focused(focused) => {
                 if let Some(clipboard) = &self.clipboard {
-                    clipboard.focus(focused);
+                    clipboard.focus(focused && self.connected);
                 }
                 if !focused {
                     let messages = self.core.input.focus_lost();
                     self.ungrab()?;
-                    self.core.send(messages)?;
+                    if self.connected {
+                        self.core.send(messages)?;
+                    }
                 }
             }
             WindowEvent::Occluded(occluded) => {
@@ -314,10 +362,42 @@ impl ApplicationHandler<Event> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
-        let Event::Display(packet) = event;
-        let result = packet
-            .map_err(anyhow::Error::from)
-            .and_then(|p| self.display(p));
+        let result = match event {
+            Event::Packet(generation, packet)
+                if generation == self.generation && self.connected =>
+            {
+                self.display(packet)
+            }
+            Event::Connected(generation, client) => (|| -> Result<()> {
+                self.core = Core::new(client, &self.options.release_chord)?;
+                self.generation = generation;
+                self.connected = true;
+                self.core.send(self.pending_releases.iter().cloned())?;
+                self.pending_releases.clear();
+                if let Some(window) = &self.window {
+                    let size = window.inner_size();
+                    self.core.resize(Instant::now(), size.width, size.height);
+                    if let Some(clipboard) = &self.clipboard {
+                        clipboard.focus(window.has_focus());
+                    }
+                }
+                self.update_cursor();
+                self.title();
+                Ok(())
+            })(),
+            Event::Disconnected(generation, error) if generation == self.generation => {
+                if self.connected {
+                    eprintln!("display disconnected; waiting to reconnect: {error}");
+                }
+                self.disconnected();
+                Ok(())
+            }
+            Event::Gone => {
+                event_loop.exit();
+                Ok(())
+            }
+            _ => Ok(()),
+        };
         self.fail(event_loop, result);
     }
 
@@ -331,24 +411,13 @@ impl ApplicationHandler<Event> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let result = self.core.tick(Instant::now()).map_err(Into::into);
-        self.fail(event_loop, result);
+        if self.connected {
+            let result = self.core.tick(Instant::now()).map_err(Into::into);
+            self.fail(event_loop, result);
+        }
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             Instant::now() + Duration::from_millis(10),
         ));
-    }
-}
-
-struct Reader {
-    client: Arc<Client>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-impl Drop for Reader {
-    fn drop(&mut self) {
-        let _ = self.client.stream().shutdown(Shutdown::Both);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
     }
 }
 
@@ -361,32 +430,11 @@ pub fn run(options: Options) -> Result<()> {
         }
         _ => None,
     };
-    let client = core.client.clone();
-    let source = client.clone();
     let proxy = event_loop.create_proxy();
-    let thread = std::thread::Builder::new()
-        .name("viewer-display".into())
-        .spawn(move || {
-            loop {
-                let packet = source.receive().and_then(|packet| {
-                    if matches!(packet.message, Message::FrameReady { .. }) {
-                        for fd in &packet.fds {
-                            use std::os::fd::AsRawFd;
-                            crate::wait_fence(fd.as_raw_fd())?;
-                        }
-                    }
-                    Ok(packet)
-                });
-                let failed = packet.is_err();
-                if proxy.send_event(Event::Display(packet)).is_err() || failed {
-                    break;
-                }
-            }
+    let _connection =
+        Connection::start(options.display.clone(), core.client.clone(), move |event| {
+            proxy.send_event(event).is_ok()
         })?;
-    let _reader = Reader {
-        client,
-        thread: Some(thread),
-    };
     let mut app = App {
         options,
         core,
@@ -403,6 +451,9 @@ pub fn run(options: Options) -> Result<()> {
         },
         wheel: 0.,
         last_title: String::new(),
+        connected: true,
+        generation: 0,
+        pending_releases: Vec::new(),
     };
     let result = event_loop.run_app(&mut app);
     let _ = app.ungrab();

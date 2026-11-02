@@ -474,11 +474,14 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
                     let server = server.clone();
                     workers.retain(|worker: &std::thread::JoinHandle<()>| !worker.is_finished());
                     workers.push(std::thread::spawn(move || {
-                        let _ = if rfb {
+                        let result = if rfb {
                             server.serve_rfb(stream)
                         } else {
                             server.serve_native(stream)
                         };
+                        if let Err(error) = result {
+                            log::warn!("{name} client ended: {error}");
+                        }
                     }));
                 }
                 server.shutdown();

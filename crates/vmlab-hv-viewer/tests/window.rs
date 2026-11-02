@@ -112,15 +112,18 @@ fn exercise(mode: &str) {
     listener.set_nonblocking(true).unwrap();
     let stderr = directory.path().join("viewer.log");
     let mut viewer = ManagedChild::helper(
-        Command::new(env!("CARGO_BIN_EXE_vmlab-hv-viewer"))
-            .args(["--display"])
-            .arg(&socket)
-            .env("DISPLAY", &display)
-            .env_remove("WAYLAND_DISPLAY")
-            .env("WINIT_UNIX_BACKEND", "x11")
-            .env("VMLAB_VIEWER_PRESENT_MODE", mode)
-            .stdout(Stdio::null())
-            .stderr(File::create(&stderr).unwrap()),
+        Command::new(
+            std::env::var_os("VMLAB_VIEWER_TEST_BINARY")
+                .unwrap_or_else(|| env!("CARGO_BIN_EXE_vmlab-hv-viewer").into()),
+        )
+        .args(["--display"])
+        .arg(&socket)
+        .env("DISPLAY", &display)
+        .env_remove("WAYLAND_DISPLAY")
+        .env("WINIT_UNIX_BACKEND", "x11")
+        .env("VMLAB_VIEWER_PRESENT_MODE", mode)
+        .stdout(Stdio::null())
+        .stderr(File::create(&stderr).unwrap()),
     )
     .unwrap();
     let mut stream = None;
@@ -801,6 +804,140 @@ fn exercise(mode: &str) {
     connection.map_window(window).unwrap().check().unwrap();
     connection.flush().unwrap();
     wait(|| pixel(500, 300)[..3] == [255, 0, 255]);
+    for (kind, key) in [(BUTTON_PRESS_EVENT, 1), (KEY_PRESS_EVENT, 38)] {
+        connection
+            .xtest_fake_input(kind, key, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    let mut held = Vec::new();
+    wait(|| {
+        held.extend(receiver.try_iter());
+        held.iter()
+            .any(|message| matches!(message, Message::Key { qcode, down: true } if qcode == "a"))
+            && held
+                .iter()
+                .any(|message| matches!(message, Message::Buttons { mask: 1 }))
+    });
+    // A reset may interrupt a packet and remove/rebind the listener. The native
+    // window must survive, and a new connection can reuse surface/buffer IDs.
+    writer.shutdown(std::net::Shutdown::Both).unwrap();
+    reader.join().unwrap();
+    drop(listener);
+    std::fs::remove_file(&socket).unwrap();
+    let name = connection
+        .intern_atom(false, b"_NET_WM_NAME")
+        .unwrap()
+        .reply()
+        .unwrap()
+        .atom;
+    wait(|| {
+        assert!(
+            viewer.try_wait().unwrap().is_none(),
+            "viewer exited on display EOF: {}",
+            std::fs::read_to_string(&stderr).unwrap()
+        );
+        let title = connection
+            .get_property(false, window, name, AtomEnum::ANY, 0, 1024)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .value;
+        String::from_utf8(title)
+            .unwrap()
+            .contains("waiting for display")
+    });
+    wait(|| pixel(500, 300)[..3] == [0, 0, 0]);
+    wait(host_visible);
+    keyboard_free();
+    for (kind, key) in [(BUTTON_RELEASE_EVENT, 1), (KEY_RELEASE_EVENT, 38)] {
+        connection
+            .xtest_fake_input(kind, key, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut resumed = None;
+    wait(|| {
+        if let Ok((stream, _)) = listener.accept() {
+            resumed = Some(stream);
+            true
+        } else {
+            false
+        }
+    });
+    let resumed = resumed.unwrap();
+    resumed
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let hello = receive(&resumed).unwrap();
+    assert!(matches!(hello.message, Message::Hello { .. }));
+    send(&resumed, &hello.message, &[]).unwrap();
+    let replacement = tempfile::tempfile().unwrap();
+    replacement
+        .write_all_at(&[0, 255, 255, 255].repeat(64 * 32), 0)
+        .unwrap();
+    send(
+        &resumed,
+        &Message::SurfaceConfigure {
+            surface_id: 1,
+            width: 64,
+            height: 32,
+            drm_fourcc: u32::from_le_bytes(*b"XR24"),
+            stride: 256,
+            modifier: 0,
+            kind: SurfaceKind::Shm,
+            buffers: 1,
+        },
+        &[replacement.as_raw_fd()],
+    )
+    .unwrap();
+    send(
+        &resumed,
+        &Message::FrameReady {
+            flags: FrameFlags::default(),
+            surface_id: 1,
+            buffer: 0,
+            seq: 1,
+            timestamp_ns: 0,
+            damage: vec![],
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| pixel(500, 300)[..3] == [0, 255, 255]);
+    assert!(connection.get_geometry(window).unwrap().reply().is_ok());
+    let mut releases = Vec::new();
+    loop {
+        let message = receive(&resumed).unwrap().message;
+        let done = matches!(
+            message,
+            Message::Release {
+                surface_id: 1,
+                seq: 1,
+                ..
+            }
+        );
+        releases.push(message);
+        if done {
+            break;
+        }
+    }
+    assert!(releases.contains(&Message::Key {
+        qcode: "a".into(),
+        down: false
+    }));
+    assert!(releases.contains(&Message::Buttons { mask: 0 }));
+    assert!(
+        !releases
+            .iter()
+            .any(|message| matches!(message, Message::Key { down: true, .. }))
+    );
     let protocols = connection
         .intern_atom(false, b"WM_PROTOCOLS")
         .unwrap()
@@ -830,5 +967,4 @@ fn exercise(mode: &str) {
         "viewer close failed: {}",
         std::fs::read_to_string(stderr).unwrap()
     );
-    reader.join().unwrap();
 }

@@ -146,3 +146,70 @@ input, so the manual pointer and button checks below remain required.
 4. Where the guest supplies a hardware cursor, check its hotspot, move-only
    updates, shape changes, and intentional hiding. Record whether the viewer
    used a hardware cursor, framebuffer software cursor, or placeholder arrow.
+
+## Display reconnect and clipboard follow-up
+
+F4. The viewer treated every display receive error as fatal. The previous
+executable reproduced the owner's `Error: unexpected end of file` in private
+Xvfb when its display peer closed. The new viewer keeps the same window, clears
+its image, and shows `waiting for display` in the title. It releases host
+keyboard capture, restores the host cursor, and reconnects off the UI thread.
+Retries grow from 100 ms to 2 s. A pidfd tracks the original socket peer, so
+removing or rebinding the socket does not mean the machine has exited.
+The viewer exits when that process dies or the user closes the window.
+Initial connection and local renderer setup errors still fail startup.
+
+Reconnect resets surface IDs, buffer imports, repaint images, cursor state,
+LEDs, and resize state. Previously held guest keys and buttons get matching
+releases on the new connection. Input while disconnected is not replayed.
+Connection generations prevent queued old packets from modifying new state.
+Handshake attempts have a two-second timeout and cancellation closes the
+active stream before joining the reader.
+
+F5. In-place reset does not deliberately disconnect display clients. Linux S1
+reboot retained the process, control connection, and original display
+connection in 28.11 s. A separate deterministic server regression reproduced
+a GPU reset race: a readback from an obsolete frame generation failed after
+reset, and the server closed the client. The server now drops that failed
+obsolete frame and continues with the new generation. A failure from the
+current generation still propagates.
+
+The owner's original disconnect cannot be attributed conclusively. The old
+server discarded native-client errors. Its log contains GPU context/import
+warnings and tablet queue warnings, but no client-close reason. The reproduced
+readback race is a verified server failure path, not proof of the owner's
+specific sequence. Native input errors now reach the caller, and the VMM logs
+client errors. No native display message or shared device trait changed.
+
+F6. Clipboard failures had no backoff, so different lab error strings could
+alternate every second. The bridge now reports one outage, retries with
+exponential delays from 1 s to 30 s, and reports recovery once. Refocusing does
+not reset the delay. Busy host clipboards, EAGAIN, interrupted operations, and
+timeouts retry without an error line. Failed transfers retain pending state.
+Lab replies have an absolute deadline as well as a per-read timeout.
+
+The old bridge ignored host-read failures. The unprefixed
+`Resource temporarily unavailable (os error 11)` could therefore also come
+from the lab socket's receive timeout, rather than a nonblocking host read.
+Both paths now retry. Arboard's Wayland adapter erases the I/O error type;
+the bridge recognizes its EAGAIN description as a temporary error too.
+
+T5. Private Xvfb checks run both presentation modes and verify the same native
+window across EOF, socket removal, rebind, and reused surface IDs. They inspect
+waiting and resumed pixels, host cursor restoration, native keyboard release,
+and guest key/button releases after reconnect. The old executable fails this
+reproduction. Reader tests cover truncated packets, stalled-handshake
+cancellation, and original-process death.
+
+T6. Clipboard tests use real fake-lab sockets to verify alternating errors,
+delay growth and its cap, focus changes during backoff, socket timeout retry,
+and a single recovery notice. Existing clipboard synchronization tests still
+cover host changes, guest polling, and echo suppression.
+
+Evidence is in `.scratch/viewer-windows/reconnect-before.log`,
+`reconnect-after.log`, `server-reset-before.log`, `server-reset-after.log`,
+`reset-s1.log`, and `reconnect-clippy.log`. Focused tests, formatting, and
+workspace Clippy pass. The full workspace suite was not rerun, as requested.
+The optional hardware dma-buf test still skips without a selected render node.
+The owner's Windows Venus first-boot reboot and physical KDE clipboard retest
+remain manual checks. No owner VM or desktop was changed.

@@ -436,8 +436,24 @@ impl DisplayServer {
         });
         let result = self.native_frames(&stream, caps, &local);
         let _ = stream.shutdown(Shutdown::Both);
-        let _ = handle.join();
-        result
+        let input = handle
+            .join()
+            .map_err(|_| io::Error::other("display input thread panicked"))?;
+        result?;
+        match input {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                Ok(())
+            }
+            result => result,
+        }
     }
     fn native_input(
         &self,
@@ -672,9 +688,14 @@ impl DisplayServer {
                             )?;
                         }
                         if !dma {
+                            // Reset can destroy readback resources after this frame was captured.
                             let pixels = match self.cpu_pixels(&frame) {
                                 Ok(pixels) => pixels,
-                                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                Err(error)
+                                    if error.kind() == io::ErrorKind::WouldBlock
+                                        || self.shared.state.lock().unwrap().frame.generation
+                                            != frame.generation =>
+                                {
                                     local.lock().unwrap().held.remove(&(surface, index, seq));
                                     continue;
                                 }

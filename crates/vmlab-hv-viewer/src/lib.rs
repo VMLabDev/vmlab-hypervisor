@@ -1,6 +1,7 @@
 //! Headless display state and input translation. The binary owns the window and GPU.
 
 pub mod clipboard;
+mod connection;
 mod grab;
 pub mod input;
 pub mod render;

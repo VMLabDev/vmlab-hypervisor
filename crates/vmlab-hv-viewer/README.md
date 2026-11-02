@@ -54,10 +54,23 @@ Resize requests follow the window after 200 ms without another size change.
 Guests decide whether to apply them. Guests with fixed VGA modes are letterboxed.
 Pointer coordinates use the same viewport as rendering and clamp at its edges.
 
+If the display connection closes, the window clears to black and its title
+shows `waiting for display`. The viewer releases host keyboard capture and
+restores the host cursor. It reconnects with delays from 100 ms to 2 s while
+the original hypervisor process lives. A Linux pidfd tracks that process, so
+socket removal alone does not end the viewer or attach it to another machine.
+Reconnect clears cached surfaces and cursor images, renegotiates the protocol,
+and sends releases for previously held guest keys and buttons. Closing the
+window cancels retries. Hypervisor process exit ends the viewer.
+
 Clipboard synchronization runs only while focused. Host text is sent on focus
 gain and when a 100 ms selection check detects a change. Guest text is polled
 once per second. Host changes win when both selections changed between polls.
-Clipboard errors are printed without interrupting display or input.
+Clipboard failures back off from 1 s to 30 s without interrupting display or
+input. An outage produces one error notice and one recovery notice, even if
+the lab alternates its error messages. Temporary busy, EAGAIN, and timeout
+errors retry quietly. Failed reads and writes do not consume pending changes.
+Changing focus does not bypass an active backoff.
 
 ## Frame ownership and rendering
 
@@ -89,7 +102,8 @@ Vulkan, Xvfb, KVM, firmware, or guest assets produce named skips where relevant.
 S1 uses the Ubuntu template discovered by the existing template convention, or
 `VMLAB_HV_UBUNTU_26_04`. `VMLAB_HV_BINARY` selects an already-built hypervisor.
 It checks input through the agent, including ISO, F13, and volume keys, and
-applies an 800x600 DRM mode. VMs use the
+applies an 800x600 DRM mode, and verifies an in-place reboot with the original
+control and display connections. VMs use the
 host-wide VM permit and a systemd scope with 24 GiB RAM and no swap.
 The permit defaults to four VMs; `VMLAB_HV_TEST_VM_LIMIT` overrides it.
 Disposable overlays and sockets are removed at test exit.
@@ -131,7 +145,9 @@ the guest, host GPU, compositor, selected frame path, and any CpuCopy diagnostic
 - [ ] A Windows desktop presents and accepts typing, pointer, buttons, and wheel.
 - [ ] A std-VGA guest remains letterboxed after resize, with aligned pointer input.
 - [ ] Clicking grabs. The default and a configured chord both release.
-- [ ] Focus loss, close, and disconnect leave no guest keys or buttons held.
+- [ ] Focus loss and close release held guest keys and buttons.
+- [ ] Disconnect keeps the window, releases host capture, and restores the host cursor.
+- [ ] Reconnect resumes frames and releases previously held guest keys and buttons.
 - [ ] Num, Caps, and Scroll Lock indicators follow guest state.
 - [ ] Guest cursor shape, position, visibility, alpha, and hotspot are correct.
 - [ ] Rapid resize produces one final request after 200 ms and the guest applies it.

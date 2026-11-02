@@ -691,6 +691,15 @@ impl Renderer {
         self.dirty = true;
     }
 
+    pub(crate) fn reset_display(&mut self) {
+        // present completes GPU use before returning; no cached import is in flight.
+        self.imports.clear();
+        self.repaint = None;
+        self.cursor = None;
+        self.cursor_generation = 0;
+        self.surface = None;
+    }
+
     pub fn occluded(&mut self, occluded: bool) {
         self.occluded = occluded;
     }
