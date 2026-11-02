@@ -37,6 +37,8 @@ pub struct SwitchStats {
     pub dhcp_request: bool,
     /// The lease was ACKed (the exchange completed).
     pub dhcp_acked: bool,
+    /// UDP echo requests with valid IPv4 and nonzero UDP checksums.
+    pub udp_echoes: usize,
     /// Every (source MAC, ethertype) seen, for diagnostics.
     pub seen: Vec<([u8; 6], u16)>,
 }
@@ -181,7 +183,7 @@ fn serve(listener: UnixListener, inner: Arc<Mutex<Inner>>, stopped: Arc<AtomicBo
     }
 }
 
-/// Record one frame and answer DHCP, gateway ARP, and ICMP echo requests.
+/// Record one frame and answer DHCP, gateway ARP, ICMP, and UDP echo requests.
 fn handle_frame(frame: &[u8], inner: &Arc<Mutex<Inner>>) -> Option<Vec<u8>> {
     if frame.len() < 14 {
         return None;
@@ -215,6 +217,10 @@ fn handle_frame(frame: &[u8], inner: &Arc<Mutex<Inner>>) -> Option<Vec<u8>> {
         return None;
     }
     if let Some(reply) = echo_reply(frame) {
+        return Some(reply);
+    }
+    if let Some(reply) = udp_echo_reply(frame) {
+        inner.lock().stats.udp_echoes += 1;
         return Some(reply);
     }
     let dhcp = parse_dhcp(frame)?;
@@ -271,6 +277,56 @@ fn echo_reply(frame: &[u8]) -> Option<Vec<u8>> {
     reply[16 + header..18 + header].copy_from_slice(&icmp_sum.to_be_bytes());
     reply.resize(reply.len().max(60), 0);
     Some(reply)
+}
+
+fn udp_echo_reply(frame: &[u8]) -> Option<Vec<u8>> {
+    let ip = frame.get(14..)?;
+    if ip.len() < 20
+        || ip[0] >> 4 != 4
+        || ip[9] != 17
+        || ip[16..20] != SERVER_IP.octets()
+        || u16::from_be_bytes([ip[6], ip[7]]) & 0x3fff != 0
+    {
+        return None;
+    }
+    let header = usize::from(ip[0] & 15) * 4;
+    let length = usize::from(u16::from_be_bytes([ip[2], ip[3]]));
+    if header < 20 || length < header + 8 || length > ip.len() || ip_checksum(&ip[..header]) != 0 {
+        return None;
+    }
+    let udp = &ip[header..length];
+    if u16::from_be_bytes([udp[2], udp[3]]) != 46000
+        || usize::from(u16::from_be_bytes([udp[4], udp[5]])) != udp.len()
+        || udp[6..8] == [0, 0]
+        || udp_checksum(&ip[..header], udp) != 0
+    {
+        return None;
+    }
+    let mut reply = frame[..14 + length].to_vec();
+    reply[..6].copy_from_slice(&frame[6..12]);
+    reply[6..12].copy_from_slice(&SWITCH_MAC);
+    reply[26..30].copy_from_slice(&SERVER_IP.octets());
+    reply[30..34].copy_from_slice(&ip[12..16]);
+    let offset = 14 + header;
+    reply[offset..offset + 2].copy_from_slice(&udp[2..4]);
+    reply[offset + 2..offset + 4].copy_from_slice(&udp[..2]);
+    reply[24..26].fill(0);
+    let checksum = ip_checksum(&reply[14..offset]);
+    reply[24..26].copy_from_slice(&checksum.to_be_bytes());
+    reply[offset + 6..offset + 8].fill(0);
+    let checksum = udp_checksum(&reply[14..offset], &reply[offset..]);
+    let checksum = if checksum == 0 { 0xffff } else { checksum };
+    reply[offset + 6..offset + 8].copy_from_slice(&checksum.to_be_bytes());
+    reply.resize(reply.len().max(60), 0);
+    Some(reply)
+}
+
+fn udp_checksum(ip: &[u8], udp: &[u8]) -> u16 {
+    let mut pseudo = ip[12..20].to_vec();
+    pseudo.extend_from_slice(&[0, 17]);
+    pseudo.extend_from_slice(&(udp.len() as u16).to_be_bytes());
+    pseudo.extend_from_slice(udp);
+    ip_checksum(&pseudo)
 }
 
 // ---- DHCP -------------------------------------------------------------------
@@ -405,6 +461,48 @@ fn ip_checksum(header: &[u8]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_echo_requires_valid_wire_checksums_and_returns_exact_payload() {
+        let payload = b"odd checksum payload!";
+        let length = 20 + 8 + payload.len();
+        let mut frame = vec![0; 14 + length];
+        frame[..6].copy_from_slice(&SWITCH_MAC);
+        frame[6..12].copy_from_slice(&crate::TEST_MAC);
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame[14] = 0x45;
+        frame[16..18].copy_from_slice(&(length as u16).to_be_bytes());
+        frame[22] = 64;
+        frame[23] = 17;
+        frame[26..30].copy_from_slice(&LEASE_IP.octets());
+        frame[30..34].copy_from_slice(&SERVER_IP.octets());
+        frame[34..36].copy_from_slice(&12345u16.to_be_bytes());
+        frame[36..38].copy_from_slice(&46000u16.to_be_bytes());
+        frame[38..40].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        frame[42..].copy_from_slice(payload);
+        let checksum = ip_checksum(&frame[14..34]);
+        frame[24..26].copy_from_slice(&checksum.to_be_bytes());
+        let checksum = udp_checksum(&frame[14..34], &frame[34..]);
+        frame[40..42].copy_from_slice(&checksum.to_be_bytes());
+        let reply = udp_echo_reply(&frame).unwrap();
+        assert_eq!(&reply[42..14 + length], payload);
+        assert_eq!(&reply[34..36], &46000u16.to_be_bytes());
+        assert_eq!(&reply[36..38], &12345u16.to_be_bytes());
+        assert_eq!(ip_checksum(&reply[14..34]), 0);
+        assert_eq!(udp_checksum(&reply[14..34], &reply[34..14 + length]), 0);
+        let mut bad = frame.clone();
+        *bad.last_mut().unwrap() ^= 1;
+        assert!(udp_echo_reply(&bad).is_none());
+        bad = frame.clone();
+        bad[40..42].fill(0);
+        assert!(udp_echo_reply(&bad).is_none());
+        bad = frame.clone();
+        bad[24] ^= 1;
+        assert!(udp_echo_reply(&bad).is_none());
+        for len in 0..frame.len() {
+            assert!(udp_echo_reply(&frame[..len]).is_none());
+        }
+    }
 
     #[test]
     fn gateway_answers_arp_and_icmp_over_the_switch_socket() {

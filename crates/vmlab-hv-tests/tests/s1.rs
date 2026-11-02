@@ -747,6 +747,27 @@ fn nic_traffic_survives_snapshot_load() {
             Some(&b'1'),
             "{phase}: network MRG_RXBUF was not negotiated: {output:?}"
         );
+        for bit in [0, 1] {
+            assert_eq!(
+                output.stdout.get(bit),
+                Some(&b'1'),
+                "{phase}: checksum feature {bit} was not negotiated: {output:?}"
+            );
+        }
+        let token = format!("checksum echo {phase}\n");
+        let command = format!(
+            "printf '%s\\n' 'checksum echo {phase}' | /.vmlab/busybox nc -u -w 1 {SERVER_IP} 46000"
+        );
+        let before_udp = switch.stats().udp_echoes;
+        let output = agent
+            .exec(&[BUSYBOX, "sh", "-c", &command], Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(output.exit_code, 0, "{phase}: UDP echo: {output:?}");
+        assert_eq!(output.stdout, token.as_bytes(), "{phase}: UDP echo bytes");
+        assert!(
+            switch.stats().udp_echoes > before_udp,
+            "{phase}: no checksum-valid UDP frame"
+        );
         // More packets than ring entries exercise refill and rearm after wrap.
         let before = switch.stats().frames_from_guest_mac;
         let server = SERVER_IP.to_string();
@@ -799,6 +820,29 @@ fn nic_traffic_survives_snapshot_load() {
     };
 
     exchange(&mut agent, &guest, "before snapshot save");
+    let before_traffic = guest.switch.as_ref().unwrap().stats().udp_echoes;
+    let output = agent
+        .exec(
+            &[
+                BUSYBOX,
+                "sh",
+                "-c",
+                "(i=0; while [ $i -lt 500 ]; do printf '%08d checksum-snapshot\\n' \"$i\"; \
+         i=$((i+1)); /.vmlab/busybox sleep 0.02; done | \
+         /.vmlab/busybox nc -u -w 2 10.42.0.1 46000) < /dev/null > /tmp/nic-inflight.log 2>&1 &",
+            ],
+            Duration::from_secs(10),
+        )
+        .unwrap();
+    assert_eq!(output.exit_code, 0, "start snapshot traffic: {output:?}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while guest.switch.as_ref().unwrap().stats().udp_echoes < before_traffic + 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no checksum-valid traffic before snapshot"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(matches!(
         guest
             .control
