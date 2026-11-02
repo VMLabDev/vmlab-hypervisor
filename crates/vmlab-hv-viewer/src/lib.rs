@@ -1,6 +1,7 @@
 //! Headless display state and input translation. The binary owns the window and GPU.
 
 pub mod clipboard;
+mod connection;
 mod grab;
 pub mod input;
 pub mod render;
@@ -125,6 +126,50 @@ pub struct Cursor {
     pub generation: u64,
 }
 
+impl Cursor {
+    pub fn has_shape(&self) -> bool {
+        self.width != 0 && self.height != 0
+    }
+
+    /// A local arrow for host placeholder frames without a guest cursor shape.
+    pub fn fallback() -> Self {
+        let rows = [
+            "X...........",
+            "XX..........",
+            "XOX.........",
+            "XOOX........",
+            "XOOOX.......",
+            "XOOOOX......",
+            "XOOOOOX.....",
+            "XOOOOOOX....",
+            "XOOOOOOOX...",
+            "XOOOOXXXXX..",
+            "XOOXOX......",
+            "XOX.OX......",
+            "XX..XOX.....",
+            "X...XOX.....",
+            ".....XX.....",
+            "............",
+        ];
+        Self {
+            width: 12,
+            height: 16,
+            visible: true,
+            generation: u64::MAX,
+            argb: rows
+                .iter()
+                .flat_map(|row| row.bytes())
+                .flat_map(|pixel| match pixel {
+                    b'X' => [0, 0, 0, 255],
+                    b'O' => [255; 4],
+                    _ => [0; 4],
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+}
+
 pub struct Core {
     pub client: Arc<Client>,
     pub surfaces: HashMap<u64, Surface>,
@@ -136,12 +181,31 @@ pub struct Core {
 }
 
 impl Core {
+    pub fn host_cursor_visible(&self, pointer_inside: bool) -> bool {
+        !pointer_inside || self.current.is_none()
+    }
+
+    pub fn use_fallback_cursor(&self) -> bool {
+        !self.cursor.has_shape()
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|frame| frame.flags.has(FrameFlags::PLACEHOLDER))
+    }
+
     pub fn connect(path: &Path, shm: bool, chord: &str) -> io::Result<Self> {
+        Self::new(
+            Arc::new(Client::connect(path, Self::capabilities(shm))?),
+            chord,
+        )
+    }
+
+    pub(crate) fn capabilities(shm: bool) -> Capabilities {
         let mut caps = Capabilities::ALL.0;
         if shm {
             caps &= !Capabilities::DMABUF_OK;
         }
-        Self::new(Arc::new(Client::connect(path, Capabilities(caps))?), chord)
+        Capabilities(caps)
     }
 
     pub fn new(client: Arc<Client>, chord: &str) -> io::Result<Self> {

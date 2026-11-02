@@ -12,9 +12,12 @@ use vmlab_hv_tests::process::ManagedChild;
 use x11rb::{
     connection::Connection,
     protocol::{
+        xfixes::ConnectionExt as _,
         xproto::{
-            BUTTON_PRESS_EVENT, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask,
-            ImageFormat, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+            AtomEnum, AutoRepeatMode, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT,
+            ChangeKeyboardControlAux, ClientMessageEvent, ConfigureWindowAux, ConnectionExt,
+            EventMask, GrabMode, GrabStatus, ImageFormat, InputFocus, KEY_PRESS_EVENT,
+            KEY_RELEASE_EVENT,
         },
         xtest::ConnectionExt as _,
     },
@@ -45,10 +48,44 @@ fn wait(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
-fn executable_presents_letterbox_cursor_input_and_resize_on_private_display() {
-    for mode in ["mailbox", "fifo"] {
-        exercise(mode);
+fn replacement_peer_relay() {
+    let Some(path) = std::env::var_os("VMLAB_VIEWER_REPLACEMENT_SOCKET") else {
+        return;
+    };
+    let listener = UnixListener::bind(path).unwrap();
+    let backend = std::os::unix::net::UnixStream::connect(
+        std::env::var_os("VMLAB_VIEWER_RELAY_SOCKET").unwrap(),
+    )
+    .unwrap();
+    let (viewer, _) = listener.accept().unwrap();
+    fn forward(
+        source: std::os::unix::net::UnixStream,
+        destination: std::os::unix::net::UnixStream,
+    ) {
+        while let Ok(packet) = receive(&source) {
+            let descriptors: Vec<_> = packet.fds.iter().map(AsRawFd::as_raw_fd).collect();
+            if send(&destination, &packet.message, &descriptors).is_err() {
+                break;
+            }
+        }
+        let _ = source.shutdown(std::net::Shutdown::Both);
+        let _ = destination.shutdown(std::net::Shutdown::Both);
     }
+    let source = backend.try_clone().unwrap();
+    let destination = viewer.try_clone().unwrap();
+    let thread = std::thread::spawn(move || forward(source, destination));
+    forward(viewer, backend);
+    thread.join().unwrap();
+}
+
+#[test]
+fn executable_waits_for_missing_socket_and_presents_on_private_display() {
+    exercise("mailbox");
+}
+
+#[test]
+fn executable_waits_for_refused_socket_and_presents_on_private_display() {
+    exercise("fifo");
 }
 
 fn exercise(mode: &str) {
@@ -79,7 +116,7 @@ fn exercise(mode: &str) {
                     "1",
                     "-screen",
                     "0",
-                    "1024x768x24",
+                    "1280x1024x24",
                     "-nolisten",
                     "tcp",
                     "-ac",
@@ -99,23 +136,102 @@ fn exercise(mode: &str) {
     );
     let display = format!(":{}", number.trim());
     let (connection, screen) = x11rb::connect(Some(&display)).unwrap();
+    connection
+        .xfixes_query_version(5, 0)
+        .unwrap()
+        .reply()
+        .unwrap();
     let root = connection.setup().roots[screen].root;
     let socket = directory.path().join("display.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    listener.set_nonblocking(true).unwrap();
+    if mode == "fifo" {
+        // Dropping this listener leaves a stale pathname that refuses connects.
+        drop(UnixListener::bind(&socket).unwrap());
+    }
     let stderr = directory.path().join("viewer.log");
     let mut viewer = ManagedChild::helper(
-        Command::new(env!("CARGO_BIN_EXE_vmlab-hv-viewer"))
-            .args(["--display"])
-            .arg(&socket)
-            .env("DISPLAY", &display)
-            .env_remove("WAYLAND_DISPLAY")
-            .env("WINIT_UNIX_BACKEND", "x11")
-            .env("VMLAB_VIEWER_PRESENT_MODE", mode)
-            .stdout(Stdio::null())
-            .stderr(File::create(&stderr).unwrap()),
+        Command::new(
+            std::env::var_os("VMLAB_VIEWER_TEST_BINARY")
+                .unwrap_or_else(|| env!("CARGO_BIN_EXE_vmlab-hv-viewer").into()),
+        )
+        .args(["--display"])
+        .arg(&socket)
+        .env("DISPLAY", &display)
+        .env_remove("WAYLAND_DISPLAY")
+        .env("WINIT_UNIX_BACKEND", "x11")
+        .env("VMLAB_VIEWER_PRESENT_MODE", mode)
+        .stdout(Stdio::null())
+        .stderr(File::create(&stderr).unwrap()),
     )
     .unwrap();
+    let mut startup_window = 0;
+    wait(|| {
+        assert!(
+            viewer.try_wait().unwrap().is_none(),
+            "viewer exited before its socket was ready: {}",
+            std::fs::read_to_string(&stderr).unwrap()
+        );
+        startup_window = connection
+            .query_tree(root)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .children
+            .into_iter()
+            .find(|window| {
+                connection
+                    .get_geometry(*window)
+                    .unwrap()
+                    .reply()
+                    .is_ok_and(|geometry| geometry.width == 1024 && geometry.height == 768)
+            })
+            .unwrap_or(0);
+        startup_window != 0
+    });
+    let title_atom = connection
+        .intern_atom(false, b"_NET_WM_NAME")
+        .unwrap()
+        .reply()
+        .unwrap()
+        .atom;
+    wait(|| {
+        let title = connection
+            .get_property(false, startup_window, title_atom, AtomEnum::ANY, 0, 1024)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .value;
+        String::from_utf8(title)
+            .unwrap()
+            .contains("waiting for display")
+    });
+    wait(|| {
+        let pixels = connection
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                startup_window,
+                500,
+                300,
+                1,
+                1,
+                u32::MAX,
+            )
+            .unwrap()
+            .reply()
+            .unwrap()
+            .data;
+        pixels[..3] == [0, 0, 0]
+    });
+    assert!(
+        std::fs::read_to_string(&stderr)
+            .unwrap()
+            .lines()
+            .all(|line| !line.contains("Connection refused") && !line.contains("No such file"))
+    );
+    if mode == "fifo" {
+        std::fs::remove_file(&socket).unwrap();
+    }
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
     let mut stream = None;
     wait(|| {
         if let Ok((client, _)) = listener.accept() {
@@ -175,11 +291,11 @@ fn exercise(mode: &str) {
     send(
         &stream,
         &Message::CursorShape {
-            width: 1,
-            height: 1,
+            width: 0,
+            height: 0,
             hot_x: 0,
             hot_y: 0,
-            argb: vec![255; 4],
+            argb: vec![],
         },
         &[],
     )
@@ -189,7 +305,7 @@ fn exercise(mode: &str) {
         &Message::CursorState {
             x: 16,
             y: 16,
-            visible: true,
+            visible: false,
         },
         &[],
     )
@@ -255,6 +371,10 @@ fn exercise(mode: &str) {
             .unwrap_or(0);
         window != 0
     });
+    assert_eq!(
+        window, startup_window,
+        "startup must keep the same native window"
+    );
     let pixel = |x, y| {
         connection
             .get_image(ImageFormat::Z_PIXMAP, window, x, y, 1, 1, u32::MAX)
@@ -263,18 +383,121 @@ fn exercise(mode: &str) {
             .unwrap()
             .data
     };
+    let ungrabbed = || {
+        let property = connection
+            .get_property(false, window, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 256)
+            .unwrap()
+            .reply()
+            .unwrap();
+        String::from_utf8_lossy(&property.value).contains("click to grab")
+    };
+    let host_visible = || {
+        connection
+            .xfixes_get_cursor_image()
+            .unwrap()
+            .reply()
+            .unwrap()
+            .cursor_image
+            .iter()
+            .any(|p| p >> 24 != 0)
+    };
+    let keyboard_free = || {
+        let reply = connection
+            .grab_keyboard(
+                false,
+                root,
+                x11rb::CURRENT_TIME,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!(
+            reply.status,
+            GrabStatus::SUCCESS,
+            "native keyboard grab remained active"
+        );
+        connection
+            .ungrab_keyboard(x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        connection.flush().unwrap();
+    };
+    let leave = || {
+        connection
+            .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 1100, 900)
+            .unwrap()
+            .check()
+            .unwrap();
+        connection.flush().unwrap();
+        wait(|| {
+            let pointer = connection.query_pointer(root).unwrap().reply().unwrap();
+            pointer.root_x == 1100 && pointer.root_y == 900 && host_visible()
+        });
+    };
     wait(|| pixel(500, 300)[..3] == [0, 0, 255]);
     assert_eq!(&pixel(10, 10)[..3], &[0, 0, 0], "letterbox is black");
-    assert_eq!(
-        &pixel(260, 390)[..3],
-        &[255, 255, 255],
-        "protocol cursor is composited"
-    );
     connection
         .set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)
         .unwrap()
         .check()
         .unwrap();
+    connection
+        .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, 500, 300)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| {
+        receiver.try_iter().any(|message| {
+            matches!(
+                message,
+                Message::PointerAbs {
+                    x: 31,
+                    y: 10,
+                    width: 64,
+                    height: 32
+                }
+            )
+        })
+    });
+    wait(|| !host_visible());
+    assert!(ungrabbed(), "hovering cannot capture the keyboard");
+    for key in [37, 64] {
+        connection
+            .xtest_fake_input(KEY_PRESS_EVENT, key, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    for kind in [BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT] {
+        connection
+            .xtest_fake_input(kind, 1, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    wait(|| {
+        receiver
+            .try_iter()
+            .any(|message| matches!(message, Message::Buttons { mask: 0 }))
+    });
+    assert!(
+        ungrabbed(),
+        "a chord without capture, including a held-chord click, cannot grab"
+    );
+    for key in [37, 64] {
+        connection
+            .xtest_fake_input(KEY_RELEASE_EVENT, key, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    keyboard_free();
+    leave();
     connection
         .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, 500, 300)
         .unwrap()
@@ -291,6 +514,220 @@ fn exercise(mode: &str) {
             .try_iter()
             .any(|message| matches!(message, Message::Buttons { mask: 1 }))
     });
+    connection
+        .xtest_fake_input(BUTTON_RELEASE_EVENT, 1, x11rb::CURRENT_TIME, root, 0, 0, 0)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| !ungrabbed());
+    leave();
+    wait(ungrabbed);
+    keyboard_free();
+    connection
+        .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, 500, 300)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| !host_visible());
+    send(
+        &writer,
+        &Message::CursorShape {
+            width: 2,
+            height: 2,
+            hot_x: 1,
+            hot_y: 1,
+            argb: vec![255; 16],
+        },
+        &[],
+    )
+    .unwrap();
+    send(
+        &writer,
+        &Message::CursorState {
+            x: 16,
+            y: 16,
+            visible: true,
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| pixel(260, 390)[..3] == [255, 255, 255]);
+    assert_eq!(
+        &pixel(236, 364)[..3],
+        &[0, 0, 255],
+        "hotspot offsets the cursor quad"
+    );
+    wait(|| {
+        connection
+            .xfixes_get_cursor_image()
+            .unwrap()
+            .reply()
+            .unwrap()
+            .cursor_image
+            .iter()
+            .all(|p| p >> 24 == 0)
+    });
+    send(
+        &writer,
+        &Message::CursorState {
+            x: 24,
+            y: 20,
+            visible: true,
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| pixel(380, 440)[..3] == [255, 255, 255]);
+    assert_eq!(
+        &pixel(260, 390)[..3],
+        &[0, 0, 255],
+        "move-only update removes old cursor"
+    );
+    send(
+        &writer,
+        &Message::CursorState {
+            x: 24,
+            y: 20,
+            visible: false,
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| pixel(380, 440)[..3] == [0, 0, 255]);
+    send(
+        &writer,
+        &Message::CursorShape {
+            width: 0,
+            height: 0,
+            hot_x: 0,
+            hot_y: 0,
+            argb: vec![],
+        },
+        &[],
+    )
+    .unwrap();
+    assert!(
+        !host_visible(),
+        "software guest cursor replaces the host cursor without capture"
+    );
+    assert!(ungrabbed());
+    assert_eq!(
+        &pixel(536, 376)[..3],
+        &[0, 0, 255],
+        "active guest frame has no extra arrow"
+    );
+    send(
+        &writer,
+        &Message::FrameReady {
+            flags: FrameFlags(FrameFlags::PLACEHOLDER),
+            surface_id: 1,
+            buffer: 0,
+            seq: 2,
+            timestamp_ns: 0,
+            damage: vec![],
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| {
+        receiver
+            .try_iter()
+            .any(|m| matches!(m, Message::Release { seq: 2, .. }))
+    });
+    for (x, y) in [(501, 301), (500, 300)] {
+        connection
+            .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, x, y)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    wait(|| pixel(536, 376)[..3] == [255, 255, 255]);
+    connection
+        .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, 300, 400)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| pixel(328, 488)[..3] == [255, 255, 255]);
+    assert_eq!(
+        &pixel(536, 376)[..3],
+        &[0, 0, 255],
+        "fallback follows ungrabbed motion"
+    );
+    leave();
+    wait(|| pixel(328, 488)[..3] == [0, 0, 255]);
+    connection
+        .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, 300, 400)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| pixel(328, 488)[..3] == [255, 255, 255]);
+    for kind in [BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT] {
+        connection
+            .xtest_fake_input(kind, 1, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    wait(|| !ungrabbed());
+    connection
+        .change_keyboard_control(
+            &ChangeKeyboardControlAux::new().auto_repeat_mode(AutoRepeatMode::ON),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    connection
+        .change_keyboard_control(
+            &ChangeKeyboardControlAux::new()
+                .key(38)
+                .auto_repeat_mode(AutoRepeatMode::ON),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    connection
+        .xtest_fake_input(KEY_PRESS_EVENT, 38, x11rb::CURRENT_TIME, root, 0, 0, 0)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    let mut repeated = Vec::new();
+    wait(|| {
+        repeated.extend(receiver.try_iter());
+        repeated
+            .iter()
+            .filter(|message| matches!(message, Message::Key { qcode, down: true } if qcode == "a"))
+            .count()
+            >= 3
+    });
+    connection
+        .xtest_fake_input(KEY_RELEASE_EVENT, 38, x11rb::CURRENT_TIME, root, 0, 0, 0)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| {
+        repeated.extend(receiver.try_iter());
+        repeated.contains(&Message::Key {
+            qcode: "a".into(),
+            down: false,
+        })
+    });
+    assert_eq!(
+        repeated
+            .iter()
+            .filter(
+                |message| matches!(message, Message::Key { qcode, down: false } if qcode == "a")
+            )
+            .count(),
+        1
+    );
     for (key, down) in [(38, true), (38, false), (37, true), (64, true)] {
         connection
             .xtest_fake_input(
@@ -325,6 +762,45 @@ fn exercise(mode: &str) {
         qcode: "a".into(),
         down: false
     }));
+    assert!(
+        !keys
+            .iter()
+            .any(|message| matches!(message, Message::Key {qcode, ..} if qcode == "alt")),
+        "completing chord key is never forwarded"
+    );
+    wait(ungrabbed);
+    keyboard_free();
+    for (kind, detail) in [
+        (KEY_RELEASE_EVENT, 37),
+        (KEY_RELEASE_EVENT, 64),
+        (BUTTON_RELEASE_EVENT, 1),
+        (KEY_PRESS_EVENT, 64),
+        (BUTTON_PRESS_EVENT, 1),
+        (BUTTON_RELEASE_EVENT, 1),
+    ] {
+        connection
+            .xtest_fake_input(kind, detail, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    wait(|| !ungrabbed());
+    send(&writer, &Message::LedState { mask: 7 }, &[]).unwrap();
+    connection
+        .xtest_fake_input(KEY_PRESS_EVENT, 37, x11rb::CURRENT_TIME, root, 0, 0, 0)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(ungrabbed);
+    for key in [37, 64] {
+        connection
+            .xtest_fake_input(KEY_RELEASE_EVENT, key, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
     connection
         .configure_window(window, &ConfigureWindowAux::new().width(800).height(600))
         .unwrap()
@@ -359,13 +835,15 @@ fn exercise(mode: &str) {
         &[file.as_raw_fd()],
     )
     .unwrap();
+    wait(host_visible);
+    wait(|| pixel(500, 300)[..3] == [0, 0, 0]);
     send(
         &writer,
         &Message::FrameReady {
             flags: FrameFlags::default(),
             surface_id: 2,
             buffer: 0,
-            seq: 2,
+            seq: 3,
             timestamp_ns: 0,
             damage: vec![],
         },
@@ -380,7 +858,7 @@ fn exercise(mode: &str) {
     assert!(fallback.contains(&Message::Release {
         surface_id: 2,
         buffer: 0,
-        seq: 2
+        seq: 3
     }));
     let green: Vec<_> = [0, 255, 0, 255]
         .into_iter()
@@ -409,7 +887,7 @@ fn exercise(mode: &str) {
             flags: FrameFlags::default(),
             surface_id: 3,
             buffer: 0,
-            seq: 3,
+            seq: 4,
             timestamp_ns: 0,
             damage: vec![],
         },
@@ -419,7 +897,7 @@ fn exercise(mode: &str) {
     wait(|| {
         receiver
             .try_iter()
-            .any(|m| matches!(m, Message::Release { seq: 3, .. }))
+            .any(|m| matches!(m, Message::Release { seq: 4, .. }))
     });
     wait(|| pixel(500, 300)[..3] == [0, 255, 0]);
     file.write_all_at(&[255, 0, 0, 255], 8 * 256 + 20 * 4)
@@ -430,7 +908,7 @@ fn exercise(mode: &str) {
             flags: FrameFlags::default(),
             surface_id: 3,
             buffer: 0,
-            seq: 4,
+            seq: 5,
             timestamp_ns: 0,
             damage: vec![Rect {
                 x: 20,
@@ -445,7 +923,7 @@ fn exercise(mode: &str) {
     wait(|| {
         receiver
             .try_iter()
-            .any(|m| matches!(m, Message::Release { seq: 4, .. }))
+            .any(|m| matches!(m, Message::Release { seq: 5, .. }))
     });
     wait(|| {
         let sample = pixel(256, 206);
@@ -470,7 +948,7 @@ fn exercise(mode: &str) {
             flags: FrameFlags::default(),
             surface_id: 3,
             buffer: 0,
-            seq: 5,
+            seq: 6,
             timestamp_ns: 0,
             damage: vec![Rect {
                 x: 0,
@@ -485,11 +963,154 @@ fn exercise(mode: &str) {
     wait(|| {
         receiver
             .try_iter()
-            .any(|m| matches!(m, Message::Release { seq: 5, .. }))
+            .any(|m| matches!(m, Message::Release { seq: 6, .. }))
     });
     connection.map_window(window).unwrap().check().unwrap();
     connection.flush().unwrap();
     wait(|| pixel(500, 300)[..3] == [255, 0, 255]);
+    for (kind, key) in [(BUTTON_PRESS_EVENT, 1), (KEY_PRESS_EVENT, 38)] {
+        connection
+            .xtest_fake_input(kind, key, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    let mut held = Vec::new();
+    wait(|| {
+        held.extend(receiver.try_iter());
+        held.iter()
+            .any(|message| matches!(message, Message::Key { qcode, down: true } if qcode == "a"))
+            && held
+                .iter()
+                .any(|message| matches!(message, Message::Buttons { mask: 1 }))
+    });
+    // A reset may interrupt a packet and remove/rebind the listener. The native
+    // window must survive, and a new connection can reuse surface/buffer IDs.
+    writer.shutdown(std::net::Shutdown::Both).unwrap();
+    reader.join().unwrap();
+    drop(listener);
+    std::fs::remove_file(&socket).unwrap();
+    let name = connection
+        .intern_atom(false, b"_NET_WM_NAME")
+        .unwrap()
+        .reply()
+        .unwrap()
+        .atom;
+    wait(|| {
+        assert!(
+            viewer.try_wait().unwrap().is_none(),
+            "viewer exited on display EOF: {}",
+            std::fs::read_to_string(&stderr).unwrap()
+        );
+        let title = connection
+            .get_property(false, window, name, AtomEnum::ANY, 0, 1024)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .value;
+        String::from_utf8(title)
+            .unwrap()
+            .contains("waiting for display")
+    });
+    wait(|| pixel(500, 300)[..3] == [0, 0, 0]);
+    wait(host_visible);
+    keyboard_free();
+    for (kind, key) in [(BUTTON_RELEASE_EVENT, 1), (KEY_RELEASE_EVENT, 38)] {
+        connection
+            .xtest_fake_input(kind, key, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    let relay = directory.path().join("relay.sock");
+    let listener = UnixListener::bind(&relay).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut replacement_peer = ManagedChild::helper(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "replacement_peer_relay"])
+            .env("VMLAB_VIEWER_REPLACEMENT_SOCKET", &socket)
+            .env("VMLAB_VIEWER_RELAY_SOCKET", &relay)
+            .stdout(Stdio::null()),
+    )
+    .unwrap();
+    let mut resumed = None;
+    wait(|| {
+        if let Ok((stream, _)) = listener.accept() {
+            resumed = Some(stream);
+            true
+        } else {
+            false
+        }
+    });
+    let resumed = resumed.unwrap();
+    resumed
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let hello = receive(&resumed).unwrap();
+    assert!(matches!(hello.message, Message::Hello { .. }));
+    send(&resumed, &hello.message, &[]).unwrap();
+    let replacement = tempfile::tempfile().unwrap();
+    replacement
+        .write_all_at(&[0, 255, 255, 255].repeat(64 * 32), 0)
+        .unwrap();
+    send(
+        &resumed,
+        &Message::SurfaceConfigure {
+            surface_id: 1,
+            width: 64,
+            height: 32,
+            drm_fourcc: u32::from_le_bytes(*b"XR24"),
+            stride: 256,
+            modifier: 0,
+            kind: SurfaceKind::Shm,
+            buffers: 1,
+        },
+        &[replacement.as_raw_fd()],
+    )
+    .unwrap();
+    send(
+        &resumed,
+        &Message::FrameReady {
+            flags: FrameFlags::default(),
+            surface_id: 1,
+            buffer: 0,
+            seq: 1,
+            timestamp_ns: 0,
+            damage: vec![],
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| pixel(500, 300)[..3] == [0, 255, 255]);
+    assert!(connection.get_geometry(window).unwrap().reply().is_ok());
+    let mut releases = Vec::new();
+    loop {
+        let message = receive(&resumed).unwrap().message;
+        let done = matches!(
+            message,
+            Message::Release {
+                surface_id: 1,
+                seq: 1,
+                ..
+            }
+        );
+        releases.push(message);
+        if done {
+            break;
+        }
+    }
+    assert!(releases.contains(&Message::Key {
+        qcode: "a".into(),
+        down: false
+    }));
+    assert!(releases.contains(&Message::Buttons { mask: 0 }));
+    assert!(
+        !releases
+            .iter()
+            .any(|message| matches!(message, Message::Key { down: true, .. }))
+    );
     let protocols = connection
         .intern_atom(false, b"WM_PROTOCOLS")
         .unwrap()
@@ -519,5 +1140,5 @@ fn exercise(mode: &str) {
         "viewer close failed: {}",
         std::fs::read_to_string(stderr).unwrap()
     );
-    reader.join().unwrap();
+    assert!(replacement_peer.wait().unwrap().success());
 }

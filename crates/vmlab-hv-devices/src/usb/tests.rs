@@ -325,6 +325,41 @@ fn p4_enumerate_descriptors_and_receive_tablet_input() {
 }
 
 #[test]
+fn windows_control_data_event_completes_before_the_status_stage_is_queued() {
+    let mut d = Driver::new();
+    d.enumerate();
+    // Windows ends Setup+Data with Event Data, then queues Status after its event.
+    d.trb(
+        0x7000,
+        u64::from_le_bytes([0x80, 6, 0, 1, 0, 0, 64, 0]),
+        8,
+        0x30840,
+    );
+    d.trb(0x7010, 0x9000, 64, 0x10c12);
+    d.trb(0x7020, 0xfeed, 0, (7 << 10) | 32);
+    d.write(0x2000 + u64::from(d.slot) * 4, 1);
+    let event = d.event(32);
+    assert_eq!(event.status >> 24, 1, "Windows descriptor TD was rejected");
+    assert_eq!(event.control & 4, 4);
+    assert_eq!(event.parameter, 0xfeed);
+    assert_eq!(event.status & 0xff_ffff, 18);
+    let mut descriptor = [0; 18];
+    d.mem
+        .read_slice(&mut descriptor, GuestAddress(0x9000))
+        .unwrap();
+    assert_eq!(&descriptor[8..12], &[0x27, 6, 1, 0]);
+    let snapshot = d.hc.save_state().unwrap();
+    d.hc.restore_state(&snapshot).unwrap();
+    d.trb(0x7030, 0, 0, (4 << 10) | 16);
+    d.trb(0x7040, 0xbeef, 0, (7 << 10) | 32);
+    d.write(0x2000 + u64::from(d.slot) * 4, 1);
+    let event = d.event(32);
+    assert_eq!(event.status >> 24, 1);
+    assert_eq!(event.parameter, 0xbeef);
+    assert_eq!(event.status & 0xff_ffff, 0);
+}
+
+#[test]
 fn pcie_device_control_matches_qtest_read_only_bits() {
     let mut d = Driver::new();
     for value in [0x100u32, 0xffff] {
@@ -725,6 +760,89 @@ fn system_reset_clears_pci_slots_and_msix_and_keeps_the_tablet() {
     assert_eq!(d.read(0x1020), 0);
     assert!(!d.hc.port_free(super::TABLET_PORT));
     assert_eq!(d.read(0x300c), 1);
+}
+
+#[test]
+fn tablet_motion_burst_preserves_button_wheel_edges_and_final_position() {
+    use super::{SetupPacket, Tablet, UsbDevice, UsbTransfer};
+    let mut tablet = Tablet::default();
+    tablet.control(SetupPacket::from_bytes([0, 9, 1, 0, 0, 0, 0, 0]), &[]);
+    let mut expected = Vec::new();
+    for group in 0..20 {
+        for offset in 0..1000 {
+            tablet
+                .inject_pointer(PointerEvent {
+                    x: group * 1000 + offset,
+                    y: offset,
+                    ..PointerEvent::default()
+                })
+                .unwrap();
+        }
+        let x = group * 1000 + 999;
+        for (buttons, wheel) in [(1, 0), (1, 1), (0, 0), (0, -1)] {
+            tablet
+                .inject_pointer(PointerEvent {
+                    x,
+                    y: 999,
+                    buttons,
+                    wheel,
+                })
+                .unwrap();
+            expected.push((buttons, x, 999, wheel));
+        }
+    }
+    tablet
+        .inject_pointer(PointerEvent {
+            x: 32767,
+            y: 12345,
+            ..PointerEvent::default()
+        })
+        .unwrap();
+    let snapshot = tablet.save_state().unwrap();
+    tablet.restore_state(&snapshot).unwrap();
+    let mut observed = Vec::new();
+    let mut buttons = 0;
+    let mut final_position = (0, 0);
+    let mut count = 0;
+    while let UsbTransfer::Ack(report) = tablet.transfer(0x81, &[], 8) {
+        count += 1;
+        let x = u16::from_le_bytes([report[1], report[2]]);
+        let y = u16::from_le_bytes([report[3], report[4]]);
+        let wheel = report[5] as i8;
+        if report[0] != buttons || wheel != 0 {
+            observed.push((report[0], x, y, wheel));
+        }
+        buttons = report[0];
+        final_position = (x, y);
+    }
+    assert_eq!(observed, expected);
+    assert_eq!(final_position, (32767, 12345));
+    assert!(count <= 101, "motion backlog: {count} reports");
+}
+
+#[test]
+fn tablet_full_of_transitions_retries_without_losing_the_pending_event() {
+    use super::{SetupPacket, Tablet, UsbDevice, UsbTransfer};
+    let mut tablet = Tablet::default();
+    tablet.control(SetupPacket::from_bytes([0, 9, 1, 0, 0, 0, 0, 0]), &[]);
+    let event = PointerEvent {
+        wheel: 1,
+        ..PointerEvent::default()
+    };
+    for _ in 0..1024 {
+        tablet.inject_pointer(event).unwrap();
+    }
+    assert!(
+        matches!(tablet.inject_pointer(event), Err(crate::DeviceError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert!(matches!(tablet.transfer(0x81, &[], 8), UsbTransfer::Ack(_)));
+    tablet.inject_pointer(event).unwrap();
+    for _ in 0..1024 {
+        assert!(
+            matches!(tablet.transfer(0x81, &[], 8), UsbTransfer::Ack(report) if report[5] == 1)
+        );
+    }
+    assert!(matches!(tablet.transfer(0x81, &[], 8), UsbTransfer::Nak));
 }
 
 #[test]

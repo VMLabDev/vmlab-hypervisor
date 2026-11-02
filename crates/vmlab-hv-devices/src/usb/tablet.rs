@@ -217,10 +217,29 @@ impl UsbDevice for Tablet {
         }
     }
     fn inject_pointer(&mut self, event: PointerEvent) -> Result<(), DeviceError> {
-        if self.reports.len() == QUEUE_LIMIT {
-            return Err(DeviceError::Other("USB tablet input queue full".into()));
+        let report = event.report();
+        let previous = self.reports.back().unwrap_or(&self.current);
+        if report == *previous && report[5] == 0 {
+            return Ok(());
         }
-        self.reports.push_back(event.report());
+        let motion = report[0] == previous[0] && report[5] == 0;
+        let before_tail = self.reports.iter().rev().nth(1).unwrap_or(&self.current);
+        if motion
+            && previous[5] == 0
+            && previous[0] == before_tail[0]
+            && let Some(tail) = self.reports.back_mut()
+        {
+            *tail = report;
+            return Ok(());
+        }
+        if self.reports.len() == QUEUE_LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "USB tablet input queue full; waiting for interrupt IN",
+            )
+            .into());
+        }
+        self.reports.push_back(report);
         Ok(())
     }
 }

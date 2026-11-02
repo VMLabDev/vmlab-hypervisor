@@ -319,6 +319,18 @@ impl vmlab_hv_devices::virtio::gpu::DisplaySink for GpuSink {
 struct Input {
     shared: Weak<VmShared>,
     pointer: Mutex<vmlab_hv_devices::usb::PointerEvent>,
+    pointer_warning: Mutex<Option<std::time::Instant>>,
+}
+
+impl Input {
+    fn pointer_warning(&self, error: &vmlab_hv_devices::DeviceError) {
+        let now = std::time::Instant::now();
+        let mut last = self.pointer_warning.lock();
+        if last.is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_secs(5)) {
+            log::warn!("display pointer: {error}");
+            *last = Some(now);
+        }
+    }
 }
 
 fn pointer_message(pointer: &mut vmlab_hv_devices::usb::PointerEvent, message: Message) {
@@ -375,10 +387,27 @@ impl InputSink for Input {
             | Message::Scroll { .. }) => {
                 let mut pointer = self.pointer.lock();
                 pointer_message(&mut pointer, message);
-                if let Some(xhci) = shared.xhci.lock().as_ref()
-                    && let Err(e) = xhci.lock().inject_pointer(*pointer)
-                {
-                    log::warn!("display pointer: {e}");
+                let xhci = shared.xhci.lock().clone();
+                if let Some(xhci) = xhci {
+                    loop {
+                        if shared.exited() {
+                            break;
+                        }
+                        let result = xhci.lock().inject_pointer(*pointer);
+                        match result {
+                            Ok(()) => break,
+                            Err(error @ vmlab_hv_devices::DeviceError::Io(_)) if matches!(&error, vmlab_hv_devices::DeviceError::Io(error) if error.kind() == io::ErrorKind::WouldBlock) =>
+                            {
+                                self.pointer_warning(&error);
+                                // Release all controller locks while the guest drains reports.
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            }
+                            Err(error) => {
+                                self.pointer_warning(&error);
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
@@ -436,6 +465,7 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
                     buttons: 0,
                     wheel: 0,
                 }),
+                pointer_warning: Mutex::new(None),
             }),
         )
         .map_err(|e| VmmError::Other(format!("creating display server: {e}")))?,
@@ -474,11 +504,14 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
                     let server = server.clone();
                     workers.retain(|worker: &std::thread::JoinHandle<()>| !worker.is_finished());
                     workers.push(std::thread::spawn(move || {
-                        let _ = if rfb {
+                        let result = if rfb {
                             server.serve_rfb(stream)
                         } else {
                             server.serve_native(stream)
                         };
+                        if let Err(error) = result {
+                            log::warn!("{name} client ended: {error}");
+                        }
                     }));
                 }
                 server.shutdown();

@@ -1,4 +1,4 @@
-//! Keyboard grabs complement winit's pointer confinement.
+//! Native keyboard capture. Absolute pointer input does not need confinement.
 
 use anyhow::{Context, Result, ensure};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};

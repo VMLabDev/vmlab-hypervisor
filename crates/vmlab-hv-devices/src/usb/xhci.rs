@@ -352,14 +352,15 @@ impl XhciController {
     }
 
     pub fn inject_pointer(&mut self, event: PointerEvent) -> Result<(), DeviceError> {
-        self.devices
+        let result = self
+            .devices
             .iter_mut()
             .flatten()
             .find(|device| device.state_id() == "usb-tablet")
             .ok_or_else(|| DeviceError::Other("USB tablet disconnected".into()))?
-            .inject_pointer(event)?;
+            .inject_pointer(event);
         self.poll();
-        Ok(())
+        result
     }
     pub fn has_keyboard(&self) -> bool {
         self.devices[super::KEYBOARD_PORT as usize - 1]
@@ -891,7 +892,7 @@ impl XhciController {
                 self.store_endpoint(slot, ep)?;
                 break;
             }
-            let setup = if control {
+            let setup = if control && td[0].1.kind() == 2 {
                 Some(SetupPacket::from_bytes(td[0].1.parameter.to_le_bytes()))
             } else {
                 None
@@ -920,13 +921,14 @@ impl XhciController {
                     valid = false;
                 }
             }
-            if control
-                && (td[0].1.kind() != 2
-                    || td[0].1.control & 64 == 0
-                    || td[0].1.length() != 8
-                    || !td.iter().any(|(_, t)| t.kind() == 4))
-            {
-                valid = false;
+            if control {
+                if setup.is_some() {
+                    if td[0].1.control & 64 == 0 || td[0].1.length() != 8 {
+                        valid = false;
+                    }
+                } else if !td.iter().all(|(_, t)| matches!(t.kind(), 4 | 7 | 8)) {
+                    valid = false;
+                }
             }
             if length > 1024 * 1024 {
                 valid = false;
@@ -963,6 +965,10 @@ impl XhciController {
             {
                 if let Some(s) = setup {
                     d.control(s, &data)
+                } else if control {
+                    // UsbDevice::control completes the USB request atomically. xHCI
+                    // 4.11.2.2 permits the guest to queue Status after the data event.
+                    UsbTransfer::Ack(vec![])
                 } else if !bus_transfer {
                     UsbTransfer::Ack(vec![])
                 } else {

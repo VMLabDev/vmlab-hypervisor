@@ -251,8 +251,22 @@ release those frames before receiving more than three outstanding frames.
 `InputSink::input(&self, Message)` receives the negotiated input messages.
 The machine adapter routes keys to PS/2 and pointer input to the xHCI tablet.
 Device input runs on a separate worker, preserving per-connection order.
-The shared queue holds at most 256 pending input messages. Overflow closes the
-sender's connection. A blocked resize or input handler cannot block Release.
+The shared queue holds at most 256 pending input messages. Consecutive pending
+PointerAbs messages coalesce to the latest position. Buttons, Scroll, Key, and
+RequestSize messages end a coalescing interval and retain their order.
+A full queue applies backpressure until space exists, without closing the
+client or dropping a transition. Full-queue warnings occur at most once per
+five seconds. Shutdown cancels producers waiting for space.
+A blocked input handler does not delay Release while queue capacity remains.
+Once transitions fill the queue, transport backpressure can delay subsequent
+messages on that connection, including Release.
+
+The built-in tablet also coalesces consecutive motion-only reports, retaining
+the position at each button or wheel transition. Its queue holds at most
+1024 reports. A full transition queue returns DeviceError::Io(WouldBlock)
+without consuming the event. The machine adapter retries that event outside
+controller locks until interrupt IN drains space or the machine exits.
+Tablet warnings occur at most once per five seconds.
 
 `serve_native(UnixStream)` and `serve_rfb(UnixStream)` run one connection until
 disconnect or error. Each uses a separate input reader. The caller controls

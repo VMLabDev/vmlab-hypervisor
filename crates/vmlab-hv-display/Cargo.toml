@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 libc.workspace = true
+log = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

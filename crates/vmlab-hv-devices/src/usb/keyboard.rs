@@ -318,6 +318,36 @@ mod tests {
     }
 
     #[test]
+    fn repeated_host_makes_do_not_queue_duplicate_hid_reports() {
+        let mut keyboard = Keyboard::new("fake");
+        keyboard.control(
+            SetupPacket {
+                request_type: 0,
+                request: 9,
+                value: 1,
+                index: 0,
+                length: 0,
+            },
+            &[],
+        );
+        for _ in 0..2048 {
+            keyboard.inject_key("a", true).unwrap();
+        }
+        assert_eq!(
+            keyboard.transfer(0x81, &[], 8),
+            UsbTransfer::Ack(vec![0, 0, 4, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(keyboard.transfer(0x81, &[], 8), UsbTransfer::Nak);
+        keyboard.inject_key("a", false).unwrap();
+        assert_eq!(
+            keyboard.transfer(0x81, &[], 8),
+            UsbTransfer::Ack(vec![0; 8])
+        );
+        keyboard.inject_key("a", false).unwrap();
+        assert_eq!(keyboard.transfer(0x81, &[], 8), UsbTransfer::Nak);
+    }
+
+    #[test]
     fn boot_reports_modifiers_rollover_and_snapshot_queue() {
         let mut keyboard = Keyboard::new("fake");
         assert_eq!(keyboard.transfer(0x81, &[], 8), UsbTransfer::Nak);

@@ -312,7 +312,10 @@ fn preferred_size_requires_input_and_valid_dimensions() {
         assert!(c.receive().is_err());
         assert!(sink.0.lock().unwrap().is_empty());
         drop(c);
-        h.join().unwrap().unwrap();
+        assert_eq!(
+            h.join().unwrap().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 }
 
@@ -637,8 +640,90 @@ fn wrong_version_and_unnegotiated_input_disconnect() {
     })
     .unwrap();
     assert!(c.receive().is_err());
-    h.join().unwrap().unwrap();
+    assert_eq!(
+        h.join().unwrap().unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
     assert!(sink.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn pointer_burst_with_clicks_does_not_disconnect_a_slow_input_sink() {
+    struct SlowSink(std::sync::Mutex<Vec<M>>);
+    impl vmlab_hv_display::InputSink for SlowSink {
+        fn input(&self, message: M) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            self.0.lock().unwrap().push(message);
+        }
+    }
+    let source = Arc::new(Source(std::sync::Mutex::new(frame(1, 4, 3))));
+    let sink = Arc::new(SlowSink(std::sync::Mutex::new(Vec::new())));
+    let server = vmlab_hv_display::DisplayServer::new(source, sink.clone()).unwrap();
+    let (client, worker) = client(&server, C::INPUT);
+    assert!(matches!(
+        client.receive().unwrap().message,
+        M::LedState { .. }
+    ));
+    for index in 0..10_000 {
+        client
+            .send(&M::PointerAbs {
+                x: index % 1024,
+                y: index % 768,
+                width: 1024,
+                height: 768,
+            })
+            .unwrap();
+        if index % 100 == 99 {
+            for mask in [1, 0] {
+                client.send(&M::Buttons { mask }).unwrap();
+            }
+            client.send(&M::Scroll { dx: 0, dy: 1 }).unwrap();
+        }
+    }
+    client
+        .send(&M::PointerAbs {
+            x: 1023,
+            y: 767,
+            width: 1024,
+            height: 768,
+        })
+        .unwrap();
+    until(|| {
+        matches!(
+            sink.0.lock().unwrap().last(),
+            Some(M::PointerAbs {
+                x: 1023,
+                y: 767,
+                ..
+            })
+        )
+        .then_some(())
+    });
+    let input = sink.0.lock().unwrap();
+    let buttons: Vec<_> = input
+        .iter()
+        .filter_map(|m| {
+            if let M::Buttons { mask } = m {
+                Some(*mask)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(buttons, [1, 0].repeat(100));
+    assert_eq!(
+        input
+            .iter()
+            .filter(|m| matches!(m, M::Scroll { dy: 1, .. }))
+            .count(),
+        100
+    );
+    drop(input);
+    server.set_leds(4);
+    assert_eq!(client.receive().unwrap().message, M::LedState { mask: 4 });
+    drop(client);
+    worker.join().unwrap().unwrap();
+    server.shutdown();
 }
 
 #[test]
@@ -663,6 +748,66 @@ fn same_size_reset_reconfigures_without_overwriting_old_held_buffers() {
     c.release(new.0, new.1, new.2).unwrap();
     drop(c);
     h.join().unwrap().unwrap();
+}
+
+#[test]
+fn reset_during_obsolete_gpu_readback_keeps_the_native_client() {
+    use std::sync::Barrier;
+    use vmlab_hv_display::BufferLease;
+
+    let (server, source, _) = server();
+    let barrier = Arc::new(Barrier::new(2));
+    let callback = barrier.clone();
+    let mut old = frame(1, 4, 3);
+    old.pixels = Pixels::Leased {
+        buffers: Arc::new(vec![Arc::new(File::open("/dev/zero").unwrap().into())]),
+        buffer: 0,
+        acquire: None,
+        lease: BufferLease::new(),
+        cpu: None,
+        readback: Arc::new(move || {
+            callback.wait();
+            callback.wait();
+            Err(std::io::Error::other("GPU resource destroyed by reset"))
+        }),
+    };
+    *source.0.lock().unwrap() = old;
+    let (client, worker) = client(&server, C::FRAMES);
+    let (old_surface, _) = configure(&client);
+    barrier.wait();
+    let mut reset = frame(9, 4, 3);
+    reset.generation = 1;
+    *source.0.lock().unwrap() = reset;
+    server.publish().unwrap();
+    barrier.wait();
+    let (new_surface, fds) = configure(&client);
+    assert!(new_surface > old_surface);
+    let next = ready(&client);
+    assert_eq!(pixels(&fds[next.1 as usize], 48), vec![9; 48]);
+    client.release(next.0, next.1, next.2).unwrap();
+    drop(client);
+    worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn current_gpu_readback_failure_is_still_reported() {
+    use vmlab_hv_display::BufferLease;
+    let (server, source, _) = server();
+    source.0.lock().unwrap().pixels = Pixels::Leased {
+        buffers: Arc::new(vec![Arc::new(File::open("/dev/zero").unwrap().into())]),
+        buffer: 0,
+        acquire: None,
+        lease: BufferLease::new(),
+        cpu: None,
+        readback: Arc::new(|| Err(std::io::Error::other("current GPU readback failed"))),
+    };
+    let (client, worker) = client(&server, C::FRAMES);
+    configure(&client);
+    assert!(client.receive().is_err());
+    assert_eq!(
+        worker.join().unwrap().unwrap_err().to_string(),
+        "current GPU readback failed"
+    );
 }
 
 #[test]

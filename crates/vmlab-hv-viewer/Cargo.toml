@@ -26,7 +26,7 @@ tempfile = "3"
 vmlab-hv-tests = { path = "../vmlab-hv-tests" }
 vmlab-hv-proto.workspace = true
 vmlab-disk.workspace = true
-x11rb = { version = "0.13", features = ["xtest"] }
+x11rb = { version = "0.13", features = ["xtest", "xfixes"] }
 
 [lints]
 workspace = true

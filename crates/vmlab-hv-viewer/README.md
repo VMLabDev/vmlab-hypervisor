@@ -19,12 +19,30 @@ vmlab-hv-viewer --display /path/to/display.sock \
 text clipboard synchronization. The socket must belong to the machine's lab
 daemon. The machine name is local to that daemon, without a lab prefix.
 
-Click to grab keyboard and pointer. Press left Ctrl+Alt to release. The title
+Left-click to grab the keyboard. Press left Ctrl+Alt to release it. The title
 shows the grab state, release chord, and the guest's Num, Caps, and Scroll Lock
 indicators. These indicators mirror protocol LED state. The compositor still
-owns physical host keyboard LEDs. Losing focus releases held guest keys and
-buttons. X11 grabs use winit's Xlib connection. Wayland requires pointer
-constraints and keyboard-shortcuts-inhibit support from the compositor.
+owns physical host keyboard LEDs. Losing focus or leaving the window releases
+held guest keys and buttons. X11 keyboard grabs use winit's Xlib connection.
+Wayland keyboard capture requires keyboard-shortcuts-inhibit support.
+
+The pointer is never locked or confined. Absolute motion, buttons, and wheel
+work without keyboard capture, so you can move in and out freely. The host
+cursor is hidden inside the window while a frame exists, including when the
+guest draws a software cursor in its framebuffer. Hardware cursor messages
+are composited separately. Host placeholder frames use a local fallback arrow
+when no guest shape exists. The host cursor returns on leave or when no frame
+exists. Active guest frames never get an extra fallback arrow.
+
+Chord detection tracks physical keys before and during capture. Pressing the
+chord without capture does not grab anything. Clicking while the full chord is
+held cannot start capture. The completing chord key stays local; only keys
+forwarded to the guest receive matching releases.
+
+Host auto-repeat key-down events are forwarded while the keyboard is captured.
+The compositor supplies the repeat delay and rate; the viewer has no repeat
+timer. Each held key still receives one matching release. The PS/2 keyboard
+emits every make code, while USB HID keeps duplicate held-key reports suppressed.
 
 Use `--release-chord ctrl_r+alt_r` to choose another chord. Chord components are
 QEMU key names, joined by `+`. Both modifiers in the default chord are left-side
@@ -41,10 +59,33 @@ Resize requests follow the window after 200 ms without another size change.
 Guests decide whether to apply them. Guests with fixed VGA modes are letterboxed.
 Pointer coordinates use the same viewport as rendering and clamp at its edges.
 
+The window opens without waiting for the first display connection. If the
+socket is missing or refuses connections during startup, the viewer shows
+`waiting for display` on black and retries quietly for up to 120 seconds.
+Before the first handshake there is no peer PID to establish that the machine
+has exited, so an unavailable socket gets the full startup timeout. Closing
+the window cancels the wait. Invalid paths and protocol errors still fail.
+
+If the display connection closes, the window clears to black and its title
+shows `waiting for display`. The viewer releases host keyboard capture and
+restores the host cursor. It reconnects with delays from 100 ms to 2 s while
+the hypervisor process lives. A Linux pidfd detects process exit. The viewer
+allows a five-second restart grace period for a replacement process to bind
+the same configured socket. If none appears, the viewer exits. The configured
+socket path identifies the machine across process replacement.
+Reconnect clears cached surfaces and cursor images, renegotiates the protocol,
+and sends releases for previously held guest keys and buttons. Closing the
+window cancels retries. Surface reconfiguration also clears the previous image
+before a new frame arrives, so expose events cannot redraw a stale desktop.
+
 Clipboard synchronization runs only while focused. Host text is sent on focus
 gain and when a 100 ms selection check detects a change. Guest text is polled
 once per second. Host changes win when both selections changed between polls.
-Clipboard errors are printed without interrupting display or input.
+Clipboard failures back off from 1 s to 30 s without interrupting display or
+input. An outage produces one error notice and one recovery notice, even if
+the lab alternates its error messages. Temporary busy, EAGAIN, and timeout
+errors retry quietly. Failed reads and writes do not consume pending changes.
+Changing focus does not bypass an active backoff.
 
 ## Frame ownership and rendering
 
@@ -76,9 +117,32 @@ Vulkan, Xvfb, KVM, firmware, or guest assets produce named skips where relevant.
 S1 uses the Ubuntu template discovered by the existing template convention, or
 `VMLAB_HV_UBUNTU_26_04`. `VMLAB_HV_BINARY` selects an already-built hypervisor.
 It checks input through the agent, including ISO, F13, and volume keys, and
-applies an 800x600 DRM mode. VMs use the
-host-wide four-VM permit and a systemd scope with 24 GiB RAM and no swap.
+applies an 800x600 DRM mode, and verifies an in-place reboot with the original
+control and display connections. VMs use the
+host-wide VM permit and a systemd scope with 24 GiB RAM and no swap.
+The permit defaults to four VMs; `VMLAB_HV_TEST_VM_LIMIT` overrides it.
 Disposable overlays and sockets are removed at test exit.
+
+The Linux S1 fixture also captures translated input from `/dev/tty1` with a
+PS/2 keyboard. One held key with two host repeat makes must produce `aaa`
+and one release. The fixture uses a one-second initial hold, then 50 ms between
+repeat makes, so Linux's early-duplicate debounce does not hide the repeats.
+Private Xvfb tests hold a native key until host auto-repeat produces multiple
+protocol key-downs, followed by one key-up.
+
+The Windows S1 test discovers the Windows 11 standard template, or uses
+`VMLAB_HV_VIEWER_WINDOWS` as its disk path. `VMLAB_HV_FIRMWARE_DIR` selects the
+directory containing secure OVMF code and Microsoft-enrolled variable defaults.
+It checks tablet enumeration and Windows' parsing of the mouse usage and input
+report size through SetupAPI and HidP_GetCaps. It sends pointer, button, and key
+input and checks that the first Ctrl+Alt press releases the viewer. A burst
+of 20,000 moves with 80 button transitions and
+40 wheel events must preserve the display connection and continued non-black
+frames, without tablet overflow. It does not
+observe desktop movement or buttons in Windows' interactive session; those
+remain manual checks. No logged-in user, scheduled task, or restart is required.
+The investigation and physical-desktop retest steps are in
+`../../docs/viewer-windows.md`.
 
 For a real dma-buf import test, select a render node and its matching Vulkan ICD:
 
@@ -106,7 +170,9 @@ the guest, host GPU, compositor, selected frame path, and any CpuCopy diagnostic
 - [ ] A Windows desktop presents and accepts typing, pointer, buttons, and wheel.
 - [ ] A std-VGA guest remains letterboxed after resize, with aligned pointer input.
 - [ ] Clicking grabs. The default and a configured chord both release.
-- [ ] Focus loss, close, and disconnect leave no guest keys or buttons held.
+- [ ] Focus loss and close release held guest keys and buttons.
+- [ ] Disconnect keeps the window, releases host capture, and restores the host cursor.
+- [ ] Reconnect resumes frames and releases previously held guest keys and buttons.
 - [ ] Num, Caps, and Scroll Lock indicators follow guest state.
 - [ ] Guest cursor shape, position, visibility, alpha, and hotspot are correct.
 - [ ] Rapid resize produces one final request after 200 ms and the guest applies it.
