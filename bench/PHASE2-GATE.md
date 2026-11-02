@@ -4,6 +4,135 @@
 G1, G4, G7, and G10 fail.**
 The VM default must remain unchanged.
 
+## Round 6 owner decisions (2026-11-02)
+
+The owner accepts G1 at parity: Ubuntu boot at 6.61 seconds versus QEMU's
+6.59 seconds is within noise. Round 6 does not pursue further boot changes.
+The round-5 table below retains its strict numerical verdict for traceability.
+
+UDP TX and sequential-write regressions must be investigated before the
+network optimizations. If TCP B to A does not recover with UDP TX, the owner
+accepts its round-5 0.7974x result as noise-level. This exception does not
+change the UDP TX or sequential-write bars. The default remains unchanged
+until the remaining work and the authorized quiet-window comparison finish.
+
+## Round 6 development checkpoint (2026-11-02)
+
+This is shared-host evidence, not a quiet-window verdict. G4 remains
+unresolved. No default, workload size, flush policy, or D28 threshold changed.
+The owner scheduled the full merge gate after the focused quiet window.
+
+### Historical commit comparisons
+
+The quiet-window ratio changes do not establish raw HV slowdowns. Between
+rounds 4 and 5, HV UDP TX rises from 23.38 to 24.50 Gbit/s and sequential
+write rises from 3843.93 to 3986.11 MiB/s. QEMU rises more: 30.94 to 38.83
+Gbit/s and 4793.65 to 5337.45 MiB/s. The lower ratios remain failed bars;
+they do not, by themselves, identify a regression caused by an HV commit.
+
+Frozen release binaries cover round 4, queue-wake coalescing, firmware
+configuration I/O, mergeable receive buffers, and round 5. Each workload
+runs alone in three rotated cohorts. UDP uses three 12-second sends per
+fresh overlay. Writes use seven fresh 512 MiB files per overlay, each with
+the unchanged O_DIRECT writes and timed final fdatasync.
+
+The write column below uses only the first write in each fresh overlay.
+Later writes have warmer mappings and must not conceal the cold-write gap.
+Every sample, including the later writes, is retained in the profile.
+
+| Revision | UDP TX median (Gbit/s) | First sequential write median (MiB/s) |
+|---|---:|---:|
+| round 4, `41e53e4` | 24.21 | 3776.81 |
+| wake coalescing, `e9333a9` | 23.89 | - |
+| firmware I/O, `2bec7a2` | - | 3650.99 |
+| mergeable RX, `a3ddb7b` | 24.25 | 3790.71 |
+| round 5, `95ea79d` | 28.01 | 3571.90 |
+
+UDP's round-5 regression does not reproduce in this cohort. Cold writes
+remain 5.4% below round 4. The parent/child samples around block interrupt
+suppression overlap and reverse direction in one cohort. These runs do not
+establish either suspect as the cause. No speculative block or firmware
+revert was made. This is an unresolved performance finding, not a claimed
+fix or an owner-approved exception for G4.
+
+### Retained network changes
+
+N1 receive DMA reads the frame length separately and readv fills validated
+guest spans. A short body is captured in the existing owned decoder state.
+The header and used entries are published only after the complete packet.
+Three rotated RX cohorts improve the median from 79.03 to 104.43 Gbit/s.
+The RX-only confirmation measures 77.03 to 98.81 Gbit/s. The per-packet
+direct-TX candidate is rejected: 24.42 versus 31.35 Gbit/s.
+
+N2 batches transmit spans in writev, keeps descriptor ownership until the
+unsent suffix is owned, and uses 512 KiB buffered RX chunks. UDP TX rises
+from 23.22 to 25.20 Gbit/s across three rotated cohorts. A paired RX check
+measures 74.86 to 100.78 Gbit/s. EVENT_IDX, POLLOUT continuation, ring wrap,
+bounded staging, and legacy interrupt suppression remain covered by tests.
+
+N5 requests 4 MiB SO_SNDBUF/SO_RCVBUF. Its UDP median falls from 26.66 to
+25.05 Gbit/s, so the change is removed. Host socket sysctls are unchanged.
+
+N6 offers CSUM and GUEST_CSUM. TX completes the seeded checksum during its
+owned payload copy; the wire still carries bare Ethernet. Buffered RX
+combines checksum calculation and placement. Direct RX validates its DMA
+spans before setting DATA_VALID. Invalid checksums, unsupported formats,
+and fragments requiring reassembly retain flags=0. No TSO, USO, or MQ is
+offered. IPv4/IPv6, TCP/UDP, VLAN, odd splits, malformed metadata, and
+short-write ownership have device coverage.
+
+| N6 copy-path prototype | Before (Gbit/s) | After (Gbit/s) |
+|---|---:|---:|
+| UDP TX | 27.32 | 27.36 |
+| TCP A to B | 25.17 | 34.71 |
+| TCP B to A | 23.55 | 33.22 |
+
+These are three interleaved cohorts. A later two-byte writev checksum-patch
+candidate is also tested and rejected: UDP falls from 29.82 to 27.63 Gbit/s
+in all three paired comparisons. The final source retains the copy path.
+The prototype and final rebuild have distinct hashes; the final rebuild
+has its own correctness and focused-runner smoke checks. Prototype timings
+are not labelled as final-binary quiet measurements.
+
+Linux ethtool reports generic TX checksum offload enabled under N6 and
+fixed off before it. ethtool -S is captured but exposes no checksum counters.
+Separate, untimed 32 MiB random TCP transfers match SHA-256 in both
+directions. Guest probes then show TX checksum-helper calls disappearing.
+A mixed QEMU/HV check also matches bytes and digests: QEMU records 348 TX
+checksum-helper calls and 633 RX GRO checksum calls; N6 records zero for
+both. Probes are installed only after timed transfers.
+
+### Correctness and focused-window preparation
+
+The final copy-based rebuild passes all 42 NIC tests and all 15 core S1
+tests. S1 asserts both checksum features, validates nonzero on-wire UDP
+checksums through the test switch, compares exact echo bytes, and snapshots
+with UDP traffic active. The reset check passes four reboot methods, two
+resets each, preserving the NIC stream and control connection. All 23 active
+S2 tests and the explicit 1 GiB S2 check pass. Formatting, changed-crate
+Clippy with warnings denied, and all 103 benchmark tests pass. Full
+`just ci::check` remains for the owner's post-window merge gate.
+
+`bench/phase2_window.py` prepares exactly G4, G7, G9, and G10 on both
+backends, interleaved for three repeats. It performs no builds, boot bars,
+read/random/RX/idle workloads, or CI. Preflight checks prepared assets;
+the run reserves four admission locks and monitors VM ownership, memory
+limits, and load. Only a complete cohort appends the eight target history
+records. Its single-VM and guest-pair paths pass live smoke checks on both
+backends without appending history. Allow 6-8 minutes for the authorized
+window.
+
+The raw diagnostics, source drivers, binary hashes, feature queries,
+counter probes, negative control, rejected candidates, and verification
+receipts are in `bench/profiles/phase2-round6-20261102.json`. Development
+does not append benchmark history. Every VM uses the shared host count
+check and a 24 GiB, zero-swap scope. Android and physical PCI/USB devices
+are untouched. Temporary VM directories are removed after each run.
+
+Runtime traits, the control protocol, switch framing, and VLNET v1 snapshot
+layout are unchanged. The test-only SwitchStats adds udp_echoes. The default
+is unchanged; G4 and the focused quiet-window verdict are still pending.
+
 ## Round 5 authorized final quiet bench window (2026-11-02)
 
 The final measurement passes six of ten core bars. G1, G4, G7, and G10 fail.
