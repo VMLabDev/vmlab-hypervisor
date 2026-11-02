@@ -94,6 +94,10 @@ See `display-export.md` for the hardware checks and latency measurements.
 Online snapshot save and restore return `unsupported` whenever acceleration
 is attached, following phase-2 decision D9. Offline disk snapshots are unchanged.
 
+The host reset completion contract and its current Venus backend gap are
+documented in `renderer-reset.md`. Local teardown completion does not establish
+an acknowledged worker/GPU-idle barrier.
+
 ## Verification
 
 `display::virtio_vga::tests::accelerated_protocol_fences_transfer_and_immutable_scanout`
@@ -162,6 +166,18 @@ system render server. Gamescope still reports direct-scanout import fallbacks;
 the rendered frames and guest GPU command checks pass.
 The Windows in-place reset test also passed on both GPUs with driver `58101`,
 including both Vulkan architectures and the strict command-error check.
+That earlier check did not query Windows bugcheck history. Its command-error
+result is not evidence that OOBE was bugcheck-free.
+
+The Windows S1 regression now queries System event 1001 and both WER report
+directories during first-boot polling, after reboot, and after rendering.
+BugCheck and BlueScreen records fail even if they predate the first agent
+response. Optional TDR and rendering probes verify both recovery callbacks,
+unchanged hypervisor PID, no OS reset during TDR, and hardware RGB readback.
+The accepted `58104` package passed four native runs, twice on each GPU, with
+Vulkan and both D3D11 architectures before/after TDR. OneDrive faults were
+deliberately excluded by the owner. See `renderer-reset.md` for the boundary
+between this functional acceptance and the missing backend acknowledgement.
 
 Run VM tests under the work package's 24 GiB memory scope. The shared harness
 checks the host-wide four-project-VM limit before booting by default.
