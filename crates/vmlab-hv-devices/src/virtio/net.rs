@@ -7,11 +7,13 @@
 //! end of the socket).
 //!
 //! One receiveq and one transmitq, no control queue: the offered features are
-//! `VIRTIO_NET_F_MAC`, `VIRTIO_NET_F_STATUS` and `VIRTIO_NET_F_MTU` (only when
+//! `VIRTIO_NET_F_MAC`, `VIRTIO_NET_F_STATUS`, `VIRTIO_NET_F_MRG_RXBUF` and
+//! `VIRTIO_NET_F_MTU` (only when
 //! an MTU other than 1500 is configured, matching what vmlab passes to QEMU).
 //! Indirect descriptor tables let one ring entry describe a scatter/gather packet.
 //! The `virtio_net_hdr` (12 bytes for a modern device) is stripped on transmit
-//! and prepended with `num_buffers` = 1 on receive.
+//! and prepended on receive. Mergeable receive buffers carry one header per
+//! packet, with `num_buffers` covering all used chains.
 //!
 //! If the switch socket closes, frames are dropped, `VIRTIO_NET_S_LINK_UP` is
 //! cleared in the config space with a config-change interrupt, and the device
@@ -33,7 +35,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use virtio_queue::{Queue, QueueOwnedT, QueueState, QueueT};
-use vm_memory::{Bytes, GuestAddress};
+use vm_memory::{Address, Bytes, GuestAddress};
 
 use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
 
@@ -45,8 +47,7 @@ const DEVICE_ID: u32 = 1;
 const F_MTU: u64 = 1 << 3;
 /// `VIRTIO_NET_F_MAC` (feature bit 5).
 const F_MAC: u64 = 1 << 5;
-/// `VIRTIO_NET_F_MRG_RXBUF` (feature bit 15) — never offered, but it changes
-/// the header length if a driver negotiated it against a wider feature set.
+/// `VIRTIO_NET_F_MRG_RXBUF` (feature bit 15).
 const F_MRG_RXBUF: u64 = 1 << 15;
 /// `VIRTIO_NET_F_STATUS` (feature bit 16).
 const F_STATUS: u64 = 1 << 16;
@@ -289,7 +290,8 @@ fn run(
             // Rearm before consuming commands. Earlier senders are covered by
             // this drain; later senders must publish another readable byte.
             wake_pending.swap(false, Ordering::AcqRel);
-            let hdr = hdr_len(negotiated.load(Ordering::Acquire));
+            let features = negotiated.load(Ordering::Acquire);
+            let hdr = hdr_len(features);
             while let Ok(cmd) = cmds.try_recv() {
                 match cmd {
                     Cmd::Barrier(done) => {
@@ -300,7 +302,7 @@ fn run(
             }
             // A wakeup is also the device saying shared state changed
             // (activation, restore): give pending work another chance.
-            process_wakeup(&shared, &mut stream, hdr);
+            process_wakeup(&shared, &mut stream, hdr, features & F_MRG_RXBUF != 0);
         }
 
         if stream.is_some() {
@@ -308,7 +310,10 @@ fn run(
             let dead = revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0;
             if revents & libc::POLLIN != 0 {
                 match read_frames(&shared, stream.as_mut().unwrap()) {
-                    Ok(()) => place_rx_frames(&shared, hdr_len(negotiated.load(Ordering::Acquire))),
+                    Ok(()) => {
+                        let features = negotiated.load(Ordering::Acquire);
+                        place_rx_frames(&shared, hdr_len(features), features & F_MRG_RXBUF != 0);
+                    }
                     Err(()) => {
                         drop_link(&mut stream, &shared);
                         continue;
@@ -370,8 +375,13 @@ fn drain_wakeup(mut wake: &UnixStream) {
     }
 }
 
-fn process_wakeup(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr: usize) {
-    place_rx_frames(shared, hdr);
+fn process_wakeup(
+    shared: &Arc<Mutex<Shared>>,
+    stream: &mut Option<UnixStream>,
+    hdr: usize,
+    mergeable: bool,
+) {
+    place_rx_frames(shared, hdr, mergeable);
     if let Some(socket) = stream.as_mut()
         && flush_tx(shared, socket).is_err()
     {
@@ -503,8 +513,98 @@ fn needs_interrupt(queue: &mut Queue, mem: &GuestMemory) -> bool {
             .is_ok_and(|flags| u16::from_le(flags) & AVAIL_F_NO_INTERRUPT == 0)
 }
 
+enum Receive {
+    Delivered,
+    Retry,
+    Wait(u16),
+}
+
+/// Publish the whole packet with one release-store to used.idx. The queue's
+/// notification counter accounts for the final entry only; RX uses the
+/// saved pre-batch index when checking the driver's interrupt event.
+fn publish_receive(mem: &GuestMemory, q: &mut Queue, entries: &[(u16, u32)]) -> Result<(), ()> {
+    let (&(head, len), earlier) = entries.split_last().ok_or(())?;
+    let mut next = q.next_used();
+    for &(head, len) in earlier {
+        let address = GuestAddress(q.used_ring())
+            .checked_add(4 + 8 * u64::from(next % q.size()))
+            .ok_or(())?;
+        mem.write_obj((u64::from(head) | u64::from(len) << 32).to_le(), address)
+            .map_err(|_| ())?;
+        next = next.wrapping_add(1);
+    }
+    q.set_next_used(next);
+    q.add_used(mem, head, len).map_err(|_| ())
+}
+
+fn receive_merged(mem: &GuestMemory, q: &mut Queue, frame: &[u8]) -> Result<Receive, ()> {
+    let start = q.next_avail();
+    let need = 12 + frame.len();
+    let mut buffers = Vec::new();
+    let mut entries = Vec::new();
+    let mut capacity = 0;
+    while capacity < need {
+        let chain = q.iter(mem).map_err(|_| ())?.next();
+        let Some(chain) = chain else {
+            let observed = q.next_avail();
+            q.set_next_avail(start);
+            return Ok(Receive::Wait(observed));
+        };
+        let head = chain.head_index();
+        let writer = chain.writer(mem);
+        entries.push((head, 0));
+        let Ok(writer) = writer else {
+            publish_receive(mem, q, &entries)?;
+            return Ok(Receive::Retry);
+        };
+        if writer.available_bytes() < 12 {
+            publish_receive(mem, q, &entries)?;
+            return Ok(Receive::Retry);
+        }
+        capacity += writer.available_bytes();
+        buffers.push(writer);
+        if buffers.len() == usize::from(q.size()) && capacity < need {
+            // A full ring cannot hold this packet. Drop it and return the
+            // buffers so a misconfigured driver cannot stall the worker.
+            publish_receive(mem, q, &entries)?;
+            return Ok(Receive::Delivered);
+        }
+    }
+    let mut header = [0; 12];
+    header[10..].copy_from_slice(&(buffers.len() as u16).to_le_bytes());
+    let mut remaining = frame;
+    for (index, (writer, entry)) in buffers.iter_mut().zip(&mut entries).enumerate() {
+        if index == 0 {
+            writer.write_all(&header).map_err(|_| ())?;
+            entry.1 = 12;
+        }
+        let len = writer.available_bytes().min(remaining.len());
+        writer.write_all(&remaining[..len]).map_err(|_| ())?;
+        entry.1 += len as u32;
+        remaining = &remaining[len..];
+    }
+    publish_receive(mem, q, &entries)?;
+    Ok(Receive::Delivered)
+}
+
+fn needs_receive_interrupt(q: &mut Queue, mem: &GuestMemory, old_used: u16) -> bool {
+    let normal = needs_interrupt(q, mem);
+    if !q.event_idx_enabled() {
+        return normal;
+    }
+    // needs_interrupt supplies the publication fence and resets num_added.
+    let Some(event) = GuestAddress(q.avail_ring()).checked_add(4 + 2 * u64::from(q.size())) else {
+        return false;
+    };
+    let Ok(event) = mem.load::<u16>(event, Ordering::Relaxed) else {
+        return false;
+    };
+    let new = q.next_used();
+    new.wrapping_sub(u16::from_le(event)).wrapping_sub(1) < new.wrapping_sub(old_used)
+}
+
 /// Move pending frames into free receiveq buffers, header first.
-fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
+fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize, mergeable: bool) {
     let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
     {
         let mut guard = lock(shared);
@@ -522,9 +622,8 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
         let Some(q) = sh.queues.get_mut(usize::from(RXQ)).and_then(|q| q.as_mut()) else {
             return;
         };
-        // A zeroed header with num_buffers = 1: no offloads are offered, and
-        // exactly one descriptor holds the packet (VIRTIO_NET_F_MRG_RXBUF is
-        // not offered).
+        let old_used = q.next_used();
+        // Without mergeable buffers, a single chain holds the whole packet.
         let mut hdr = vec![0u8; hdr_len];
         let num_buffers_at = hdr.len().saturating_sub(2);
         hdr[num_buffers_at..].copy_from_slice(&1u16.to_le_bytes());
@@ -532,7 +631,26 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
         let mut invalid = false;
         loop {
             let _ = q.disable_notification(mem);
+            let mut refill_at = None;
             while let Some(frame) = sh.rx_pending.front() {
+                if mergeable {
+                    match receive_merged(mem, q, frame) {
+                        Ok(Receive::Delivered) => {
+                            used_any = true;
+                            sh.rx_pending.pop_front();
+                        }
+                        Ok(Receive::Retry) => used_any = true,
+                        Ok(Receive::Wait(observed)) => {
+                            refill_at = Some(observed);
+                            break;
+                        }
+                        Err(()) => {
+                            invalid = true;
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 let chain = match q.iter(mem) {
                     Ok(mut available) => available.next(),
                     Err(_) => {
@@ -563,11 +681,20 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize) {
             }
             // Socket input drives RX while buffers are available. If a frame
             // is waiting, arm the refill kick and check for a raced refill.
-            if sh.rx_pending.is_empty() || !q.enable_notification(mem).unwrap_or(false) || invalid {
+            if sh.rx_pending.is_empty() || invalid {
+                break;
+            }
+            let next = q.next_avail();
+            if let Some(observed) = refill_at {
+                q.set_next_avail(observed);
+            }
+            let raced = q.enable_notification(mem).unwrap_or(false);
+            q.set_next_avail(next);
+            if !raced {
                 break;
             }
         }
-        if used_any && needs_interrupt(q, mem) {
+        if used_any && needs_receive_interrupt(q, mem, old_used) {
             irq = sh.interrupt.clone().map(|irq| (irq, RXQ));
         }
     }
@@ -704,7 +831,8 @@ impl VirtioDevice for Net {
     }
 
     fn features(&self) -> u64 {
-        let mut features = F_MAC | F_STATUS | F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1;
+        let mut features =
+            F_MAC | F_STATUS | F_MRG_RXBUF | F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1;
         if self.config.mtu != DEFAULT_MTU {
             features |= F_MTU;
         }
@@ -1341,7 +1469,7 @@ mod tests {
         lock(&f.dev.shared)
             .rx_pending
             .push_back(b"waiting for a receive buffer".to_vec());
-        place_rx_frames(&f.dev.shared, 12);
+        place_rx_frames(&f.dev.shared, 12, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
         assert!(f.irq.queues.lock().is_empty());
     }
@@ -1605,7 +1733,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let mut stream = Some(producer);
-        process_wakeup(&f.dev.shared, &mut stream, 12);
+        process_wakeup(&f.dev.shared, &mut stream, 12, false);
         assert_eq!(
             f.vqs[1].used_idx(&f.mem),
             1,
@@ -1636,6 +1764,126 @@ mod tests {
     }
 
     #[test]
+    fn merged_receive_spans_buffers_with_one_header() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        let frame = (0..80).collect::<Vec<u8>>();
+        for (index, len) in [24, 20, 64].into_iter().enumerate() {
+            let address = f.data(index as u64);
+            if index == 0 {
+                f.vqs[0].add_chain(&f.mem, &[(address, 5, true), (address + 5, len - 5, true)]);
+            } else {
+                f.vqs[0].add_chain(&f.mem, &[(address, len, true)]);
+            }
+        }
+        lock(&f.dev.shared).rx_pending.push_back(frame.clone());
+        place_rx_frames(&f.dev.shared, 12, true);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 3);
+        assert_eq!(
+            f.mem.read_obj::<u16>(GuestAddress(f.data(0) + 10)).unwrap(),
+            3
+        );
+        let mut received = Vec::new();
+        for (index, expected) in [24, 20, 48].into_iter().enumerate() {
+            assert_eq!(f.vqs[0].used_entry(&f.mem, index as u16).1, expected);
+            let skip = if index == 0 { 12 } else { 0 };
+            let mut bytes = vec![0; (expected - skip) as usize];
+            f.mem
+                .read_slice(
+                    &mut bytes,
+                    GuestAddress(f.data(index as u64) + u64::from(skip)),
+                )
+                .unwrap();
+            received.extend(bytes);
+        }
+        assert_eq!(received, frame);
+    }
+
+    #[test]
+    fn merged_receive_waits_for_refill_without_publishing_a_partial_packet() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        {
+            let mut state = lock(&f.dev.shared);
+            state.snapshot_paused = false;
+            state.queues[0].as_mut().unwrap().set_event_idx(true);
+        }
+        let frame = vec![0x5a; 80];
+        let first = f.data(0);
+        f.mem.write_slice(&[0x33; 24], GuestAddress(first)).unwrap();
+        f.vqs[0].add_chain(&f.mem, &[(first, 24, true)]);
+        lock(&f.dev.shared).rx_pending.push_back(frame);
+        place_rx_frames(&f.dev.shared, 12, true);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
+        let mut unchanged = [0; 24];
+        f.mem
+            .read_slice(&mut unchanged, GuestAddress(first))
+            .unwrap();
+        assert_eq!(unchanged, [0x33; 24]);
+        let event = GuestAddress(f.vqs[0].used + 4 + 8 * u64::from(f.vqs[0].size));
+        assert_eq!(f.mem.read_obj::<u16>(event).unwrap(), 1);
+        let second = f.data(1);
+        f.vqs[0].add_chain(&f.mem, &[(second, 128, true)]);
+        place_rx_frames(&f.dev.shared, 12, true);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 2);
+        assert!(lock(&f.dev.shared).rx_pending.is_empty());
+    }
+
+    #[test]
+    fn merged_receive_publishes_wrapped_ring_and_checks_the_whole_interrupt_batch() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        let shared = f.dev.shared.clone();
+        {
+            let mut state = lock(&shared);
+            state.snapshot_paused = false;
+            let queue = state.queues[0].as_mut().unwrap();
+            queue.set_event_idx(true);
+            queue.set_next_used(u16::MAX);
+        }
+        let event = GuestAddress(f.vqs[0].avail + 4 + 2 * u64::from(f.vqs[0].size));
+        f.mem.write_obj(u16::MAX, event).unwrap();
+        let first = f.data(0);
+        let second = f.data(1);
+        f.vqs[0].add_chain(&f.mem, &[(first, 24, true)]);
+        f.vqs[0].add_chain(&f.mem, &[(second, 128, true)]);
+        lock(&shared).rx_pending.push_back(vec![0x5a; 80]);
+        let before = f.irq.queues.lock().len();
+        place_rx_frames(&shared, 12, true);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 1);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, f.vqs[0].size - 1).1, 24);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, 0).1, 68);
+        assert_eq!(f.irq.queues.lock().len(), before + 1);
+    }
+
+    #[test]
+    fn merged_receive_rejects_short_and_inaccessible_buffers() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        for (index, (address, size)) in [(f.data(0), 8), (MEM_SIZE + 1, 32), (f.data(2), 128)]
+            .into_iter()
+            .enumerate()
+        {
+            f.vqs[0].add_chain(&f.mem, &[(address, size, true)]);
+            if index == 0 {
+                lock(&f.dev.shared).rx_pending.push_back(vec![0x5a; 80]);
+            }
+        }
+        place_rx_frames(&f.dev.shared, 12, true);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 3);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, 0).1, 0);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, 1).1, 0);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, 2).1, 92);
+        assert!(lock(&f.dev.shared).rx_pending.is_empty());
+    }
+
+    #[test]
     fn network_offers_event_index_notifications() {
         let f = Fixture::new();
         assert_ne!(f.dev.features() & (1 << 29), 0);
@@ -1660,7 +1908,7 @@ mod tests {
             let buffer = f.data(index as u64);
             f.vqs[0].add_chain(&f.mem, &[(buffer, 128, true)]);
             lock(&shared).rx_pending.push_back(frame.to_vec());
-            place_rx_frames(&shared, 12);
+            place_rx_frames(&shared, 12, false);
             assert_eq!(f.vqs[0].used_idx(&f.mem), index);
             let mut received = vec![0; frame.len()];
             f.mem
@@ -1668,7 +1916,7 @@ mod tests {
                 .unwrap();
             assert_eq!(received, frame);
             lock(&shared).rx_pending.push_back(frame.to_vec());
-            place_rx_frames(&shared, 12);
+            place_rx_frames(&shared, 12, false);
             let event = GuestAddress(f.vqs[0].used + 4 + 8 * u64::from(f.vqs[0].size));
             assert_eq!(f.mem.read_obj::<u16>(event).unwrap(), index);
             lock(&shared).rx_pending.clear();
@@ -1687,7 +1935,7 @@ mod tests {
         f.vqs[0].add_chain(&f.mem, &[(short, 8, true)]);
         f.vqs[0].add_chain(&f.mem, &[(full, 128, true)]);
         lock(&f.dev.shared).rx_pending.push_back(frame.to_vec());
-        place_rx_frames(&f.dev.shared, 12);
+        place_rx_frames(&f.dev.shared, 12, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 2);
         assert_eq!(f.vqs[0].used_entry(&f.mem, 0).1, 0);
         assert_eq!(f.vqs[0].used_entry(&f.mem, 1).1, 12 + frame.len() as u32);
@@ -1707,7 +1955,7 @@ mod tests {
         f.mem
             .write_obj(f.vqs[0].size + 1, GuestAddress(f.vqs[0].avail + 2))
             .unwrap();
-        place_rx_frames(&f.dev.shared, 12);
+        place_rx_frames(&f.dev.shared, 12, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
         assert_eq!(lock(&f.dev.shared).rx_pending.len(), 1);
     }
