@@ -1,8 +1,8 @@
 # Phase-2 performance gate (HV-D28)
 
-**Verdict: NOT passed. The final 2026-11-02 quiet window meets six of ten core bars;
-G1, G4, G7, and G10 fail.**
-The VM default must remain unchanged.
+**Verdict: NOT passed. The round-5 full-suite window met six of ten core bars.
+The round-6 focused window now passes G4, G7, G9, and G10; other bars were
+not rerun.** The VM default must remain unchanged.
 
 ## Round 6 owner decisions (2026-11-02)
 
@@ -131,7 +131,52 @@ are untouched. Temporary VM directories are removed after each run.
 
 Runtime traits, the control protocol, switch framing, and VLNET v1 snapshot
 layout are unchanged. The test-only SwitchStats adds udp_echoes. The default
-is unchanged; G4 and the focused quiet-window verdict are still pending.
+is unchanged. The focused-window results below supersede the round-5 G4, G7,
+G9, and G10 measurements; other bars retain their last full-suite verdicts.
+
+### Round 6 authorized focused quiet window
+
+The owner opened the window with other project work paused and no project VMs
+running. The focused runner completed all three interleaved repeats on both
+backends in 5m42s. It ran only sequential write (G4), UDP TX (G7), and TCP
+guest-to-guest in both directions (G9/G10). No full suite, build, or CI ran.
+The tested HV binary is the final copy-based N6 build, SHA-256
+`93a214688c3289c59dd25be6893fc414e46b3883ebb0d54f7d538afc2322e818`.
+
+| Bar | Workload | QEMU median | vmlab-hv median | hv/qemu | Required | Verdict |
+|---|---|---:|---:|---:|---:|---|
+| G4 | sequential write (MiB/s) | 4769.18 | 3859.40 | 0.8092 | >= 0.800 | PASS |
+| G7 | UDP TX (Mbit/s) | 29361.04 | 25417.98 | 0.8657 | >= 0.800 | PASS |
+| G9 | TCP A to B (Mbit/s) | 28519.17 | 32916.90 | 1.1542 | >= 0.800 | PASS |
+| G10 | TCP B to A (Mbit/s) | 26809.29 | 33511.79 | 1.2500 | >= 0.800 | PASS |
+
+Samples are retained in `bench/history/x86_64.jsonl`; the runner's complete
+JSON and logs remain under `bench/run/`. Sender and receiver byte counts
+matched for every TCP transfer. The three UDP sends completed without sender
+errors. The host had 32 logical CPUs, performance governor, 24 GiB VM memory
+caps with swap disabled, and the unchanged Ubuntu 26.04.3 template. Each load
+entry is the host's 1-, 5-, and 15-minute load average at run start and end.
+
+| Suite | Repeat | Backend | Sequential write | UDP TX | TCP A to B | TCP B to A | Load start -> end |
+|---|---:|---|---:|---:|---:|---:|---|
+| single | 1 | QEMU | 4769.18 | 40983.75 | - | - | 1.48, 3.38, 7.01 -> 1.72, 3.28, 6.88 |
+| single | 1 | vmlab-hv | 3859.40 | 34597.70 | - | - | 1.72, 3.28, 6.88 -> 1.74, 3.18, 6.77 |
+| single | 2 | vmlab-hv | 3683.14 | 25417.98 | - | - | 1.74, 3.18, 6.77 -> 1.46, 3.03, 6.64 |
+| single | 2 | QEMU | 4731.02 | 29361.04 | - | - | 1.46, 3.03, 6.64 -> 1.41, 2.91, 6.53 |
+| single | 3 | QEMU | 4865.58 | 28812.22 | - | - | 1.41, 2.91, 6.53 -> 1.58, 2.85, 6.43 |
+| single | 3 | vmlab-hv | 3889.63 | 25042.77 | - | - | 1.58, 2.85, 6.43 -> 1.70, 2.80, 6.33 |
+| g2g | 1 | QEMU | - | - | 31138.51 | 26809.29 | 1.70, 2.80, 6.33 -> 2.54, 2.88, 6.23 |
+| g2g | 1 | vmlab-hv | - | - | 31204.22 | 32486.28 | 2.54, 2.88, 6.23 -> 3.31, 3.04, 6.14 |
+| g2g | 2 | vmlab-hv | - | - | 32916.90 | 33511.79 | 3.31, 3.04, 6.14 -> 3.33, 3.07, 6.04 |
+| g2g | 2 | QEMU | - | - | 28519.17 | 27443.33 | 3.33, 3.07, 6.04 -> 3.46, 3.11, 5.94 |
+| g2g | 3 | QEMU | - | - | 26436.00 | 26630.34 | 3.46, 3.11, 5.94 -> 2.95, 3.03, 5.79 |
+| g2g | 3 | vmlab-hv | - | - | 33636.92 | 35103.53 | 2.95, 3.03, 5.79 -> 3.08, 3.06, 5.70 |
+
+The 15-minute load average declined from 7.01 to 5.70 over the window.
+Each backend's result remains the median of its three interleaved samples;
+no repeat was discarded. The complete result JSON also records template and
+binary hashes, backend versions, workload counts, and per-second VM/load
+monitoring.
 
 ## Round 5 authorized final quiet bench window (2026-11-02)
 
