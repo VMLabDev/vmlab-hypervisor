@@ -24,13 +24,21 @@ fn renderer_initializes_on_selected_node() {
         eprintln!("SKIP: set VMLAB_HV_TEST_RENDER_NODE to exercise the host renderer");
         return;
     };
+    let venus = std::env::var("VMLAB_HV_TEST_GPU_MODE").is_ok_and(|mode| mode == "venus");
+    let mode = if venus {
+        GpuMode::Venus
+    } else {
+        GpuMode::Virgl
+    };
     let gpu = Gpu::new("probe");
-    gpu.enable_3d(GpuMode::Virgl, PathBuf::from(node), Arc::new(Mapper))
+    gpu.enable_3d(mode, PathBuf::from(node), Arc::new(Mapper))
         .unwrap();
-    assert_ne!(gpu.features() & 1, 0);
+    let accelerated = 1 | (1 << 3) | (1 << 4);
+    assert_eq!(gpu.features() & accelerated, accelerated);
     let mut config = [0; 16];
     gpu.read_config(0, &mut config);
-    assert!(u32::from_le_bytes(config[12..16].try_into().unwrap()) >= 2);
+    let capsets = u32::from_le_bytes(config[12..16].try_into().unwrap());
+    assert!(capsets >= if venus { 3 } else { 2 });
     assert!(
         gpu.save_state()
             .unwrap_err()
