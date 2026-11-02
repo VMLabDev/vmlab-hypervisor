@@ -7,7 +7,8 @@
 //! end of the socket).
 //!
 //! One receiveq and one transmitq, no control queue: the offered features are
-//! `VIRTIO_NET_F_MAC`, `VIRTIO_NET_F_STATUS`, `VIRTIO_NET_F_MRG_RXBUF` and
+//! `VIRTIO_NET_F_CSUM`, `VIRTIO_NET_F_GUEST_CSUM`, `VIRTIO_NET_F_MAC`,
+//! `VIRTIO_NET_F_STATUS`, `VIRTIO_NET_F_MRG_RXBUF` and
 //! `VIRTIO_NET_F_MTU` (only when
 //! an MTU other than 1500 is configured, matching what vmlab passes to QEMU).
 //! Indirect descriptor tables let one ring entry describe a scatter/gather packet.
@@ -35,14 +36,27 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use virtio_queue::{Queue, QueueOwnedT, QueueState, QueueT};
-use vm_memory::{Address, Bytes, GuestAddress};
+use vm_memory::bitmap::Bitmap;
+use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, VolatileSlice};
 
 use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
+
+mod buffer;
+mod checksum;
+
+use buffer::ReceiveWriter;
+use checksum::CopyChecksum;
 
 /// Virtio device id 1, the network device.
 /// Size of `struct virtio_net_config` up to and including `mtu`.
 const CONFIG_LEN: usize = 12;
 const DEVICE_ID: u32 = 1;
+/// The device completes partial checksums before sending bare Ethernet frames.
+const F_CSUM: u64 = 1;
+/// The device validates receive checksums before setting DATA_VALID.
+const F_GUEST_CSUM: u64 = 1 << 1;
+const HDR_F_NEEDS_CSUM: u8 = 1;
+const HDR_F_DATA_VALID: u8 = 2;
 /// `VIRTIO_NET_F_MTU` (feature bit 3).
 const F_MTU: u64 = 1 << 3;
 /// `VIRTIO_NET_F_MAC` (feature bit 5).
@@ -72,7 +86,7 @@ const MAX_FRAME: usize = 65536 + 14;
 /// Bound host-side output while the switch is backpressured.
 const MAX_TX_STAGE: usize = 1024 * 1024;
 /// Largest read the worker takes from the switch socket in one go.
-const READ_CHUNK: usize = 128 * 1024;
+const READ_CHUNK: usize = 512 * 1024;
 /// Default reconnect interval after the switch socket closes.
 const RETRY: Duration = Duration::from_secs(1);
 /// The MTU at which `VIRTIO_NET_F_MTU` is not offered, matching vmlab's
@@ -302,17 +316,39 @@ fn run(
             }
             // A wakeup is also the device saying shared state changed
             // (activation, restore): give pending work another chance.
-            process_wakeup(&shared, &mut stream, hdr, features & F_MRG_RXBUF != 0);
+            process_wakeup(
+                &shared,
+                &mut stream,
+                hdr,
+                features & F_MRG_RXBUF != 0,
+                features & F_CSUM != 0,
+                features & F_GUEST_CSUM != 0,
+            );
         }
 
         if stream.is_some() {
             let revents = polls[1].revents;
             let dead = revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0;
             if revents & libc::POLLIN != 0 {
-                match read_frames(&shared, stream.as_mut().unwrap()) {
+                let features = negotiated.load(Ordering::Acquire);
+                let socket = stream.as_mut().unwrap();
+                let received = read_guest_frame(
+                    &shared,
+                    socket,
+                    hdr_len(features),
+                    features & F_MRG_RXBUF != 0,
+                    features & F_GUEST_CSUM != 0,
+                )
+                .unwrap_or_else(|| read_frames(&shared, socket));
+                match received {
                     Ok(()) => {
                         let features = negotiated.load(Ordering::Acquire);
-                        place_rx_frames(&shared, hdr_len(features), features & F_MRG_RXBUF != 0);
+                        place_rx_frames(
+                            &shared,
+                            hdr_len(features),
+                            features & F_MRG_RXBUF != 0,
+                            features & F_GUEST_CSUM != 0,
+                        );
                     }
                     Err(()) => {
                         drop_link(&mut stream, &shared);
@@ -328,10 +364,12 @@ fn run(
                 continue;
             }
             if revents & libc::POLLOUT != 0 {
+                let features = negotiated.load(Ordering::Acquire);
                 process_tx(
                     &shared,
                     &mut stream,
-                    hdr_len(negotiated.load(Ordering::Acquire)),
+                    hdr_len(features),
+                    features & F_CSUM != 0,
                 );
             }
             if dead {
@@ -380,15 +418,17 @@ fn process_wakeup(
     stream: &mut Option<UnixStream>,
     hdr: usize,
     mergeable: bool,
+    csum: bool,
+    guest_csum: bool,
 ) {
-    place_rx_frames(shared, hdr, mergeable);
+    place_rx_frames(shared, hdr, mergeable, guest_csum);
     if let Some(socket) = stream.as_mut()
         && flush_tx(shared, socket).is_err()
     {
         drop_link(stream, shared);
     }
     // Draining staging can remove POLLOUT while guest kicks are suppressed.
-    process_tx(shared, stream, hdr);
+    process_tx(shared, stream, hdr, csum);
 }
 
 /// Update the link bit; true when it changed.
@@ -436,6 +476,191 @@ fn drop_link(stream: &mut Option<UnixStream>, shared: &Arc<Mutex<Shared>>) {
 /// always finishes first, and cannot coexist with a queued complete frame).
 fn rx_may_read(shared: &Arc<Mutex<Shared>>) -> bool {
     lock(shared).rx_pending.is_empty()
+}
+
+/// Read one complete packet directly into available guest buffers. A partial
+/// packet is copied into the existing decoder state without publishing DMA.
+/// Return None when the buffered decoder must handle framing or backpressure.
+fn read_guest_frame(
+    shared: &Arc<Mutex<Shared>>,
+    stream: &mut UnixStream,
+    hdr: usize,
+    mergeable: bool,
+    guest_csum: bool,
+) -> Option<Result<(), ()>> {
+    let mut guard = lock(shared);
+    let sh = &mut *guard;
+    if sh.snapshot_paused || !sh.rx_pending.is_empty() || !matches!(sh.rx, RxRead::Idle) {
+        return None;
+    }
+    let mem = sh.mem.as_ref()?;
+    let q = sh.queues.get_mut(usize::from(RXQ))?.as_mut()?;
+    let mut prefix = [0u8; 4];
+    let received = loop {
+        match stream.read(&mut prefix) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => break result,
+        }
+    };
+    match received {
+        Ok(4) => {}
+        Ok(0) => return Some(Err(())),
+        Ok(got) => {
+            sh.rx = RxRead::Prefix { buf: prefix, got };
+            return Some(Ok(()));
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Some(Ok(())),
+        Err(_) => return Some(Err(())),
+    }
+    let len = u32::from_be_bytes(prefix) as usize;
+    if len > MAX_FRAME {
+        return Some(Err(()));
+    }
+    if len == 0 {
+        sh.rx_pending.push_back(Vec::new());
+        return Some(Ok(()));
+    }
+    let start = q.next_avail();
+    let old_used = q.next_used();
+    let mut header = Vec::new();
+    let mut payload = Vec::new();
+    let mut entries = Vec::new();
+    let mut remaining = len;
+    let prepared = (|| {
+        while remaining != 0 {
+            let chain = q.iter(mem).ok()?.next()?;
+            let head = chain.head_index();
+            let mut capacity = 0usize;
+            let mut skip = if entries.is_empty() { hdr } else { 0 };
+            let mut written = skip;
+            for descriptor in chain.writable() {
+                let slice = mem
+                    .get_slice(descriptor.addr(), descriptor.len() as usize)
+                    .ok()?;
+                capacity = capacity.checked_add(slice.len())?;
+                let offset = skip.min(slice.len());
+                skip -= offset;
+                if offset != 0 {
+                    header.push(slice.subslice(0, offset).ok()?);
+                }
+                let count = (slice.len() - offset).min(remaining);
+                if count != 0 {
+                    payload.push(slice.subslice(offset, count).ok()?);
+                    remaining -= count;
+                    written += count;
+                }
+            }
+            if capacity < hdr || skip != 0 || payload.len() > 1024 {
+                return None;
+            }
+            entries.push((head, written as u32));
+            if remaining != 0 && (!mergeable || entries.len() >= usize::from(q.size())) {
+                return None;
+            }
+        }
+        Some(())
+    })();
+    if prepared.is_none() {
+        q.set_next_avail(start);
+        sh.rx = RxRead::Body {
+            buf: vec![0; len],
+            got: 0,
+        };
+        return Some(Ok(()));
+    }
+    let _ = q.disable_notification(mem);
+    let count = {
+        let guards: Vec<_> = payload.iter().map(VolatileSlice::ptr_guard_mut).collect();
+        let vectors: Vec<_> = guards
+            .iter()
+            .zip(&payload)
+            .map(|(guard, slice)| libc::iovec {
+                iov_base: guard.as_ptr().cast(),
+                iov_len: slice.len(),
+            })
+            .collect();
+        for slice in &payload {
+            slice.bitmap().mark_dirty(0, slice.len());
+        }
+        loop {
+            // SAFETY: validated writable mappings and their guards remain live
+            // until readv completes. No Rust reference aliases the guest bytes.
+            let read =
+                unsafe { libc::readv(stream.as_raw_fd(), vectors.as_ptr(), vectors.len() as i32) };
+            if read >= 0 {
+                break Ok(read as usize);
+            }
+            match io::Error::last_os_error().kind() {
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock => break Ok(0),
+                _ => break Err(()),
+            }
+        }
+    };
+    let Ok(count) = count else {
+        q.set_next_avail(start);
+        return Some(Err(()));
+    };
+    if count != len {
+        let mut bytes = vec![0; len];
+        let mut copied = 0;
+        for slice in &payload {
+            let take = slice.len().min(count - copied);
+            slice.copy_to(&mut bytes[copied..copied + take]);
+            copied += take;
+            if copied == count {
+                break;
+            }
+        }
+        sh.rx = RxRead::Body {
+            buf: bytes,
+            got: count,
+        };
+        q.set_next_avail(start);
+        return Some(Ok(()));
+    }
+    let mut bytes = [0; 12];
+    if guest_csum {
+        let mut header = [0; 128];
+        let mut copied = 0;
+        for slice in &payload {
+            let count = slice.len().min(header.len() - copied);
+            slice.copy_to(&mut header[copied..copied + count]);
+            copied += count;
+            if copied == header.len() {
+                break;
+            }
+        }
+        if let Some(mut checksum) = CopyChecksum::receive_header(&header[..copied], len) {
+            for slice in &payload {
+                let guard = slice.ptr_guard();
+                // SAFETY: readv initialized this entire guarded guest span.
+                unsafe { checksum.update_guest(guard.as_ptr(), slice.len()) };
+            }
+            if checksum.valid() {
+                bytes[0] = HDR_F_DATA_VALID;
+            }
+        }
+    }
+    if hdr == 12 {
+        bytes[10..].copy_from_slice(&(entries.len() as u16).to_le_bytes());
+    }
+    let mut copied = 0;
+    for slice in header {
+        slice.copy_from(&bytes[copied..copied + slice.len()]);
+        copied += slice.len();
+    }
+    if publish_receive(mem, q, &entries).is_err() {
+        return Some(Err(()));
+    }
+    let irq = needs_receive_interrupt(q, mem, old_used)
+        .then(|| sh.interrupt.clone())
+        .flatten();
+    drop(guard);
+    if let Some(irq) = irq {
+        irq.notify_queue(RXQ);
+    }
+    Some(Ok(()))
 }
 
 /// Read length-prefixed frames off the switch socket into `rx_pending`.
@@ -537,7 +762,12 @@ fn publish_receive(mem: &GuestMemory, q: &mut Queue, entries: &[(u16, u32)]) -> 
     q.add_used(mem, head, len).map_err(|_| ())
 }
 
-fn receive_merged(mem: &GuestMemory, q: &mut Queue, frame: &[u8]) -> Result<Receive, ()> {
+fn receive_merged(
+    mem: &GuestMemory,
+    q: &mut Queue,
+    frame: &[u8],
+    guest_csum: bool,
+) -> Result<Receive, ()> {
     let start = q.next_avail();
     let need = 12 + frame.len();
     let mut buffers = Vec::new();
@@ -551,7 +781,7 @@ fn receive_merged(mem: &GuestMemory, q: &mut Queue, frame: &[u8]) -> Result<Rece
             return Ok(Receive::Wait(observed));
         };
         let head = chain.head_index();
-        let writer = chain.writer(mem);
+        let writer = ReceiveWriter::new(mem, chain);
         entries.push((head, 0));
         let Ok(writer) = writer else {
             publish_receive(mem, q, &entries)?;
@@ -572,6 +802,7 @@ fn receive_merged(mem: &GuestMemory, q: &mut Queue, frame: &[u8]) -> Result<Rece
     }
     let mut header = [0; 12];
     header[10..].copy_from_slice(&(buffers.len() as u16).to_le_bytes());
+    let mut checksum = guest_csum.then(|| CopyChecksum::receive(frame)).flatten();
     let mut remaining = frame;
     for (index, (writer, entry)) in buffers.iter_mut().zip(&mut entries).enumerate() {
         if index == 0 {
@@ -579,9 +810,14 @@ fn receive_merged(mem: &GuestMemory, q: &mut Queue, frame: &[u8]) -> Result<Rece
             entry.1 = 12;
         }
         let len = writer.available_bytes().min(remaining.len());
-        writer.write_all(&remaining[..len]).map_err(|_| ())?;
+        writer
+            .write_frame(&remaining[..len], checksum.as_mut())
+            .map_err(|_| ())?;
         entry.1 += len as u32;
         remaining = &remaining[len..];
+    }
+    if checksum.as_ref().is_some_and(CopyChecksum::valid) {
+        buffers[0].set_flags(HDR_F_DATA_VALID).map_err(|_| ())?;
     }
     publish_receive(mem, q, &entries)?;
     Ok(Receive::Delivered)
@@ -604,7 +840,7 @@ fn needs_receive_interrupt(q: &mut Queue, mem: &GuestMemory, old_used: u16) -> b
 }
 
 /// Move pending frames into free receiveq buffers, header first.
-fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize, mergeable: bool) {
+fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize, mergeable: bool, guest_csum: bool) {
     let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
     {
         let mut guard = lock(shared);
@@ -634,7 +870,7 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize, mergeable: bool)
             let mut refill_at = None;
             while let Some(frame) = sh.rx_pending.front() {
                 if mergeable {
-                    match receive_merged(mem, q, frame) {
+                    match receive_merged(mem, q, frame, guest_csum) {
                         Ok(Receive::Delivered) => {
                             used_any = true;
                             sh.rx_pending.pop_front();
@@ -662,10 +898,13 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize, mergeable: bool)
                 let head = chain.head_index();
                 let need = hdr.len() + frame.len();
                 let mut written = 0;
-                if let Ok(mut writer) = chain.writer(mem)
+                let mut checksum = guest_csum.then(|| CopyChecksum::receive(frame)).flatten();
+                if let Ok(mut writer) = ReceiveWriter::new(mem, chain)
                     && writer.available_bytes() >= need
                     && writer.write_all(&hdr).is_ok()
-                    && writer.write_all(frame).is_ok()
+                    && writer.write_frame(frame, checksum.as_mut()).is_ok()
+                    && (!checksum.as_ref().is_some_and(CopyChecksum::valid)
+                        || writer.set_flags(HDR_F_DATA_VALID).is_ok())
                 {
                     written = need as u32;
                 }
@@ -703,9 +942,136 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize, mergeable: bool)
     }
 }
 
-/// Consume transmitq buffers: strip the header, frame the packet, and send it
-/// to the switch — or drop it while the link is down.
-fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_len: usize) {
+/// One consumed transmit chain and its validated payload spans.
+struct TxPacket<'a> {
+    head: u16,
+    consumed: u32,
+    prefix: Option<[u8; 4]>,
+    slices: Vec<VolatileSlice<'a>>,
+    owned: Option<Vec<u8>>,
+}
+
+fn complete_tx_checksum(
+    packet: &mut TxPacket<'_>,
+    header: &[u8; 12],
+    len: usize,
+    csum: bool,
+) -> bool {
+    if header[1] != 0 {
+        return false;
+    }
+    if header[0] & HDR_F_NEEDS_CSUM == 0 {
+        return true;
+    }
+    if !csum {
+        return false;
+    }
+    let start = usize::from(u16::from_le_bytes([header[6], header[7]]));
+    let offset = usize::from(u16::from_le_bytes([header[8], header[9]]));
+    let Some(mut checksum) = CopyChecksum::transmit(start, offset, len) else {
+        return false;
+    };
+    let mut bytes = vec![0; len];
+    let mut copied = 0;
+    for slice in &packet.slices {
+        let guard = slice.ptr_guard();
+        let Some(target) = bytes.get_mut(copied..copied + slice.len()) else {
+            return false;
+        };
+        // SAFETY: the guest guard retains slice.len() readable bytes; the
+        // disjoint host vector has the same validated total payload length.
+        unsafe { checksum.copy(guard.as_ptr(), target.as_mut_ptr(), target.len()) };
+        copied += slice.len();
+    }
+    if copied != len {
+        return false;
+    }
+    let field = start + offset;
+    bytes[field..field + 2].copy_from_slice(&checksum.completed().to_be_bytes());
+    packet.owned = Some(bytes);
+    packet.slices.clear();
+    true
+}
+
+/// Preserve the unsent suffix before publishing any used descriptor.
+fn send_tx_batch(stream: &UnixStream, packets: &[TxPacket<'_>], output: &mut Vec<u8>) {
+    let guards: Vec<_> = packets
+        .iter()
+        .flat_map(|packet| packet.slices.iter())
+        .map(VolatileSlice::ptr_guard)
+        .collect();
+    let mut vectors = Vec::new();
+    let mut next = 0;
+    for packet in packets {
+        if let Some(prefix) = &packet.prefix {
+            vectors.push(libc::iovec {
+                iov_base: prefix.as_ptr().cast_mut().cast(),
+                iov_len: 4,
+            });
+            if let Some(bytes) = &packet.owned {
+                vectors.push(libc::iovec {
+                    iov_base: bytes.as_ptr().cast_mut().cast(),
+                    iov_len: bytes.len(),
+                });
+            }
+            for slice in &packet.slices {
+                vectors.push(libc::iovec {
+                    iov_base: guards[next].as_ptr().cast_mut().cast(),
+                    iov_len: slice.len(),
+                });
+                next += 1;
+            }
+        }
+    }
+    let mut sent = 0;
+    if output.is_empty() && !vectors.is_empty() && vectors.len() <= 1024 {
+        loop {
+            // SAFETY: prefixes and validated guest mappings remain live and
+            // guarded until writev completes. No Rust references alias DMA.
+            let result =
+                unsafe { libc::writev(stream.as_raw_fd(), vectors.as_ptr(), vectors.len() as i32) };
+            if result >= 0 {
+                sent = result as usize;
+                break;
+            }
+            if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+        }
+    }
+    for packet in packets {
+        let Some(prefix) = &packet.prefix else {
+            continue;
+        };
+        let skip = sent.min(4);
+        sent -= skip;
+        output.extend_from_slice(&prefix[skip..]);
+        if let Some(bytes) = &packet.owned {
+            let skip = sent.min(bytes.len());
+            sent -= skip;
+            output.extend_from_slice(&bytes[skip..]);
+        }
+        for slice in &packet.slices {
+            let skip = sent.min(slice.len());
+            sent -= skip;
+            if skip != slice.len() {
+                let slice = slice.offset(skip).unwrap();
+                let start = output.len();
+                output.resize(start + slice.len(), 0);
+                slice.copy_to(&mut output[start..]);
+            }
+        }
+    }
+}
+
+/// Drain transmit descriptors into bounded vectored batches, or drop them
+/// while the link is down.
+fn process_tx(
+    shared: &Arc<Mutex<Shared>>,
+    stream: &mut Option<UnixStream>,
+    hdr_len: usize,
+    csum: bool,
+) {
     loop {
         let mut blocked = false;
         let more;
@@ -726,6 +1092,10 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             let _ = q.disable_notification(mem);
             let mut used_any = false;
             let mut invalid = false;
+            let mut packets = Vec::new();
+            let mut bytes = sh.tx_out.len();
+            let mut vectors = 0;
+            let mut full_batch = false;
             loop {
                 let chain = match q.iter(mem) {
                     Ok(mut available) => available.next(),
@@ -735,33 +1105,69 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
                     }
                 };
                 let Some(chain) = chain else { break };
-                if stream.is_some() && sh.tx_out.len() >= MAX_TX_STAGE {
+                if stream.is_some() && bytes >= MAX_TX_STAGE {
                     q.go_to_previous_position();
                     blocked = true;
                     break;
                 }
                 let head = chain.head_index();
-                let mut consumed = 0;
-                if let Ok(mut reader) = chain.reader(mem) {
-                    let mut hdr = [0u8; 12];
-                    let header_len = hdr_len.min(reader.available_bytes());
-                    if reader.read_exact(&mut hdr[..header_len]).is_ok() {
-                        if reader.available_bytes() > MAX_FRAME || stream.is_none() {
-                            consumed = (header_len + reader.available_bytes()) as u32;
-                        } else {
-                            let len = reader.available_bytes();
-                            let start = sh.tx_out.len();
-                            sh.tx_out.extend_from_slice(&(len as u32).to_be_bytes());
-                            sh.tx_out.resize(start + 4 + len, 0);
-                            if reader.read_exact(&mut sh.tx_out[start + 4..]).is_ok() {
-                                consumed = (header_len + len) as u32;
-                            } else {
-                                sh.tx_out.truncate(start);
-                            }
-                        }
+                let mut packet = TxPacket {
+                    head,
+                    consumed: 0,
+                    prefix: None,
+                    slices: Vec::new(),
+                    owned: None,
+                };
+                let mut skip = hdr_len;
+                let mut header = [0; 12];
+                let mut total = Some(0usize);
+                for descriptor in chain.readable() {
+                    let Ok(slice) = mem.get_slice(descriptor.addr(), descriptor.len() as usize)
+                    else {
+                        total = None;
+                        break;
+                    };
+                    total = total.and_then(|bytes| bytes.checked_add(slice.len()));
+                    let offset = skip.min(slice.len());
+                    slice
+                        .subslice(0, offset)
+                        .unwrap()
+                        .copy_to(&mut header[hdr_len - skip..hdr_len - skip + offset]);
+                    skip -= offset;
+                    if offset < slice.len() {
+                        packet.slices.push(slice.offset(offset).unwrap());
                     }
                 }
-                if q.add_used(mem, head, consumed).is_err() {
+                if let Some(total) = total {
+                    packet.consumed = total as u32;
+                    let len = total.saturating_sub(hdr_len);
+                    if stream.is_some()
+                        && len <= MAX_FRAME
+                        && skip == 0
+                        && complete_tx_checksum(&mut packet, &header, len, csum)
+                    {
+                        packet.prefix = Some((len as u32).to_be_bytes());
+                        let count = 1 + packet.slices.len() + usize::from(packet.owned.is_some());
+                        if !packets.is_empty() && vectors + count > 1024 {
+                            q.go_to_previous_position();
+                            full_batch = true;
+                            break;
+                        }
+                        vectors += count;
+                        bytes += 4 + len;
+                    }
+                }
+                if packet.prefix.is_none() {
+                    packet.slices.clear();
+                    packet.owned = None;
+                }
+                packets.push(packet);
+            }
+            if let Some(socket) = stream.as_ref() {
+                send_tx_batch(socket, &packets, &mut sh.tx_out);
+            }
+            for packet in packets {
+                if q.add_used(mem, packet.head, packet.consumed).is_err() {
                     invalid = true;
                     break;
                 }
@@ -770,7 +1176,8 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             // POLLOUT resumes a backpressured queue. Otherwise rearm kicks
             // and check for buffers published before the rearm became visible.
             blocked |= stream.is_some() && sh.tx_out.len() >= MAX_TX_STAGE;
-            more = !blocked && q.enable_notification(mem).unwrap_or(false) && !invalid;
+            more = !invalid
+                && (full_batch || (!blocked && q.enable_notification(mem).unwrap_or(false)));
             if used_any && needs_interrupt(q, mem) {
                 irq = sh.interrupt.clone().map(|irq| (irq, TXQ));
             }
@@ -798,8 +1205,7 @@ fn flush_tx(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(), 
         if sent == sh.tx_out.len() {
             break Ok(());
         }
-        let end = sh.tx_out.len().min(sent + READ_CHUNK);
-        match stream.write(&sh.tx_out[sent..end]) {
+        match stream.write(&sh.tx_out[sent..]) {
             Ok(0) => break Err(()),
             Ok(n) => sent += n,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => break Ok(()),
@@ -831,8 +1237,14 @@ impl VirtioDevice for Net {
     }
 
     fn features(&self) -> u64 {
-        let mut features =
-            F_MAC | F_STATUS | F_MRG_RXBUF | F_INDIRECT_DESC | F_EVENT_IDX | F_VERSION_1;
+        let mut features = F_CSUM
+            | F_GUEST_CSUM
+            | F_MAC
+            | F_STATUS
+            | F_MRG_RXBUF
+            | F_INDIRECT_DESC
+            | F_EVENT_IDX
+            | F_VERSION_1;
         if self.config.mtu != DEFAULT_MTU {
             features |= F_MTU;
         }
@@ -1164,6 +1576,258 @@ mod tests {
     use std::time::Instant;
     use vm_memory::{Bytes, GuestAddress};
 
+    fn wire_sum(bytes: &[u8]) -> u16 {
+        let mut sum: u32 = bytes
+            .chunks(2)
+            .map(|pair| u32::from(u16::from_be_bytes([pair[0], *pair.get(1).unwrap_or(&0)])))
+            .sum();
+        while sum > 0xffff {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        sum as u16
+    }
+
+    fn checksum_frame(partial: bool) -> Vec<u8> {
+        let mut frame = vec![0; 14 + 20 + 8 + 57];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame[14] = 0x45;
+        frame[16..18].copy_from_slice(&85u16.to_be_bytes());
+        frame[22] = 64;
+        frame[23] = 17;
+        frame[26..34].copy_from_slice(&[192, 0, 2, 1, 198, 51, 100, 2]);
+        frame[34..38].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        frame[38..40].copy_from_slice(&65u16.to_be_bytes());
+        for (n, byte) in frame[42..].iter_mut().enumerate() {
+            *byte = n as u8;
+        }
+        let checksum = !wire_sum(&frame[14..34]);
+        frame[24..26].copy_from_slice(&checksum.to_be_bytes());
+        let mut pseudo = frame[26..34].to_vec();
+        pseudo.extend_from_slice(&[0, 17, 0, 65]);
+        let checksum = if partial {
+            wire_sum(&pseudo)
+        } else {
+            pseudo.extend_from_slice(&frame[34..]);
+            !wire_sum(&pseudo)
+        };
+        frame[40..42].copy_from_slice(&checksum.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn transmit_completes_partial_checksum_without_changing_guest_memory() {
+        let frame = checksum_frame(true);
+        let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 4096)]).unwrap();
+        mem.write_slice(&frame, GuestAddress(0)).unwrap();
+        let mut packet = TxPacket {
+            head: 0,
+            consumed: (12 + frame.len()) as u32,
+            prefix: Some((frame.len() as u32).to_be_bytes()),
+            owned: None,
+            slices: vec![
+                mem.get_slice(GuestAddress(0), 35).unwrap(),
+                mem.get_slice(GuestAddress(35), frame.len() - 35).unwrap(),
+            ],
+        };
+        let mut header = [0; 12];
+        header[0] = HDR_F_NEEDS_CSUM;
+        header[6..8].copy_from_slice(&34u16.to_le_bytes());
+        header[8..10].copy_from_slice(&6u16.to_le_bytes());
+        assert!(complete_tx_checksum(
+            &mut packet,
+            &header,
+            frame.len(),
+            true
+        ));
+        assert_eq!(packet.owned.as_ref().unwrap(), &checksum_frame(false));
+        let mut original = vec![0; frame.len()];
+        mem.read_slice(&mut original, GuestAddress(0)).unwrap();
+        assert_eq!(original, frame);
+        let (producer, mut receiver) = UnixStream::pair().unwrap();
+        producer.set_nonblocking(true).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut output = Vec::new();
+        send_tx_batch(&producer, &[packet], &mut output);
+        assert!(output.is_empty());
+        let mut wire = vec![0; frame.len() + 4];
+        receiver.read_exact(&mut wire).unwrap();
+        assert_eq!(&wire[..4], &(frame.len() as u32).to_be_bytes());
+        assert_eq!(&wire[4..], &checksum_frame(false));
+    }
+
+    #[test]
+    fn owned_checksum_payload_survives_short_writes() {
+        for field in [0usize, 1, 40, 41, 8191, MAX_FRAME - 2] {
+            let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 128 * 1024)]).unwrap();
+            let bytes: Vec<_> = (0..MAX_FRAME).map(|n| (n % 251) as u8).collect();
+            mem.write_slice(&bytes, GuestAddress(0)).unwrap();
+            let mut owned = bytes.clone();
+            owned[field..field + 2].copy_from_slice(&[0x12, 0x34]);
+            let packet = TxPacket {
+                head: 0,
+                consumed: (12 + MAX_FRAME) as u32,
+                prefix: Some((MAX_FRAME as u32).to_be_bytes()),
+                owned: Some(owned),
+                slices: Vec::new(),
+            };
+            let (producer, mut receiver) = UnixStream::pair().unwrap();
+            producer.set_nonblocking(true).unwrap();
+            receiver
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let size: libc::c_int = 4096;
+            // SAFETY: producer and the initialized integer option stay live.
+            let result = unsafe {
+                libc::setsockopt(
+                    producer.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    std::ptr::from_ref(&size).cast(),
+                    std::mem::size_of_val(&size) as libc::socklen_t,
+                )
+            };
+            assert_eq!(result, 0);
+            let mut output = Vec::new();
+            send_tx_batch(&producer, &[packet], &mut output);
+            assert!(!output.is_empty());
+            let mut expected = (MAX_FRAME as u32).to_be_bytes().to_vec();
+            expected.extend_from_slice(&bytes);
+            expected[4 + field..4 + field + 2].copy_from_slice(&[0x12, 0x34]);
+            let sent = expected.len() - output.len();
+            mem.write_slice(&vec![0; MAX_FRAME], GuestAddress(0))
+                .unwrap();
+            let mut actual = vec![0; sent];
+            receiver.read_exact(&mut actual).unwrap();
+            actual.extend_from_slice(&output);
+            assert_eq!(actual, expected, "checksum field {field}");
+        }
+    }
+
+    #[test]
+    fn invalid_checksum_metadata_and_unoffered_segmentation_do_not_reach_the_socket() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        let (producer, mut receiver) = UnixStream::pair().unwrap();
+        producer.set_nonblocking(true).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let mut stream = Some(producer);
+        for (index, csum, gso, start, offset) in [
+            (0, true, 0, 99u16, 0u16),
+            (1, true, 0, 34, u16::MAX),
+            (2, false, 0, 34, 6),
+            (3, true, 1, 34, 6),
+        ] {
+            f.queue_tx(&checksum_frame(true));
+            let mut header = [0; 12];
+            header[0] = HDR_F_NEEDS_CSUM;
+            header[1] = gso;
+            header[6..8].copy_from_slice(&start.to_le_bytes());
+            header[8..10].copy_from_slice(&offset.to_le_bytes());
+            f.mem.write_slice(&header, GuestAddress(f.data(0))).unwrap();
+            process_tx(&f.dev.shared, &mut stream, 12, csum);
+            assert_eq!(f.vqs[1].used_idx(&f.mem), index + 1);
+            assert!(lock(&f.dev.shared).tx_out.is_empty());
+            assert_eq!(
+                receiver.read(&mut [0; 128]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+    }
+
+    #[test]
+    fn receive_marks_only_valid_negotiated_checksums_before_publication() {
+        for mergeable in [false, true] {
+            for guest_csum in [false, true] {
+                for corrupt in [false, true] {
+                    let mut f = Fixture::new();
+                    let _switch = f.take_switch_side();
+                    f.dev.quiesce();
+                    lock(&f.dev.shared).snapshot_paused = false;
+                    let mut frame = checksum_frame(false);
+                    if corrupt {
+                        *frame.last_mut().unwrap() ^= 1;
+                    }
+                    let address = f.data(2);
+                    let additional = f.data(3);
+                    f.vqs[0].add_chain(
+                        &f.mem,
+                        &[
+                            (address, 5, true),
+                            (address + 5, if mergeable { 20 } else { 251 }, true),
+                        ],
+                    );
+                    if mergeable {
+                        f.vqs[0].add_chain(&f.mem, &[(additional, 256, true)]);
+                    }
+                    lock(&f.dev.shared).rx_pending.push_back(frame.clone());
+                    place_rx_frames(&f.dev.shared, 12, mergeable, guest_csum);
+                    assert_eq!(f.vqs[0].used_idx(&f.mem), if mergeable { 2 } else { 1 });
+                    let flags = f.mem.read_obj::<u8>(GuestAddress(address)).unwrap();
+                    assert_eq!(
+                        flags,
+                        if guest_csum && !corrupt {
+                            HDR_F_DATA_VALID
+                        } else {
+                            0
+                        }
+                    );
+                    let mut actual = vec![0; frame.len()];
+                    let first = if mergeable { 13 } else { frame.len() };
+                    f.mem
+                        .read_slice(&mut actual[..first], GuestAddress(address + 12))
+                        .unwrap();
+                    if mergeable {
+                        f.mem
+                            .read_slice(&mut actual[first..], GuestAddress(f.data(3)))
+                            .unwrap();
+                    }
+                    assert_eq!(actual, frame);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_receive_checksums_valid_and_corrupt_packets_before_publishing() {
+        for guest_csum in [false, true] {
+            for corrupt in [false, true] {
+                let mut f = Fixture::new();
+                let _switch = f.take_switch_side();
+                f.dev.quiesce();
+                lock(&f.dev.shared).snapshot_paused = false;
+                let address = f.data(2);
+                f.vqs[0].add_chain(&f.mem, &[(address, 256, true)]);
+                let mut frame = checksum_frame(false);
+                if corrupt {
+                    *frame.last_mut().unwrap() ^= 1;
+                }
+                let (mut producer, mut receiver) = UnixStream::pair().unwrap();
+                receiver.set_nonblocking(true).unwrap();
+                producer
+                    .write_all(&(frame.len() as u32).to_be_bytes())
+                    .unwrap();
+                producer.write_all(&frame).unwrap();
+                assert_eq!(
+                    read_guest_frame(&f.dev.shared, &mut receiver, 12, true, guest_csum),
+                    Some(Ok(()))
+                );
+                assert_eq!(f.vqs[0].used_idx(&f.mem), 1);
+                assert_eq!(
+                    f.mem.read_obj::<u8>(GuestAddress(address)).unwrap(),
+                    if guest_csum && !corrupt {
+                        HDR_F_DATA_VALID
+                    } else {
+                        0
+                    }
+                );
+            }
+        }
+    }
+
     #[test]
     fn coalesces_worker_wakes_and_rearms_after_drain() {
         let (sender, mut receiver) = UnixStream::pair().unwrap();
@@ -1182,6 +1846,136 @@ mod tests {
         pending.store(false, Ordering::Release);
         notify_worker(&sender, &pending);
         assert_eq!(receiver.read(&mut bytes).unwrap(), 1);
+    }
+    #[test]
+    fn direct_receive_handles_split_headers_and_mergeable_buffers() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        let first = f.data(2);
+        let second = f.data(3);
+        let third = f.data(4);
+        f.vqs[0].add_chain(&f.mem, &[(first, 5, true), (second, 20, true)]);
+        f.vqs[0].add_chain(&f.mem, &[(third, 256, true)]);
+        let frame: Vec<_> = (0..128).map(|n| n as u8).collect();
+        let (mut producer, mut receiver) = UnixStream::pair().unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        producer
+            .write_all(&(frame.len() as u32).to_be_bytes())
+            .unwrap();
+        producer.write_all(&frame).unwrap();
+        assert_eq!(
+            read_guest_frame(&f.dev.shared, &mut receiver, 12, true, false),
+            Some(Ok(()))
+        );
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 2);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, 0).1, 25);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, 1).1, 115);
+        let mut bytes = [0; 140];
+        f.mem
+            .read_slice(&mut bytes[..5], GuestAddress(first))
+            .unwrap();
+        f.mem
+            .read_slice(&mut bytes[5..25], GuestAddress(second))
+            .unwrap();
+        f.mem
+            .read_slice(&mut bytes[25..], GuestAddress(third))
+            .unwrap();
+        assert_eq!(&bytes[..10], &[0; 10]);
+        assert_eq!(&bytes[10..12], &2u16.to_le_bytes());
+        assert_eq!(&bytes[12..], &frame);
+    }
+
+    #[test]
+    fn partial_direct_receive_survives_snapshot_before_publication() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        let address = f.data(2);
+        f.vqs[0].add_chain(&f.mem, &[(address, 256, true)]);
+        let frame: Vec<_> = (0..128).map(|n| n as u8).collect();
+        let (mut producer, mut receiver) = UnixStream::pair().unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        producer
+            .write_all(&(frame.len() as u32).to_be_bytes())
+            .unwrap();
+        producer.write_all(&frame[..37]).unwrap();
+        assert_eq!(
+            read_guest_frame(&f.dev.shared, &mut receiver, 12, true, false),
+            Some(Ok(()))
+        );
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
+        assert!(matches!(
+            lock(&f.dev.shared).rx,
+            RxRead::Body { got: 37, .. }
+        ));
+        f.dev.quiesce();
+        let snapshot = f.dev.save_state().unwrap();
+        lock(&f.dev.shared).rx = RxRead::Idle;
+        f.dev.restore_state(&snapshot).unwrap();
+        producer.write_all(&frame[37..]).unwrap();
+        read_frames(&f.dev.shared, &mut receiver).unwrap();
+        lock(&f.dev.shared).snapshot_paused = false;
+        place_rx_frames(&f.dev.shared, 12, true, false);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 1);
+        let mut received = vec![0; frame.len()];
+        f.mem
+            .read_slice(&mut received, GuestAddress(address + 12))
+            .unwrap();
+        assert_eq!(received, frame);
+    }
+
+    #[test]
+    fn transmit_batch_preserves_framing_and_owns_every_unsent_guest_byte() {
+        let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 128 * 1024)]).unwrap();
+        let mut expected = Vec::new();
+        let mut packets = Vec::new();
+        let mut address = 0;
+        for (head, len) in [1usize, MAX_FRAME, 17].into_iter().enumerate() {
+            let bytes: Vec<_> = (0..len).map(|n| (n % 251) as u8).collect();
+            mem.write_slice(&bytes, GuestAddress(address)).unwrap();
+            let prefix = (len as u32).to_be_bytes();
+            expected.extend_from_slice(&prefix);
+            expected.extend_from_slice(&bytes);
+            packets.push(TxPacket {
+                head: head as u16,
+                consumed: (12 + len) as u32,
+                prefix: Some(prefix),
+                slices: vec![mem.get_slice(GuestAddress(address), len).unwrap()],
+                owned: None,
+            });
+            address += len as u64;
+        }
+        let (producer, mut receiver) = UnixStream::pair().unwrap();
+        producer.set_nonblocking(true).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let size: libc::c_int = 4096;
+        // SAFETY: producer is live and size is an initialized integer option.
+        let result = unsafe {
+            libc::setsockopt(
+                producer.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                std::ptr::from_ref(&size).cast(),
+                std::mem::size_of_val(&size) as libc::socklen_t,
+            )
+        };
+        assert_eq!(result, 0);
+        let mut output = Vec::new();
+        send_tx_batch(&producer, &packets, &mut output);
+        assert!(!output.is_empty());
+        let sent = expected.len() - output.len();
+        assert!(sent > 5);
+        mem.write_slice(&vec![0; address as usize], GuestAddress(0))
+            .unwrap();
+        let mut received = vec![0; sent];
+        receiver.read_exact(&mut received).unwrap();
+        received.extend_from_slice(&output);
+        assert_eq!(received, expected);
     }
     /// Guest memory: 288 MiB, room for the queues' rings plus buffers.
     const MEM_SIZE: u64 = 288 * 1024 * 1024;
@@ -1456,7 +2250,7 @@ mod tests {
         let mut f = Fixture::new();
         let _switch = f.take_switch_side();
         f.irq.queues.lock().clear();
-        process_tx(&f.dev.shared, &mut None, 12);
+        process_tx(&f.dev.shared, &mut None, 12, false);
         assert_eq!(f.vqs[1].used_idx(&f.mem), 0);
         assert!(f.irq.queues.lock().is_empty());
     }
@@ -1469,7 +2263,7 @@ mod tests {
         lock(&f.dev.shared)
             .rx_pending
             .push_back(b"waiting for a receive buffer".to_vec());
-        place_rx_frames(&f.dev.shared, 12, false);
+        place_rx_frames(&f.dev.shared, 12, false, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
         assert!(f.irq.queues.lock().is_empty());
     }
@@ -1661,13 +2455,14 @@ mod tests {
         while producer.write(&payload).is_ok() {}
         let mut stream = Some(producer);
         mem.write_slice(&payload, GuestAddress(0x100000)).unwrap();
+        mem.write_slice(&[0; 12], GuestAddress(0x100000)).unwrap();
         for iteration in 0..1024 {
             let mut ring = TestVq::new(0x1000, 8);
             mem.write_obj(0u16, GuestAddress(ring.avail + 2)).unwrap();
             mem.write_obj(0u16, GuestAddress(ring.used + 2)).unwrap();
             ring.add_chain(&mem, &[(0x100000, payload.len() as u32, false)]);
             lock(&shared).queues[1] = Some(ring.queue());
-            process_tx(&shared, &mut stream, 12);
+            process_tx(&shared, &mut stream, 12, false);
             let bytes = lock(&shared).tx_out.len();
             assert!(
                 bytes <= 1024 * 1024 + MAX_FRAME,
@@ -1700,7 +2495,7 @@ mod tests {
         let event = GuestAddress(f.vqs[1].used + 4 + 8 * u64::from(f.vqs[1].size));
         for index in 1..=4 {
             f.queue_tx(b"next event-index packet");
-            process_tx(&shared, &mut None, 12);
+            process_tx(&shared, &mut None, 12, false);
             assert_eq!(f.vqs[1].used_idx(&f.mem), index);
             assert_eq!(f.mem.read_obj::<u16>(event).unwrap(), index);
         }
@@ -1733,7 +2528,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let mut stream = Some(producer);
-        process_wakeup(&f.dev.shared, &mut stream, 12, false);
+        process_wakeup(&f.dev.shared, &mut stream, 12, false, false, false);
         assert_eq!(
             f.vqs[1].used_idx(&f.mem),
             1,
@@ -1759,7 +2554,7 @@ mod tests {
         f.mem
             .write_obj(f.vqs[1].size + 1, GuestAddress(f.vqs[1].avail + 2))
             .unwrap();
-        process_tx(&f.dev.shared, &mut None, 12);
+        process_tx(&f.dev.shared, &mut None, 12, false);
         assert_eq!(f.vqs[1].used_idx(&f.mem), 0);
     }
 
@@ -1779,7 +2574,7 @@ mod tests {
             }
         }
         lock(&f.dev.shared).rx_pending.push_back(frame.clone());
-        place_rx_frames(&f.dev.shared, 12, true);
+        place_rx_frames(&f.dev.shared, 12, true, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 3);
         assert_eq!(
             f.mem.read_obj::<u16>(GuestAddress(f.data(0) + 10)).unwrap(),
@@ -1816,7 +2611,7 @@ mod tests {
         f.mem.write_slice(&[0x33; 24], GuestAddress(first)).unwrap();
         f.vqs[0].add_chain(&f.mem, &[(first, 24, true)]);
         lock(&f.dev.shared).rx_pending.push_back(frame);
-        place_rx_frames(&f.dev.shared, 12, true);
+        place_rx_frames(&f.dev.shared, 12, true, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
         let mut unchanged = [0; 24];
         f.mem
@@ -1827,7 +2622,7 @@ mod tests {
         assert_eq!(f.mem.read_obj::<u16>(event).unwrap(), 1);
         let second = f.data(1);
         f.vqs[0].add_chain(&f.mem, &[(second, 128, true)]);
-        place_rx_frames(&f.dev.shared, 12, true);
+        place_rx_frames(&f.dev.shared, 12, true, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 2);
         assert!(lock(&f.dev.shared).rx_pending.is_empty());
     }
@@ -1853,7 +2648,7 @@ mod tests {
         f.vqs[0].add_chain(&f.mem, &[(second, 128, true)]);
         lock(&shared).rx_pending.push_back(vec![0x5a; 80]);
         let before = f.irq.queues.lock().len();
-        place_rx_frames(&shared, 12, true);
+        place_rx_frames(&shared, 12, true, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 1);
         assert_eq!(f.vqs[0].used_entry(&f.mem, f.vqs[0].size - 1).1, 24);
         assert_eq!(f.vqs[0].used_entry(&f.mem, 0).1, 68);
@@ -1875,7 +2670,7 @@ mod tests {
                 lock(&f.dev.shared).rx_pending.push_back(vec![0x5a; 80]);
             }
         }
-        place_rx_frames(&f.dev.shared, 12, true);
+        place_rx_frames(&f.dev.shared, 12, true, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 3);
         assert_eq!(f.vqs[0].used_entry(&f.mem, 0).1, 0);
         assert_eq!(f.vqs[0].used_entry(&f.mem, 1).1, 0);
@@ -1908,7 +2703,7 @@ mod tests {
             let buffer = f.data(index as u64);
             f.vqs[0].add_chain(&f.mem, &[(buffer, 128, true)]);
             lock(&shared).rx_pending.push_back(frame.to_vec());
-            place_rx_frames(&shared, 12, false);
+            place_rx_frames(&shared, 12, false, false);
             assert_eq!(f.vqs[0].used_idx(&f.mem), index);
             let mut received = vec![0; frame.len()];
             f.mem
@@ -1916,7 +2711,7 @@ mod tests {
                 .unwrap();
             assert_eq!(received, frame);
             lock(&shared).rx_pending.push_back(frame.to_vec());
-            place_rx_frames(&shared, 12, false);
+            place_rx_frames(&shared, 12, false, false);
             let event = GuestAddress(f.vqs[0].used + 4 + 8 * u64::from(f.vqs[0].size));
             assert_eq!(f.mem.read_obj::<u16>(event).unwrap(), index);
             lock(&shared).rx_pending.clear();
@@ -1935,7 +2730,7 @@ mod tests {
         f.vqs[0].add_chain(&f.mem, &[(short, 8, true)]);
         f.vqs[0].add_chain(&f.mem, &[(full, 128, true)]);
         lock(&f.dev.shared).rx_pending.push_back(frame.to_vec());
-        place_rx_frames(&f.dev.shared, 12, false);
+        place_rx_frames(&f.dev.shared, 12, false, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 2);
         assert_eq!(f.vqs[0].used_entry(&f.mem, 0).1, 0);
         assert_eq!(f.vqs[0].used_entry(&f.mem, 1).1, 12 + frame.len() as u32);
@@ -1955,7 +2750,7 @@ mod tests {
         f.mem
             .write_obj(f.vqs[0].size + 1, GuestAddress(f.vqs[0].avail + 2))
             .unwrap();
-        place_rx_frames(&f.dev.shared, 12, false);
+        place_rx_frames(&f.dev.shared, 12, false, false);
         assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
         assert_eq!(lock(&f.dev.shared).rx_pending.len(), 1);
     }
@@ -1976,10 +2771,11 @@ mod tests {
             }
         }
         f.queue_tx(b"before restore");
-        process_tx(&f.dev.shared, &mut None, 12);
+        process_tx(&f.dev.shared, &mut None, 12, false);
         f.dev.quiesce();
         let state = f.dev.save_state().unwrap();
         f.dev.reset();
+        assert_eq!(f.dev.negotiated.load(Ordering::Acquire), 0);
         f.dev.restore_state(&state).unwrap();
         f.dev.ack_features(f.dev.features());
         f.activate();
