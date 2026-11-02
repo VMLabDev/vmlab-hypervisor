@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
+use zerocopy::IntoBytes;
 
 pub const APERTURE_SIZE: u64 = 1 << 32;
 
@@ -370,7 +371,22 @@ impl Renderer {
         }
         let mem = mem.clone();
         let request = request.to_vec();
-        self.call(move |b| b.command(&mem, &request))
+        self.call(move |b| {
+            let ctx = request
+                .get(16..20)
+                .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
+            let result = b.command(&mem, &request);
+            if let Err(error) = &result {
+                log::warn!(
+                    "GPU command failed: type={:#x} ctx={} live={} bytes={} response={error:#x}",
+                    kind.unwrap_or_default(),
+                    ctx.unwrap_or_default(),
+                    ctx.is_some_and(|ctx| b.contexts.contains(&ctx)),
+                    request.len()
+                );
+            }
+            result
+        })
     }
 
     pub fn fence(&self, flags: u32, id: u64, ctx: u32, index: u8) -> Result<(), u32> {
@@ -444,13 +460,14 @@ impl Renderer {
             };
             b.synchronize()?;
             let resource = b.resources.get_mut(&id).ok_or(RESOURCE)?;
-            let mut info = resource
-                .export_info
-                .unwrap_or(export_info(id, host(b.gpu.resource3d_info(id))?));
+            let mut info = if let Some(scanout) = resource.scanout_info {
+                scanout
+            } else if let Some(info) = resource.export_info {
+                info
+            } else {
+                export_info(id, host(b.gpu.resource3d_info(id))?)
+            };
             let (width, height) = if let Some(scanout) = resource.scanout_info {
-                info.drm_fourcc = scanout.drm_fourcc;
-                info.strides[0] = scanout.strides[0];
-                info.offsets[0] = scanout.offsets[0];
                 (scanout.width, scanout.height)
             } else {
                 (resource.width, resource.height)
@@ -485,7 +502,11 @@ impl Renderer {
             }
             let copy = b.scanout_copy.as_mut().unwrap();
             if resource.export_info.is_none() {
-                info = copy.metadata(fd.as_raw_fd(), info, width, height);
+                // Blob scanouts carry their own layout. Probing an implicit Vulkan
+                // allocation through GBM can change NVIDIA's buffer interpretation.
+                if resource.scanout_info.is_none() {
+                    info = copy.metadata(fd.as_raw_fd(), info, width, height);
+                }
                 resource.export_info = Some(info);
             }
             let frame = if copy.direct(info, width, height, rect) {
@@ -597,6 +618,7 @@ impl Renderer {
             lease.retire();
         }
         self.call(|b| {
+            log::debug!("GPU renderer reset: contexts={:?}", b.contexts);
             let ids: Vec<_> = b.resources.keys().copied().collect();
             for id in ids {
                 b.unref(id)?;
@@ -798,6 +820,9 @@ impl Backend {
         d.u64()?;
         let ctx = d.u32()?;
         d.u32()?;
+        if matches!(kind, 0x200 | 0x201) {
+            log::debug!("GPU context command: type={kind:#x} ctx={ctx}");
+        }
         let mut out = Vec::new();
         let response = match kind {
             0x108 => {
@@ -830,6 +855,7 @@ impl Backend {
                     return Err(INVALID);
                 }
                 let name = std::str::from_utf8(&name[..len]).map_err(|_| INVALID)?;
+                log::debug!("GPU context create: ctx={ctx} init={init:#x} name={name:?}");
                 host(self.gpu.create_context(ctx, init, Some(name)))?;
                 self.contexts.insert(ctx);
                 NODATA
@@ -842,11 +868,15 @@ impl Backend {
             0x202 | 0x203 => {
                 let id = d.u32()?;
                 d.u32()?;
-                if kind == 0x202 {
-                    host(self.gpu.context_attach_resource(ctx, id))?;
-                } else {
-                    host(self.gpu.context_detach_resource(ctx, id))?;
+                if self.contexts.contains(&ctx) && self.resources.contains_key(&id) {
+                    if kind == 0x202 {
+                        host(self.gpu.context_attach_resource(ctx, id))?;
+                    } else {
+                        host(self.gpu.context_detach_resource(ctx, id))?;
+                    }
                 }
+                // Guest GEM file operations can precede context creation or outlive
+                // context/resource teardown. Match virglrenderer's no-op handling.
                 NODATA
             }
             0x101 | 0x204 => {
@@ -928,6 +958,10 @@ impl Backend {
                 let id = d.u32()?;
                 let count = d.u32()? as usize;
                 let resource = self.resources.get_mut(&id).ok_or(RESOURCE)?;
+                log::debug!(
+                    "GPU attach backing: id={id} entries={count} backed={}",
+                    resource.memory.is_some()
+                );
                 if resource.memory.is_some() {
                     return Err(INVALID);
                 }
@@ -984,8 +1018,22 @@ impl Backend {
                 if size > 16 * 1024 * 1024 || !size.is_multiple_of(4) {
                     return Err(INVALID);
                 }
-                let mut command = d.take(size)?.to_vec();
-                host(self.gpu.submit_command(ctx, &mut command, &[]))?;
+                // virglrenderer requires dword alignment even for an empty stream.
+                let mut command: Vec<u32> = d
+                    .take(size)?
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|word| u32::from_ne_bytes(*word))
+                    .collect();
+                // Windows uses empty context-zero submissions for global fences
+                // and vblank notifications. The transport still queues their fence.
+                if ctx != 0 || size != 0 {
+                    host(
+                        self.gpu
+                            .submit_command(ctx, command.as_mut_slice().as_mut_bytes(), &[]),
+                    )?;
+                }
                 NODATA
             }
             0x103 => {
@@ -1064,6 +1112,11 @@ impl Backend {
                     return Err(INVALID);
                 }
                 let vecs = iovecs(mem, &mut d, count)?;
+                // An empty Vec still has a non-null pointer. Passing it through
+                // the C API would mark a host-only blob as already guest-backed.
+                let vecs = (!vecs.is_empty()).then_some(vecs);
+                let memory = vecs.as_ref().map(|_| mem.clone());
+                log::debug!("GPU create blob: id={id} ctx={ctx} memory={blob_mem} entries={count}");
                 host(self.gpu.resource_create_blob(
                     ctx,
                     id,
@@ -1073,7 +1126,7 @@ impl Backend {
                         blob_id,
                         size,
                     },
-                    Some(vecs),
+                    vecs,
                     None,
                 ))?;
                 self.resources.insert(
@@ -1084,7 +1137,7 @@ impl Backend {
                         format: 0,
                         size,
                         mapped: false,
-                        memory: Some(mem.clone()),
+                        memory,
                         scanout_info: None,
                         exported: None,
                         export_info: None,
@@ -1142,7 +1195,7 @@ impl Backend {
                         drm_fourcc,
                         strides,
                         offsets,
-                        modifier: 0,
+                        modifier: super::scanout::INVALID_MODIFIER,
                     });
                     resource.export_info = None;
                     self.scanout = Some((id, rect));

@@ -20,7 +20,7 @@ type DupFence = unsafe extern "C" fn(Handle, Handle) -> i32;
 type QueryModifiers = unsafe extern "C" fn(Handle, i32, i32, *mut u64, *mut u32, *mut i32) -> u32;
 type QueryImage = unsafe extern "C" fn(Handle, Handle, *mut i32, *mut i32, *mut u64) -> u32;
 
-const INVALID_MODIFIER: u64 = (1 << 56) - 1;
+pub(super) const INVALID_MODIFIER: u64 = (1 << 56) - 1;
 type ReadPixels = Arc<dyn Fn() -> Result<Vec<u8>, u32> + Send + Sync>;
 
 #[link(name = "EGL")]

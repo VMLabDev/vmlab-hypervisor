@@ -2,12 +2,16 @@
 
 use serde_json::json;
 use std::fs::File;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use vmlab_hv_display::{Capabilities, Client as DisplayClient, FrameFlags, Message, SurfaceKind};
 use vmlab_hv_proto::{client::Client, control::Command as Ctrl};
 use vmlab_hv_tests::{agent::AgentClient, process::ManagedChild};
+
+#[path = "venus/windows.rs"]
+mod windows;
 
 #[test]
 fn steamos_venus_vulkan_device_and_frames() {
@@ -62,7 +66,10 @@ fn steamos_venus_vulkan_device_and_frames() {
             .arg(path.join("machine.json"))
             .arg("--control")
             .arg(path.join("control.sock"))
-            .env("VMLAB_HV_LOG", "vmlab_hv_devices::virtio::gpu=debug,info")
+            .env(
+                "VMLAB_HV_LOG",
+                "info,vmlab_hv_devices::virtio::gpu::renderer=debug",
+            )
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log)),
     )
@@ -94,66 +101,180 @@ fn steamos_venus_vulkan_device_and_frames() {
             );
             String::from_utf8(output.stdout).unwrap()
         };
-        exec(
-            &mut agent,
-            "systemctl stop sddm.service; mkdir -p /run/venus-s1; chmod 700 /run/venus-s1",
-        );
-        let devices = exec(
-            &mut agent,
-            "XDG_RUNTIME_DIR=/run/venus-s1 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json vulkaninfo --summary",
-        );
-        eprintln!("Venus on {}:\n{devices}", Path::new(&node).display());
-        assert!(
-            devices.contains("DRIVER_ID_MESA_VENUS"),
-            "not a Venus Vulkan device: {devices}"
-        );
-        let display = DisplayClient::connect(
-            path.join("display.sock"),
-            Capabilities(
-                Capabilities::FRAMES | Capabilities::DMABUF_OK | Capabilities::FRAME_FLAGS,
-            ),
-        )
-        .unwrap();
-        display
-            .stream()
-            .set_read_timeout(Some(Duration::from_secs(30)))
+        for cycle in 0..2 {
+            exec(
+                &mut agent,
+                "systemctl stop sddm.service; mkdir -p /run/venus-s1; chmod 700 /run/venus-s1",
+            );
+            let devices = exec(
+                &mut agent,
+                "XDG_RUNTIME_DIR=/run/venus-s1 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json vulkaninfo --summary",
+            );
+            eprintln!("Venus on {}:\n{devices}", Path::new(&node).display());
+            assert!(
+                devices.contains("DRIVER_ID_MESA_VENUS"),
+                "not a Venus Vulkan device: {devices}"
+            );
+            let display = DisplayClient::connect(
+                path.join("display.sock"),
+                Capabilities(
+                    Capabilities::FRAMES
+                        | Capabilities::DMABUF_OK
+                        | Capabilities::FRAME_FLAGS
+                        | Capabilities::CPU_COPY
+                        | Capabilities::INPUT,
+                ),
+            )
             .unwrap();
-        exec(
-            &mut agent,
-            "XDG_RUNTIME_DIR=/run/venus-s1 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json seatd-launch -- gamescope --backend drm --expose-wayland -- sh -c 'DISABLE_GAMESCOPE_WSI=1 vkcube --wsi wayland --c 120; echo $? >/run/venus-s1/cube.status' >/run/venus-s1/render.log 2>&1 &",
-        );
-        let mut frames = 0;
-        let mut dma = false;
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while frames < 5 && Instant::now() < deadline {
-            let packet = display.receive().unwrap_or_else(|error| {
-                let render = exec(&mut agent, "cat /run/venus-s1/render.log");
-                panic!("waiting for Vulkan frames: {error}; guest renderer:\n{render}");
-            });
-            match packet.message {
-                Message::SurfaceConfigure { kind, .. } => dma = kind == SurfaceKind::Dmabuf,
-                Message::FrameReady {
-                    surface_id,
-                    buffer,
-                    seq,
-                    flags,
-                    ..
-                } => {
-                    display.release(surface_id, buffer, seq).unwrap();
-                    if dma && !flags.has(FrameFlags::PLACEHOLDER) {
-                        frames += 1;
+            display
+                .stream()
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .unwrap();
+            display
+                .send(&Message::RequestSize {
+                    width: 1024,
+                    height: 768,
+                })
+                .unwrap();
+            exec(
+                &mut agent,
+                "XDG_RUNTIME_DIR=/run/venus-s1 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/virtio_icd.x86_64.json seatd-launch -- gamescope --backend drm --expose-wayland -- sh -c 'DISABLE_GAMESCOPE_WSI=1 vkcube --wsi wayland --c 120; echo $? >/run/venus-s1/cube.status' >/run/venus-s1/render.log 2>&1 &",
+            );
+            let mut frames = 0;
+            let mut dma = false;
+            let mut buffers = Vec::new();
+            let mut dimensions = (0, 0, 0);
+            let mut copy_requested = false;
+            let mut rendered_pixels = false;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while (!rendered_pixels || frames < 20) && Instant::now() < deadline {
+                let packet = display.receive().unwrap_or_else(|error| {
+                    let render = exec(&mut agent, "cat /run/venus-s1/render.log");
+                    panic!("waiting for Vulkan frames: {error}; guest renderer:\n{render}");
+                });
+                match packet.message {
+                    Message::SurfaceConfigure {
+                        kind,
+                        width,
+                        height,
+                        stride,
+                        ..
+                    } => {
+                        dma = kind == SurfaceKind::Dmabuf;
+                        buffers = packet.fds;
+                        dimensions = (width, height, stride);
                     }
+                    Message::FrameReady {
+                        surface_id,
+                        buffer,
+                        seq,
+                        flags,
+                        ..
+                    } => {
+                        if !dma && copy_requested && !flags.has(FrameFlags::PLACEHOLDER) {
+                            let file = File::from(buffers[buffer as usize].try_clone().unwrap());
+                            let mut pixels = vec![0; dimensions.2 as usize * dimensions.1 as usize];
+                            file.read_exact_at(&mut pixels, 0).unwrap();
+                            let colours: std::collections::HashSet<_> = pixels
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .step_by(16)
+                                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                                .collect();
+                            rendered_pixels = colours.len() > 256;
+                            if rendered_pixels {
+                                assert_eq!((dimensions.0, dimensions.1), (1024, 768));
+                                let sample = |x: u32, y: u32| {
+                                    let offset = (y * dimensions.2 + x * 4) as usize;
+                                    [pixels[offset], pixels[offset + 1], pixels[offset + 2]]
+                                };
+                                let background = sample(dimensions.0 / 2, 16);
+                                for y in 16..dimensions.1 / 8 {
+                                    for x in (dimensions.0 / 3..dimensions.0 * 2 / 3).step_by(8) {
+                                        let actual = sample(x, y);
+                                        assert!(
+                                            actual
+                                                .iter()
+                                                .zip(background)
+                                                .all(|(a, b)| a.abs_diff(b) <= 2),
+                                            "Vulkan scanout layout corrupted at ({x},{y}): {actual:?}, background={background:?}"
+                                        );
+                                    }
+                                }
+                            }
+                            if rendered_pixels
+                                && let Some(output) = std::env::var_os("VMLAB_HV_TEST_VENUS_FRAME")
+                            {
+                                let mut ppm =
+                                    format!("P6\n{} {}\n255\n", dimensions.0, dimensions.1)
+                                        .into_bytes();
+                                for row in pixels.chunks_exact(dimensions.2 as usize) {
+                                    for pixel in row[..dimensions.0 as usize * 4].as_chunks::<4>().0
+                                    {
+                                        ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+                                    }
+                                }
+                                std::fs::write(output, ppm).unwrap();
+                            }
+                        }
+                        display.release(surface_id, buffer, seq).unwrap();
+                        if dma && !flags.has(FrameFlags::PLACEHOLDER) {
+                            frames += 1;
+                            if frames >= 20 && !copy_requested {
+                                display.cpu_copy(surface_id).unwrap();
+                                copy_requested = true;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+            drop(display);
+            let render = exec(
+                &mut agent,
+                "for n in $(seq 1 300); do test ! -f /run/venus-s1/cube.status || { cat /run/venus-s1/render.log; test $(cat /run/venus-s1/cube.status) = 0; exit; }; sleep .1; done; cat /run/venus-s1/render.log >&2; exit 1",
+            );
+            eprintln!("Vulkan render: {render}");
+            assert!(
+                frames >= 20 && rendered_pixels,
+                "Vulkan scene was not received: {render}"
+            );
+            exec(
+                &mut agent,
+                "python3 -c 'import concurrent.futures, subprocess; pool=concurrent.futures.ThreadPoolExecutor(max_workers=4); results=list(pool.map(lambda _: subprocess.run([\"vulkaninfo\",\"--summary\"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode, range(24))); assert not any(results), results'",
+            );
+            let errors = exec(&mut agent, "dmesg | grep 'response 0x12' || true");
+            assert!(errors.is_empty(), "guest GPU command errors:\n{errors}");
+            let renderer_log = std::fs::read_to_string(path.join("hv.log")).unwrap();
+            assert!(
+                !renderer_log.contains("invalid context id")
+                    && !renderer_log.contains("GPU command failed:"),
+                "renderer GPU command error:\n{renderer_log}"
+            );
+            if cycle == 0 {
+                let pid = child.id();
+                control.call(Ctrl::Status).unwrap();
+                control.take_events();
+                agent.shutdown("reboot", Duration::from_secs(20)).unwrap();
+                drop(agent);
+                let deadline = Instant::now() + Duration::from_secs(120);
+                loop {
+                    let event = control
+                        .wait_event_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .unwrap()
+                        .expect("guest reset did not arrive");
+                    if event == vmlab_hv_proto::control::Event::Reset {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "guest reset timed out");
+                }
+                assert_eq!(child.id(), pid);
+                assert!(child.try_wait().unwrap().is_none());
+                agent = AgentClient::connect(&path.join("agent.sock"), Duration::from_secs(120))
+                    .unwrap();
             }
         }
-        drop(display);
-        let render = exec(
-            &mut agent,
-            "for n in $(seq 1 300); do test ! -f /run/venus-s1/cube.status || { cat /run/venus-s1/render.log; test $(cat /run/venus-s1/cube.status) = 0; exit; }; sleep .1; done; cat /run/venus-s1/render.log >&2; exit 1",
-        );
-        eprintln!("Vulkan render: {render}");
-        assert!(frames >= 5, "Vulkan app did not publish frames: {render}");
         control.call(Ctrl::Quit).unwrap();
         assert!(child.wait().unwrap().success());
     }));

@@ -224,6 +224,20 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
     assert_eq!(code(&d.command(0, 0x109, &[1, 1])), 0x1103);
     assert!(code(&d.command(0, 0x108, &[u32::MAX, 0])) >= 0x1200);
     if venus {
+        let mut global = vec![0; 32];
+        global[..4].copy_from_slice(&0x207u32.to_le_bytes());
+        global[4..8].copy_from_slice(&1u32.to_le_bytes());
+        global[8..16].copy_from_slice(&17u64.to_le_bytes());
+        let completed = d.submit_raw(0, &global, 2048);
+        assert_eq!(code(&completed), 0x1100, "global fence-only submission");
+        assert_eq!(&completed[4..24], &global[4..24]);
+        global[4..8].fill(0);
+        global[24..28].copy_from_slice(&4u32.to_le_bytes());
+        global.extend_from_slice(&0u32.to_le_bytes());
+        assert!(
+            code(&d.submit_raw(0, &global, 2048)) >= 0x1200,
+            "nonempty context-zero submission is invalid"
+        );
         let cap = d.command(0, 0x108, &[2, 0]);
         assert_eq!(code(&cap), 0x1102);
         assert_eq!(u32::from_le_bytes(cap[24..28].try_into().unwrap()), 4);
@@ -241,8 +255,41 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
     if venus {
         context[28..32].copy_from_slice(&4u32.to_le_bytes());
         assert_eq!(code(&d.submit_raw(0, &context, 2048)), 0x1100);
+        let mut empty = vec![0; 32];
+        empty[..4].copy_from_slice(&0x207u32.to_le_bytes());
+        empty[16..20].copy_from_slice(&7u32.to_le_bytes());
+        assert_eq!(
+            code(&d.submit_raw(0, &empty, 2048)),
+            0x1100,
+            "empty Venus submission"
+        );
         context[..4].copy_from_slice(&0x201u32.to_le_bytes());
         assert_eq!(code(&d.submit_raw(0, &context[..24], 2048)), 0x1100);
+        assert!(
+            code(&d.submit_raw(0, &empty, 2048)) >= 0x1200,
+            "unknown context still rejects submission"
+        );
+        let mut detach = vec![0; 32];
+        detach[..4].copy_from_slice(&0x203u32.to_le_bytes());
+        detach[16..20].copy_from_slice(&7u32.to_le_bytes());
+        detach[24..28].copy_from_slice(&1234u32.to_le_bytes());
+        assert_eq!(
+            code(&d.submit_raw(0, &detach, 2048)),
+            0x1100,
+            "detach after destroy"
+        );
+        detach[16..20].copy_from_slice(&999u32.to_le_bytes());
+        assert_eq!(
+            code(&d.submit_raw(0, &detach, 2048)),
+            0x1100,
+            "detach without create"
+        );
+        detach[..4].copy_from_slice(&0x202u32.to_le_bytes());
+        assert_eq!(
+            code(&d.submit_raw(0, &detach, 2048)),
+            0x1100,
+            "attach without create"
+        );
         context[..4].copy_from_slice(&0x200u32.to_le_bytes());
         context[28..32].copy_from_slice(&2u32.to_le_bytes());
     }
@@ -346,6 +393,23 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
         truncated[..4].copy_from_slice(&kind.to_le_bytes());
         assert_eq!(code(&d.submit_raw(0, &truncated, 2048)), 0x1205);
     }
+    assert_eq!(code(&d.submit_raw(0, &context, 2048)), 0x1100);
+    crate::Resettable::reset(&mut d.dev).unwrap();
+    assert!(!d.dev.has_3d_contexts());
+    d.avail = [0; 2];
+    d.mem
+        .write_slice(&[0; 0x8000], GuestAddress(0x1000))
+        .unwrap();
+    d.start();
+    submit.truncate(32);
+    submit[4..8].fill(0);
+    submit[24..28].fill(0);
+    assert!(
+        code(&d.submit_raw(0, &submit, 2048)) >= 0x1200,
+        "reset contexts must be recreated by the guest"
+    );
+    assert_eq!(code(&d.submit_raw(0, &context, 2048)), 0x1100);
+    assert_eq!(code(&d.submit_raw(0, &submit, 2048)), 0x1100);
 }
 
 #[test]

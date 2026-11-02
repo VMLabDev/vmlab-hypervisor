@@ -55,6 +55,10 @@ capability ID 1 describes that aperture. The VMM's `gpu::Aperture` registers
 and removes blob mappings in KVM's normal and SMM address spaces. Overlapping,
 unaligned and out-of-aperture mappings fail.
 
+Host-only blobs start without guest backing. Passing an empty backing vector
+through the C API would supply a non-null pointer and prevent a later backing
+attachment. Guest memory remains pinned only while actual backing is attached.
+
 The renderer and EGL readback run on one worker thread. Simple scanout-bound
 resources get an explicit-layout allocation before guest rendering begins.
 The layout must support Vulkan import on the selected render node. The guest
@@ -62,8 +66,11 @@ renders directly into that allocation; display publication does not blit it.
 Unknown layouts, cropped or multi-plane resources and external-only imports
 use a three-buffer EGL blit pool. Pool allocation also prefers Vulkan-importable
 modifiers. No CPU readback runs without a native shm, CpuCopy or RFB consumer.
-An inferred GBM modifier is accepted only after EGL imports it successfully.
-Otherwise a Vulkan blob retains its implicit layout for the blit path.
+Blob scanouts use the guest's dimensions, format, strides and offsets, with an
+implicit modifier. They bypass GBM layout probing before EGL import. Probing
+an implicit NVIDIA Vulkan allocation can corrupt its interpretation at resized
+display modes, even if the subsequent EGL import succeeds. Ordinary virgl
+resources still use the GBM metadata path.
 
 RESOURCE_FLUSH and SET_SCANOUT publish frames with guest damage. Only VGA
 compatibility still polls. Native clients negotiate `stable_buffers` to cache
@@ -72,6 +79,15 @@ rendering waits for all leases on a direct scanout; pool buffers cannot be
 overwritten while sampled. Renderer fences finish preceding work before a
 frame is published. The guest fence timeline is separate from export fences.
 `CpuCopy` returns the published frame, including its stride padding.
+
+Context attach and detach commands for absent contexts or resources are no-ops,
+matching virglrenderer. Linux GEM file cleanup can send detach without ever
+creating a rendering context. Windows win3d also sends empty context-zero
+submissions for vblank notifications and global fences. These submissions
+retain normal asynchronous fence handling but do not enter the user-context
+map. Nonempty context-zero submissions and submissions to unknown nonzero
+contexts still fail. Submitted command storage is dword-aligned, including
+empty streams, as required by virglrenderer.
 
 See `display-export.md` for the hardware checks and latency measurements.
 
@@ -84,7 +100,9 @@ is attached, following phase-2 decision D9. Offline disk snapshots are unchanged
 exercises PCI capabilities, capsets, contexts, 3D resources, submission,
 asynchronous fences, transfers, guest-backed blobs, immutable frames and
 malformed commands. Set `VMLAB_HV_TEST_RENDER_NODE` to run it against hardware.
-`VMLAB_HV_TEST_GPU_MODE=venus` also checks the Venus capset.
+`VMLAB_HV_TEST_GPU_MODE=venus` also checks the Venus capset, empty submissions,
+global fence-only submissions, and cleanup without a live context. Invalid
+submissions still fail.
 
 `gpu::tests::blob_slots_map_relocate_reject_overlap_and_unmap` exercises real
 KVM registrations without booting a guest.
@@ -99,23 +117,53 @@ if KVM, the template, firmware or a usable render node is missing.
 
 The S1 test `steamos_venus_vulkan_device_and_frames` boots a private SteamOS
 overlay, requires `vulkaninfo --summary` to report `DRIVER_ID_MESA_VENUS`, and
-runs gamescope with a Wayland vkcube client. It requires five non-placeholder
-dma-buf frames through the native display protocol and a successful 120-frame
-vkcube run using Mesa's Wayland WSI. Set
+runs gamescope with a Wayland vkcube client at 1024x768. It requires twenty
+non-placeholder dma-buf frames, checks rendered pixels through `CpuCopy`, and
+requires a successful 120-frame vkcube run using Mesa's Wayland WSI. The pixel
+check verifies spatial layout as well as color variation. Frame counts alone
+did not detect the resized NVIDIA scanout corruption.
+
+The test also runs 24 Vulkan device enumerations with four concurrent workers,
+rejects GPU command errors, and repeats rendering and context churn after a
+guest reboot in the same hypervisor process. Set
 `VMLAB_HV_TEST_VENUS_RENDER_NODE` to enable it and
 `VMLAB_HV_TEST_VENUS_DISK` to override the SteamOS 3.8.14.3 template. OVMF
 comes from vmlab's local guest firmware directory. The launcher environment
 must select the same Vulkan physical device as the render node, as vmlab's
 driver filter and PCI filter do in production.
 
-On 2026-11-02 this S1 test passed on both the NVIDIA RTX 5090 at
+The opt-in S1 test `windows_win3d_venus_context_cleanup` boots a private
+Windows 11 win3d overlay and runs the template's `win3d-verify.ps1 -Phase Vulkan`.
+It waits for first-boot setup, reconnects across setup reboots, and forces a
+guest reboot without replacing the hypervisor process. It also handles the
+verifier's one-shot console login. Both 64-bit and 32-bit `vulkaninfo` must
+enumerate Venus, and the hypervisor log must contain no GPU command errors.
+`VMLAB_HV_TEST_WIN3D_DISK` and `VMLAB_HV_TEST_WIN3D_VERIFY` override the local
+template and verification script. This test does not modify an owner's VM.
+Its q35 fixture includes TPM2 and the Windows Hyper-V settings. A sealed image
+can spend 25 minutes in first-boot setup before interactive verification starts.
+`VMLAB_HV_TEST_PROCESS_TIMEOUT_SECS=2400` allows that setup and the guest reboot.
+
+The sealed win3d driver `100.6.101.58100` passes both Vulkan enumerations but
+fails the strict command-error check after reset. Its GDI present path emits a
+nonempty virgl copy on an ID without `CTX_CREATE`. The companion vmlab-win3d
+driver `100.6.101.58101` creates a legacy context before allocation attachment;
+UMD initialization replaces it when an application selects Venus. The strict
+S1 test passes with that driver, including the in-place reboot. The hypervisor
+continues to reject uncreated rendering contexts instead of guessing capsets
+or retaining contexts across reset. An older sealed image needs the driver
+update before it can pass this check.
+
+On 2026-11-02, the Linux S1 test passed on the NVIDIA RTX 5090 at
 `/dev/dri/renderD128` and the AMD Ryzen 9 9950X integrated GPU at
-`/dev/dri/renderD130`. Each run exposed one `DRIVER_ID_MESA_VENUS` device,
-published five dma-buf frames and completed the 120-frame vkcube run. NVIDIA
-used the host's patched `RENDER_SERVER_EXEC_PATH`; AMD used the system render
-server. One earlier AMD boot timed out before the agent handshake; the
-unchanged test passed on the next run.
+`/dev/dri/renderD130`. Both runs passed resized pixel checks, context churn and
+guest reboot. NVIDIA used the patched `RENDER_SERVER_EXEC_PATH`; AMD used the
+system render server. Gamescope still reports direct-scanout import fallbacks;
+the rendered frames and guest GPU command checks pass.
+The Windows in-place reset test also passed on both GPUs with driver `58101`,
+including both Vulkan architectures and the strict command-error check.
 
 Run VM tests under the work package's 24 GiB memory scope. The shared harness
-checks the host-wide four-project-VM limit before booting. `just ci::check`
-remains the full merge gate.
+checks the host-wide four-project-VM limit before booting by default.
+`VMLAB_HV_TEST_VM_LIMIT` overrides that limit when the owner authorizes it.
+`just ci::check` remains the full merge gate.
