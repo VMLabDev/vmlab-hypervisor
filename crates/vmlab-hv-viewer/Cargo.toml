@@ -1,0 +1,32 @@
+[package]
+name = "vmlab-hv-viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vmlab-hv-display = { path = "../vmlab-hv-display" }
+anyhow.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+winit = "0.30.13"
+ash = "0.38"
+ash-window = "0.13"
+raw-window-handle = "0.6"
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+x11-dl = "2.21"
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+
+[dev-dependencies]
+tempfile = "3"
+vmlab-hv-tests = { path = "../vmlab-hv-tests" }
+vmlab-hv-proto.workspace = true
+vmlab-disk.workspace = true
+x11rb = { version = "0.13", features = ["xtest"] }
+
+[lints]
+workspace = true
