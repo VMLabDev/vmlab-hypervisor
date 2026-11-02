@@ -112,8 +112,8 @@ baseline, and candidate with rotating order.
 
 The distributions overlap. UDP VM-process CPU seconds per GiB increased;
 no CPU-efficiency gain is claimed. TCP remains below 80% of QEMU in this
-cohort, and G9 is not closed. All 18 TCP transfers have exact sender and
-receiver byte equality. The new wake regression fails before the fix with
+cohort, and G9 is not closed. All 18 TCP transfers have matching sender and
+receiver byte counts. The new wake regression fails before the fix with
 200 socket bytes instead of one. All 24 network unit tests and the S1 NIC
 test pass, including all 900 echoes across save and restore.
 
@@ -139,7 +139,7 @@ traits, the control protocol, and snapshot formats are unchanged. The
 benchmark agent client adds an optional reset monitor; other callers keep
 their existing behavior.
 
-### Correctness gate
+### Initial correctness gate
 
 `just ci::check` passed after the fixes: formatting, clippy with warnings
 denied, and 998 tests, including S1 and S2 coverage. Six slow, manual, or
@@ -148,8 +148,128 @@ separately. Physical USB and VFIO opt-ins were unset; real-device paths
 were not exercised. Owned temporary VM overlays were removed; diagnostic
 logs and compressed traces remain available.
 
-G1 and G9 remain open. G2 and G7 need confirmation in the next authorized
-quiet window. The default remains unchanged. READY FOR BENCH WINDOW.
+The initial pass leaves G1 and G9 open. G2 and G7 need confirmation in the
+next authorized quiet window. The default remains unchanged. READY FOR BENCH WINDOW.
+
+### Owner-requested G1/G9 follow-up
+
+The owner requested another focused pass before the quiet window. The
+following measurements remain shared-host diagnostics. The strict D28
+verdict and the default are unchanged.
+
+F1, ECAM service during SeaBIOS and GRUB boot, accounts for a large part
+of the pre-kernel gap. vmlab-hv completes firmware/ROM loading, ACPI
+construction, and vCPU creation within about 0.1 seconds. QEMU also reaches
+its first KVM exit in about 0.1 seconds. Captured fw_cfg DMA service is
+about 0.1 ms in vmlab-hv. Neither accounts for the original gap. The disk's
+ECAM page receives about 44771 accesses. Its observed userspace service
+interval totals 0.516 seconds before the first correction and 0.100 after.
+Those intervals include scheduling and observer overhead, not only device
+CPU time.
+
+ECAM reads now call each configuration dword once, including unaligned
+reads, instead of repeating a side-effecting read for every returned byte.
+Writes through virtio's indirect configuration window no longer stop every
+other vCPU, recheck VGA mappings, or resynchronize platform timers and PIRQs for
+each access. The exception covers only the captured net, block, and
+console identities and bytes 0x88 through 0x97. All other configuration
+writes retain the memory-update barrier. PAM, SMRAM, VGA, A20, and VFIO
+mapping rules are preserved. Both new regressions failed before the fix.
+
+The initial interleaved candidate reduces the median launch-to-first-kernel
+interval from 2.251 to 1.851 seconds; QEMU measures 1.614. Full readiness
+changes only from 8.16 to 8.12 seconds in that cohort. Unmapped ROM reads
+remain visible in the observer. QEMU registers ioeventfds, but the large
+firmware disk cost appears in configuration-window accesses; it is not a
+measurement of Linux's steady-state BAR notification path.
+
+F2, console input before guest open, explains the remaining large readiness
+penalty. vmlab-hv previously consumed host bytes when receive buffers
+existed, even if the guest had not opened the named port. The kernel can
+discard that early Hello. QEMU's `virtio_serial_guest_ready` gates input on
+guest-open state. The device now applies that backpressure and delivers
+staged data when the guest opens the port. The socket regression fails
+before the correction. No benchmark timing or readiness rule changed.
+
+| Console cohort | Full readiness median (s) | Samples (s) |
+|---|---:|---|
+| QEMU | 6.80 | 6.84, 6.80, 6.69 |
+| Before guest-open correction | 8.13 | 8.13, 8.12, 8.13 |
+| After guest-open correction | 6.90 | 6.92, 6.90, 6.80 |
+
+F3, mergeable network receive buffers, closes the remaining observed
+feature difference relevant to RX allocation. CSUM, GUEST_CSUM,
+HOST_TSO4/6, and GUEST_TSO4/6 remain off on both stream backends. MRG_RXBUF
+is now offered and negotiated, as in QEMU. One header describes each
+packet; all receive chains are copied before one used-index publication.
+If capacity is insufficient, the packet and original available position
+remain pending, while the refill event targets the end of the inspected
+buffers. This avoids repeatedly retrying the same insufficient buffers.
+
+Tests cover split headers, multi-buffer packets, no DMA or partial
+publication before refill, short and inaccessible buffers, ring wrap,
+and interrupt events crossing the whole batch. The first two mergeable
+RX regressions failed before implementation. The S1 snapshot test now
+asserts MRG_RXBUF and EVENT_IDX negotiation and passes all 900 normal and
+60 unfragmented jumbo echoes across save and restore.
+
+| Three-pair TCP cohort | QEMU (Mbit/s) | Before MRG_RXBUF | After MRG_RXBUF | After/QEMU |
+|---|---:|---:|---:|---:|
+| A to B | 26029.85 | 20914.20 | 22752.00 | 0.8741 |
+| B to A | 26578.61 | 22166.90 | 23007.16 | 0.8656 |
+
+All 18 cohort transfers and four later combined-build transfers have
+matching sender/receiver byte counts. Payload hashes were not collected.
+The quiet-window G9 result remains unmeasured. TCP CPU efficiency was not
+measured in this cohort.
+
+F4, legacy block interrupt suppression, removes unnecessary completion
+interrupts while firmware polls the ring. Without EVENT_IDX, the block
+device previously ignored the driver's NO_INTERRUPT flag. It now respects
+that flag; EVENT_IDX still takes precedence when negotiated. The polling
+regression fails before the fix. The observer records 22290 pre-kernel
+KVM_IRQ_LINE calls before this change and six after; QEMU records zero.
+
+| Final interleaved boot cohort | First kernel median (s) | Full readiness median (s) | Full readiness samples (s) |
+|---|---:|---:|---|
+| QEMU | 1.636 | 6.75 | 6.76, 6.75, 6.73 |
+| Before block interrupt correction | 1.871 | 6.81 | 6.80, 6.81, 6.89 |
+| All corrections | 1.792 | 6.76 | 6.72, 6.78, 6.76 |
+
+The final full-readiness ratio is 1.0015. G1 is still above the strict bar
+in this shared-host cohort; neither rounding nor a noise allowance makes
+it pass. First-kernel output is sampled every 5 ms. Host setup, firmware
+execution, first kernel output, and full readiness remain separate metrics.
+The benchmark clock includes the systemd scope launch. The observer also
+timestamps VMM exec through its loader constructor, vCPU creation, and
+the first KVM exits.
+
+Boot diagnostics use CPUs 8-15; TCP uses 16-19 and 20-23. Some cohorts
+overlap on those separate physical-core groups, with brief builds and
+unit checks also recorded. Full CI starts after every timed cohort ends.
+The existing Ananicy priority difference remains unchanged. Each VM uses
+the shared four-slot admission checks and its own 24 GiB, zero-swap scope.
+
+`bench/profiles/phase2-round5-followup-20261102.json` retains all cohorts,
+feature queries, observer records, source drivers, binary hashes, failures,
+and validation receipts. The first observer lacked mmap64 interception;
+two early captures stopped on UART setup rather than kernel text. These
+captures are marked unsuitable for port-cost conclusions. A wrapped Herdr
+exit marker also prevented its build-status parser from reading one
+successful build; the displayed EXIT=0 and build log are retained.
+
+No Rust trait, control protocol, switch framing, or snapshot layout changed.
+The guest-visible change is MRG_RXBUF support, matching the reference.
+The runtime changes are ready for the authorized quiet-window comparison.
+
+The final `just ci::check` passes formatting, clippy with warnings denied,
+and 1007 Rust tests, including S1 and S2. Six slow, manual, or live-session
+diagnostics remain ignored. All 89 benchmark tests and the final release
+build pass. Physical USB and VFIO opt-ins remain unset; no real devices
+were exercised. Owned temporary benchmark VM directories were removed.
+
+READY FOR BENCH WINDOW. G1 still needs a strict quiet-host result; G9's
+shared-host improvement does not change the existing gate verdict.
 
 ## Round 4 authorized quiet bench window (2026-11-02)
 
