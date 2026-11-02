@@ -59,6 +59,9 @@ count and memory), N repeats, fresh qcow2 overlay per repeat:
    (the gate vmlab's provision script applies). Both current backends
    reboot in-process. The runner retains a respawn path for older
    vmlab-hv binaries that exit on reset. The clock starts at the first spawn.
+   During Windows readiness, control-socket reset events cancel commands on
+   the previous agent session. The runner reconnects and repeats the same
+   readiness probe instead of waiting for an exec timeout after a reboot.
 2. **blk_seq_read_mbps** — 1-MiB O_DIRECT reads over the template-backed
    overlay's allocated extent (`/dev/vda`), via bench/randblke.c copied in
    through the agent (the template ships no fio, and GNU dd's

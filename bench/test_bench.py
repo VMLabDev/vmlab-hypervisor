@@ -94,6 +94,141 @@ class QmpTests(unittest.TestCase):
         self.release(running=False)
 
 
+class ResetMonitorTests(unittest.TestCase):
+    def monitor(self, backend):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = os.path.join(directory.name, "control.sock")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(path)
+        listener.listen()
+        self.addCleanup(listener.close)
+        peers = []
+        failures = []
+
+        def serve():
+            try:
+                peer, _ = listener.accept()
+                peers.append(peer)
+                if backend == "qemu":
+                    peer.sendall(b'{"QMP":{}}\n')
+                request = b""
+                while b"\n" not in request:
+                    request += peer.recv(4096)
+                message = json.loads(request)
+                if backend == "qemu":
+                    self.assertEqual(message["execute"], "qmp_capabilities")
+                    peer.sendall(b'{"return":{},"id":1}\n')
+                else:
+                    self.assertEqual(message["type"], "hello")
+                    peer.sendall((json.dumps({"type": "hello", "proto_version": lib.HV_PROTO_VERSION}) + "\n").encode())
+            except Exception as error:
+                failures.append(error)
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        monitor = lib.ResetMonitor(path, backend, timeout=1)
+        self.addCleanup(monitor.close)
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.addCleanup(peers[0].close)
+        return monitor, peers[0]
+
+    def agent(self, monitor):
+        agent, guest = socket.socketpair()
+        self.addCleanup(guest.close)
+        with mock.patch.object(lib.socket, "socket", return_value=agent):
+            with mock.patch.object(agent.__class__, "connect"):
+                client = lib.AgentClient("unused", reset_monitor=monitor)
+        self.addCleanup(client.close)
+        return client, guest
+
+    def test_reset_interrupts_an_exec_whose_agent_socket_stays_open(self):
+        for backend, event in (("qemu", {"event": "RESET"}),
+                               ("vmlab-hv", {"type": "event", "event": "reset"})):
+            with self.subTest(backend=backend):
+                monitor, control = self.monitor(backend)
+                client, _ = self.agent(monitor)
+                control.sendall((json.dumps(event) + "\n").encode())
+                with self.assertRaisesRegex(ConnectionError, "guest reset"):
+                    client.exec(["powershell.exe", "-Command", "OOBE probe"], .2)
+
+    def test_fragmented_and_coalesced_events_keep_the_reset_generation(self):
+        monitor, control = self.monitor("vmlab-hv")
+        control.sendall(b'{"type":"event","event":"resu')
+        monitor.poll()
+        self.assertEqual(monitor.generation, 0)
+        control.sendall(b'med"}\n{"type":"event","event":"reset"}\n')
+        monitor.poll()
+        self.assertEqual(monitor.generation, 1)
+
+    def reply(self, guest):
+        pending = b""
+        while len(pending) < 13:
+            pending += guest.recv(4096)
+        length = int.from_bytes(pending[4:8], "little")
+        while len(pending) < 13 + length:
+            pending += guest.recv(4096)
+        cid = json.loads(pending[13:13 + length])["id"]
+        guest.sendall(b"".join(lib.agent_frame(0, 0, json.dumps(message).encode()) for message in (
+            {"event": "eof", "id": cid}, {"event": "exited", "id": cid, "code": 0})))
+
+    def test_other_events_do_not_cancel_an_exec(self):
+        monitor, control = self.monitor("vmlab-hv")
+        client, guest = self.agent(monitor)
+        control.sendall(b'{"type":"event","event":"resumed"}\n')
+        thread = threading.Thread(target=self.reply, args=(guest,))
+        thread.start()
+        try:
+            self.assertEqual(client.exec(["true"], 1)["code"], 0)
+        finally:
+            thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+
+    def test_new_agent_session_uses_the_generation_after_reset(self):
+        monitor, control = self.monitor("qemu")
+        control.sendall(b'{"event":"RESET"}\n')
+        client, guest = self.agent(monitor)
+        self.assertEqual(client.reset_generation, 1)
+        thread = threading.Thread(target=self.reply, args=(guest,))
+        thread.start()
+        try:
+            self.assertEqual(client.exec(["true"], 1)["code"], 0)
+        finally:
+            thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+
+    def test_control_disconnect_cancels_the_old_agent_session(self):
+        monitor, control = self.monitor("vmlab-hv")
+        client, _ = self.agent(monitor)
+        control.close()
+        with self.assertRaisesRegex(ConnectionError, "reset monitor socket closed"):
+            client.exec(["true"], .2)
+
+    def test_marker_observation_survives_reset_during_its_deletion(self):
+        import run
+        first, second = mock.Mock(), mock.Mock()
+        ready = run.WindowsReady(mock.Mock(), argparse.Namespace(timeout_scale=1), "/unused", time.monotonic())
+        calls = []
+
+        def execute(agent, argv, timeout):
+            calls.append(argv[-1])
+            if len(calls) == 1:
+                return {"code": 0}
+            if len(calls) == 2:
+                raise ConnectionError("guest reset")
+            self.assertTrue(argv[-1].startswith("del /f /q"), argv)
+            return {"code": 0}
+
+        with mock.patch.object(ready, "connect", side_effect=[(first, {}), (second, {})]), \
+                mock.patch.object(run, "win_exec", side_effect=execute), \
+                mock.patch.object(run.time, "sleep"):
+            agent, _ = ready.wait_marker()
+        self.assertIs(agent, second)
+        self.assertEqual(len(calls), 3)
+
+
 class StatsTests(unittest.TestCase):
     def test_median_odd_and_even(self):
         self.assertEqual(lib.median_and_spread([3.0, 1.0, 2.0]), (2.0, 2.0))

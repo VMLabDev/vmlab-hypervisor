@@ -14,6 +14,7 @@ The QEMU argv below is vmlab's own argv for a linux-modern profile VM on the
 import itertools
 import json
 import os
+import select
 import shutil
 import socket
 import statistics
@@ -263,6 +264,70 @@ def agent_frame(kind, channel, payload):
     )
 
 
+class ResetMonitor:
+    """Observe reset events without sharing a command client's buffered reader."""
+
+    def __init__(self, path, backend, timeout=60):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.buf = b""
+        self.generation = 0
+        self.backend = backend
+        try:
+            self.sock.connect(path)
+            self.sock.settimeout(timeout)
+            if backend == "qemu":
+                if "QMP" not in self._message():
+                    raise BenchError("reset monitor: QMP greeting is missing")
+                self._send({"execute": "qmp_capabilities", "id": 1})
+                while True:
+                    reply = self._message()
+                    self._event(reply)
+                    if reply.get("id") == 1:
+                        if "error" in reply or "return" not in reply:
+                            raise BenchError(f"reset monitor: QMP capabilities failed: {reply}")
+                        break
+            else:
+                self._send({"type": "hello", "proto_version": HV_PROTO_VERSION})
+                reply = self._message()
+                if reply.get("type") != "hello" or reply.get("proto_version") != HV_PROTO_VERSION:
+                    raise BenchError(f"reset monitor: control handshake failed: {reply}")
+            self.sock.setblocking(False)
+        except BaseException:
+            self.sock.close()
+            raise
+
+    def _send(self, message):
+        self.sock.sendall((json.dumps(message) + "\n").encode())
+
+    def _message(self):
+        while b"\n" not in self.buf:
+            data = self.sock.recv(65536)
+            if not data:
+                raise ConnectionError("reset monitor socket closed")
+            self.buf += data
+        line, self.buf = self.buf.split(b"\n", 1)
+        return json.loads(line)
+
+    def _event(self, message):
+        reset = (message.get("event") == "RESET" if self.backend == "qemu" else
+                 message.get("type") == "event" and message.get("event") == "reset")
+        if reset:
+            self.generation += 1
+
+    def poll(self):
+        while True:
+            try:
+                self._event(self._message())
+            except BlockingIOError:
+                return
+
+    def fileno(self):
+        return self.sock.fileno()
+
+    def close(self):
+        self.sock.close()
+
+
 class AgentClient:
     """The readiness poller and in-guest exec channel, as vmlab drives them.
 
@@ -272,15 +337,24 @@ class AgentClient:
 
     _channel_ids = itertools.count(1)
 
-    def __init__(self, path):
+    def __init__(self, path, reset_monitor=None):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.connect(path)
         self.buf = b""
         self.channels = {}
+        self.reset_monitor = reset_monitor
+        if reset_monitor is not None:
+            reset_monitor.poll()
+        self.reset_generation = reset_monitor.generation if reset_monitor is not None else None
 
     def _recv_frame(self, timeout):
         self.sock.settimeout(timeout)
+        deadline = time.monotonic() + timeout
         while True:
+            if self.reset_monitor is not None:
+                self.reset_monitor.poll()
+                if self.reset_monitor.generation != self.reset_generation:
+                    raise ConnectionError("guest reset during agent command")
             i = self.buf.find(AGENT_MAGIC)
             if i < 0:
                 self.buf = self.buf[-3:]
@@ -292,6 +366,15 @@ class AgentClient:
                     payload = self.buf[13 : 13 + ln]
                     self.buf = self.buf[13 + ln :]
                     return kind, ch, payload
+            if self.reset_monitor is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout("agent receive timeout")
+                ready, _, _ = select.select([self.sock, self.reset_monitor], [], [], remaining)
+                if not ready:
+                    raise socket.timeout("agent receive timeout")
+                if self.reset_monitor in ready:
+                    continue
             chunk = self.sock.recv(65536)
             if not chunk:
                 raise ConnectionError("agent socket closed")
