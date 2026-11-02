@@ -46,10 +46,30 @@ intersection of the requested capabilities and those it implements.
 Unknown capability bits are ignored. A version mismatch closes the connection.
 
 Capability bits are frames=1, cursor=2, input=4, dmabuf_ok=8, cpu_copy=16,
-frame_flags=32.
+frame_flags=32, stable_buffers=64.
 Frames gates surface and frame delivery. Cursor gates shape and state.
 Input gates input acceptance and LED delivery. Dma-buf delivery requires
 frames and dmabuf_ok. CpuCopy requires cpu_copy and a configured surface.
+
+### Stable buffers extension, version 1
+
+`stable_buffers` is an additive v1 capability. It changes no message layout.
+With frames and dmabuf_ok, it lets the server reuse a dma-buf configure across
+frames. Cache imports by `(surface_id, buffer)`, not by sequence number.
+The configure announces all buffers in a small fallback pool, or one buffer
+for a directly exported guest resource. A resource, geometry, format or pool
+change replaces the configure. A new frame alone does not.
+
+Every FrameReady must be released, including frames without damage. Wait for
+the acquire fence, finish all GPU sampling, then send Release. Release is the
+completion token; no release fence fd is sent. The producer prevents writes to
+a held allocation until every client releases it or disconnects. Clients must
+not sample a buffer after Release, even if its configure is still cached.
+Holding a direct guest buffer can stall guest rendering. Keep it only for the
+GPU work needed to sample it, not until a later frame arrives.
+
+Without stable_buffers the server keeps the original per-frame dma-buf
+configure behaviour. Shared-memory clients need no new capability.
 
 ### SurfaceConfigure, kind 2
 
@@ -65,7 +85,8 @@ prevent truncation and growth. Fds support read-only client mmap.
 A configure supersedes the previous configure. Surface IDs increase within
 one connection and restart on reconnect. Old held frames remain valid until
 Release. Old buffers are never modified after a replacement configure.
-The core exports XRGB8888 or ARGB8888, with one plane at offset zero.
+Shared memory uses XRGB8888 or ARGB8888. Stable dma-bufs also support
+XBGR8888 (`XB24`) and ABGR8888 (`AB24`), with one plane at offset zero.
 Multi-plane formats and nonzero plane offsets are not represented in v1.
 
 ### FrameReady, kind 3
@@ -204,8 +225,8 @@ framebuffer dirty log to avoid rendering unchanged VGA pixels.
 Each client retains at most three frames. Held buffers cannot be reused.
 When no buffer is available, the worker waits while publications continue.
 After Release, the worker sends the latest frame with full damage if it skipped
-updates. Each dma-buf publication uses a new configure and retains the old
-allocation until Release. A client that holds frames across resize must still
+updates. Without stable_buffers, each dma-buf publication uses a new configure
+and retains the old allocation until Release. A client that holds frames across resize must still
 release those frames before receiving more than three outstanding frames.
 
 `DisplayServer::set_cursor(Cursor)` validates and publishes cursor state.
