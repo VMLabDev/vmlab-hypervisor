@@ -871,14 +871,17 @@ impl VmShared {
 
     pub(crate) fn mmio_read(&self, addr: u64, data: &mut [u8]) {
         let addr = self.cpu_address(addr);
-        self.advance_chipset();
+        let ecam = self.ecam_offset(addr);
+        if ecam.is_none() {
+            self.advance_chipset();
+        }
         if (0xa0000..0xc0000).contains(&addr)
             && let Some(vga) = self.vga.lock().as_ref()
         {
             vga.legacy_read(addr - 0xa0000, data);
             return;
         }
-        if let Some(offset) = self.ecam_offset(addr) {
+        if let Some(offset) = ecam {
             use vmlab_hv_devices::BusDevice;
             crate::pci::PciEcam::new(self.pci_root.clone()).read(offset, data);
             return;
@@ -893,15 +896,19 @@ impl VmShared {
     }
     pub(crate) fn mmio_write(&self, addr: u64, data: &[u8]) {
         let addr = self.cpu_address(addr);
-        self.advance_chipset();
+        let ecam = self.ecam_offset(addr);
+        let indirect = ecam.is_some_and(|offset| self.virtio_config_io(offset, data.len()));
+        if !indirect {
+            self.advance_chipset();
+        }
         if (0xa0000..0xc0000).contains(&addr)
             && let Some(vga) = self.vga.lock().as_ref()
         {
             vga.legacy_write(addr - 0xa0000, data);
             return;
         }
-        if let Some(offset) = self.ecam_offset(addr) {
-            let _memory_update = self.memory_update();
+        if let Some(offset) = ecam {
+            let _memory_update = (!indirect).then(|| self.memory_update());
             use vmlab_hv_devices::BusDevice;
             crate::pci::PciEcam::new(self.pci_root.clone()).write(offset, data);
             if !self.vfio.lock().is_empty()
@@ -909,10 +916,12 @@ impl VmShared {
             {
                 self.request_exit(ExitReason::Error(error));
             }
-            if let Err(error) = self.sync_vga_mapping() {
+            if _memory_update.is_some()
+                && let Err(error) = self.sync_vga_mapping()
+            {
                 self.request_exit(ExitReason::Error(error.to_string()));
             }
-            if let Some(chipset) = self.chipset.lock().as_ref() {
+            if !indirect && let Some(chipset) = self.chipset.lock().as_ref() {
                 chipset.sync_pirqs();
             }
             return;
@@ -1050,6 +1059,23 @@ impl VmShared {
         let mch = self.mch.lock();
         let (base, size) = mch.as_ref()?.lock().ecam_window()?;
         addr.checked_sub(base).filter(|offset| *offset < size)
+    }
+
+    fn virtio_config_io(&self, offset: u64, len: usize) -> bool {
+        // The captured transitional transports use 0x88..0x98 for indirect
+        // BAR I/O. These accesses cannot change PAM, SMRAM or VGA mappings.
+        // All other configuration writes retain the memory-update barrier.
+        let register = (offset & 0xfff) as usize;
+        if !(0x88..0x98).contains(&register) || len > 0x98 - register {
+            return false;
+        }
+        let id = self.pci_root.lock().config_read(
+            (offset >> 20) as u8,
+            ((offset >> 15) & 31) as u8,
+            ((offset >> 12) & 7) as u8,
+            0,
+        );
+        matches!(id, 0x1000_1af4 | 0x1001_1af4 | 0x1003_1af4)
     }
 
     fn clock_running(&self, running: bool) {
@@ -1721,6 +1747,67 @@ mod tests {
             "exit finalization overtook the legacy shutdown event"
         );
         assert_eq!(reason, ExitReason::Shutdown(ShutdownReason::HostRequest));
+    }
+
+    #[test]
+    fn virtio_config_window_does_not_park_other_vcpus() {
+        use vmlab_hv_devices::{BarInfo, PciDevice};
+        struct Probe;
+        impl PciDevice for Probe {
+            fn config_read(&mut self, _: usize) -> u32 {
+                0x1001_1af4
+            }
+            fn config_write(&mut self, _: usize, _: u64, _: &[u8]) {}
+            fn bars(&self) -> Vec<BarInfo> {
+                vec![]
+            }
+            fn bar_read(&mut self, _: u8, _: u64, _: &mut [u8]) {}
+            fn bar_write(&mut self, _: u8, _: u64, _: &[u8]) {}
+        }
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("SKIP virtio configuration dispatch: /dev/kvm absent");
+            return;
+        }
+        let mut root = PciRoot::q35(1 << 32);
+        root.add_device_at(2, 0, Arc::new(Mutex::new(Probe)))
+            .unwrap();
+        let signal = Arc::new(SleepSignal::default());
+        let shared = VmShared::new(
+            KvmVm::new().unwrap(),
+            IoBus::new(),
+            MmioBus::new(),
+            Arc::new(Mutex::new(root)),
+            Arc::new(Mutex::new(PmDevice::new(Arc::new(NullIrq), signal.sink()))),
+            signal,
+            1 << 32,
+        );
+        let pam = crate::q35::Pam::new(&vec![0xff; 0x40000], None, 0).unwrap();
+        let mut mch = crate::q35::Mch::new(Arc::new(Mutex::new(pam)));
+        vmlab_hv_devices::PciDevice::config_write(
+            &mut mch,
+            0x60 / 4,
+            0,
+            &0xb000_0001u32.to_le_bytes(),
+        );
+        *shared.mch.lock() = Some(Arc::new(Mutex::new(mch)));
+        assert!(shared.virtio_config_io(0x10094, 2));
+        assert!(!shared.virtio_config_io(0x94, 2));
+        assert!(!shared.virtio_config_io(0x10087, 2));
+        assert!(!shared.virtio_config_io(0x10097, 2));
+        let permit = shared.enter_kvm();
+        let dispatch = shared.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            dispatch.mmio_write(0xb001_0094, &0u16.to_le_bytes());
+            sent.send(()).unwrap();
+        });
+        let without_parking = received.recv_timeout(Duration::from_millis(100)).is_ok();
+        drop(permit);
+        worker.join().unwrap();
+        assert!(
+            without_parking,
+            "virtio configuration I/O waited for another vCPU"
+        );
     }
 
     #[test]

@@ -1,8 +1,392 @@
 # Phase-2 performance gate (HV-D28)
 
-**Verdict: NOT passed. The 2026-11-02 quiet window meets six of ten core bars;
-G1, G2, G7, and G9 fail.**
+**Verdict: NOT passed. The final 2026-11-02 quiet window meets six of ten core bars;
+G1, G4, G7, and G10 fail.**
 The VM default must remain unchanged.
+
+## Round 5 authorized final quiet bench window (2026-11-02)
+
+The final measurement passes six of ten core bars. G1, G4, G7, and G10 fail.
+The default remains unchanged. This window supersedes the round-4 verdict
+and the development sections' pending-window statements below.
+
+The owner authorized the window with the other project SIGSTOPped, every
+other session idle, no project VMs, and 68 GiB free in /tmp. Both backends
+ran from source `a1eb3ec`. The tested HV binary's SHA-256 is
+`eae67f98cdf14d89a3d19b86a02b808e07fff4dc9dcaa5c573021d641d8d388f`.
+
+Both backends ran the actual `just bench-run-kvm` recipes for Ubuntu
+26.04 and Windows 10, plus `just bench-run-g2g` for Ubuntu. Each has three
+fresh-overlay repeats, alternating QEMU then vmlab-hv per repeat. Recipe
+dependencies finish before either backend starts its first VM. Runtime
+source, firmware, workload sizes, flushes, readiness, repeat counts, and
+D28 thresholds stay unchanged.
+
+All six benchmark commands and `just bench-report x86_64` exit 0. The
+report prints the failed bars; its exit status does not enforce D28.
+All 22 new aggregate records and their raw samples are appended to
+`bench/history/x86_64.jsonl`. The earlier supplementary Server 2025
+result is historical and is not included in these ten bars.
+
+### Full bar table
+
+Values are medians. Boot requires hv/qemu <= 1.0000. Throughput requires
+hv/qemu >= 0.8000. Neither rounding nor spread changes the verdict.
+
+| Bar | Workload | QEMU | vmlab-hv | hv/qemu | Result |
+|---|---|---:|---:|---:|---|
+| G1 | Ubuntu boot (s) | 6.59 | 6.61 | 1.0030 | FAIL |
+| G2 | Windows 10 boot (s) | 85.46 | 79.13 | 0.9259 | PASS |
+| G3 | Sequential read (MiB/s) | 17197.94 | 14990.46 | 0.8716 | PASS |
+| G4 | Sequential write (MiB/s) | 5337.45 | 3986.11 | 0.7468 | FAIL |
+| G5 | Random read 4 KiB (iops) | 49844.60 | 68271.20 | 1.3697 | PASS |
+| G6 | Random write 4 KiB (iops) | 30947.90 | 36018.80 | 1.1639 | PASS |
+| G7 | UDP TX (Mbit/s) | 38828.77 | 24502.28 | 0.6310 | FAIL |
+| G8 | UDP RX (Mbit/s) | 86589.76 | 82292.74 | 0.9504 | PASS |
+| G9 | TCP A to B (Mbit/s) | 26395.45 | 21429.40 | 0.8119 | PASS |
+| G10 | TCP B to A (Mbit/s) | 26695.35 | 21286.79 | 0.7974 | FAIL |
+
+G2 and G9 now pass. G1 remains 0.02 seconds slower. G10 is below the floor
+at 0.7974, while G4 and G7 have larger deficits. These measurements do not
+identify the cause of the remaining gaps. Idle host CPU has no D28 bar:
+QEMU measures 1.03% and vmlab-hv 2.57% of one core.
+
+### Windows readiness and TCP checks
+
+Windows 10 samples are 86.16, 85.46, and 85.30 seconds for QEMU, and
+81.17, 79.13, and 78.84 for vmlab-hv. The unchanged marker, OOBE, AppX,
+and guest-reboot readiness sequence completes. Existing boot-ID probes
+change from `0x9` to `0xa` across all six requested reboots. Capturing
+those return values adds no guest commands.
+
+All 12 TCP transfers have matching sender and receiver byte counts.
+Payload hashes were not collected. All 12 single-VM repeats exit cleanly;
+the g2g teardown also stops every owned VM and peer.
+
+### Load averages per run
+
+Each triple contains the one-, five-, and fifteen-minute load averages.
+Start observations are taken after the interleaving wait. Rolling averages
+include preceding benchmark work. The original history environment's
+pre-wait observations are retained separately.
+
+| Run | Start load [1, 5, 15 min] | End load [1, 5, 15 min] |
+|---|---|---|
+| ubuntu qemu r1 | [0.34, 2.24, 3.79] | [0.55, 1.85, 3.49] |
+| ubuntu vmlab-hv r1 | [0.55, 1.85, 3.49] | [0.52, 1.50, 3.19] |
+| ubuntu qemu r2 | [0.52, 1.50, 3.19] | [0.57, 1.28, 2.94] |
+| ubuntu vmlab-hv r2 | [0.57, 1.28, 2.94] | [0.48, 1.11, 2.70] |
+| ubuntu qemu r3 | [0.48, 1.11, 2.70] | [0.62, 1.06, 2.53] |
+| ubuntu vmlab-hv r3 | [0.62, 1.06, 2.53] | [0.60, 0.97, 2.34] |
+| windows10 qemu r1 | [0.60, 0.97, 2.34] | [1.34, 1.15, 2.27] |
+| windows10 vmlab-hv r1 | [1.34, 1.15, 2.27] | [1.85, 1.36, 2.25] |
+| windows10 qemu r2 | [1.85, 1.36, 2.25] | [1.43, 1.36, 2.17] |
+| windows10 vmlab-hv r2 | [1.43, 1.36, 2.17] | [2.05, 1.57, 2.17] |
+| windows10 qemu r3 | [2.05, 1.57, 2.17] | [2.48, 1.79, 2.19] |
+| windows10 vmlab-hv r3 | [2.48, 1.79, 2.19] | [1.75, 1.72, 2.13] |
+| g2g qemu r1 | [1.75, 1.72, 2.13] | [2.36, 1.88, 2.17] |
+| g2g vmlab-hv r1 | [2.36, 1.88, 2.17] | [3.05, 2.11, 2.23] |
+| g2g qemu r2 | [3.05, 2.11, 2.23] | [3.05, 2.23, 2.27] |
+| g2g vmlab-hv r2 | [3.05, 2.23, 2.27] | [3.02, 2.33, 2.30] |
+| g2g qemu r3 | [3.02, 2.33, 2.30] | [3.12, 2.45, 2.34] |
+| g2g vmlab-hv r3 | [3.12, 2.45, 2.34] | [2.90, 2.48, 2.36] |
+
+The one-second monitor records 1361 observations, a one-minute load range
+of 0.31 to 3.41, at most two owned VMs, and no foreign project VM. Android
+is excluded. Every observed VM has memory.max 25769803776 and
+memory.swap.max 0. The coordinator holds all four shared admission locks;
+the harness also checks capacity before every launch.
+
+Single VMs use CPUs 16-23, and g2g uses 16-19 plus 20-23. The governor is
+performance. The existing Ananicy policy remains unchanged: QEMU is moved
+to nice 9 while vmlab-hv inherits nice -4. No profiler or exit-recorder
+override is active.
+
+### Evidence and cleanup
+
+`bench/profiles/phase2-round5-final-20261102.json` contains the complete
+bar table, all records and samples, load triples, monitor, command logs,
+firmware and binary hashes, existing boot-ID probes, TCP counters, and
+coordinator sources. The measurement job has a clean exit-0 receipt.
+There are no discarded attempts or resource failures in this window.
+
+Every owned temporary VM directory is removed as its run finishes, with
+logs retained on disk. The minimum observed /tmp free space is
+71086792704 bytes, about 66.2 GiB. The empty temporary root and the
+measurement job are removed after completion. No project VM remains.
+
+`just ci::check` is deliberately not run in this window, as instructed.
+The orchestrator owns the subsequent integration gate. Later history
+dirty flags reflect appended history, not runtime edits. The window changes
+no default, threshold, shared interface, or snapshot format. Nothing is
+merged or pushed.
+
+## Round 5 development diagnostics (2026-11-02)
+
+These are shared-host diagnostics on main `41e53e4`, not a new D28 verdict.
+The round-4 quiet-window table remains the gate result. No history record,
+threshold, firmware, guest workload, or default changed.
+
+### Windows readiness across reset
+
+The large Windows 10 gap includes a benchmark-client defect. Sysprep can
+reboot after the specialize marker appears. The host's agent socket stays
+open, but an outstanding command belongs to the previous guest boot. The
+old client waits its full 90-second exec timeout before reconnecting.
+Windows' own OOBE log finishes much earlier than the host's next probe.
+
+An unchanged main binary reproduced a 156.74-second boot. A later QEMU
+boot reproduced the same failure at 157.36 seconds, including an explicitly
+recorded 90.09-second OOBE-probe timeout. Other boots of both binaries avoid
+the race. This does not identify a VMM regression between `6cceef4` and main.
+
+The runner now observes QMP or S1 reset events and cancels commands from the
+previous agent generation. It reconnects and repeats the same probe. The
+marker, OOBE, AppX, final guest reboot, and boot-ID checks remain. A marker
+already observed is remembered if reset interrupts its deletion, so retrying
+the deletion cannot lose the readiness proof.
+
+Interleaved fresh-overlay boots used frozen VMM binaries. The old and fixed
+columns are complete readiness times, not Hello-only measurements.
+
+| Backend | Old readiness samples (s) | Fixed readiness samples (s) |
+|---|---|---|
+| QEMU | 157.36 | 92.92 |
+| vmlab-hv main | 86.15, 85.67 | 83.83, 83.00 |
+
+The old main samples in this cohort avoided the race; the earlier 156.74
+capture remains separate. A controlled S1 reproduction on one Windows VM
+scheduled a reboot during the same long command. The old client timed out
+after 90.09 seconds; the fixed client cancelled after 3.36 seconds. S1 reset
+events and BootId transitions `0xa -> 0xb -> 0xc` prove both guest reboots.
+Six socket and readiness regressions pass, including both control protocols.
+The reset-cancellation and marker-deletion regressions failed before their
+corrections.
+
+Server 2025 also completed the unchanged readiness sequence with the fixed
+client: QEMU 76.98 seconds and vmlab-hv 71.18 seconds. Those samples shared
+the host with other diagnostics and do not replace its round-4 result.
+
+### Windows hardware and phase evidence
+
+| ID | Hypothesis | Evidence |
+|---|---|---|
+| H1 | Coarse userspace HLT or synthetic timers | Both use KVM's irqchip, LAPIC, halt handling, and Hyper-V timers. Host halt polling is 200 us. PID-filtered HLT and scheduler traces record runnable-to-scheduled latency separately from the intended halt duration. |
+| H2 | Missing Hyper-V enlightenments | Installed CPUID matches across QEMU, `6cceef4`, and main: feature leaf `0xaff/0x30/0/0x108`, recommendations `0xe24`, spinlock limit `0x1fff`. TLB flush, IPI, SynIC, timers, and AVIC are present. Neither reference launch enables stimer-direct. |
+| H3 | Expensive reset or firmware rerun | Typical final reset-to-agent intervals are about eight seconds on both current backends. OVMF BDS, guest kernel-start events, marker, OOBE, AppX, and agent timestamps are retained for each captured boot. |
+| H5 | Trapped framebuffer writes | Both register an 8 MiB dirty-logged mapping at `0x80000000`. Complete MMIO-page histograms in the second observer cohort contain no exits in that mapping. Legacy VGA-aperture exits are separate. |
+
+Windows 10 and Server 2025 use the same configured hardware: four vCPUs,
+8192 MiB, installed OVMF, enlightenments, virtio-blk, virtio-vga, tablet,
+and no NIC. Their images and provisioning work differ.
+
+Guest kernel-start events are calibrated against a post-boot guest/host
+clock observation, with the RPC interval retained as uncertainty. These
+bound boot-manager and kernel/service startup phases; they do not measure
+kernel-only CPU time. The initial all-exit main trace overran by 166526
+records and is marked incomplete. The replacement HLT-filtered captures
+have no overruns. Raw captures are retained as lossless gzip files.
+
+One complete 157.36-second QEMU capture contains 483609 HLT exits; a complete
+83.00-second fixed-main capture contains 282281. Their HLT-blocked vCPU
+runnable-to-scheduled p95 is 3 us on both backends, with p99 of 12 and 8 us.
+The different capture durations prevent interpreting those totals as an
+exit-rate improvement. This scheduler interval is not timer-expiration to
+the first resumed guest instruction.
+
+`bench/profiles/phase2-round5-windows-20261102.json` contains the complete
+samples, failed probes, guest logs, phase markers, installed CPUID and
+memory-registration evidence, trace summaries, losses, compressed-capture
+hashes, and diagnostic sources. Credential-related guest log lines are
+omitted from the committed copy; original local diagnostic logs remain.
+
+### Network queue service and G1
+
+H4, the offload hypothesis, was checked inside the guests. CSUM,
+GUEST_CSUM, HOST_TSO4/6, and GUEST_TSO4/6 are disabled on both backends with
+the stream-socket attachment. QEMU removes those capabilities when its
+peer has no virtio header. MRG_RXBUF is offered by QEMU and remains absent
+from vmlab-hv; this pre-existing difference was not identified as the TX
+cause. Negotiated bits and complete ethtool output are retained.
+
+The NIC now coalesces worker wakes, rearms before processing work, and
+services both queues without enqueuing a command for each kick. This
+removes duplicate queue walks. Lifecycle barriers remain ordered, and
+backpressure, POLLOUT continuation, EVENT_IDX, and snapshot bytes remain
+unchanged. Coalescing socket writes alone did not improve UDP and was not
+retained as a standalone fix.
+
+The following are medians of three fresh-overlay boots per configuration.
+UDP uses the median of three unchanged 12-second sends within each boot.
+Each TCP direction runs once per fresh pair. The cohorts alternate QEMU,
+baseline, and candidate with rotating order.
+
+| Workload | QEMU (Mbit/s) | Baseline (Mbit/s) | Coalesced queue service (Mbit/s) |
+|---|---:|---:|---:|
+| UDP TX | 28113.15 | 22724.03 | 25099.14 |
+| TCP A to B | 24552.06 | 13616.11 | 17382.59 |
+| TCP B to A | 29395.08 | 16006.86 | 18886.95 |
+
+The distributions overlap. UDP VM-process CPU seconds per GiB increased;
+no CPU-efficiency gain is claimed. TCP remains below 80% of QEMU in this
+cohort, and G9 is not closed. All 18 TCP transfers have matching sender and
+receiver byte counts. The new wake regression fails before the fix with
+200 socket bytes instead of one. All 24 network unit tests and the S1 NIC
+test pass, including all 900 echoes across save and restore.
+
+UDP used CPUs 8-15 while Windows diagnostics used 16-23. TCP used 16-19 and
+20-23 and overlapped the final UDP cohort and CI. Every VM used the shared
+four-slot admission checks and a 24 GiB, zero-swap scope. The host's
+Ananicy rule moves QEMU to nice 9 and best-effort I/O priority 7; vmlab-hv
+inherits nice -4. This policy is recorded, not changed. These conditions
+exclude a quiet-host verdict.
+
+G1 remains unresolved. A startup profile pair reaches first kernel output
+at 1.81 seconds under QEMU and 2.35 under baseline vmlab-hv. The requested
+one-second leaf samples contain 329 and 626 samples, with 176 and 170
+unresolved. Run-loop synchronization, mutex contention, and platform clock
+service remain distributed costs. This does not establish one sufficient
+safe change, and no boot-time fix is claimed. Memory-map quiescence and
+timer synchronization were preserved.
+
+`bench/profiles/phase2-round5-network-20261102.json` retains every sample,
+CPU counter, feature query, failed setup attempt, discarded wake-only
+candidate, startup profile, TCP byte check, and driver source. Rust shared
+traits, the control protocol, and snapshot formats are unchanged. The
+benchmark agent client adds an optional reset monitor; other callers keep
+their existing behavior.
+
+### Initial correctness gate
+
+`just ci::check` passed after the fixes: formatting, clippy with warnings
+denied, and 998 tests, including S1 and S2 coverage. Six slow, manual, or
+live-session diagnostics remain ignored. All 89 benchmark-harness tests passed
+separately. Physical USB and VFIO opt-ins were unset; real-device paths
+were not exercised. Owned temporary VM overlays were removed; diagnostic
+logs and compressed traces remain available.
+
+The initial pass leaves G1 and G9 open. G2 and G7 need confirmation in the
+next authorized quiet window. The default remains unchanged. READY FOR BENCH WINDOW.
+
+### Owner-requested G1/G9 follow-up
+
+The owner requested another focused pass before the quiet window. The
+following measurements remain shared-host diagnostics. The strict D28
+verdict and the default are unchanged.
+
+F1, ECAM service during SeaBIOS and GRUB boot, accounts for a large part
+of the pre-kernel gap. vmlab-hv completes firmware/ROM loading, ACPI
+construction, and vCPU creation within about 0.1 seconds. QEMU also reaches
+its first KVM exit in about 0.1 seconds. Captured fw_cfg DMA service is
+about 0.1 ms in vmlab-hv. Neither accounts for the original gap. The disk's
+ECAM page receives about 44771 accesses. Its observed userspace service
+interval totals 0.516 seconds before the first correction and 0.100 after.
+Those intervals include scheduling and observer overhead, not only device
+CPU time.
+
+ECAM reads now call each configuration dword once, including unaligned
+reads, instead of repeating a side-effecting read for every returned byte.
+Writes through virtio's indirect configuration window no longer stop every
+other vCPU, recheck VGA mappings, or resynchronize platform timers and PIRQs for
+each access. The exception covers only the captured net, block, and
+console identities and bytes 0x88 through 0x97. All other configuration
+writes retain the memory-update barrier. PAM, SMRAM, VGA, A20, and VFIO
+mapping rules are preserved. Both new regressions failed before the fix.
+
+The initial interleaved candidate reduces the median launch-to-first-kernel
+interval from 2.251 to 1.851 seconds; QEMU measures 1.614. Full readiness
+changes only from 8.16 to 8.12 seconds in that cohort. Unmapped ROM reads
+remain visible in the observer. QEMU registers ioeventfds, but the large
+firmware disk cost appears in configuration-window accesses; it is not a
+measurement of Linux's steady-state BAR notification path.
+
+F2, console input before guest open, explains the remaining large readiness
+penalty. vmlab-hv previously consumed host bytes when receive buffers
+existed, even if the guest had not opened the named port. The kernel can
+discard that early Hello. QEMU's `virtio_serial_guest_ready` gates input on
+guest-open state. The device now applies that backpressure and delivers
+staged data when the guest opens the port. The socket regression fails
+before the correction. No benchmark timing or readiness rule changed.
+
+| Console cohort | Full readiness median (s) | Samples (s) |
+|---|---:|---|
+| QEMU | 6.80 | 6.84, 6.80, 6.69 |
+| Before guest-open correction | 8.13 | 8.13, 8.12, 8.13 |
+| After guest-open correction | 6.90 | 6.92, 6.90, 6.80 |
+
+F3, mergeable network receive buffers, closes the remaining observed
+feature difference relevant to RX allocation. CSUM, GUEST_CSUM,
+HOST_TSO4/6, and GUEST_TSO4/6 remain off on both stream backends. MRG_RXBUF
+is now offered and negotiated, as in QEMU. One header describes each
+packet; all receive chains are copied before one used-index publication.
+If capacity is insufficient, the packet and original available position
+remain pending, while the refill event targets the end of the inspected
+buffers. This avoids repeatedly retrying the same insufficient buffers.
+
+Tests cover split headers, multi-buffer packets, no DMA or partial
+publication before refill, short and inaccessible buffers, ring wrap,
+and interrupt events crossing the whole batch. The first two mergeable
+RX regressions failed before implementation. The S1 snapshot test now
+asserts MRG_RXBUF and EVENT_IDX negotiation and passes all 900 normal and
+60 unfragmented jumbo echoes across save and restore.
+
+| Three-pair TCP cohort | QEMU (Mbit/s) | Before MRG_RXBUF | After MRG_RXBUF | After/QEMU |
+|---|---:|---:|---:|---:|
+| A to B | 26029.85 | 20914.20 | 22752.00 | 0.8741 |
+| B to A | 26578.61 | 22166.90 | 23007.16 | 0.8656 |
+
+All 18 cohort transfers and four later combined-build transfers have
+matching sender/receiver byte counts. Payload hashes were not collected.
+The quiet-window G9 result remains unmeasured. TCP CPU efficiency was not
+measured in this cohort.
+
+F4, legacy block interrupt suppression, removes unnecessary completion
+interrupts while firmware polls the ring. Without EVENT_IDX, the block
+device previously ignored the driver's NO_INTERRUPT flag. It now respects
+that flag; EVENT_IDX still takes precedence when negotiated. The polling
+regression fails before the fix. The observer records 22290 pre-kernel
+KVM_IRQ_LINE calls before this change and six after; QEMU records zero.
+
+| Final interleaved boot cohort | First kernel median (s) | Full readiness median (s) | Full readiness samples (s) |
+|---|---:|---:|---|
+| QEMU | 1.636 | 6.75 | 6.76, 6.75, 6.73 |
+| Before block interrupt correction | 1.871 | 6.81 | 6.80, 6.81, 6.89 |
+| All corrections | 1.792 | 6.76 | 6.72, 6.78, 6.76 |
+
+The final full-readiness ratio is 1.0015. G1 is still above the strict bar
+in this shared-host cohort; neither rounding nor a noise allowance makes
+it pass. First-kernel output is sampled every 5 ms. Host setup, firmware
+execution, first kernel output, and full readiness remain separate metrics.
+The benchmark clock includes the systemd scope launch. The observer also
+timestamps VMM exec through its loader constructor, vCPU creation, and
+the first KVM exits.
+
+Boot diagnostics use CPUs 8-15; TCP uses 16-19 and 20-23. Some cohorts
+overlap on those separate physical-core groups, with brief builds and
+unit checks also recorded. Full CI starts after every timed cohort ends.
+The existing Ananicy priority difference remains unchanged. Each VM uses
+the shared four-slot admission checks and its own 24 GiB, zero-swap scope.
+
+`bench/profiles/phase2-round5-followup-20261102.json` retains all cohorts,
+feature queries, observer records, source drivers, binary hashes, failures,
+and validation receipts. The first observer lacked mmap64 interception;
+two early captures stopped on UART setup rather than kernel text. These
+captures are marked unsuitable for port-cost conclusions. A wrapped Herdr
+exit marker also prevented its build-status parser from reading one
+successful build; the displayed EXIT=0 and build log are retained.
+
+No Rust trait, control protocol, switch framing, or snapshot layout changed.
+The guest-visible change is MRG_RXBUF support, matching the reference.
+The runtime changes are ready for the authorized quiet-window comparison.
+
+The final `just ci::check` passes formatting, clippy with warnings denied,
+and 1007 Rust tests, including S1 and S2. Six slow, manual, or live-session
+diagnostics remain ignored. All 89 benchmark tests and the final release
+build pass. Physical USB and VFIO opt-ins remain unset; no real devices
+were exercised. Owned temporary benchmark VM directories were removed.
+
+READY FOR BENCH WINDOW. G1 still needs a strict quiet-host result; G9's
+shared-host improvement does not change the existing gate verdict.
 
 ## Round 4 authorized quiet bench window (2026-11-02)
 

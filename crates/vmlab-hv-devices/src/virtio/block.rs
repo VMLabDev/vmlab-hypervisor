@@ -41,6 +41,8 @@ const F_DISCARD: u64 = 1 << 13;
 // Transport features the device opts into (VIRTIO 1.2 §6).
 const F_RING_EVENT_IDX: u64 = 1 << 29;
 const F_RING_INDIRECT_DESC: u64 = 1 << 28;
+/// Legacy split-ring flag suppressing completion interrupts.
+const AVAIL_F_NO_INTERRUPT: u16 = 1;
 
 // Request types (VIRTIO 1.2 §5.2.5).
 const T_IN: u32 = 0;
@@ -472,10 +474,16 @@ impl Block {
                 _ => break,
             }
         }
-        let notified = self
-            .queues
-            .get_mut(index)
-            .is_some_and(|q| q.needs_notification(&mem).unwrap_or(false));
+        let notified = self.queues.get_mut(index).is_some_and(|q| {
+            q.needs_notification(&mem).unwrap_or(false)
+                && (q.event_idx_enabled()
+                    || mem
+                        .load::<u16>(
+                            GuestAddress(q.avail_ring()),
+                            std::sync::atomic::Ordering::Relaxed,
+                        )
+                        .is_ok_and(|flags| u16::from_le(flags) & AVAIL_F_NO_INTERRUPT == 0))
+        });
         if used_any && notified {
             interrupt.notify_queue(index as u16);
         }
@@ -1414,6 +1422,33 @@ mod tests {
                 assert!(f.block.io_buffer.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn polling_legacy_driver_suppresses_completion_interrupts() {
+        let mut f = Fixture::new(Box::new(MemDisk::new(64 * 1024)));
+        f.block.acked_features &= !F_RING_EVENT_IDX;
+        f.block.queues[0].set_event_idx(false);
+        f.mem.write_obj(1u16, GuestAddress(f.avail)).unwrap();
+        f.put_header(T_IN, 2);
+        f.chain_hdr_data_status(512, true);
+        f.submit(0);
+        assert_eq!(f.status(), S_OK);
+        assert_eq!(f.used_slot(0), (1, 0, 513));
+        assert!(f.interrupt.notifies.lock().is_empty());
+        f.mem.write_obj(0u16, GuestAddress(f.avail)).unwrap();
+        f.submit(0);
+        assert_eq!(*f.interrupt.notifies.lock(), vec![0]);
+    }
+
+    #[test]
+    fn event_index_takes_precedence_over_the_legacy_interrupt_flag() {
+        let mut f = Fixture::new(Box::new(MemDisk::new(64 * 1024)));
+        f.mem.write_obj(1u16, GuestAddress(f.avail)).unwrap();
+        f.put_header(T_IN, 2);
+        f.chain_hdr_data_status(512, true);
+        f.submit(0);
+        assert_eq!(*f.interrupt.notifies.lock(), vec![0]);
     }
 
     #[test]

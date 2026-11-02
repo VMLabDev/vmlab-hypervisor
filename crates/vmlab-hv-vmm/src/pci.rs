@@ -750,22 +750,22 @@ impl PciEcam {
 }
 
 impl BusDevice for PciEcam {
-    fn read(&mut self, offset: u64, data: &mut [u8]) {
-        if offset >= MMCONFIG_SIZE {
-            data.fill(0xFF);
-            return;
-        }
+    fn read(&mut self, mut offset: u64, mut data: &mut [u8]) {
         let mut root = self.root.lock();
-        for (index, byte) in data.iter_mut().enumerate() {
-            let address = offset.saturating_add(index as u64);
-            if address >= MMCONFIG_SIZE {
-                *byte = 0xff;
-                continue;
+        while !data.is_empty() {
+            if offset >= MMCONFIG_SIZE {
+                data.fill(0xff);
+                break;
             }
-            let (bus, slot, function, conf_off) = ecam_decode(address);
-            *byte = root
+            let (bus, slot, function, conf_off) = ecam_decode(offset);
+            let within = conf_off % 4;
+            let len = data.len().min(4 - within);
+            let value = root
                 .config_read(bus, slot, function, conf_off / 4)
-                .to_le_bytes()[conf_off % 4];
+                .to_le_bytes();
+            data[..len].copy_from_slice(&value[within..within + len]);
+            data = &mut data[len..];
+            offset += len as u64;
         }
     }
 
@@ -1029,6 +1029,19 @@ mod tests {
         cfg.write(0, &0x8000_0810u32.to_le_bytes());
         cfg.write(4, &0xFFFF_FFF0u32.to_le_bytes());
         assert_eq!(shared.lock().config_read(0, 1, 0, 4), 0xFFFF_F000);
+    }
+
+    #[test]
+    fn ecam_reads_each_config_dword_once() {
+        let (root, device) = root_with_fake();
+        let mut ecam = PciEcam::new(root);
+        let reads = device.lock().config_reads;
+        let mut bytes = [0; 4];
+        ecam.read(1 << 15, &mut bytes);
+        assert_eq!(device.lock().config_reads - reads, 1);
+        assert_eq!(u32::from_le_bytes(bytes), 0xabcd_1234);
+        ecam.read((1 << 15) + 3, &mut bytes);
+        assert_eq!(device.lock().config_reads - reads, 3);
     }
 
     #[test]

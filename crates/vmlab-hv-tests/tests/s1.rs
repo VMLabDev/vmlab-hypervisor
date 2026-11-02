@@ -742,6 +742,11 @@ fn nic_traffic_survives_snapshot_load() {
             Some(&b'1'),
             "{phase}: network EVENT_IDX was not negotiated: {output:?}"
         );
+        assert_eq!(
+            output.stdout.get(15),
+            Some(&b'1'),
+            "{phase}: network MRG_RXBUF was not negotiated: {output:?}"
+        );
         // More packets than ring entries exercise refill and rearm after wrap.
         let before = switch.stats().frames_from_guest_mac;
         let server = SERVER_IP.to_string();
@@ -766,6 +771,30 @@ fn nic_traffic_survives_snapshot_load() {
             after.frames_from_guest_mac >= before + 300,
             "{phase}: missing transmitted echo requests: {after:?}\n{}",
             guest.diagnostics(phase)
+        );
+        let output = agent
+            .exec(
+                &[BUSYBOX, "ip", "link", "set", "dev", "eth0", "mtu", "9000"],
+                Duration::from_secs(15),
+            )
+            .unwrap_or_else(|e| panic!("{phase}: {e}\n{}", guest.diagnostics(phase)));
+        assert_eq!(output.exit_code, 0, "{phase}: jumbo MTU: {output:?}");
+        // These unfragmented replies span several mergeable receive buffers.
+        let output = agent
+            .exec(
+                &[
+                    BUSYBOX, "ping", "-q", "-c", "20", "-i", "0.005", "-W", "3", "-s", "8192",
+                    &server,
+                ],
+                Duration::from_secs(30),
+            )
+            .unwrap_or_else(|e| panic!("{phase}: {e}\n{}", guest.diagnostics(phase)));
+        eprintln!("{phase}: jumbo ping {output:?}");
+        assert_eq!(output.exit_code, 0, "{phase}: jumbo echo: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("20 packets transmitted, 20 packets received, 0% packet loss"),
+            "{phase}: incomplete jumbo echo exchange: {output:?}"
         );
     };
 

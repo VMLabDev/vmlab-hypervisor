@@ -377,6 +377,8 @@ class WindowsReady:
         self.t0 = t0
         self.deadline = t0 + X86_BOOT_DEADLINE["windows-10"] * args.timeout_scale
         self.resets = 0
+        self.reset_monitor = None
+        self.reset_session = None
 
     def ensure_vm(self):
         """vmlab-hv exits 0 on every guest reset; vmlab restarts it, and so
@@ -400,9 +402,16 @@ class WindowsReady:
         """The answered agent, or None. An early persistent connection's
         Hello is never answered, so every attempt is a fresh dial."""
         self.ensure_vm()
+        if self.reset_session is not self.backend.session:
+            if self.reset_monitor is not None:
+                self.reset_monitor.close()
+            path = (self.backend.qmp_sock if self.args.backend == "qemu" else
+                    self.backend.control_sock)
+            self.reset_monitor = lib.ResetMonitor(path, self.args.backend)
+            self.reset_session = self.backend.session
         cand = None
         try:
-            cand = lib.AgentClient(self.backend.agent_socket())
+            cand = lib.AgentClient(self.backend.agent_socket(), reset_monitor=self.reset_monitor)
             hello = cand.handshake(3)
             return cand, hello
         except Exception:
@@ -413,17 +422,20 @@ class WindowsReady:
     def wait_marker(self):
         """Phase 1: the specialize marker, `cmd if exist` like vmlab's
         script (powershell is not dependable this early)."""
+        marker_seen = False
         while time.monotonic() < self.deadline:
             agent, hello = self.connect()
             if agent is not None:
                 try:
-                    chan = win_exec(
-                        agent,
-                        ["cmd.exe", "/C",
-                         f"if exist {WINDOWS_MARKER} (exit 0) else (exit 1)"],
-                        60,
-                    )
-                    if chan["code"] == 0:
+                    if not marker_seen:
+                        chan = win_exec(
+                            agent,
+                            ["cmd.exe", "/C",
+                             f"if exist {WINDOWS_MARKER} (exit 0) else (exit 1)"],
+                            60,
+                        )
+                        marker_seen = chan["code"] == 0
+                    if marker_seen:
                         log("windows first boot finished; clearing marker")
                         win_exec(agent, ["cmd.exe", "/C", f"del /f /q {WINDOWS_MARKER}"], 60)
                         return agent, hello
@@ -542,11 +554,16 @@ class WindowsReady:
         return self.wait_agent(min(time.monotonic() + 900, self.deadline))
 
     def run(self):
-        agent, hello = self.wait_marker()
-        agent = self.wait_oobe(agent) or agent
-        self.settle_appx(agent)
-        agent, hello = self.reboot_and_return(agent)
-        return agent, hello, round(time.monotonic() - self.t0, 2)
+        try:
+            agent, hello = self.wait_marker()
+            agent = self.wait_oobe(agent) or agent
+            self.settle_appx(agent)
+            agent, hello = self.reboot_and_return(agent)
+            agent.reset_monitor = None
+            return agent, hello, round(time.monotonic() - self.t0, 2)
+        finally:
+            if self.reset_monitor is not None:
+                self.reset_monitor.close()
 
 
 def wait_x86_ready(backend, args, guest, run_dir, t0):
