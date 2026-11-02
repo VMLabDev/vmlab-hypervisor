@@ -29,11 +29,15 @@ mode without a render node, fail machine validation.
 Virgl mode advertises virgl and virgl2 capsets. Venus mode adds the Venus
 capset. Both modes support context creation, resource attachment, 3D
 submission, transfers, fences and blob resources. Venus needs host Vulkan
-driver support in addition to EGL.
+driver support in addition to EGL. It enables virglrenderer's render server
+and external blobs. Initialization rejects an empty Venus capset, even when
+rutabaga reports the capset ID.
 
 The process inherits the launcher's environment unchanged. This includes
 Vulkan ICD/loader settings and the PCI filter layer supplied by vmlab. The
-hypervisor does not translate `qemu_env` or choose a replacement ICD.
+hypervisor does not translate `qemu_env` or choose a replacement ICD. The
+vmlab launcher must apply the selected host GPU's environment itself, including
+`RENDER_SERVER_EXEC_PATH` when a patched virglrenderer render server is needed.
 
 ## Host dependencies
 
@@ -58,6 +62,8 @@ renders directly into that allocation; display publication does not blit it.
 Unknown layouts, cropped or multi-plane resources and external-only imports
 use a three-buffer EGL blit pool. Pool allocation also prefers Vulkan-importable
 modifiers. No CPU readback runs without a native shm, CpuCopy or RFB consumer.
+An inferred GBM modifier is accepted only after EGL imports it successfully.
+Otherwise a Vulkan blob retains its implicit layout for the blit path.
 
 RESOURCE_FLUSH and SET_SCANOUT publish frames with guest damage. Only VGA
 compatibility still polls. Native clients negotiate `stable_buffers` to cache
@@ -91,5 +97,25 @@ refusals. No guest packages are installed. The template defaults to the newest
 local version; `VMLAB_HV_TEST_VM_DISK` overrides it. The test skips with a reason
 if KVM, the template, firmware or a usable render node is missing.
 
+The S1 test `steamos_venus_vulkan_device_and_frames` boots a private SteamOS
+overlay, requires `vulkaninfo --summary` to report `DRIVER_ID_MESA_VENUS`, and
+runs gamescope with a Wayland vkcube client. It requires five non-placeholder
+dma-buf frames through the native display protocol and a successful 120-frame
+vkcube run using Mesa's Wayland WSI. Set
+`VMLAB_HV_TEST_VENUS_RENDER_NODE` to enable it and
+`VMLAB_HV_TEST_VENUS_DISK` to override the SteamOS 3.8.14.3 template. OVMF
+comes from vmlab's local guest firmware directory. The launcher environment
+must select the same Vulkan physical device as the render node, as vmlab's
+driver filter and PCI filter do in production.
+
+On 2026-11-02 this S1 test passed on both the NVIDIA RTX 5090 at
+`/dev/dri/renderD128` and the AMD Ryzen 9 9950X integrated GPU at
+`/dev/dri/renderD130`. Each run exposed one `DRIVER_ID_MESA_VENUS` device,
+published five dma-buf frames and completed the 120-frame vkcube run. NVIDIA
+used the host's patched `RENDER_SERVER_EXEC_PATH`; AMD used the system render
+server. One earlier AMD boot timed out before the agent handshake; the
+unchanged test passed on the next run.
+
 Run VM tests under the work package's 24 GiB memory scope. The shared harness
-limits concurrent test VMs to two. `just ci::check` remains the full merge gate.
+checks the host-wide four-project-VM limit before booting. `just ci::check`
+remains the full merge gate.

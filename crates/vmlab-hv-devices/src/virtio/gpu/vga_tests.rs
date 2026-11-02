@@ -228,7 +228,9 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
         assert_eq!(code(&cap), 0x1102);
         assert_eq!(u32::from_le_bytes(cap[24..28].try_into().unwrap()), 4);
         assert_ne!(u32::from_le_bytes(cap[32..36].try_into().unwrap()), 0);
-        assert_eq!(code(&d.command(0, 0x109, &[4, 0])), 0x1103);
+        let caps = d.command(0, 0x109, &[4, 0]);
+        assert_eq!(code(&caps), 0x1103);
+        assert_ne!(&caps[24..28], &[0; 4], "Venus wire format version is zero");
     }
     let mut context = vec![0; 96];
     context[..4].copy_from_slice(&0x200u32.to_le_bytes());
@@ -236,6 +238,14 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
     context[24..28].copy_from_slice(&4u32.to_le_bytes());
     context[28..32].copy_from_slice(&2u32.to_le_bytes());
     context[32..36].copy_from_slice(b"test");
+    if venus {
+        context[28..32].copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!(code(&d.submit_raw(0, &context, 2048)), 0x1100);
+        context[..4].copy_from_slice(&0x201u32.to_le_bytes());
+        assert_eq!(code(&d.submit_raw(0, &context[..24], 2048)), 0x1100);
+        context[..4].copy_from_slice(&0x200u32.to_le_bytes());
+        context[28..32].copy_from_slice(&2u32.to_le_bytes());
+    }
     assert_eq!(code(&d.submit_raw(0, &context, 2048)), 0x1100);
     assert!(d.dev.has_3d_contexts());
     assert!(d.dev.save_state().is_err());

@@ -262,6 +262,8 @@ impl Renderer {
                     .set_use_egl(true)
                     .set_use_surfaceless(false)
                     .set_use_vulkan(mode == GpuMode::Venus)
+                    .set_use_external_blob(mode == GpuMode::Venus)
+                    .set_use_render_server(mode == GpuMode::Venus)
                     .set_rutabaga_paths(Some(vec![RutabagaPath {
                         path: node.clone(),
                         path_type: RUTABAGA_PATH_TYPE_GPU,
@@ -279,6 +281,14 @@ impl Renderer {
                         "virglrenderer failed initialization; refusing rutabaga's 2D fallback"
                             .into(),
                     ));
+                    return;
+                }
+                if mode == GpuMode::Venus
+                    && !gpu
+                        .get_capset(RUTABAGA_CAPSET_VENUS, 0)
+                        .is_ok_and(|caps| caps.get(..4).is_some_and(|version| version != [0; 4]))
+                {
+                    let _ = ready.send(Err("virglrenderer returned no usable Venus capset".into()));
                     return;
                 }
                 let _ = ready.send(Ok(gpu.get_num_capsets()));

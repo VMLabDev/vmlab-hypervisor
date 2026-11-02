@@ -556,7 +556,13 @@ impl Scanout {
                 }
                 gbm_bo_destroy(bo);
                 if ![u64::MAX, INVALID_MODIFIER].contains(&info.modifier) {
-                    return info;
+                    // GBM may infer a layout that EGL cannot import for a Vulkan blob.
+                    // Keep implicit import unless the inferred layout is usable.
+                    if let Ok(image) = self.import(fd, info, width, height) {
+                        (self.destroy_image)(self.display, image);
+                        return info;
+                    }
+                    info.modifier = INVALID_MODIFIER;
                 }
             }
         }
