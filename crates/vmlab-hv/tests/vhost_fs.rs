@@ -400,6 +400,7 @@ fn initrd_overlay_is_complete_before_returning() {
 /// One machine description with a single share on `socket`.
 fn machine(dir: &Dir, socket: &Path, initrd: &Path) -> MachineDescription {
     MachineDescription {
+        fw_cfg: vec![],
         exit_on_reset: false,
         vfio: vec![],
         machine: Default::default(),

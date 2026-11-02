@@ -149,6 +149,7 @@ fn fs_share_socket_and_path_are_alternatives() {
 
 fn sample_machine() -> MachineDescription {
     MachineDescription {
+        fw_cfg: vec![],
         exit_on_reset: false,
         vfio: vec![],
         machine: Default::default(),
@@ -240,6 +241,81 @@ fn sample_machine() -> MachineDescription {
         }),
         rtc_base: Some("2026-10-30T00:00:00Z".to_owned()),
     }
+}
+
+#[test]
+fn fw_cfg_sources_are_additive_and_strict() {
+    use vmlab_hv_proto::machine::{FwCfgFile, FwCfgSource};
+    let mut machine = sample_machine();
+    let old = serde_json::to_value(&machine).unwrap();
+    assert!(old.get("fw_cfg").is_none());
+    assert!(
+        serde_json::from_value::<MachineDescription>(old)
+            .unwrap()
+            .fw_cfg
+            .is_empty()
+    );
+    machine.fw_cfg = vec![
+        FwCfgFile {
+            name: "opt/vmlab/gop-width".into(),
+            source: FwCfgSource::Inline {
+                bytes: b"1024".to_vec(),
+            },
+        },
+        FwCfgFile {
+            name: "bootsplash.jpg".into(),
+            source: FwCfgSource::File {
+                path: "/splash.jpg".into(),
+            },
+        },
+    ];
+    let value = serde_json::to_value(&machine).unwrap();
+    assert_eq!(
+        value["fw_cfg"][0],
+        serde_json::json!({"name":"opt/vmlab/gop-width","source":{"kind":"inline","bytes":[49,48,50,52]}})
+    );
+    assert_eq!(
+        serde_json::from_value::<MachineDescription>(value).unwrap(),
+        machine
+    );
+    for source in [
+        serde_json::json!({"kind":"inline","bytes":[256]}),
+        serde_json::json!({"kind":"inline","bytes":[],"path":"/unexpected"}),
+        serde_json::json!({"kind":"file"}),
+        serde_json::json!({"kind":"unknown","bytes":[]}),
+    ] {
+        assert!(serde_json::from_value::<FwCfgSource>(source).is_err());
+    }
+}
+
+#[test]
+fn firmware_boot_menu_defaults_off_and_can_be_enabled() {
+    let mut value =
+        serde_json::json!({"kind":"firmware", "firmware":"seabios", "code":"/bios.bin"});
+    let boot: Boot = serde_json::from_value(value.clone()).unwrap();
+    assert!(matches!(
+        boot,
+        Boot::Firmware {
+            boot_menu: false,
+            ..
+        }
+    ));
+    assert!(
+        serde_json::to_value(boot)
+            .unwrap()
+            .get("boot_menu")
+            .is_none()
+    );
+    value["boot_menu"] = true.into();
+    let boot: Boot = serde_json::from_value(value).unwrap();
+    assert!(matches!(
+        boot,
+        Boot::Firmware {
+            boot_menu: true,
+            ..
+        }
+    ));
+    assert_eq!(serde_json::to_value(boot).unwrap()["boot_menu"], true);
 }
 
 #[test]
@@ -343,6 +419,7 @@ fn pinned_firmware_boot() {
     wire(
         &Boot::Firmware {
             firmware: FirmwareKind::Seabios,
+            boot_menu: false,
             code: "/firmware/bios.bin".into(),
             vars: None,
             secure_boot: false,
@@ -353,6 +430,7 @@ fn pinned_firmware_boot() {
     wire(
         &Boot::Firmware {
             firmware: FirmwareKind::Ovmf,
+            boot_menu: false,
             code: "/firmware/OVMF_CODE.fd".into(),
             vars: Some("/vm/OVMF_VARS.fd".into()),
             secure_boot: true,

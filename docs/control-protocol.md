@@ -93,7 +93,79 @@ hypervisors. The client must omit configuration an older server cannot
 parse, or require a compatible hypervisor. Control-protocol tolerance does
 not relax this launch contract.
 
-## Verification and rollout
+## Extra firmware files
+
+The optional `MachineDescription.fw_cfg` field is a list of read-only named
+files. Absence means an empty list. This is an additive launch-schema extension
+within protocol major 1; older binaries reject the field. Callers must pin a
+binary and `vmlab-hv-proto` revision that includes this extension.
+
+Each `FwCfgFile` has a `name` string and a tagged `source` object:
+
+```json
+{"fw_cfg":[
+  {"name":"opt/vmlab/gop-width","source":{"kind":"inline","bytes":[49,48,50,52]}},
+  {"name":"opt/vmlab/gop-height","source":{"kind":"inline","bytes":[55,54,56]}},
+  {"name":"bootsplash.jpg","source":{"kind":"file","path":"/run/vmlab/splash.jpg"}},
+  {"name":"etc/boot-menu-wait","source":{"kind":"inline","bytes":[0,0]}}
+]}
+```
+
+`inline.bytes` is a JSON array of u8 values, including zero-length arrays.
+`file.path` names a regular host file, read once during machine construction.
+Relative paths resolve against the hypervisor's working directory. Sources,
+entries, and the machine description reject unknown fields.
+
+Files require firmware boot on q35 or pc. Names contain 1..55 non-NUL ASCII
+bytes. Names are case-sensitive and unique. Each payload is at most
+4,294,967,295 bytes. Directory selectors occupy `0x0020..0x4000`, excluding
+the upper bound and including platform files. Invalid names, duplicates,
+reserved names, oversized payloads, unreadable paths, and a full directory
+fail machine construction with a named error. These are launch failures,
+not control-socket error replies.
+
+Platform-owned names are reserved even if the selected machine omits them:
+`bootorder`, `bios-geometry`, `etc/e820`, `etc/boot-fail-wait`,
+`etc/system-states`, `etc/table-loader`, `etc/acpi/rsdp`, `etc/acpi/tables`,
+`etc/smbios/smbios-anchor`, `etc/smbios/smbios-tables`, `etc/tpm/config`,
+`etc/tpm/log`, `etc/smi/supported-features`, `etc/smi/requested-features`,
+and `etc/smi/features-ok`.
+
+Both port reads and DMA reads serve the captured bytes; guest writes fail.
+Reset retains the captured inputs without reopening host paths. Snapshot
+restore requires the same file names and read-only contents. The machine
+digest also covers the launch description. Changing a host file after launch
+does not change the running VM; a new launch with different bytes rejects
+the old fw_cfg snapshot state.
+
+For vmlab's GOP-capable OVMF, width and height are decimal ASCII, with no
+required NUL. The resolver must check the firmware's `gop_resolution`
+capability and provide both dimensions, with width 320..8192 and height
+200..8192. The generic file transport does not interpret firmware-specific
+payloads. SeaBIOS consumes JPEG bytes from `bootsplash.jpg` and a
+little-endian u16 millisecond delay from `etc/boot-menu-wait`; zero is the
+branded firmware's POST-only splash setting.
+
+`Boot::Firmware.boot_menu` is an optional boolean, default false. Setting it
+to true enables the numeric fw_cfg boot-menu flag. SeaBIOS requires this flag
+to wait for `etc/boot-menu-wait`; the S1 test enables it with a 10,000 ms delay.
+The branded firmware's zero-delay POST splash keeps `boot_menu` false,
+matching vmlab's QEMU `menu=off,splash-time=0` launch.
+
+Sources: `crates/vmlab-hv-proto/src/machine.rs`,
+`crates/vmlab-hv-vmm/src/builder.rs`,
+`crates/vmlab-hv-firmware/src/fw_cfg.rs`, and vmlab draft PR #205.
+The guest directory and DMA formats follow
+https://www.qemu.org/docs/master/specs/fw_cfg.html.
+
+`crates/vmlab-hv/tests/fw_cfg.rs` exercises firmware consumption through S1
+and captures native-display frames before and after snapshot restore.
+`VMLAB_HV_TEST_FIRMWARE_DIR` selects the vmlab firmware bundle with
+`features.json`, `OVMF_CODE_4M.fd`, `OVMF_VARS_4M.fd`, and
+`bios-vmlab-q35.bin`. The test uses a bundled two-colour JPEG fixture.
+`VMLAB_HV_TEST_FW_EVIDENCE_DIR` optionally retains PPM screenshots.
+
+## Compatibility verification
 
 `tests/compatibility.rs` covers future hello values and events, missing
 optional fields, unknown error codes, unsupported requests, and malformed

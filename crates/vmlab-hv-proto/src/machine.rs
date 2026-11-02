@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineDescription {
+    /// Read-only firmware inputs, loaded once at launch. Requires firmware boot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fw_cfg: Vec<FwCfgFile>,
     /// Exit cleanly with shutdown{guest_reset} instead of resetting in place.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub exit_on_reset: bool,
@@ -87,6 +90,20 @@ pub struct MachineDescription {
     pub rtc_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub floppy: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FwCfgFile {
+    pub name: String,
+    pub source: FwCfgSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FwCfgSource {
+    Inline { bytes: Vec<u8> },
+    File { path: PathBuf },
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +215,9 @@ pub enum Boot {
         cmdline: String,
     },
     Firmware {
+        /// Enable the firmware boot menu, including SeaBIOS's splash delay.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        boot_menu: bool,
         firmware: FirmwareKind,
         code: PathBuf,
         #[serde(default)]

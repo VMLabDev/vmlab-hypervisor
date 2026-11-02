@@ -7,6 +7,109 @@ fn setup() -> (FwCfg, GuestMemory) {
     (FwCfg::new(memory.clone()), memory)
 }
 
+#[test]
+fn extra_firmware_inputs_directory_dma_and_snapshot_identity() {
+    let (mut device, mem) = setup();
+    let files = [
+        ("opt/vmlab/gop-width", b"1024".as_slice()),
+        ("opt/vmlab/gop-height", b"768".as_slice()),
+        ("bootsplash.jpg", b"jpeg fixture".as_slice()),
+        ("etc/boot-menu-wait", b"\0\0".as_slice()),
+    ];
+    for (name, bytes) in files {
+        vmlab_hv_firmware::fw_cfg::validate_extra_file_name(name).unwrap();
+        device.add_file(name, bytes.to_vec(), false).unwrap();
+    }
+    let initial = device.save_state().unwrap();
+    select(&mut device, 0x19);
+    assert_eq!(read(&mut device, 4), 4u32.to_be_bytes());
+    let directory = read(&mut device, 4 * 64);
+    let mut names = Vec::new();
+    for entry in directory.as_chunks::<64>().0 {
+        let key = u16::from_be_bytes(entry[4..6].try_into().unwrap());
+        let end = entry[8..].iter().position(|byte| *byte == 0).unwrap();
+        let name = std::str::from_utf8(&entry[8..8 + end]).unwrap();
+        names.push(name);
+        let bytes = files.iter().find(|(file, _)| *file == name).unwrap().1;
+        assert_eq!(
+            u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize,
+            bytes.len()
+        );
+        select(&mut device, key);
+        assert_eq!(read(&mut device, bytes.len() + 1), [bytes, &[0]].concat());
+        assert_eq!(
+            dma(
+                &mut device,
+                &mem,
+                ((key as u32) << 16) | 8 | 2,
+                bytes.len() as u32,
+                0x2000
+            ),
+            0
+        );
+        let mut actual = vec![0; bytes.len()];
+        mem.read_slice(&mut actual, GuestAddress(0x2000)).unwrap();
+        assert_eq!(actual, bytes);
+        assert_eq!(
+            dma(&mut device, &mem, ((key as u32) << 16) | 8 | 16, 1, 0x2000),
+            1
+        );
+    }
+    assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+    device.restore_state(&initial).unwrap();
+    for (name, bytes) in files {
+        assert_eq!(device.file(name), Some(bytes));
+    }
+    let (mut changed, _) = setup();
+    for (name, bytes) in files {
+        let bytes = if name.ends_with("width") {
+            b"1280".to_vec()
+        } else {
+            bytes.to_vec()
+        };
+        changed.add_file(name, bytes, false).unwrap();
+    }
+    assert!(changed.restore_state(&initial).is_err());
+    changed.add_file("opt/extra", vec![], false).unwrap();
+    assert!(changed.restore_state(&initial).is_err());
+}
+
+#[test]
+fn extra_names_obey_directory_limits_and_reserve_platform_files() {
+    use vmlab_hv_firmware::fw_cfg::{validate_extra_file_name, validate_file_name};
+    for name in ["", "a\0b", "non-ascii-\u{e9}", &"x".repeat(56)] {
+        assert!(validate_file_name(name).is_err(), "{name:?}");
+    }
+    validate_extra_file_name(&"x".repeat(55)).unwrap();
+    let (_, mem) = setup();
+    for pc in [false, true] {
+        let mut device = if pc {
+            FwCfg::for_pc(mem.clone(), &Default::default(), &Default::default()).unwrap()
+        } else {
+            FwCfg::for_platform(mem.clone(), &Default::default(), &Default::default()).unwrap()
+        };
+        select(&mut device, 0x19);
+        let count = u32::from_be_bytes(read(&mut device, 4).try_into().unwrap());
+        for entry in read(&mut device, count as usize * 64).as_chunks::<64>().0 {
+            let end = entry[8..].iter().position(|byte| *byte == 0).unwrap();
+            let name = std::str::from_utf8(&entry[8..8 + end]).unwrap();
+            assert!(
+                validate_extra_file_name(name).is_err(),
+                "unreserved platform file {name}"
+            );
+        }
+    }
+    for name in [
+        "etc/tpm/config",
+        "etc/tpm/log",
+        "etc/smi/supported-features",
+        "etc/smi/requested-features",
+        "etc/smi/features-ok",
+    ] {
+        assert!(validate_extra_file_name(name).is_err(), "{name}");
+    }
+}
+
 fn select(device: &mut FwCfg, key: u16) {
     device.write(0, &key.to_le_bytes());
 }

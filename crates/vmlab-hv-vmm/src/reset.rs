@@ -208,3 +208,37 @@ impl ResetState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vmlab_hv_devices::{BusDevice, GuestMemory};
+
+    #[test]
+    fn fw_cfg_power_on_reset_preserves_extra_inputs_and_rewinds_the_stream() {
+        let memory = GuestMemory::from_ranges(&[(Default::default(), 0x10000)]).unwrap();
+        let mut firmware = vmlab_hv_firmware::FwCfg::new(memory.clone());
+        let selector = firmware
+            .add_file("opt/vmlab/gop-width", b"1024".to_vec(), false)
+            .unwrap();
+        let device = Arc::new(Mutex::new(
+            crate::smm::SmiFwCfg::new(firmware, memory).unwrap(),
+        ));
+        let mut power_on = PowerOnDevice {
+            state: device.lock().save_state().unwrap(),
+            device: device.clone(),
+        };
+        for _ in 0..2 {
+            device.lock().write(0, &selector.to_le_bytes());
+            for expected in b"1024" {
+                let mut byte = [0];
+                device.lock().read(1, &mut byte);
+                assert_eq!(byte[0], *expected);
+            }
+            power_on.reset().unwrap();
+            let mut signature = [0];
+            device.lock().read(1, &mut signature);
+            assert_eq!(signature[0], b'Q');
+        }
+    }
+}
