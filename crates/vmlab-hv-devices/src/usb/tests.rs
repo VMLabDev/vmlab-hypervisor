@@ -325,6 +325,41 @@ fn p4_enumerate_descriptors_and_receive_tablet_input() {
 }
 
 #[test]
+fn windows_control_data_event_completes_before_the_status_stage_is_queued() {
+    let mut d = Driver::new();
+    d.enumerate();
+    // Windows ends Setup+Data with Event Data, then queues Status after its event.
+    d.trb(
+        0x7000,
+        u64::from_le_bytes([0x80, 6, 0, 1, 0, 0, 64, 0]),
+        8,
+        0x30840,
+    );
+    d.trb(0x7010, 0x9000, 64, 0x10c12);
+    d.trb(0x7020, 0xfeed, 0, (7 << 10) | 32);
+    d.write(0x2000 + u64::from(d.slot) * 4, 1);
+    let event = d.event(32);
+    assert_eq!(event.status >> 24, 1, "Windows descriptor TD was rejected");
+    assert_eq!(event.control & 4, 4);
+    assert_eq!(event.parameter, 0xfeed);
+    assert_eq!(event.status & 0xff_ffff, 18);
+    let mut descriptor = [0; 18];
+    d.mem
+        .read_slice(&mut descriptor, GuestAddress(0x9000))
+        .unwrap();
+    assert_eq!(&descriptor[8..12], &[0x27, 6, 1, 0]);
+    let snapshot = d.hc.save_state().unwrap();
+    d.hc.restore_state(&snapshot).unwrap();
+    d.trb(0x7030, 0, 0, (4 << 10) | 16);
+    d.trb(0x7040, 0xbeef, 0, (7 << 10) | 32);
+    d.write(0x2000 + u64::from(d.slot) * 4, 1);
+    let event = d.event(32);
+    assert_eq!(event.status >> 24, 1);
+    assert_eq!(event.parameter, 0xbeef);
+    assert_eq!(event.status & 0xff_ffff, 0);
+}
+
+#[test]
 fn pcie_device_control_matches_qtest_read_only_bits() {
     let mut d = Driver::new();
     for value in [0x100u32, 0xffff] {
