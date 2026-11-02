@@ -10,6 +10,7 @@ import os
 import select
 import struct
 import time
+import sys
 
 
 fd = os.open(sorted(glob.glob('/dev/dri/card*'))[0], os.O_RDWR)
@@ -23,7 +24,8 @@ def ioctl(number, data):
 
 # DRM_VIRTGPU_RESOURCE_CREATE creates a 3D render target and its context.
 pitch = width * 4
-created = ioctl(0x44, bytearray(struct.pack('14I', 2, 2, 2 | (1 << 18),
+bind = 2 | (1 << 22) if sys.argv[1:] == ['implicit'] else 2 | (1 << 18)
+created = ioctl(0x44, bytearray(struct.pack('14I', 2, 2, bind,
                 width, height, 1, 1, 0, 0, 1, 0, 0, pitch * height, pitch)))
 handle, resource = struct.unpack_from('II', created, 40)
 assert handle and resource
@@ -80,4 +82,31 @@ connectors = array.array('I', [connector])
 mode = bytearray(struct.pack('Q7I', connectors.buffer_info()[0], 1, crtc, fb_id, 0, 0, 0, 1)) + selected
 ioctl(0xa2, mode)
 Path('/run/gpu-scanout.json').write_text(json.dumps({'renderer': renderer, 'width': width, 'height': height}))
-time.sleep(180)
+request_path = Path('/run/gpu-request.json')
+last_request = None
+deadline = time.monotonic() + 180
+while time.monotonic() < deadline:
+    if not request_path.exists():
+        time.sleep(.002)
+        continue
+    request = json.loads(request_path.read_text())
+    if request['id'] == last_request:
+        time.sleep(.002)
+        continue
+    last_request = request['id']
+    if 'colour' in request:
+        clear = array.array('I', [(8 << 16) | 7, 4,
+            *struct.unpack('4I', struct.pack('4f', *request['colour'], 1.)), 0, 0, 0])
+        execution = bytearray(64)
+        struct.pack_into('IIQQIi', execution, 0, 2, len(clear) * 4,
+            clear.buffer_info()[0], handles.buffer_info()[0], 1, -1)
+        ioctl(0x42, execution)
+        fence = struct.unpack_from('i', execution, 28)[0]
+        wait = select.poll()
+        wait.register(fence, select.POLLIN)
+        assert wait.poll(10000), 'update fence timed out'
+        os.close(fence)
+    x, y, w, h = request.get('damage', [16, 24, 32, 40])
+    clips = array.array('H', [x, y, x + w, y + h])
+    ioctl(0xb1, bytearray(struct.pack('4IQ', fb_id, 0, 0, 1, clips.buffer_info()[0])))
+    Path('/run/gpu-reply.json').write_text(json.dumps({'id': last_request}))

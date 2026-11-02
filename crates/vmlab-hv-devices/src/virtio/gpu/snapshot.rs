@@ -256,6 +256,7 @@ impl Gpu {
         } else {
             s.pending = queues;
         }
+        s.publish_scanout(super::monotonic_ns());
         Ok(())
     }
 }

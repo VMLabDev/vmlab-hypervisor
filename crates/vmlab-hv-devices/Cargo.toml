@@ -28,6 +28,8 @@ rutabaga_gfx = { version = "=0.1.80", features = ["virgl_renderer"] }
 # rutabaga 0.1.80 requires the MesaMapping API removed by magma-gpu 0.1.85.
 magma-gpu = "=0.1.80"
 glow = "0.16"
+ash = "0.38"
+vmlab-hv-display = { path = "../vmlab-hv-display" }
 
 [build-dependencies]
 pkg-config = "0.3"

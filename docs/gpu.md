@@ -51,12 +51,23 @@ capability ID 1 describes that aperture. The VMM's `gpu::Aperture` registers
 and removes blob mappings in KVM's normal and SMM address spaces. Overlapping,
 unaligned and out-of-aperture mappings fail.
 
-The renderer and EGL readback run on one worker thread. Each published frame
-has a fresh dma-buf allocation; guest rendering cannot overwrite a frame held
-by a client. External-texture sampling supports external-only imports, including
-NVIDIA buffers. Rendering finishes before publication. Where available, an
-acquire sync-file accompanies the frame. `CpuCopy` returns pixels from that
-same immutable frame, including its stride padding.
+The renderer and EGL readback run on one worker thread. Simple scanout-bound
+resources get an explicit-layout allocation before guest rendering begins.
+The layout must support Vulkan import on the selected render node. The guest
+renders directly into that allocation; display publication does not blit it.
+Unknown layouts, cropped or multi-plane resources and external-only imports
+use a three-buffer EGL blit pool. Pool allocation also prefers Vulkan-importable
+modifiers. No CPU readback runs without a native shm, CpuCopy or RFB consumer.
+
+RESOURCE_FLUSH and SET_SCANOUT publish frames with guest damage. Only VGA
+compatibility still polls. Native clients negotiate `stable_buffers` to cache
+imports. A client retains a buffer lease until Release or disconnect. Guest
+rendering waits for all leases on a direct scanout; pool buffers cannot be
+overwritten while sampled. Renderer fences finish preceding work before a
+frame is published. The guest fence timeline is separate from export fences.
+`CpuCopy` returns the published frame, including its stride padding.
+
+See `display-export.md` for the hardware checks and latency measurements.
 
 Online snapshot save and restore return `unsupported` whenever acceleration
 is attached, following phase-2 decision D9. Offline disk snapshots are unchanged.

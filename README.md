@@ -73,6 +73,8 @@ cargo features are enabled by default in debug and release builds. Builds with
   edition 2024) and `just`.
 - pkg-config plus virglrenderer >= 1.3.0, EGL, and GBM development libraries.
   `vmlab-hv-devices` probes all three at build time.
+- For zero-copy GPU export, the Vulkan loader and a Vulkan ICD for the selected
+  render node. Modifier queries use `ash` and need no Vulkan build headers.
 - The libpipewire and libpulse development files for the default audio backends
   (PipeWire also needs libclang for bindgen).
 - Firmware arrives by machine description. SeaBIOS comes from your distro;

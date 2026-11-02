@@ -28,10 +28,10 @@ impl Video {
     pub(crate) fn accelerated(&self) -> bool {
         matches!(self, Self::Virtio(device) if device.lock().accelerated())
     }
-    fn dma_frame(&self) -> io::Result<Option<vmlab_hv_devices::virtio::gpu::DmaFrame>> {
+    pub(crate) fn poll_scanout(&self) -> bool {
         match self {
-            Self::Standard(_) => Ok(None),
-            Self::Virtio(device) => device.lock().dma_frame().map_err(io::Error::other),
+            Self::Standard(_) => true,
+            Self::Virtio(device) => device.lock().poll_scanout(),
         }
     }
     pub(crate) fn set_aperture_base(&self, base: Option<u64>) -> Result<(), VmmError> {
@@ -141,18 +141,15 @@ impl Video {
 struct Source {
     shared: Weak<VmShared>,
     generation: Mutex<((u64, u64), u64)>,
-    readbacks: Mutex<Vec<Readback>>,
+    latest: Mutex<Option<Frame>>,
     placeholder: Arc<Vec<u8>>,
-}
-struct Readback {
-    fd: Weak<std::os::fd::OwnedFd>,
-    pixels: Arc<Vec<u8>>,
 }
 impl FrameSource for Source {
     fn frame(&self) -> io::Result<Frame> {
-        self.readbacks
-            .lock()
-            .retain(|entry| entry.fd.strong_count() != 0);
+        if let Some(mut frame) = self.latest.lock().clone() {
+            frame.damage.clear();
+            return Ok(frame);
+        }
         let shared = self
             .shared
             .upgrade()
@@ -178,38 +175,6 @@ impl FrameSource for Source {
                 timestamp_ns: crate::chipset::host_monotonic_ns(),
                 damage: Vec::new(),
                 pixels: Pixels::Shm(self.placeholder.clone()),
-            });
-        }
-        if let Some(dma) = vga.dma_frame()? {
-            let mut readbacks = self.readbacks.lock();
-            readbacks.push(Readback {
-                fd: Arc::downgrade(&dma.fd),
-                pixels: dma.pixels,
-            });
-            let generation = match &vga {
-                Video::Virtio(device) => device.lock().scanout_generation(),
-                _ => 0,
-            };
-            return Ok(Frame {
-                flags: Default::default(),
-                generation: generation
-                    .wrapping_add(shared.display_generation.load(Ordering::SeqCst)),
-                width: dma.width,
-                height: dma.height,
-                stride: dma.stride,
-                drm_fourcc: dma.fourcc,
-                modifier: dma.modifier,
-                timestamp_ns: crate::chipset::host_monotonic_ns(),
-                damage: vec![Rect {
-                    x: 0,
-                    y: 0,
-                    width: dma.width,
-                    height: dma.height,
-                }],
-                pixels: Pixels::Dmabuf {
-                    fd: dma.fd,
-                    acquire: dma.acquire,
-                },
             });
         }
         let (scanout_generation, frame) = vga.frame();
@@ -250,13 +215,103 @@ impl FrameSource for Source {
     fn readback(&self, frame: &Frame) -> io::Result<Vec<u8>> {
         match &frame.pixels {
             Pixels::Shm(bytes) => Ok(bytes.as_ref().clone()),
-            Pixels::Dmabuf { fd, .. } => self
-                .readbacks
-                .lock()
-                .iter()
-                .find(|entry| entry.fd.ptr_eq(&Arc::downgrade(fd)))
-                .map(|entry| entry.pixels.as_ref().clone())
-                .ok_or_else(|| io::Error::other("GPU readback no longer available")),
+            Pixels::Leased { readback, .. } => readback(),
+            Pixels::Dmabuf { .. } => Err(io::Error::other("GPU frame has no readback provider")),
+        }
+    }
+}
+
+struct GpuSink {
+    source: Arc<Source>,
+    server: Weak<DisplayServer>,
+}
+
+impl vmlab_hv_devices::virtio::gpu::DisplaySink for GpuSink {
+    fn needs_cpu(&self) -> bool {
+        self.server
+            .upgrade()
+            .is_some_and(|server| server.needs_cpu())
+    }
+
+    fn update(&self, update: vmlab_hv_devices::virtio::gpu::ScanoutUpdate) {
+        use vmlab_hv_devices::virtio::gpu::ScanoutPixels;
+        let Some(server) = self.server.upgrade() else {
+            return;
+        };
+        if matches!(&update.pixels, ScanoutPixels::Vga) {
+            *self.source.latest.lock() = None;
+            // The legacy VGA state may already be active after a restore.
+            // Let its poll publish the real frame or the inactive placeholder.
+            return;
+        }
+        let generation = update.generation.wrapping_add(
+            self.source
+                .shared
+                .upgrade()
+                .map_or(0, |shared| shared.display_generation.load(Ordering::SeqCst)),
+        );
+        let mut frame = Frame {
+            flags: FrameFlags(FrameFlags::PLACEHOLDER),
+            generation,
+            width: 640,
+            height: 480,
+            stride: 640 * 4,
+            drm_fourcc: vmlab_hv_display::protocol::XRGB8888,
+            modifier: 0,
+            timestamp_ns: update.timestamp_ns,
+            damage: Vec::new(),
+            pixels: Pixels::Shm(self.source.placeholder.clone()),
+        };
+        match update.pixels {
+            ScanoutPixels::Dma(dma) => {
+                frame.flags = Default::default();
+                frame.width = dma.width;
+                frame.height = dma.height;
+                frame.stride = dma.stride;
+                frame.drm_fourcc = dma.fourcc;
+                frame.modifier = dma.modifier;
+                frame.damage = update
+                    .damage
+                    .into_iter()
+                    .map(|r| Rect {
+                        x: r.x,
+                        y: r.y,
+                        width: r.width,
+                        height: r.height,
+                    })
+                    .collect();
+                let readback = dma.clone();
+                frame.pixels = Pixels::Leased {
+                    buffers: dma.buffers,
+                    buffer: dma.buffer,
+                    acquire: dma.acquire,
+                    lease: dma.lease,
+                    cpu: dma.pixels,
+                    readback: Arc::new(move || readback.readback()),
+                };
+            }
+            ScanoutPixels::Shm(cpu) => {
+                frame.flags = Default::default();
+                frame.width = cpu.mode.width;
+                frame.height = cpu.mode.height;
+                frame.stride = cpu.mode.stride;
+                frame.damage = cpu
+                    .damage
+                    .into_iter()
+                    .map(|r| Rect {
+                        x: r.x,
+                        y: r.y,
+                        width: r.width,
+                        height: r.height,
+                    })
+                    .collect();
+                frame.pixels = Pixels::Shm(Arc::new(cpu.pixels));
+            }
+            ScanoutPixels::Inactive | ScanoutPixels::Vga => {}
+        }
+        *self.source.latest.lock() = Some(frame.clone());
+        if let Err(error) = server.publish_frame(frame) {
+            log::warn!("display flush: {error}");
         }
     }
 }
@@ -364,14 +419,15 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
             )));
         }
     };
+    let source = Arc::new(Source {
+        shared: Arc::downgrade(shared),
+        generation: Mutex::new(((0, 0), 0)),
+        latest: Mutex::new(None),
+        placeholder: Arc::new(placeholder_pixels()),
+    });
     let server = Arc::new(
         DisplayServer::new(
-            Arc::new(Source {
-                shared: Arc::downgrade(shared),
-                generation: Mutex::new(((0, 0), 0)),
-                readbacks: Mutex::new(Vec::new()),
-                placeholder: Arc::new(placeholder_pixels()),
-            }),
+            source.clone(),
             Arc::new(Input {
                 shared: Arc::downgrade(shared),
                 pointer: Mutex::new(vmlab_hv_devices::usb::PointerEvent {
@@ -384,6 +440,12 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
         )
         .map_err(|e| VmmError::Other(format!("creating display server: {e}")))?,
     );
+    if let Some(Video::Virtio(device)) = shared.vga.lock().as_ref() {
+        device.lock().set_display_sink(Arc::new(GpuSink {
+            source,
+            server: Arc::downgrade(&server),
+        }));
+    }
     for (listener, rfb, name) in [
         (native_listener, false, "display-native"),
         (rfb_listener, true, "display-rfb"),
@@ -457,6 +519,98 @@ fn placeholder_pixels() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vga_restore_defers_to_legacy_poll_without_a_false_placeholder() {
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+        use vmlab_hv_devices::virtio::gpu::{DisplaySink, ScanoutPixels, ScanoutUpdate};
+        use vmlab_hv_display::{Capabilities, Client};
+
+        struct GuestFrame(Frame);
+        impl FrameSource for GuestFrame {
+            fn frame(&self) -> io::Result<Frame> {
+                Ok(self.0.clone())
+            }
+            fn readback(&self, frame: &Frame) -> io::Result<Vec<u8>> {
+                let Pixels::Shm(bytes) = &frame.pixels else {
+                    return Err(io::Error::other("expected shared-memory pixels"));
+                };
+                Ok(bytes.as_ref().clone())
+            }
+        }
+        struct NoInput;
+        impl InputSink for NoInput {
+            fn input(&self, _: Message) {}
+        }
+        let frame = Frame {
+            flags: FrameFlags::default(),
+            generation: 1,
+            width: 1,
+            height: 1,
+            stride: 4,
+            drm_fourcc: vmlab_hv_display::protocol::XRGB8888,
+            modifier: 0,
+            timestamp_ns: 1,
+            damage: Vec::new(),
+            pixels: Pixels::Shm(Arc::new(vec![19, 37, 211, 0])),
+        };
+        let source = Arc::new(Source {
+            shared: Weak::new(),
+            generation: Mutex::new(((0, 0), 0)),
+            latest: Mutex::new(Some(frame.clone())),
+            placeholder: Arc::new(placeholder_pixels()),
+        });
+        let server =
+            Arc::new(DisplayServer::new(Arc::new(GuestFrame(frame)), Arc::new(NoInput)).unwrap());
+        let (a, b) = UnixStream::pair().unwrap();
+        b.set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let serving = server.clone();
+        let worker = std::thread::spawn(move || serving.serve_native(a));
+        let client = Client::from_stream(
+            b,
+            Capabilities(Capabilities::FRAMES | Capabilities::FRAME_FLAGS),
+        )
+        .unwrap();
+        assert!(matches!(
+            client.receive().unwrap().message,
+            Message::SurfaceConfigure { .. }
+        ));
+        let Message::FrameReady {
+            surface_id,
+            buffer,
+            seq,
+            flags,
+            ..
+        } = client.receive().unwrap().message
+        else {
+            panic!("expected guest frame")
+        };
+        assert!(!flags.has(FrameFlags::PLACEHOLDER));
+        client.release(surface_id, buffer, seq).unwrap();
+        GpuSink {
+            source: source.clone(),
+            server: Arc::downgrade(&server),
+        }
+        .update(ScanoutUpdate {
+            generation: 2,
+            timestamp_ns: 2,
+            damage: Vec::new(),
+            pixels: ScanoutPixels::Vga,
+        });
+        let received = client.receive();
+        server.shutdown();
+        drop(client);
+        let _ = worker.join().unwrap();
+        assert!(source.latest.lock().is_none());
+        let error = received.expect_err("VGA restore published a false placeholder");
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ));
+    }
+
     #[test]
     fn native_buttons_and_scroll_match_usb_hid_conventions() {
         let mut pointer = vmlab_hv_devices::usb::PointerEvent::default();

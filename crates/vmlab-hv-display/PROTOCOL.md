@@ -201,7 +201,8 @@ frame. DisplayServer is cloneable. It has no KVM or device-crate dependency.
 
 `FrameSource::frame(&self) -> io::Result<Frame>` returns an immutable snapshot.
 `Frame` carries flags, generation, dimensions, stride, format, modifier, timestamp,
-damage, and either `Pixels::Shm(Arc<Vec<u8>>)` or `Pixels::Dmabuf` descriptors.
+damage, and `Pixels::Shm(Arc<Vec<u8>>)`, immutable `Pixels::Dmabuf` descriptors,
+or `Pixels::Leased` reusable descriptors.
 Generation changes on reset or same-sized scanout replacement. Geometry
 changes also force configure. The source increments generation before publishing
 a reset frame, even when the reset does not change dimensions.
@@ -212,27 +213,46 @@ GPU sampling/readback when direct mapping is unavailable, including NVIDIA
 external-only allocations. The core checks the returned byte count.
 Hardware-specific import and GPU execution belong to the FrameSource backend.
 
-The producer retains each allocation without rewriting it while any Arc to
-the published Frame exists. For dma-buf this includes consumer completion.
+For immutable pixels, the producer retains each allocation without rewriting it
+while any Arc to the published Frame exists. For dma-buf this includes consumer
+completion. `Pixels::Leased` instead carries a buffer list, an index, an acquire
+fence, a `BufferLease`, optional cached CPU pixels, and a lazy readback callback.
+The server acquires a lease before lending an allocation and retains it through
+Release or disconnect. The producer retires every publication of an allocation
+before writing it again. Retirement rejects new readers and waits for held
+leases. Cached CPU pixels and copied shm buffers do not retain producer leases.
 `DisplayServer::publish()` captures the source and replaces the latest frame.
 It acquires no client lock and performs no socket I/O. Publication errors leave
 the previous frame intact. Source capture and publication are serialized so
 concurrent requests cannot replace a newer capture with an older one.
-The producer calls publish once per completed frame, even without clients.
-The q35 adapter polls at 16 ms intervals and uses VGA dirty state and KVM's
-framebuffer dirty log to avoid rendering unchanged VGA pixels.
+`DisplayServer::publish_frame(Frame)` accepts an already captured device flush.
+It does not call the source and may run while the device is locked. A source
+capture that races with a newer publication cannot replace that publication.
+`needs_cpu()` reports native shm clients, CpuCopy clients and RFB connections.
+Native input-only and dma-buf-only connections do not request readback.
+
+The q35 adapter publishes native virtio-gpu frames on RESOURCE_FLUSH and
+SET_SCANOUT, even without clients. Timestamps mark host receipt of the guest
+command, before capture and GPU synchronization. Damage is clipped from the
+resource rectangle to the scanout. Only VGA compatibility paths poll at 16 ms,
+using VGA dirty state and KVM's framebuffer dirty log to avoid unchanged pixels.
+Native workers wait for publications and releases, without a delivery timer.
 
 Each client retains at most three frames. Held buffers cannot be reused.
 When no buffer is available, the worker waits while publications continue.
 After Release, the worker sends the latest frame with full damage if it skipped
 updates. Without stable_buffers, each dma-buf publication uses a new configure
-and retains the old allocation until Release. A client that holds frames across resize must still
+and retains the old allocation until Release. A client that holds frames across
+resize must still
 release those frames before receiving more than three outstanding frames.
 
 `DisplayServer::set_cursor(Cursor)` validates and publishes cursor state.
 `DisplayServer::set_leds(u32)` publishes guest LED changes.
 `InputSink::input(&self, Message)` receives the negotiated input messages.
 The machine adapter routes keys to PS/2 and pointer input to the xHCI tablet.
+Device input runs on a separate worker, preserving per-connection order.
+The shared queue holds at most 256 pending input messages. Overflow closes the
+sender's connection. A blocked resize or input handler cannot block Release.
 
 `serve_native(UnixStream)` and `serve_rfb(UnixStream)` run one connection until
 disconnect or error. Each uses a separate input reader. The caller controls
@@ -298,3 +318,10 @@ Dma-buf tests use synthetic descriptors and a synthetic readback backend.
 They prove transport and lifetime handling, not GPU import, sync_file waiting,
 or NVIDIA rendering. Real guest frames, guest input round-trip, and vmlab
 vision/record e2e require the machine and renderer integration packages.
+
+`crates/vmlab-hv/tests/gpu.rs` exercises real virgl scanouts through S1, stable
+imports, guest flushes, concurrent CPU frames, release backpressure and latency.
+`VMLAB_HV_TEST_RENDER_NODE` selects a render node. `VMLAB_HV_TEST_SCANOUT=implicit`
+selects a resource that requires the pooled fallback. The default probe uses
+an explicit-layout scanout. Results and hardware limitations are in
+`docs/display-export.md`.

@@ -3,11 +3,31 @@
 //! `Gpu` clones share state. Keep a clone for frame and cursor publication
 //! while the PCI transport owns another clone. The default 2D mode needs no GPU.
 
+mod modifiers;
 mod renderer;
 mod scanout;
 pub use scanout::DmaFrame;
 mod snapshot;
 pub use renderer::{APERTURE_SIZE, BlobMapper, GpuMode};
+
+pub enum ScanoutPixels {
+    Dma(DmaFrame),
+    Shm(crate::display::Frame),
+    Inactive,
+    Vga,
+}
+
+pub struct ScanoutUpdate {
+    pub generation: u64,
+    pub timestamp_ns: u64,
+    pub damage: Vec<crate::display::Damage>,
+    pub pixels: ScanoutPixels,
+}
+
+pub trait DisplaySink: Send + Sync {
+    fn needs_cpu(&self) -> bool;
+    fn update(&self, frame: ScanoutUpdate);
+}
 #[cfg(test)]
 mod tests;
 
@@ -30,6 +50,7 @@ const INVALID: u32 = 0x1205;
 const RESOURCE: u32 = 0x1203;
 const SCANOUT: u32 = 0x1202;
 const NODATA: u32 = 0x1100;
+const EXPORT_BUSY: u32 = 0x12ff;
 
 /// Cursor pixels are little-endian premultiplied ARGB8888 (B, G, R, A).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -113,6 +134,9 @@ struct State {
     interrupt: Option<Arc<dyn VirtioInterrupt>>,
     queues: Vec<Queue>,
     pending: Vec<Queue>,
+    display: Option<Arc<dyn DisplaySink>>,
+    retry_display: bool,
+    display_timestamp: u64,
 }
 
 /// One output and two queues. `enable_3d` adds virgl, Venus and blob resources.
@@ -145,6 +169,9 @@ impl Gpu {
                 interrupt: None,
                 queues: Vec::new(),
                 pending: Vec::new(),
+                display: None,
+                retry_display: false,
+                display_timestamp: 0,
             })),
         }
     }
@@ -184,9 +211,17 @@ impl Gpu {
 
     pub fn dma_frame(&self) -> Result<Option<DmaFrame>, DeviceError> {
         self.state.lock().renderer.as_ref().map_or(Ok(None), |r| {
-            r.dma_frame()
+            r.dma_frame(true)
                 .map_err(|e| DeviceError::Other(format!("GPU scanout capture failed: {e:#x}")))
         })
+    }
+
+    pub fn set_display_sink(&self, sink: Arc<dyn DisplaySink>) {
+        self.state.lock().display = Some(sink);
+    }
+
+    pub fn poll_scanout(&self) -> bool {
+        !self.state.lock().native
     }
 
     pub fn set_aperture_base(&self, base: Option<u64>) -> Result<(), DeviceError> {
@@ -244,6 +279,18 @@ impl Gpu {
                 }
             }
         }
+        s.frame_2d()
+    }
+
+    /// Runtime surface generation, including same-size replacement and reset.
+    pub fn scanout_generation(&self) -> u64 {
+        self.state.lock().scanout_generation
+    }
+}
+
+impl State {
+    fn frame_2d(&mut self) -> Option<Frame> {
+        let s = self;
         let mode = s.mode()?;
         if !s.dirty
             && let Some(frame) = &s.cached_frame
@@ -284,9 +331,52 @@ impl Gpu {
         Some(frame)
     }
 
-    /// Runtime surface generation, including same-size replacement and reset.
-    pub fn scanout_generation(&self) -> u64 {
-        self.state.lock().scanout_generation
+    fn publish_scanout(&mut self, timestamp_ns: u64) {
+        let Some(sink) = self.display.clone() else {
+            return;
+        };
+        let mut damage = Vec::new();
+        let pixels = if let Some(renderer) = &self.renderer {
+            let Ok(Some((generation, rectangles))) = renderer.take_damage() else {
+                return;
+            };
+            self.scanout_generation = generation;
+            damage = rectangles
+                .into_iter()
+                .map(|r| crate::display::Damage {
+                    x: r.x,
+                    y: r.y,
+                    width: r.w,
+                    height: r.h,
+                })
+                .collect();
+            match renderer.dma_frame(sink.needs_cpu()) {
+                Ok(Some(frame)) => ScanoutPixels::Dma(frame),
+                Ok(None) => ScanoutPixels::Inactive,
+                Err(error) => {
+                    self.retry_display = error == EXPORT_BUSY;
+                    self.display_timestamp = timestamp_ns;
+                    if error != EXPORT_BUSY {
+                        log::warn!("GPU flush export failed: {error:#x}");
+                    }
+                    return;
+                }
+            }
+        } else if !self.native {
+            ScanoutPixels::Vga
+        } else if self.scanout.is_none() {
+            ScanoutPixels::Inactive
+        } else {
+            let Some(frame) = self.frame_2d() else { return };
+            ScanoutPixels::Shm(frame)
+        };
+        self.retry_display = false;
+        sink.update(ScanoutUpdate {
+            generation: self.scanout_generation,
+            timestamp_ns,
+            damage,
+            pixels,
+        });
     }
 }
 
@@ -299,6 +389,9 @@ fn valid_format(f: u32) -> bool {
 
 impl State {
     fn complete_fences(&mut self) {
+        if self.retry_display {
+            self.publish_scanout(self.display_timestamp);
+        }
         let Some(renderer) = &self.renderer else {
             return;
         };
@@ -355,7 +448,6 @@ impl State {
             let result = renderer.command(mem, request)?;
             if matches!(kind, 0x103 | 0x10d) {
                 self.native = true;
-                self.scanout_generation = self.scanout_generation.wrapping_add(1);
             }
             return Ok(result);
         }
@@ -603,6 +695,7 @@ impl State {
     }
 
     fn chain(&mut self, mem: &GuestMemory, q: usize, chain: DescriptorChain<&GuestMemory>) -> u32 {
+        let timestamp_ns = monotonic_ns();
         self.current_fence = None;
         let Ok(mut reader) = chain.clone().reader(mem) else {
             return 0;
@@ -647,6 +740,14 @@ impl State {
         }
         if writer.write_all(&response).is_err() {
             return 0;
+        }
+        if kind < 0x1200
+            && matches!(
+                u32::from_le_bytes(request[..4].try_into().unwrap()),
+                0x102..=0x104 | 0x10d
+            )
+        {
+            self.publish_scanout(timestamp_ns);
         }
         response.len() as u32
     }
@@ -804,6 +905,7 @@ impl VirtioDevice for Gpu {
             log::error!("GPU reset failed: {error:#x}");
         }
         s.fences.clear();
+        s.retry_display = false;
         s.acked = 0;
         s.events = 0;
         s.resources.clear();
@@ -822,6 +924,14 @@ impl VirtioDevice for Gpu {
         s.interrupt = None;
         s.queues.clear();
         s.pending.clear();
+        if let Some(sink) = &s.display {
+            sink.update(ScanoutUpdate {
+                generation: s.scanout_generation,
+                timestamp_ns: monotonic_ns(),
+                damage: Vec::new(),
+                pixels: ScanoutPixels::Vga,
+            });
+        }
     }
 }
 
@@ -833,6 +943,18 @@ struct PendingFence {
     id: u64,
     ctx: u32,
     ring: u8,
+}
+
+fn monotonic_ns() -> u64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: the clock is valid and time points to writable timespec storage.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
+        return 0;
+    }
+    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
 }
 
 struct Decoder<'a> {

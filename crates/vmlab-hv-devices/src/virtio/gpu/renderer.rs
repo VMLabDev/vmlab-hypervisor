@@ -31,17 +31,80 @@ pub enum GpuMode {
 type Task = Box<dyn FnOnce(&mut Backend) + Send>;
 type Ring = (u32, u8);
 
+// Public virglrenderer.h export-query ABI. The query does not request fds.
+#[repr(C)]
+#[derive(Default)]
+struct ExportQuery {
+    stype: u32,
+    version: u32,
+    size: u32,
+    resource: u32,
+    num_fds: u32,
+    export_fds: u32,
+    fourcc: u32,
+    pad: u32,
+    fds: [i32; 4],
+    strides: [u32; 4],
+    offsets: [u32; 4],
+    modifier: u64,
+}
+
+unsafe extern "C" {
+    fn virgl_renderer_execute(args: *mut std::ffi::c_void, size: u32) -> i32;
+}
+
+fn export_info(id: u32, fallback: Resource3DInfo) -> Resource3DInfo {
+    let mut query = ExportQuery {
+        stype: 1,
+        size: std::mem::size_of::<ExportQuery>() as u32,
+        resource: id,
+        ..Default::default()
+    };
+    // SAFETY: this matches the public C ABI and runs only on the renderer thread.
+    if unsafe { virgl_renderer_execute((&mut query as *mut ExportQuery).cast(), query.size) } != 0
+        || query.num_fds == 0
+        || query.fourcc == 0
+    {
+        return fallback;
+    }
+    Resource3DInfo {
+        drm_fourcc: query.fourcc,
+        strides: query.strides,
+        offsets: query.offsets,
+        modifier: query.modifier,
+        ..fallback
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Renderer {
     worker: Arc<Worker>,
     pub capsets: u32,
     completed: Arc<Mutex<BTreeMap<Ring, u64>>>,
     mapper: Arc<dyn BlobMapper>,
+    direct: Arc<Mutex<Vec<std::sync::Weak<vmlab_hv_display::BufferLease>>>>,
 }
 
 struct Worker {
     sender: Option<mpsc::Sender<Task>>,
     join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Worker {
+    fn call<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Backend) -> Result<T, u32> + Send + 'static,
+    ) -> Result<T, u32> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.sender
+            .as_ref()
+            .ok_or(0x1200u32)?
+            .send(Box::new(move |backend| {
+                let _ = tx.send(f(backend));
+            }))
+            .map_err(|_| 0x1200u32)?;
+        rx.recv().map_err(|_| 0x1200u32)?
+    }
 }
 
 impl Drop for Worker {
@@ -62,6 +125,29 @@ struct HostResource {
     // Renderer iovecs borrow this allocation until detach or unref.
     memory: Option<GuestMemory>,
     scanout_info: Option<Resource3DInfo>,
+    exported: Option<Arc<std::os::fd::OwnedFd>>,
+    export_info: Option<Resource3DInfo>,
+}
+
+#[derive(Default)]
+struct Timeline {
+    next: u64,
+    pending: BTreeMap<u64, (Option<RutabagaFence>, Arc<std::sync::atomic::AtomicBool>)>,
+}
+
+impl Timeline {
+    fn reserve(&mut self) -> Option<u64> {
+        // virgl's global fence ABI carries only 32 bits. Drain the old epoch
+        // before reusing IDs so coalesced callbacks cannot retire newer work.
+        if self.next == u32::MAX as u64 {
+            if !self.pending.is_empty() {
+                return None;
+            }
+            self.next = 0;
+        }
+        self.next += 1;
+        Some(self.next)
+    }
 }
 
 struct Backend {
@@ -73,6 +159,15 @@ struct Backend {
     mode: GpuMode,
     scanout_copy: Option<super::scanout::Scanout>,
     node: PathBuf,
+    timeline: Arc<Mutex<Timeline>>,
+    direct_frames: u64,
+    fallback_frames: u64,
+    external_frames: u64,
+    readbacks: u64,
+    generation: u64,
+    damage: Vec<Rect>,
+    pending_frame: bool,
+    scanout_dirty: bool,
 }
 
 impl Drop for Backend {
@@ -122,6 +217,8 @@ impl Renderer {
         let (ready, initialized) = mpsc::sync_channel(1);
         let completed = Arc::new(Mutex::new(BTreeMap::<Ring, u64>::new()));
         let done = completed.clone();
+        let timeline = Arc::new(Mutex::new(Timeline::default()));
+        let callbacks = timeline.clone();
         let worker_mapper = mapper.clone();
         let join = std::thread::Builder::new()
             .name("virtio-gpu-renderer".into())
@@ -135,11 +232,30 @@ impl Renderer {
                     }
                 };
                 let handler = RutabagaFenceHandler::new(move |f: RutabagaFence| {
-                    let mut completed = done.lock();
-                    let value = completed
-                        .entry(ring(f.flags, f.ctx_id, f.ring_idx))
-                        .or_default();
-                    *value = (*value).max(f.fence_id);
+                    // Virgl may coalesce completion callbacks on a timeline.
+                    let mut pending = callbacks.lock();
+                    let key = ring(f.flags, f.ctx_id, f.ring_idx);
+                    let ids: Vec<_> = pending
+                        .pending
+                        .range(..=f.fence_id)
+                        .filter(|(_, (guest, _))| {
+                            guest.map_or((0, 0), |guest| {
+                                ring(guest.flags, guest.ctx_id, guest.ring_idx)
+                            }) == key
+                        })
+                        .map(|(&id, _)| id)
+                        .collect();
+                    for id in ids {
+                        let (guest, signal) = pending.pending.remove(&id).unwrap();
+                        signal.store(true, std::sync::atomic::Ordering::SeqCst);
+                        if let Some(guest) = guest {
+                            let mut completed = done.lock();
+                            let value = completed
+                                .entry(ring(guest.flags, guest.ctx_id, guest.ring_idx))
+                                .or_default();
+                            *value = (*value).max(guest.fence_id);
+                        }
+                    }
                 });
                 let gpu = RutabagaBuilder::new(mask, handler)
                     .set_default_component(RutabagaComponentType::VirglRenderer)
@@ -175,6 +291,15 @@ impl Renderer {
                     mode,
                     scanout_copy: None,
                     node,
+                    timeline,
+                    direct_frames: 0,
+                    fallback_frames: 0,
+                    external_frames: 0,
+                    readbacks: 0,
+                    generation: 0,
+                    damage: Vec::new(),
+                    pending_frame: false,
+                    scanout_dirty: true,
                 };
                 loop {
                     match receiver.recv_timeout(Duration::from_millis(2)) {
@@ -201,6 +326,7 @@ impl Renderer {
             capsets,
             completed,
             mapper,
+            direct: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -212,19 +338,26 @@ impl Renderer {
         &self,
         f: impl FnOnce(&mut Backend) -> Result<T, u32> + Send + 'static,
     ) -> Result<T, u32> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        self.worker
-            .sender
-            .as_ref()
-            .unwrap()
-            .send(Box::new(move |backend| {
-                let _ = tx.send(f(backend));
-            }))
-            .map_err(|_| 0x1200u32)?;
-        rx.recv().map_err(|_| 0x1200u32)?
+        self.worker.call(f)
     }
 
     pub fn command(&self, mem: &GuestMemory, request: &[u8]) -> Result<(u32, Vec<u8>), u32> {
+        let kind = request
+            .get(..4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
+        if matches!(
+            kind,
+            Some(0x102 | 0x105 | 0x107 | 0x201 | 0x203 | 0x205 | 0x207 | 0x209)
+        ) {
+            // Wait on the caller, leaving the renderer free for client readback.
+            let leases = std::mem::take(&mut *self.direct.lock());
+            for lease in leases.into_iter().filter_map(|lease| lease.upgrade()) {
+                if !lease.try_retire() {
+                    log::debug!("scanout_wait_for_release");
+                    lease.retire();
+                }
+            }
+        }
         let mem = mem.clone();
         let request = request.to_vec();
         self.call(move |b| b.command(&mem, &request))
@@ -232,12 +365,13 @@ impl Renderer {
 
     pub fn fence(&self, flags: u32, id: u64, ctx: u32, index: u8) -> Result<(), u32> {
         self.call(move |b| {
-            host(b.gpu.create_fence(RutabagaFence {
+            b.fence(Some(RutabagaFence {
                 flags,
                 fence_id: id,
                 ctx_id: ctx,
                 ring_idx: index,
             }))
+            .map(|_| ())
         })
     }
 
@@ -253,24 +387,7 @@ impl Renderer {
     }
 
     pub fn frame(&self) -> Result<Option<Frame>, u32> {
-        self.dma_frame().map(|frame| {
-            frame.map(|frame| Frame {
-                mode: Mode {
-                    width: frame.width,
-                    height: frame.height,
-                    stride: frame.stride,
-                    format: PixelFormat::Xrgb8888,
-                },
-                pixels: frame.pixels.as_ref().clone(),
-                dirty: true,
-                damage: vec![crate::display::Damage {
-                    x: 0,
-                    y: 0,
-                    width: frame.width,
-                    height: frame.height,
-                }],
-            })
-        })
+        self.dma_frame(true)?.map(cpu_frame).transpose()
     }
 
     pub fn mode(&self) -> Option<Mode> {
@@ -310,13 +427,16 @@ impl Renderer {
         })
     }
 
-    pub fn dma_frame(&self) -> Result<Option<super::DmaFrame>, u32> {
-        self.call(|b| {
+    pub fn dma_frame(&self, cpu: bool) -> Result<Option<super::DmaFrame>, u32> {
+        let mut frame = self.call(move |b| {
             let Some((id, rect)) = b.scanout else {
                 return Ok(None);
             };
-            let resource = b.resources.get(&id).ok_or(RESOURCE)?;
-            let mut info = host(b.gpu.resource3d_info(id))?;
+            b.synchronize()?;
+            let resource = b.resources.get_mut(&id).ok_or(RESOURCE)?;
+            let mut info = resource
+                .export_info
+                .unwrap_or(export_info(id, host(b.gpu.resource3d_info(id))?));
             let (width, height) = if let Some(scanout) = resource.scanout_info {
                 info.drm_fourcc = scanout.drm_fourcc;
                 info.strides[0] = scanout.strides[0];
@@ -325,30 +445,147 @@ impl Renderer {
             } else {
                 (resource.width, resource.height)
             };
-            let handle = host(b.gpu.export_blob(id))?;
-            let handle = handle.as_mesa_handle().ok_or(INVALID)?;
-            if handle.handle_type != RUTABAGA_HANDLE_TYPE_MEM_DMABUF {
-                return Err(INVALID);
+            if resource.exported.is_none() {
+                let handle = host(b.gpu.export_blob(id))?;
+                let handle = handle.as_mesa_handle().ok_or(INVALID)?;
+                if handle.handle_type != RUTABAGA_HANDLE_TYPE_MEM_DMABUF {
+                    return Err(INVALID);
+                }
+                use magma_gpu::util::AsRawDescriptor;
+                use std::os::fd::FromRawFd;
+                // SAFETY: duplicate the live rutabaga descriptor into independent ownership.
+                let raw = unsafe {
+                    libc::fcntl(
+                        handle.os_handle.as_raw_descriptor(),
+                        libc::F_DUPFD_CLOEXEC,
+                        0,
+                    )
+                };
+                if raw < 0 {
+                    return Err(0x1200);
+                }
+                // SAFETY: fcntl returned a new owned descriptor.
+                resource.exported =
+                    Some(Arc::new(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) }));
             }
-            use magma_gpu::util::AsRawDescriptor;
+            let fd = resource.exported.as_ref().unwrap().clone();
+            use std::os::fd::AsRawFd;
             if b.scanout_copy.is_none() {
                 b.scanout_copy = Some(super::scanout::Scanout::new(&b.node)?);
             }
-            b.scanout_copy
-                .as_ref()
-                .unwrap()
-                .capture(
-                    handle.os_handle.as_raw_descriptor(),
-                    info,
+            let copy = b.scanout_copy.as_mut().unwrap();
+            if resource.export_info.is_none() {
+                info = copy.metadata(fd.as_raw_fd(), info, width, height);
+                resource.export_info = Some(info);
+            }
+            let frame = if copy.direct(info, width, height, rect) {
+                b.direct_frames += 1;
+                super::DmaFrame {
+                    fd: fd.clone(),
+                    acquire: None,
                     width,
                     height,
-                    rect,
-                )
-                .map(Some)
-        })
+                    stride: info.strides[0],
+                    fourcc: info.drm_fourcc,
+                    modifier: info.modifier,
+                    pixels: None,
+                    buffers: Arc::new(vec![fd]),
+                    buffer: 0,
+                    lease: vmlab_hv_display::BufferLease::new(),
+                    direct: true,
+                    reader: None,
+                    snapshot: false,
+                }
+            } else {
+                let frame = copy.capture(fd.as_raw_fd(), info, width, height, rect, false)?;
+                b.fallback_frames += 1;
+                if copy.external_only(info) {
+                    b.external_frames += 1;
+                }
+                frame
+            };
+            b.pending_frame = false;
+            b.damage.clear();
+            b.scanout_dirty = false;
+            b.log_stats();
+            Ok(Some(frame))
+        })?;
+        if let Some(frame) = frame.as_mut() {
+            if frame.direct {
+                let mut direct = self.direct.lock();
+                direct.retain(|lease| lease.strong_count() != 0);
+                direct.push(Arc::downgrade(&frame.lease));
+            }
+            let worker = Arc::downgrade(&self.worker);
+            let fd = frame.fd.clone();
+            let (width, height, stride, fourcc, modifier) = (
+                frame.width,
+                frame.height,
+                frame.stride,
+                frame.fourcc,
+                frame.modifier,
+            );
+            let capture = move |b: &mut Backend| {
+                use std::os::fd::AsRawFd;
+                b.readbacks += 1;
+                let pixels = readback(
+                    b.scanout_copy.as_mut().ok_or(0x1200u32)?,
+                    fd.as_raw_fd(),
+                    Resource3DInfo {
+                        drm_fourcc: fourcc,
+                        modifier,
+                        strides: [stride, 0, 0, 0],
+                        ..Default::default()
+                    },
+                    width,
+                    height,
+                )?;
+                b.log_stats();
+                Ok(pixels)
+            };
+            if cpu {
+                let pin = frame.lease.acquire().ok_or(0x1200u32)?;
+                let result = Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
+                let destination = result.clone();
+                // Readback runs on the renderer after export, without delaying
+                // dma-buf publication. Its lease excludes guest writes meanwhile.
+                self.worker
+                    .sender
+                    .as_ref()
+                    .unwrap()
+                    .send(Box::new(move |backend| {
+                        let pixels = capture(backend);
+                        drop(pin);
+                        *destination.0.lock().unwrap() = Some(pixels);
+                        destination.1.notify_all();
+                    }))
+                    .map_err(|_| 0x1200u32)?;
+                frame.snapshot = true;
+                frame.reader = Some(Arc::new(move || {
+                    let mut pixels = result.0.lock().unwrap();
+                    while pixels.is_none() {
+                        pixels = result.1.wait(pixels).unwrap();
+                    }
+                    pixels.as_ref().unwrap().clone()
+                }));
+            } else {
+                frame.reader = Some(Arc::new(move || {
+                    worker.upgrade().ok_or(0x1200u32)?.call(capture.clone())
+                }));
+            }
+        }
+        Ok(frame)
+    }
+
+    pub fn take_damage(&self) -> Result<Option<(u64, Vec<Rect>)>, u32> {
+        self.call(|b| Ok(b.pending_frame.then(|| (b.generation, b.damage.clone()))))
     }
 
     pub fn reset(&self) -> Result<(), u32> {
+        let leases = std::mem::take(&mut *self.direct.lock());
+        for lease in leases.into_iter().filter_map(|lease| lease.upgrade()) {
+            lease.retire();
+        }
         self.call(|b| {
             let ids: Vec<_> = b.resources.keys().copied().collect();
             for id in ids {
@@ -358,6 +595,9 @@ impl Renderer {
                 host(b.gpu.destroy_context(id))?;
             }
             b.scanout = None;
+            b.pending_frame = false;
+            b.damage.clear();
+            b.timeline.lock().pending.clear();
             Ok(())
         })?;
         self.completed.lock().clear();
@@ -370,6 +610,61 @@ fn host<T>(result: RutabagaResult<T>) -> Result<T, u32> {
         log::warn!("virtio-gpu: {error}");
         0x1200
     })
+}
+
+fn cpu_frame(frame: super::DmaFrame) -> Result<Frame, u32> {
+    let mut pixels = frame.readback().map_err(|_| 0x1200u32)?;
+    if matches!(
+        frame.fourcc,
+        vmlab_hv_display::protocol::XBGR8888 | vmlab_hv_display::protocol::ABGR8888
+    ) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+        }
+    }
+    Ok(Frame {
+        mode: Mode {
+            width: frame.width,
+            height: frame.height,
+            stride: frame.stride,
+            format: PixelFormat::Xrgb8888,
+        },
+        pixels,
+        dirty: true,
+        damage: vec![crate::display::Damage {
+            x: 0,
+            y: 0,
+            width: frame.width,
+            height: frame.height,
+        }],
+    })
+}
+
+fn readback(
+    copy: &mut super::scanout::Scanout,
+    fd: i32,
+    info: Resource3DInfo,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, u32> {
+    let pixels = copy.readback(fd, info, width, height)?;
+    let source_stride = pixels.len() / height as usize;
+    let mut output = vec![0; info.strides[0] as usize * height as usize];
+    for (source, destination) in pixels
+        .chunks(source_stride)
+        .zip(output.chunks_mut(info.strides[0] as usize))
+    {
+        destination[..width as usize * 4].copy_from_slice(&source[..width as usize * 4]);
+        if matches!(
+            info.drm_fourcc,
+            vmlab_hv_display::protocol::XBGR8888 | vmlab_hv_display::protocol::ABGR8888
+        ) {
+            for pixel in destination[..width as usize * 4].as_chunks_mut::<4>().0 {
+                pixel.swap(0, 2);
+            }
+        }
+    }
+    Ok(output)
 }
 
 fn iovecs(mem: &GuestMemory, d: &mut Decoder<'_>, count: usize) -> Result<Vec<RutabagaIovec>, u32> {
@@ -405,6 +700,72 @@ fn iovecs(mem: &GuestMemory, d: &mut Decoder<'_>, count: usize) -> Result<Vec<Ru
 }
 
 impl Backend {
+    fn log_stats(&self) {
+        log::debug!(
+            "scanout_export {}",
+            serde_json::json!({ "node": self.node, "direct": self.direct_frames, "fallback": self.fallback_frames, "readbacks": self.readbacks,
+                "external_only": self.external_frames,
+                "source": self.scanout.and_then(|(id, _)| self.resources.get(&id)?.export_info).map(|info| serde_json::json!({ "modifier": info.modifier, "fourcc": info.drm_fourcc })) })
+        );
+    }
+    fn fence(
+        &mut self,
+        guest: Option<RutabagaFence>,
+    ) -> Result<Arc<std::sync::atomic::AtomicBool>, u32> {
+        let signal = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let start = std::time::Instant::now();
+        let id = loop {
+            let mut timeline = self.timeline.lock();
+            if let Some(id) = timeline.reserve() {
+                timeline.pending.insert(id, (guest, signal.clone()));
+                break id;
+            }
+            drop(timeline);
+            self.gpu.event_poll();
+            if start.elapsed() > Duration::from_secs(5) {
+                return Err(0x1200);
+            }
+            std::thread::yield_now();
+        };
+        let mut fence = guest.unwrap_or(RutabagaFence {
+            flags: 1,
+            fence_id: 0,
+            ctx_id: 0,
+            ring_idx: 0,
+        });
+        fence.fence_id = id;
+        if guest.is_none() {
+            fence.flags = 1;
+        }
+        if let Err(error) = host(self.gpu.create_fence(fence)) {
+            self.timeline.lock().pending.remove(&id);
+            return Err(error);
+        }
+        Ok(signal)
+    }
+
+    fn synchronize(&mut self) -> Result<(), u32> {
+        self.fence(None)?;
+        let signals: Vec<_> = self
+            .timeline
+            .lock()
+            .pending
+            .values()
+            .map(|(_, signal)| signal.clone())
+            .collect();
+        let start = std::time::Instant::now();
+        while signals
+            .iter()
+            .any(|signal| !signal.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            self.gpu.event_poll();
+            if start.elapsed() > Duration::from_secs(5) {
+                return Err(0x1200);
+            }
+            std::thread::yield_now();
+        }
+        Ok(())
+    }
     fn unref(&mut self, id: u32) -> Result<(), u32> {
         let r = self.resources.get(&id).ok_or(RESOURCE)?;
         if r.mapped {
@@ -420,6 +781,7 @@ impl Backend {
     }
 
     fn command(&mut self, mem: &GuestMemory, request: &[u8]) -> Result<(u32, Vec<u8>), u32> {
+        let previous = self.scanout;
         let mut d = Decoder::new(request);
         let kind = d.u32()?;
         d.u32()?;
@@ -510,6 +872,26 @@ impl Backend {
                     return Err(INVALID);
                 }
                 host(self.gpu.resource_create_3d(id, create))?;
+                let backing = if create.bind & (1 << 18) != 0 {
+                    if self.scanout_copy.is_none() {
+                        match super::scanout::Scanout::new(&self.node) {
+                            Ok(copy) => self.scanout_copy = Some(copy),
+                            Err(error) => {
+                                let _ = host(self.gpu.unref_resource(id));
+                                return Err(error);
+                            }
+                        }
+                    }
+                    match self.scanout_copy.as_ref().unwrap().resource(id, create) {
+                        Ok(backing) => backing,
+                        Err(error) => {
+                            let _ = host(self.gpu.unref_resource(id));
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    None
+                };
                 self.resources.insert(
                     id,
                     HostResource {
@@ -520,6 +902,8 @@ impl Backend {
                         mapped: false,
                         memory: None,
                         scanout_info: None,
+                        exported: backing.as_ref().map(|(fd, _)| fd.clone()),
+                        export_info: backing.map(|(_, info)| info),
                     },
                 );
                 NODATA
@@ -615,10 +999,42 @@ impl Backend {
                 NODATA
             }
             0x104 => {
-                d.rect()?;
+                let rect = d.rect()?;
+                log::debug!("guest flush {},{},{}x{}", rect.x, rect.y, rect.w, rect.h);
                 let id = d.u32()?;
                 d.u32()?;
-                self.resources.get(&id).ok_or(RESOURCE)?;
+                let resource = self.resources.get(&id).ok_or(RESOURCE)?;
+                let (width, height) = resource
+                    .scanout_info
+                    .map(|info| (info.width, info.height))
+                    .unwrap_or((resource.width, resource.height));
+                if !rect.fits(width, height) {
+                    return Err(INVALID);
+                }
+                if let Some((scanout_id, scanout)) = self.scanout
+                    && scanout_id == id
+                    && rect.overlaps(scanout)
+                {
+                    let x = rect.x.max(scanout.x);
+                    let y = rect.y.max(scanout.y);
+                    let damage = Rect {
+                        x: x - scanout.x,
+                        y: y - scanout.y,
+                        w: (rect.x + rect.w).min(scanout.x + scanout.w) - x,
+                        h: (rect.y + rect.h).min(scanout.y + scanout.h) - y,
+                    };
+                    if self.damage.len() < 256 {
+                        self.damage.push(damage);
+                    } else {
+                        self.damage = vec![Rect {
+                            x: 0,
+                            y: 0,
+                            w: scanout.w,
+                            h: scanout.h,
+                        }];
+                    }
+                    self.pending_frame = true;
+                }
                 // Virgl flush is ordered by the following fence. Venus blob flush
                 // does not use the optional rutabaga resource_flush operation.
                 NODATA
@@ -660,6 +1076,8 @@ impl Backend {
                         mapped: false,
                         memory: Some(mem.clone()),
                         scanout_info: None,
+                        exported: None,
+                        export_info: None,
                     },
                 );
                 NODATA
@@ -716,6 +1134,7 @@ impl Backend {
                         offsets,
                         modifier: 0,
                     });
+                    resource.export_info = None;
                     self.scanout = Some((id, rect));
                 }
                 NODATA
@@ -765,6 +1184,81 @@ impl Backend {
             }
             _ => return Err(INVALID),
         };
+        if previous != self.scanout {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        if matches!(kind, 0x105 | 0x107 | 0x201 | 0x203 | 0x205 | 0x207 | 0x209) {
+            self.scanout_dirty = true;
+        }
+        if (matches!(kind, 0x103 | 0x10d) && (previous != self.scanout || self.scanout_dirty))
+            || (kind == 0x102 && previous != self.scanout)
+        {
+            self.pending_frame = true;
+            self.damage = self
+                .scanout
+                .map(|(_, r)| {
+                    vec![Rect {
+                        x: 0,
+                        y: 0,
+                        w: r.w,
+                        h: r.h,
+                    }]
+                })
+                .unwrap_or_default();
+        }
         Ok((response, out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_frame_preserves_red_and_blue_for_every_scanout_format() {
+        for (fourcc, bytes) in [
+            (*b"AR24", [19, 37, 211, 255]),
+            (*b"XR24", [19, 37, 211, 255]),
+            (*b"AB24", [211, 37, 19, 255]),
+            (*b"XB24", [211, 37, 19, 255]),
+        ] {
+            let fd = Arc::new(std::fs::File::open("/dev/null").unwrap().into());
+            let frame = cpu_frame(super::super::DmaFrame {
+                fd: Arc::clone(&fd),
+                acquire: None,
+                width: 1,
+                height: 1,
+                stride: 4,
+                fourcc: u32::from_le_bytes(fourcc),
+                modifier: 0,
+                pixels: Some(Arc::new(bytes.to_vec())),
+                buffers: Arc::new(vec![fd]),
+                buffer: 0,
+                lease: vmlab_hv_display::BufferLease::new(),
+                direct: true,
+                reader: None,
+                snapshot: false,
+            })
+            .unwrap();
+            assert_eq!(frame.pixels, [19, 37, 211, 255], "fourcc={fourcc:?}");
+        }
+    }
+
+    #[test]
+    fn fence_ids_do_not_wrap_while_old_callbacks_are_pending() {
+        let mut timeline = Timeline {
+            next: u32::MAX as u64 - 1,
+            ..Default::default()
+        };
+        let last = timeline.reserve().unwrap();
+        assert_eq!(last, u32::MAX as u64);
+        timeline.pending.insert(
+            last,
+            (None, Arc::new(std::sync::atomic::AtomicBool::new(false))),
+        );
+        assert_eq!(timeline.reserve(), None);
+        timeline.pending.clear();
+        assert_eq!(timeline.reserve(), Some(1));
+        assert_eq!(timeline.reserve(), Some(2));
     }
 }

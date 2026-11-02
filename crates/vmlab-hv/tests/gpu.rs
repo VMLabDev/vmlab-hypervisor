@@ -13,6 +13,9 @@ use vmlab_hv_proto::{
 };
 use vmlab_hv_tests::{agent::AgentClient, process::ManagedChild};
 
+#[path = "gpu/exports.rs"]
+mod exports;
+
 fn render_node() -> Option<PathBuf> {
     if let Some(node) = std::env::var_os("VMLAB_HV_TEST_RENDER_NODE") {
         return Some(node.into());
@@ -102,6 +105,7 @@ fn ubuntu_virgl_scanout_and_cpu_copy() {
                 path.join("control.sock").to_str().unwrap(),
             ])
             .stdout(Stdio::from(log.try_clone().unwrap()))
+            .env("VMLAB_HV_LOG", "vmlab_hv_devices::virtio::gpu=debug,info")
             .stderr(Stdio::from(log)),
     )
     .unwrap();
@@ -159,7 +163,11 @@ fn ubuntu_virgl_scanout_and_cpu_copy() {
             &[
                 "sh",
                 "-ec",
-                "python3 /run/gpu-probe.py >/run/gpu-probe.log 2>&1 &",
+                if std::env::var("VMLAB_HV_TEST_SCANOUT").is_ok_and(|mode| mode == "implicit") {
+                    "python3 /run/gpu-probe.py implicit >/run/gpu-probe.log 2>&1 &"
+                } else {
+                    "python3 /run/gpu-probe.py >/run/gpu-probe.log 2>&1 &"
+                },
             ],
         );
         let renderer = exec(
@@ -197,6 +205,7 @@ fn ubuntu_virgl_scanout_and_cpu_copy() {
                 ..
             }
         ));
+        exports::exercise(path, &mut agent);
         let display = DisplayClient::connect(
             path.join("display.sock"),
             Capabilities(Capabilities::FRAMES | Capabilities::CPU_COPY | Capabilities::DMABUF_OK),
@@ -272,4 +281,19 @@ fn ubuntu_virgl_scanout_and_cpu_copy() {
         );
     }
     result.unwrap();
+    let log = std::fs::read_to_string(path.join("hv.log")).unwrap();
+    for line in log
+        .lines()
+        .filter(|line| line.contains("scanout candidate"))
+        .take(2)
+    {
+        eprintln!("{line}");
+    }
+    for line in log
+        .lines()
+        .filter(|line| line.contains("scanout modifiers"))
+        .take(1)
+    {
+        eprintln!("{line}");
+    }
 }

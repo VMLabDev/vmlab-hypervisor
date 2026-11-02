@@ -432,6 +432,152 @@ fn dmabuf_acquire_fd_and_cpu_copy_reconfigure() {
 }
 
 #[test]
+fn stable_dma_pool_keeps_imports_damage_and_release_tokens() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use vmlab_hv_display::BufferLease;
+
+    let (server, source, _) = server();
+    let buffers: Arc<Vec<Arc<OwnedFd>>> = Arc::new(
+        (0..3)
+            .map(|_| Arc::new(File::open("/dev/zero").unwrap().into()))
+            .collect(),
+    );
+    let reads = Arc::new(AtomicUsize::new(0));
+    let lease = BufferLease::new();
+    let make = |buffer, lease: Arc<BufferLease>| {
+        let mut f = frame(9, 4, 3);
+        let reads = reads.clone();
+        f.pixels = Pixels::Leased {
+            buffers: buffers.clone(),
+            buffer,
+            acquire: None,
+            lease,
+            cpu: None,
+            readback: Arc::new(move || {
+                reads.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![42; 48])
+            }),
+        };
+        f
+    };
+    *source.0.lock().unwrap() = make(0, lease.clone());
+    let (c, h) = client(&server, C::FRAMES | C::DMABUF_OK | C::STABLE_BUFFERS);
+    let configured = c.receive().unwrap();
+    assert!(matches!(
+        configured.message,
+        M::SurfaceConfigure {
+            kind: SurfaceKind::Dmabuf,
+            buffers: 3,
+            ..
+        }
+    ));
+    assert_eq!(configured.fds.len(), 3);
+    let first = ready(&c);
+    assert!(!lease.try_retire(), "a client still holds buffer zero");
+    let second_lease = BufferLease::new();
+    *source.0.lock().unwrap() = make(1, second_lease.clone());
+    server.publish().unwrap();
+    let second = ready(&c);
+    assert_eq!(first.0, second.0, "same surface without another configure");
+    assert_eq!(second.1, 1);
+    assert_eq!(
+        second.3,
+        vec![Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1
+        }]
+    );
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "dma-only clients never read back"
+    );
+    c.release(first.0, first.1, first.2).unwrap();
+    until(|| lease.try_retire().then_some(()));
+
+    let (cpu, cpu_worker) = client(&server, C::FRAMES);
+    let (_, fds) = configure(&cpu);
+    let cpu_frame = ready(&cpu);
+    assert_eq!(pixels(&fds[cpu_frame.1 as usize], 48), vec![42; 48]);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert!(
+        !second_lease.try_retire(),
+        "the dma client still samples buffer one"
+    );
+    drop(c);
+    h.join().unwrap().unwrap();
+    until(|| second_lease.try_retire().then_some(()));
+    drop(cpu);
+    cpu_worker.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_blocked_resize_cannot_prevent_buffer_release() {
+    use std::sync::mpsc;
+    use vmlab_hv_display::{BufferLease, DisplayServer, InputSink};
+    struct Resize {
+        lease: Arc<BufferLease>,
+        entered: mpsc::Sender<()>,
+        finished: mpsc::Sender<()>,
+    }
+    impl InputSink for Resize {
+        fn input(&self, _: M) {
+            self.entered.send(()).unwrap();
+            self.lease.retire();
+            self.finished.send(()).unwrap();
+        }
+    }
+    let source = Arc::new(Source(std::sync::Mutex::new(frame(1, 4, 3))));
+    let lease = BufferLease::new();
+    source.0.lock().unwrap().pixels = Pixels::Leased {
+        buffers: Arc::new(vec![Arc::new(File::open("/dev/zero").unwrap().into())]),
+        buffer: 0,
+        acquire: None,
+        lease: lease.clone(),
+        cpu: None,
+        readback: Arc::new(|| Ok(vec![0; 48])),
+    };
+    let (entered, entry) = mpsc::channel();
+    let (finished, completion) = mpsc::channel();
+    let server = DisplayServer::new(
+        source,
+        Arc::new(Resize {
+            lease,
+            entered,
+            finished,
+        }),
+    )
+    .unwrap();
+    let (c, worker) = client(
+        &server,
+        C::FRAMES | C::DMABUF_OK | C::STABLE_BUFFERS | C::INPUT,
+    );
+    assert!(matches!(c.receive().unwrap().message, M::LedState { .. }));
+    assert!(matches!(
+        c.receive().unwrap().message,
+        M::SurfaceConfigure { .. }
+    ));
+    let frame = ready(&c);
+    c.send(&M::RequestSize {
+        width: 640,
+        height: 480,
+    })
+    .unwrap();
+    entry
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    c.release(frame.0, frame.1, frame.2).unwrap();
+    completion
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("Release was blocked behind RequestSize");
+    drop(c);
+    worker.join().unwrap().unwrap();
+    server.shutdown();
+}
+
+#[test]
 fn fragmented_streams_and_fd_validation() {
     let (a, mut b) = socket();
     let bytes = M::Hello {
