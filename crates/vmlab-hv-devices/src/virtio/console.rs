@@ -463,7 +463,11 @@ fn handle_kick(shared: &Arc<Mutex<Shared>>, clients: &mut [Option<UnixStream>], 
 /// the worker only reads a client socket under this condition.
 fn rx_has_capacity(shared: &Arc<Mutex<Shared>>, queue: u16) -> bool {
     let sh = lock(shared);
-    if sh.snapshot_paused {
+    let open = rx_port(queue)
+        .filter(|port| *port >= 1)
+        .and_then(|port| sh.ports.get(usize::from(port - 1)))
+        .is_some_and(|port| port.guest_open);
+    if sh.snapshot_paused || !open {
         return false;
     }
     let Some(mem) = sh.mem.as_ref() else {
@@ -480,7 +484,7 @@ fn rx_has_capacity(shared: &Arc<Mutex<Shared>>, queue: u16) -> bool {
 
 /// Move staged host→guest bytes into as many receiveq buffers as are free.
 fn drain_rx_stage(sh: &mut Shared, i: usize) {
-    if sh.snapshot_paused {
+    if sh.snapshot_paused || !sh.ports[i].guest_open {
         return;
     }
     let queue = rx_queue(i as u16 + 1);
@@ -708,6 +712,9 @@ fn dispatch_ctrl(sh: &mut Shared, id: u32, event: u16, value: u16, max_port: u32
         }
         EV_PORT_OPEN if id >= 1 && id <= max_port => {
             sh.ports[id as usize - 1].guest_open = value == 1;
+            if value == 1 {
+                drain_rx_stage(sh, id as usize - 1);
+            }
         }
         _ => {}
     }
@@ -1416,6 +1423,12 @@ mod tests {
             wait_for("control messages", || {
                 usize::from(self.vqs[2].used_idx(&self.mem)) >= want
             });
+            for id in 1..=2 {
+                self.send_ctrl(id, EV_PORT_OPEN, 1);
+                wait_for("guest port open", || {
+                    lock(&self.dev.shared).ports[id as usize - 1].guest_open
+                });
+            }
         }
     }
 
@@ -1561,6 +1574,31 @@ mod tests {
         wait_for("tx buffer returned", || f.vqs[5].used_idx(&f.mem) == 1);
         let (_, len) = f.vqs[5].used_entry(&f.mem, 0);
         assert_eq!(len, 9);
+    }
+
+    #[test]
+    fn host_input_waits_until_the_guest_opens_the_port() {
+        let mut f = Fixture::new();
+        let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
+        f.device_ready(8, 5);
+        f.send_ctrl(1, EV_PORT_OPEN, 0);
+        wait_for("guest port closed", || {
+            !lock(&f.dev.shared).ports[0].guest_open
+        });
+        let address = f.data(2);
+        f.vqs[4].add_chain(&f.mem, &[(address, 64, true)]);
+        f.dev.queue_notify(4);
+        client.write_all(b"early hello").unwrap();
+        assert!(!rx_has_capacity(&f.dev.shared, 4));
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(f.vqs[4].used_idx(&f.mem), 0);
+        f.send_ctrl(1, EV_PORT_OPEN, 1);
+        wait_for("input delivered after guest open", || {
+            f.vqs[4].used_idx(&f.mem) == 1
+        });
+        let mut bytes = [0; 11];
+        f.mem.read_slice(&mut bytes, GuestAddress(address)).unwrap();
+        assert_eq!(&bytes, b"early hello");
     }
 
     #[test]

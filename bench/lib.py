@@ -331,8 +331,9 @@ class ResetMonitor:
 class AgentClient:
     """The readiness poller and in-guest exec channel, as vmlab drives them.
 
-    vmlab dials fresh every second: an early persistent connection's Hello is
-    eaten before the guest opens the port and never answered (notes/03 §1).
+    Readiness retries a fresh connection after each failed handshake. The
+    port socket can exist before the guest application opens it; both
+    backends hold host input until the guest announces PORT_OPEN.
     """
 
     _channel_ids = itertools.count(1)
