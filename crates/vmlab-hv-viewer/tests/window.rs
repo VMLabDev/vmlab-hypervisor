@@ -78,10 +78,13 @@ fn replacement_peer_relay() {
 }
 
 #[test]
-fn executable_presents_letterbox_cursor_input_and_resize_on_private_display() {
-    for mode in ["mailbox", "fifo"] {
-        exercise(mode);
-    }
+fn executable_waits_for_missing_socket_and_presents_on_private_display() {
+    exercise("mailbox");
+}
+
+#[test]
+fn executable_waits_for_refused_socket_and_presents_on_private_display() {
+    exercise("fifo");
 }
 
 fn exercise(mode: &str) {
@@ -139,8 +142,10 @@ fn exercise(mode: &str) {
         .unwrap();
     let root = connection.setup().roots[screen].root;
     let socket = directory.path().join("display.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    listener.set_nonblocking(true).unwrap();
+    if mode == "fifo" {
+        // Dropping this listener leaves a stale pathname that refuses connects.
+        drop(UnixListener::bind(&socket).unwrap());
+    }
     let stderr = directory.path().join("viewer.log");
     let mut viewer = ManagedChild::helper(
         Command::new(
@@ -157,6 +162,75 @@ fn exercise(mode: &str) {
         .stderr(File::create(&stderr).unwrap()),
     )
     .unwrap();
+    let mut startup_window = 0;
+    wait(|| {
+        assert!(
+            viewer.try_wait().unwrap().is_none(),
+            "viewer exited before its socket was ready: {}",
+            std::fs::read_to_string(&stderr).unwrap()
+        );
+        startup_window = connection
+            .query_tree(root)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .children
+            .into_iter()
+            .find(|window| {
+                connection
+                    .get_geometry(*window)
+                    .unwrap()
+                    .reply()
+                    .is_ok_and(|geometry| geometry.width == 1024 && geometry.height == 768)
+            })
+            .unwrap_or(0);
+        startup_window != 0
+    });
+    let title_atom = connection
+        .intern_atom(false, b"_NET_WM_NAME")
+        .unwrap()
+        .reply()
+        .unwrap()
+        .atom;
+    wait(|| {
+        let title = connection
+            .get_property(false, startup_window, title_atom, AtomEnum::ANY, 0, 1024)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .value;
+        String::from_utf8(title)
+            .unwrap()
+            .contains("waiting for display")
+    });
+    wait(|| {
+        let pixels = connection
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                startup_window,
+                500,
+                300,
+                1,
+                1,
+                u32::MAX,
+            )
+            .unwrap()
+            .reply()
+            .unwrap()
+            .data;
+        pixels[..3] == [0, 0, 0]
+    });
+    assert!(
+        std::fs::read_to_string(&stderr)
+            .unwrap()
+            .lines()
+            .all(|line| !line.contains("Connection refused") && !line.contains("No such file"))
+    );
+    if mode == "fifo" {
+        std::fs::remove_file(&socket).unwrap();
+    }
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
     let mut stream = None;
     wait(|| {
         if let Ok((client, _)) = listener.accept() {
@@ -296,6 +370,10 @@ fn exercise(mode: &str) {
             .unwrap_or(0);
         window != 0
     });
+    assert_eq!(
+        window, startup_window,
+        "startup must keep the same native window"
+    );
     let pixel = |x, y| {
         connection
             .get_image(ImageFormat::Z_PIXMAP, window, x, y, 1, 1, u32::MAX)

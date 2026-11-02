@@ -194,11 +194,18 @@ impl Core {
     }
 
     pub fn connect(path: &Path, shm: bool, chord: &str) -> io::Result<Self> {
+        Self::new(
+            Arc::new(Client::connect(path, Self::capabilities(shm))?),
+            chord,
+        )
+    }
+
+    pub(crate) fn capabilities(shm: bool) -> Capabilities {
         let mut caps = Capabilities::ALL.0;
         if shm {
             caps &= !Capabilities::DMABUF_OK;
         }
-        Self::new(Arc::new(Client::connect(path, Capabilities(caps))?), chord)
+        Capabilities(caps)
     }
 
     pub fn new(client: Arc<Client>, chord: &str) -> io::Result<Self> {

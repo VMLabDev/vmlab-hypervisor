@@ -158,7 +158,8 @@ In `60b9c86`, retries grew from 100 ms to 2 s. A pidfd tracked the original sock
 removing or rebinding the socket does not mean the machine has exited.
 That build exited when the original process died or the user closed the window.
 The replacement-process policy below supersedes that behavior.
-Initial connection and local renderer setup errors still fail startup.
+That build still failed initial connection and local renderer setup errors.
+The startup policy below supersedes its initial connection handling.
 
 Reconnect resets surface IDs, buffer imports, repaint images, cursor state,
 LEDs, and resize state. Previously held guest keys and buttons get matching
@@ -282,3 +283,36 @@ from virtio-queue's descriptor iterator, which logs and returns None. That
 message alone does not establish a fatal GPU failure. Its crash-ring files
 could not be parsed as complete JSON, so no causal claim relies on them.
 The full suite and physical KDE desktop checks remain outside this focused run.
+
+## Startup while the VM restarts
+
+F9. The shell connected synchronously before creating its window, so a missing
+socket or a stale socket pathname aborted startup. Private Xvfb reproduced both
+`No such file or directory` and `Connection refused` against the previous build.
+The reader now owns the first handshake as well as subsequent reconnects.
+The shell has no Core until that handshake succeeds, opens a black waiting
+window immediately, and sends no guest input while waiting.
+
+Missing and refused sockets retry quietly for up to 120 seconds, with delays
+from 100 ms to 2 s. Connect uses a nonblocking Unix socket, and handshake I/O
+uses the remaining deadline, capped at two seconds per attempt. A full listener
+backlog cannot block cancellation or bypass the startup deadline. Startup
+timeout emits one error and exits. Permanent path and protocol errors still
+fail. Before the first handshake no peer PID is known, so a missing socket
+alone cannot establish that the machine has gone. After connecting, the existing
+pidfd and replacement-process policy applies.
+
+T9. Both private-display startup cases now pass. They verify a visible waiting
+window and black pixels before starting the listener, quiet transient errors,
+and the same native window after frames arrive. They also run the existing
+input, cursor, resize, disconnect, and replacement-process checks. Reader tests
+exercise deadline expiry for missing, refused, stalled, and full-backlog
+sockets, plus cancellation without a peer. Tests use a short injected deadline
+and assert that the production default remains 120 seconds.
+
+Formatting, workspace Clippy, and focused viewer tests pass. Evidence is in
+`.scratch/viewer-windows/startup-before.log`, `startup-after.log`, and
+`startup-clippy.log`. No guest VM, owner desktop, or full-suite check was run
+for this startup-only change. The optional hardware dma-buf test remains a
+named skip without an explicitly selected render node. No public protocol,
+headless Core API, or shared device interface changed.

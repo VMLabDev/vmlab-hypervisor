@@ -54,6 +54,13 @@ Resize requests follow the window after 200 ms without another size change.
 Guests decide whether to apply them. Guests with fixed VGA modes are letterboxed.
 Pointer coordinates use the same viewport as rendering and clamp at its edges.
 
+The window opens without waiting for the first display connection. If the
+socket is missing or refuses connections during startup, the viewer shows
+`waiting for display` on black and retries quietly for up to 120 seconds.
+Before the first handshake there is no peer PID to establish that the machine
+has exited, so an unavailable socket gets the full startup timeout. Closing
+the window cancels the wait. Invalid paths and protocol errors still fail.
+
 If the display connection closes, the window clears to black and its title
 shows `waiting for display`. The viewer releases host keyboard capture and
 restores the host cursor. It reconnects with delays from 100 ms to 2 s while

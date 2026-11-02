@@ -21,7 +21,7 @@ use winit::{
 
 struct App {
     options: Options,
-    core: Core,
+    core: Option<Core>,
     // Renderer, keyboard grab, and all borrowed display handles die before the window.
     renderer: Option<Renderer>,
     keyboard: Option<KeyboardGrab>,
@@ -33,7 +33,6 @@ struct App {
     fallback_cursor: crate::Cursor,
     wheel: f64,
     last_title: String,
-    connected: bool,
     generation: u64,
     pending_releases: Vec<Message>,
 }
@@ -42,7 +41,7 @@ impl App {
     fn fail(&mut self, event_loop: &ActiveEventLoop, result: Result<()>) {
         if let Err(error) = result {
             if self.window.is_some() && error.chain().any(|error| error.is::<std::io::Error>()) {
-                if self.connected {
+                if self.core.is_some() {
                     eprintln!("display connection failed; waiting to reconnect: {error:#}");
                 }
                 self.disconnected();
@@ -54,17 +53,12 @@ impl App {
     }
 
     fn disconnected(&mut self) {
-        if !self.connected {
+        let Some(mut core) = self.core.take() else {
             return;
-        }
-        self.connected = false;
-        let _ = self.core.client.stream().shutdown(Shutdown::Both);
-        self.pending_releases.extend(self.core.input.focus_lost());
+        };
+        let _ = core.client.stream().shutdown(Shutdown::Both);
+        self.pending_releases.extend(core.input.focus_lost());
         self.keyboard.take();
-        self.core.current = None;
-        self.core.surfaces.clear();
-        self.core.cursor = crate::Cursor::default();
-        self.core.leds = 0;
         self.wheel = 0.;
         if let Some(clipboard) = &self.clipboard {
             clipboard.focus(false);
@@ -80,22 +74,19 @@ impl App {
     }
 
     fn title(&mut self) {
+        let leds = self.core.as_ref().map_or(0, |core| core.leds);
         let locks = [
-            if self.core.leds & 2 != 0 { "Num" } else { "" },
-            if self.core.leds & 4 != 0 { "Caps" } else { "" },
-            if self.core.leds & 1 != 0 {
-                "Scroll"
-            } else {
-                ""
-            },
+            if leds & 2 != 0 { "Num" } else { "" },
+            if leds & 4 != 0 { "Caps" } else { "" },
+            if leds & 1 != 0 { "Scroll" } else { "" },
         ]
         .join(" ");
         let title = format!(
             "{} - {} - release {} - {}",
             self.options.machine.as_deref().unwrap_or("vmlab-hv"),
-            if !self.connected || self.core.current.is_none() {
+            if self.core.as_ref().is_none_or(|core| core.current.is_none()) {
                 "waiting for display"
-            } else if self.core.input.grabbed {
+            } else if self.core.as_ref().is_some_and(|core| core.input.grabbed) {
                 "keyboard grabbed"
             } else {
                 "click to grab keyboard"
@@ -112,24 +103,32 @@ impl App {
     }
 
     fn ungrab(&mut self) -> Result<()> {
-        let messages = self.core.input.release();
+        let messages = self
+            .core
+            .as_mut()
+            .map(|core| core.input.release())
+            .unwrap_or_default();
         self.keyboard.take();
         self.update_cursor();
         self.title();
-        if self.connected {
-            self.core.send(messages)?;
+        if let Some(core) = &self.core {
+            core.send(messages)?;
         }
         Ok(())
     }
 
     fn grab(&mut self) -> Result<()> {
-        if !self.core.input.can_grab() {
+        if self.core.as_ref().is_none_or(|core| !core.input.can_grab()) {
             return Ok(());
         }
         let window = self.window.as_ref().context("window not ready")?;
         let keyboard = KeyboardGrab::new(window)?;
         self.keyboard = Some(keyboard);
-        self.core.input.grab();
+        self.core
+            .as_mut()
+            .context("display not connected")?
+            .input
+            .grab();
         self.update_cursor();
         self.title();
         Ok(())
@@ -138,39 +137,47 @@ impl App {
     fn update_cursor(&mut self) {
         let _ = self.position_fallback();
         if let Some(window) = &self.window {
-            window.set_cursor_visible(self.core.host_cursor_visible(self.pointer_inside));
+            window.set_cursor_visible(
+                self.core
+                    .as_ref()
+                    .is_none_or(|core| core.host_cursor_visible(self.pointer_inside)),
+            );
         }
     }
 
     fn display(&mut self, packet: Packet) -> Result<()> {
         let configure = matches!(packet.message, Message::SurfaceConfigure { .. });
-        let frame = self.core.receive(packet)?;
+        let frame = self
+            .core
+            .as_mut()
+            .context("display not connected")?
+            .receive(packet)?;
         if configure && let Some(renderer) = &mut self.renderer {
             renderer.reset_display();
         }
         self.update_cursor();
+        let core = self.core.as_ref().context("display not connected")?;
         if let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer) {
             if let Some(frame) = frame {
-                let surface = self
-                    .core
+                let surface = core
                     .surfaces
                     .get(&frame.surface)
                     .context("missing surface")?;
-                let cursor = if self.core.use_fallback_cursor() {
+                let cursor = if core.use_fallback_cursor() {
                     &self.fallback_cursor
                 } else {
-                    &self.core.cursor
+                    &core.cursor
                 };
                 let result = renderer.present(window, Some(surface), Some(&frame), cursor);
                 // present waits for GPU completion before returning. Failed imports never submit.
-                self.core.release(&frame)?;
+                core.release(&frame)?;
                 match result {
                     Ok(()) => {}
                     Err(error) if surface.kind == SurfaceKind::Dmabuf => {
                         eprintln!(
                             "dma-buf import/presentation failed; requesting shared memory: {error:#}"
                         );
-                        self.core.client.cpu_copy(frame.surface)?;
+                        core.client.cpu_copy(frame.surface)?;
                     }
                     Err(error) => return Err(error),
                 }
@@ -178,14 +185,14 @@ impl App {
                 window.request_redraw();
             }
         } else if let Some(frame) = frame {
-            self.core.release(&frame)?;
+            core.release(&frame)?;
         }
         self.title();
         Ok(())
     }
 
     fn window_event(&mut self, event: WindowEvent) -> Result<()> {
-        if !self.connected
+        if self.core.is_none()
             && matches!(
                 event,
                 WindowEvent::KeyboardInput { .. }
@@ -197,7 +204,9 @@ impl App {
         }
         match event {
             WindowEvent::Resized(size) => {
-                self.core.resize(Instant::now(), size.width, size.height);
+                if let Some(core) = &mut self.core {
+                    core.resize(Instant::now(), size.width, size.height);
+                }
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize();
                 }
@@ -208,13 +217,17 @@ impl App {
             }
             WindowEvent::Focused(focused) => {
                 if let Some(clipboard) = &self.clipboard {
-                    clipboard.focus(focused && self.connected);
+                    clipboard.focus(focused && self.core.is_some());
                 }
                 if !focused {
-                    let messages = self.core.input.focus_lost();
+                    let messages = self
+                        .core
+                        .as_mut()
+                        .map(|core| core.input.focus_lost())
+                        .unwrap_or_default();
                     self.ungrab()?;
-                    if self.connected {
-                        self.core.send(messages)?;
+                    if let Some(core) = &self.core {
+                        core.send(messages)?;
                     }
                 }
             }
@@ -228,22 +241,23 @@ impl App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(code) = event.physical_key.to_scancode() {
-                    let was_grabbed = self.core.input.grabbed;
-                    let messages = self
-                        .core
-                        .input
-                        .key(code, event.state == ElementState::Pressed);
-                    if was_grabbed && !self.core.input.grabbed {
+                    let core = self.core.as_mut().context("display not connected")?;
+                    let was_grabbed = core.input.grabbed;
+                    let messages = core.input.key(code, event.state == ElementState::Pressed);
+                    if was_grabbed && !core.input.grabbed {
                         self.ungrab()?;
                     }
-                    self.core.send(messages)?;
+                    self.core
+                        .as_ref()
+                        .context("display not connected")?
+                        .send(messages)?;
                 }
             }
             WindowEvent::MouseInput { state, button, .. } if self.pointer_inside => {
                 if state == ElementState::Pressed
                     && button == MouseButton::Left
                     && self.pointer_inside
-                    && !self.core.input.grabbed
+                    && self.core.as_ref().is_some_and(|core| !core.input.grabbed)
                     && let Err(error) = self.grab()
                 {
                     eprintln!("input grab failed: {error:#}");
@@ -257,8 +271,9 @@ impl App {
                     _ => 0,
                 };
                 self.send_pointer()?;
-                let messages = self.core.input.button(bit, state == ElementState::Pressed);
-                self.core.send(messages)?;
+                let core = self.core.as_mut().context("display not connected")?;
+                let messages = core.input.button(bit, state == ElementState::Pressed);
+                core.send(messages)?;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = (position.x, position.y);
@@ -288,15 +303,23 @@ impl App {
                 let steps = self.wheel.trunc() as i32;
                 self.wheel -= steps as f64;
                 if steps != 0 {
-                    self.core.send([Message::Scroll { dx: 0, dy: -steps }])?;
+                    self.core
+                        .as_ref()
+                        .context("display not connected")?
+                        .send([Message::Scroll { dx: 0, dy: -steps }])?;
                 }
             }
             WindowEvent::RedrawRequested => {
                 if let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer) {
-                    let cursor = if self.core.use_fallback_cursor() {
+                    let empty = crate::Cursor::default();
+                    let cursor = if self
+                        .core
+                        .as_ref()
+                        .is_some_and(|core| core.use_fallback_cursor())
+                    {
                         &self.fallback_cursor
                     } else {
-                        &self.core.cursor
+                        self.core.as_ref().map_or(&empty, |core| &core.cursor)
                     };
                     renderer.present(window, None, None, cursor)?;
                 }
@@ -308,8 +331,9 @@ impl App {
     }
 
     fn position_fallback(&mut self) -> Option<Message> {
-        let frame = self.core.current.as_ref()?;
-        let surface = self.core.surfaces.get(&frame.surface)?;
+        let core = self.core.as_ref()?;
+        let frame = core.current.as_ref()?;
+        let surface = core.surfaces.get(&frame.surface)?;
         let size = self.window.as_ref()?.inner_size();
         let message = crate::input::pointer(
             self.pointer,
@@ -327,12 +351,18 @@ impl App {
         if self.pointer_inside
             && let Some(message) = self.position_fallback()
         {
-            if self.core.use_fallback_cursor()
+            if self
+                .core
+                .as_ref()
+                .is_some_and(|core| core.use_fallback_cursor())
                 && let Some(window) = &self.window
             {
                 window.request_redraw();
             }
-            self.core.send([message])?;
+            self.core
+                .as_ref()
+                .context("display not connected")?
+                .send([message])?;
         }
         Ok(())
     }
@@ -368,7 +398,7 @@ impl ApplicationHandler<Event> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         let result = match event {
             Event::Packet(generation, packet)
-                if generation == self.generation && self.connected =>
+                if generation == self.generation && self.core.is_some() =>
             {
                 self.display(packet)
             }
@@ -376,14 +406,14 @@ impl ApplicationHandler<Event> for App {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.reset_display();
                 }
-                self.core = Core::new(client, &self.options.release_chord)?;
+                self.core = Some(Core::new(client, &self.options.release_chord)?);
+                let core = self.core.as_mut().context("display not connected")?;
                 self.generation = generation;
-                self.connected = true;
-                self.core.send(self.pending_releases.iter().cloned())?;
+                core.send(self.pending_releases.iter().cloned())?;
                 self.pending_releases.clear();
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
-                    self.core.resize(Instant::now(), size.width, size.height);
+                    core.resize(Instant::now(), size.width, size.height);
                     if let Some(clipboard) = &self.clipboard {
                         clipboard.focus(window.has_focus());
                     }
@@ -393,13 +423,18 @@ impl ApplicationHandler<Event> for App {
                 Ok(())
             })(),
             Event::Disconnected(generation, error) if generation == self.generation => {
-                if self.connected {
+                if self.core.is_some() {
                     eprintln!("display disconnected; waiting to reconnect: {error}");
                 }
                 self.disconnected();
                 Ok(())
             }
             Event::Gone => {
+                event_loop.exit();
+                Ok(())
+            }
+            Event::Failed(error) => {
+                self.error = Some(error.into());
                 event_loop.exit();
                 Ok(())
             }
@@ -418,8 +453,8 @@ impl ApplicationHandler<Event> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.connected {
-            let result = self.core.tick(Instant::now()).map_err(Into::into);
+        if let Some(core) = &mut self.core {
+            let result = core.tick(Instant::now()).map_err(Into::into);
             self.fail(event_loop, result);
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -430,7 +465,6 @@ impl ApplicationHandler<Event> for App {
 
 pub fn run(options: Options) -> Result<()> {
     let event_loop = EventLoop::<Event>::with_user_event().build()?;
-    let core = Core::connect(&options.display, options.shm, &options.release_chord)?;
     let clipboard = match (&options.lab_socket, &options.machine) {
         (Some(socket), Some(machine)) => {
             Some(Worker::start(LabClipboard::new(socket, machine.clone()))?)
@@ -438,13 +472,12 @@ pub fn run(options: Options) -> Result<()> {
         _ => None,
     };
     let proxy = event_loop.create_proxy();
-    let _connection =
-        Connection::start(options.display.clone(), core.client.clone(), move |event| {
-            proxy.send_event(event).is_ok()
-        })?;
+    let _connection = Connection::start(options.display.clone(), options.shm, move |event| {
+        proxy.send_event(event).is_ok()
+    })?;
     let mut app = App {
         options,
-        core,
+        core: None,
         renderer: None,
         keyboard: None,
         window: None,
@@ -458,7 +491,6 @@ pub fn run(options: Options) -> Result<()> {
         },
         wheel: 0.,
         last_title: String::new(),
-        connected: true,
         generation: 0,
         pending_releases: Vec::new(),
     };
