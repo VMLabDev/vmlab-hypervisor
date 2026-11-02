@@ -27,7 +27,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -119,10 +119,8 @@ struct Shared {
     tx_out: Vec<u8>,
 }
 
-/// Commands from the device (vCPU path) to the worker thread.
+/// Lifecycle commands sent to the worker thread.
 enum Cmd {
-    /// The driver kicked the queue with this index.
-    Kick(u16),
     Barrier(Sender<()>),
     Shutdown,
 }
@@ -148,8 +146,9 @@ pub struct Net {
     config: NetConfig,
     negotiated: Arc<AtomicU64>,
     shared: Arc<Mutex<Shared>>,
-    kicks: Sender<Cmd>,
+    commands: Sender<Cmd>,
     wake: UnixStream,
+    wake_pending: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     /// Queue states restored before `activate`, applied when it arrives.
     pending_queues: Option<Vec<Option<QueueState>>>,
@@ -166,7 +165,8 @@ impl Net {
         let (wake_dev, wake_worker) = UnixStream::pair()?;
         wake_dev.set_nonblocking(true)?;
         wake_worker.set_nonblocking(true)?;
-        let (kicks, rx) = mpsc::channel();
+        let wake_pending = Arc::new(AtomicBool::new(false));
+        let (commands, rx) = mpsc::channel();
         let shared = Arc::new(Mutex::new(Shared {
             snapshot_paused: false,
             config_pending: false,
@@ -183,27 +183,35 @@ impl Net {
         let worker = thread::Builder::new().name("virtio-net".into()).spawn({
             let shared = shared.clone();
             let negotiated = negotiated.clone();
-            move || run(switch, retry, shared, negotiated, rx, wake_worker)
+            let pending = wake_pending.clone();
+            move || run(switch, retry, shared, negotiated, rx, wake_worker, pending)
         })?;
         Ok(Net {
             config,
             negotiated,
             shared,
-            kicks,
+            commands,
             wake: wake_dev,
+            wake_pending,
             worker: Some(worker),
             pending_queues: None,
         })
     }
 
     fn wake_worker(&self) {
-        let _ = (&self.wake).write_all(b"k");
+        notify_worker(&self.wake, &self.wake_pending);
+    }
+}
+
+fn notify_worker(mut wake: &UnixStream, pending: &AtomicBool) {
+    if !pending.swap(true, Ordering::AcqRel) {
+        let _ = wake.write_all(b"k");
     }
 }
 
 impl Drop for Net {
     fn drop(&mut self) {
-        let _ = self.kicks.send(Cmd::Shutdown);
+        let _ = self.commands.send(Cmd::Shutdown);
         self.wake_worker();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -226,6 +234,7 @@ fn run(
     negotiated: Arc<AtomicU64>,
     cmds: Receiver<Cmd>,
     wake: UnixStream,
+    wake_pending: Arc<AtomicBool>,
 ) {
     let mut stream: Option<UnixStream> = None;
     let mut next_try = Instant::now();
@@ -277,12 +286,12 @@ fn run(
 
         if polls[0].revents & libc::POLLIN != 0 {
             drain_wakeup(&wake);
+            // Rearm before consuming commands. Earlier senders are covered by
+            // this drain; later senders must publish another readable byte.
+            wake_pending.swap(false, Ordering::AcqRel);
             let hdr = hdr_len(negotiated.load(Ordering::Acquire));
             while let Ok(cmd) = cmds.try_recv() {
                 match cmd {
-                    Cmd::Kick(RXQ) => place_rx_frames(&shared, hdr),
-                    Cmd::Kick(TXQ) => process_tx(&shared, &mut stream, hdr),
-                    Cmd::Kick(_) => {}
                     Cmd::Barrier(done) => {
                         let _ = done.send(());
                     }
@@ -756,7 +765,7 @@ impl VirtioDevice for Net {
     }
 
     fn queue_notify(&mut self, index: u16) {
-        if self.kicks.send(Cmd::Kick(index)).is_ok() {
+        if index <= TXQ {
             self.wake_worker();
         }
     }
@@ -784,7 +793,7 @@ impl Snapshot for Net {
     fn quiesce(&mut self) {
         lock(&self.shared).snapshot_paused = true;
         let (done, wait) = mpsc::channel();
-        if self.kicks.send(Cmd::Barrier(done)).is_ok() {
+        if self.commands.send(Cmd::Barrier(done)).is_ok() {
             self.wake_worker();
             let _ = wait.recv();
         }
@@ -1027,6 +1036,25 @@ mod tests {
     use std::time::Instant;
     use vm_memory::{Bytes, GuestAddress};
 
+    #[test]
+    fn coalesces_worker_wakes_and_rearms_after_drain() {
+        let (sender, mut receiver) = UnixStream::pair().unwrap();
+        sender.set_nonblocking(true).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let pending = AtomicBool::new(false);
+        for _ in 0..200 {
+            notify_worker(&sender, &pending);
+        }
+        let mut bytes = [0; 256];
+        assert_eq!(receiver.read(&mut bytes).unwrap(), 1);
+        assert_eq!(
+            receiver.read(&mut bytes).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        pending.store(false, Ordering::Release);
+        notify_worker(&sender, &pending);
+        assert_eq!(receiver.read(&mut bytes).unwrap(), 1);
+    }
     /// Guest memory: 288 MiB, room for the queues' rings plus buffers.
     const MEM_SIZE: u64 = 288 * 1024 * 1024;
     /// Where the tests put data buffers, above the rings.
