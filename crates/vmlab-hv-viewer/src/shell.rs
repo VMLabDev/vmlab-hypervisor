@@ -34,6 +34,7 @@ struct App {
     error: Option<anyhow::Error>,
     pointer: (f64, f64),
     pointer_locked: bool,
+    fallback_cursor: crate::Cursor,
     wheel: f64,
     last_title: String,
 }
@@ -78,7 +79,6 @@ impl App {
 
     fn ungrab(&mut self) -> Result<()> {
         let messages = self.core.input.release();
-        let sent = self.core.send(messages);
         self.keyboard.take();
         if let Some(window) = &self.window {
             window.set_cursor_grab(CursorGrabMode::None)?;
@@ -86,7 +86,7 @@ impl App {
         }
         self.pointer_locked = false;
         self.title();
-        sent?;
+        self.core.send(messages)?;
         Ok(())
     }
 
@@ -99,25 +99,35 @@ impl App {
             window.set_cursor_grab(CursorGrabMode::Locked)?;
             true
         };
-        window.set_cursor_visible(false);
         self.keyboard = Some(keyboard);
         self.core.input.grab();
+        self.update_cursor();
         self.title();
         Ok(())
     }
 
+    fn update_cursor(&self) {
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(self.core.host_cursor_visible() && !self.pointer_locked);
+        }
+    }
+
     fn display(&mut self, packet: Packet) -> Result<()> {
         let frame = self.core.receive(packet)?;
+        self.update_cursor();
         if let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer) {
-            window.set_cursor_visible(!self.core.input.grabbed);
             if let Some(frame) = frame {
                 let surface = self
                     .core
                     .surfaces
                     .get(&frame.surface)
                     .context("missing surface")?;
-                let result =
-                    renderer.present(window, Some(surface), Some(&frame), &self.core.cursor);
+                let cursor = if self.pointer_locked && !self.core.cursor.has_shape() {
+                    &self.fallback_cursor
+                } else {
+                    &self.core.cursor
+                };
+                let result = renderer.present(window, Some(surface), Some(&frame), cursor);
                 // present waits for GPU completion before returning. Failed imports never submit.
                 self.core.release(&frame)?;
                 match result {
@@ -156,7 +166,9 @@ impl App {
                     clipboard.focus(focused);
                 }
                 if !focused {
+                    let messages = self.core.input.focus_lost();
                     self.ungrab()?;
+                    self.core.send(messages)?;
                 }
             }
             WindowEvent::Occluded(occluded) => {
@@ -173,10 +185,10 @@ impl App {
                         .core
                         .input
                         .key(code, event.state == ElementState::Pressed);
-                    self.core.send(messages)?;
                     if !self.core.input.grabbed {
                         self.ungrab()?;
                     }
+                    self.core.send(messages)?;
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -218,7 +230,12 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 if let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer) {
-                    renderer.present(window, None, None, &self.core.cursor)?;
+                    let cursor = if self.pointer_locked && !self.core.cursor.has_shape() {
+                        &self.fallback_cursor
+                    } else {
+                        &self.core.cursor
+                    };
+                    renderer.present(window, None, None, cursor)?;
                 }
             }
             _ => {}
@@ -227,18 +244,28 @@ impl App {
         Ok(())
     }
 
-    fn send_pointer(&self) -> Result<()> {
+    fn send_pointer(&mut self) -> Result<()> {
         if self.core.input.grabbed
             && let Some(frame) = &self.core.current
             && let Some(surface) = self.core.surfaces.get(&frame.surface)
             && let Some(window) = &self.window
+            && let Some(message) = {
+                let size = window.inner_size();
+                crate::input::pointer(
+                    self.pointer,
+                    (size.width, size.height),
+                    (surface.width, surface.height),
+                )
+            }
         {
-            let size = window.inner_size();
-            self.core.send(crate::input::pointer(
-                self.pointer,
-                (size.width, size.height),
-                (surface.width, surface.height),
-            ))?;
+            if let Message::PointerAbs { x, y, .. } = &message {
+                self.fallback_cursor.x = *x as i32;
+                self.fallback_cursor.y = *y as i32;
+            }
+            if self.pointer_locked && !self.core.cursor.has_shape() {
+                window.request_redraw();
+            }
+            self.core.send([message])?;
         }
         Ok(())
     }
@@ -370,6 +397,7 @@ pub fn run(options: Options) -> Result<()> {
         error: None,
         pointer: (0., 0.),
         pointer_locked: false,
+        fallback_cursor: crate::Cursor::fallback(),
         wheel: 0.,
         last_title: String::new(),
     };

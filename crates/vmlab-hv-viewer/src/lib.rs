@@ -125,6 +125,50 @@ pub struct Cursor {
     pub generation: u64,
 }
 
+impl Cursor {
+    pub fn has_shape(&self) -> bool {
+        self.width != 0 && self.height != 0
+    }
+
+    /// A local arrow for locked pointers when the guest supplies no shape.
+    pub fn fallback() -> Self {
+        let rows = [
+            "X...........",
+            "XX..........",
+            "XOX.........",
+            "XOOX........",
+            "XOOOX.......",
+            "XOOOOX......",
+            "XOOOOOX.....",
+            "XOOOOOOX....",
+            "XOOOOOOOX...",
+            "XOOOOXXXXX..",
+            "XOOXOX......",
+            "XOX.OX......",
+            "XX..XOX.....",
+            "X...XOX.....",
+            ".....XX.....",
+            "............",
+        ];
+        Self {
+            width: 12,
+            height: 16,
+            visible: true,
+            generation: u64::MAX,
+            argb: rows
+                .iter()
+                .flat_map(|row| row.bytes())
+                .flat_map(|pixel| match pixel {
+                    b'X' => [0, 0, 0, 255],
+                    b'O' => [255; 4],
+                    _ => [0; 4],
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+}
+
 pub struct Core {
     pub client: Arc<Client>,
     pub surfaces: HashMap<u64, Surface>,
@@ -136,6 +180,10 @@ pub struct Core {
 }
 
 impl Core {
+    pub fn host_cursor_visible(&self) -> bool {
+        !self.input.grabbed || !self.cursor.has_shape()
+    }
+
     pub fn connect(path: &Path, shm: bool, chord: &str) -> io::Result<Self> {
         let mut caps = Capabilities::ALL.0;
         if shm {

@@ -26,6 +26,13 @@ owns physical host keyboard LEDs. Losing focus releases held guest keys and
 buttons. X11 grabs use winit's Xlib connection. Wayland requires pointer
 constraints and keyboard-shortcuts-inhibit support from the compositor.
 
+The viewer keeps the host cursor visible until the guest supplies a nonempty
+cursor shape. If confinement is unavailable and the pointer must be locked,
+it draws a local arrow instead. Once a guest shape exists, the guest controls
+cursor visibility, including explicit hide requests. Chord detection tracks
+physical keys before and during a grab. The completing chord key stays local;
+only keys forwarded to the guest receive matching releases.
+
 Use `--release-chord ctrl_r+alt_r` to choose another chord. Chord components are
 QEMU key names, joined by `+`. Both modifiers in the default chord are left-side
 keys. Keyboard mapping follows physical evdev positions, including the main
@@ -77,8 +84,20 @@ S1 uses the Ubuntu template discovered by the existing template convention, or
 `VMLAB_HV_UBUNTU_26_04`. `VMLAB_HV_BINARY` selects an already-built hypervisor.
 It checks input through the agent, including ISO, F13, and volume keys, and
 applies an 800x600 DRM mode. VMs use the
-host-wide four-VM permit and a systemd scope with 24 GiB RAM and no swap.
+host-wide VM permit and a systemd scope with 24 GiB RAM and no swap.
+The permit defaults to four VMs; `VMLAB_HV_TEST_VM_LIMIT` overrides it.
 Disposable overlays and sockets are removed at test exit.
+
+The Windows S1 test discovers the Windows 11 standard template, or uses
+`VMLAB_HV_VIEWER_WINDOWS` as its disk path. `VMLAB_HV_FIRMWARE_DIR` selects the
+directory containing secure OVMF code and Microsoft-enrolled variable defaults.
+It checks tablet enumeration and Windows' parsing of the mouse usage and input
+report size through SetupAPI and HidP_GetCaps. It sends pointer, button, and key
+input and checks that the first Ctrl+Alt press releases the viewer. It does not
+observe desktop movement or buttons in Windows' interactive session; those
+remain manual checks. No logged-in user, scheduled task, or restart is required.
+The investigation and physical-desktop retest steps are in
+`../../docs/viewer-windows.md`.
 
 For a real dma-buf import test, select a render node and its matching Vulkan ICD:
 

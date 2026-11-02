@@ -178,6 +178,7 @@ pub struct Input {
     pub buttons: u32,
     chord: BTreeSet<&'static str>,
     pressed: BTreeSet<&'static str>,
+    forwarded: BTreeSet<&'static str>,
 }
 
 impl Input {
@@ -198,6 +199,7 @@ impl Input {
             buttons: 0,
             chord: keys,
             pressed: BTreeSet::new(),
+            forwarded: BTreeSet::new(),
         })
     }
 
@@ -207,7 +209,7 @@ impl Input {
 
     pub fn release(&mut self) -> Vec<Message> {
         self.grabbed = false;
-        let mut messages: Vec<_> = std::mem::take(&mut self.pressed)
+        let mut messages: Vec<_> = std::mem::take(&mut self.forwarded)
             .into_iter()
             .map(|key| Message::Key {
                 qcode: key.into(),
@@ -221,21 +223,32 @@ impl Input {
         messages
     }
 
+    pub fn focus_lost(&mut self) -> Vec<Message> {
+        self.pressed.clear();
+        self.release()
+    }
+
     pub fn key(&mut self, evdev: u32, down: bool) -> Vec<Message> {
         let Some(key) = qcode(evdev) else {
             return Vec::new();
         };
+        if down {
+            self.pressed.insert(key);
+            if self.grabbed && self.chord.is_subset(&self.pressed) {
+                return self.release();
+            }
+        } else {
+            self.pressed.remove(key);
+        }
         if !self.grabbed {
             return Vec::new();
         }
-        if down {
-            if !self.pressed.insert(key) {
-                return Vec::new();
-            }
-            if self.chord.is_subset(&self.pressed) {
-                return self.release();
-            }
-        } else if !self.pressed.remove(key) {
+        let changed = if down {
+            self.forwarded.insert(key)
+        } else {
+            self.forwarded.remove(key)
+        };
+        if !changed {
             return Vec::new();
         }
         vec![Message::Key {

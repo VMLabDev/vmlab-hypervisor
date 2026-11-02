@@ -12,9 +12,11 @@ use vmlab_hv_tests::process::ManagedChild;
 use x11rb::{
     connection::Connection,
     protocol::{
+        xfixes::ConnectionExt as _,
         xproto::{
-            BUTTON_PRESS_EVENT, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask,
-            ImageFormat, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+            AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClientMessageEvent,
+            ConfigureWindowAux, ConnectionExt, EventMask, ImageFormat, InputFocus, KEY_PRESS_EVENT,
+            KEY_RELEASE_EVENT,
         },
         xtest::ConnectionExt as _,
     },
@@ -99,6 +101,11 @@ fn exercise(mode: &str) {
     );
     let display = format!(":{}", number.trim());
     let (connection, screen) = x11rb::connect(Some(&display)).unwrap();
+    connection
+        .xfixes_query_version(5, 0)
+        .unwrap()
+        .reply()
+        .unwrap();
     let root = connection.setup().roots[screen].root;
     let socket = directory.path().join("display.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -175,11 +182,11 @@ fn exercise(mode: &str) {
     send(
         &stream,
         &Message::CursorShape {
-            width: 1,
-            height: 1,
+            width: 0,
+            height: 0,
             hot_x: 0,
             hot_y: 0,
-            argb: vec![255; 4],
+            argb: vec![],
         },
         &[],
     )
@@ -189,7 +196,7 @@ fn exercise(mode: &str) {
         &Message::CursorState {
             x: 16,
             y: 16,
-            visible: true,
+            visible: false,
         },
         &[],
     )
@@ -265,11 +272,6 @@ fn exercise(mode: &str) {
     };
     wait(|| pixel(500, 300)[..3] == [0, 0, 255]);
     assert_eq!(&pixel(10, 10)[..3], &[0, 0, 0], "letterbox is black");
-    assert_eq!(
-        &pixel(260, 390)[..3],
-        &[255, 255, 255],
-        "protocol cursor is composited"
-    );
     connection
         .set_input_focus(InputFocus::PARENT, window, x11rb::CURRENT_TIME)
         .unwrap()
@@ -290,6 +292,104 @@ fn exercise(mode: &str) {
         receiver
             .try_iter()
             .any(|message| matches!(message, Message::Buttons { mask: 1 }))
+    });
+    assert!(
+        connection
+            .xfixes_get_cursor_image()
+            .unwrap()
+            .reply()
+            .unwrap()
+            .cursor_image
+            .iter()
+            .any(|p| p >> 24 != 0),
+        "grab must retain the host cursor when the guest has no shape"
+    );
+    send(
+        &writer,
+        &Message::CursorShape {
+            width: 2,
+            height: 2,
+            hot_x: 1,
+            hot_y: 1,
+            argb: vec![255; 16],
+        },
+        &[],
+    )
+    .unwrap();
+    send(
+        &writer,
+        &Message::CursorState {
+            x: 16,
+            y: 16,
+            visible: true,
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| pixel(260, 390)[..3] == [255, 255, 255]);
+    assert_eq!(
+        &pixel(236, 364)[..3],
+        &[0, 0, 255],
+        "hotspot offsets the cursor quad"
+    );
+    wait(|| {
+        connection
+            .xfixes_get_cursor_image()
+            .unwrap()
+            .reply()
+            .unwrap()
+            .cursor_image
+            .iter()
+            .all(|p| p >> 24 == 0)
+    });
+    send(
+        &writer,
+        &Message::CursorState {
+            x: 24,
+            y: 20,
+            visible: true,
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| pixel(380, 440)[..3] == [255, 255, 255]);
+    assert_eq!(
+        &pixel(260, 390)[..3],
+        &[0, 0, 255],
+        "move-only update removes old cursor"
+    );
+    send(
+        &writer,
+        &Message::CursorState {
+            x: 24,
+            y: 20,
+            visible: false,
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| pixel(380, 440)[..3] == [0, 0, 255]);
+    send(
+        &writer,
+        &Message::CursorShape {
+            width: 0,
+            height: 0,
+            hot_x: 0,
+            hot_y: 0,
+            argb: vec![],
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| {
+        connection
+            .xfixes_get_cursor_image()
+            .unwrap()
+            .reply()
+            .unwrap()
+            .cursor_image
+            .iter()
+            .any(|p| p >> 24 != 0)
     });
     for (key, down) in [(38, true), (38, false), (37, true), (64, true)] {
         connection
@@ -325,6 +425,52 @@ fn exercise(mode: &str) {
         qcode: "a".into(),
         down: false
     }));
+    assert!(
+        !keys
+            .iter()
+            .any(|message| matches!(message, Message::Key {qcode, ..} if qcode == "alt")),
+        "completing chord key is never forwarded"
+    );
+    let ungrabbed = || {
+        let property = connection
+            .get_property(false, window, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 256)
+            .unwrap()
+            .reply()
+            .unwrap();
+        String::from_utf8_lossy(&property.value).contains("click to grab")
+    };
+    wait(ungrabbed);
+    for (kind, detail) in [
+        (KEY_RELEASE_EVENT, 37),
+        (KEY_RELEASE_EVENT, 64),
+        (BUTTON_RELEASE_EVENT, 1),
+        (KEY_PRESS_EVENT, 64),
+        (BUTTON_PRESS_EVENT, 1),
+        (BUTTON_RELEASE_EVENT, 1),
+    ] {
+        connection
+            .xtest_fake_input(kind, detail, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    wait(|| !ungrabbed());
+    send(&writer, &Message::LedState { mask: 7 }, &[]).unwrap();
+    connection
+        .xtest_fake_input(KEY_PRESS_EVENT, 37, x11rb::CURRENT_TIME, root, 0, 0, 0)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(ungrabbed);
+    for key in [37, 64] {
+        connection
+            .xtest_fake_input(KEY_RELEASE_EVENT, key, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
     connection
         .configure_window(window, &ConfigureWindowAux::new().width(800).height(600))
         .unwrap()

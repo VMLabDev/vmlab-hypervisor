@@ -424,6 +424,144 @@ fn configurable_chord_focus_loss_buttons_repeat_and_pointer_edges() {
 }
 
 #[test]
+fn release_chord_tracks_keys_held_before_grab_in_either_order() {
+    for (first, second) in [(29, 56), (56, 29)] {
+        let (mut core, server) = pair(true);
+        assert!(core.input.key(first, true).is_empty());
+        core.input.grab();
+        for mask in [7, 0, 2] {
+            send(&server, &Message::LedState { mask }, &[]).unwrap();
+            process(&mut core);
+        }
+        let messages = core.input.key(second, true);
+        assert!(!core.input.grabbed, "first chord press must release");
+        assert!(messages.is_empty(), "neither chord key reached the guest");
+        core.input.key(second, false);
+        core.input.grab();
+        core.input.key(second, true);
+        assert!(!core.input.grabbed, "a held modifier survives re-grab");
+    }
+}
+
+#[test]
+fn release_chord_sends_breaks_only_for_forwarded_keys() {
+    for (first, second, name) in [(29, 56, "ctrl"), (56, 29, "alt")] {
+        let (mut core, server) = pair(true);
+        core.input.grab();
+        let messages = core.input.key(first, true);
+        core.send(messages).unwrap();
+        assert_eq!(
+            receive(&server).unwrap().message,
+            Message::Key {
+                qcode: name.into(),
+                down: true,
+            }
+        );
+        let messages = core.input.key(second, true);
+        assert!(!core.input.grabbed);
+        assert_eq!(
+            messages,
+            vec![Message::Key {
+                qcode: name.into(),
+                down: false,
+            }]
+        );
+        core.send(messages).unwrap();
+        assert_eq!(
+            receive(&server).unwrap().message,
+            Message::Key {
+                qcode: name.into(),
+                down: false,
+            }
+        );
+    }
+}
+
+#[test]
+fn focus_loss_discards_physical_state_and_releases_forwarded_input() {
+    let mut input = Input::new("ctrl+alt").unwrap();
+    input.grab();
+    input.key(29, true);
+    input.button(1, true);
+    assert_eq!(
+        input.focus_lost(),
+        vec![
+            Message::Key {
+                qcode: "ctrl".into(),
+                down: false
+            },
+            Message::Buttons { mask: 0 },
+        ]
+    );
+    input.grab();
+    assert_eq!(
+        input.key(56, true),
+        vec![Message::Key {
+            qcode: "alt".into(),
+            down: true
+        }]
+    );
+    assert!(input.grabbed);
+}
+
+#[test]
+fn cursor_fallback_shape_hotspot_move_only_and_visibility() {
+    let (mut core, server) = pair(true);
+    core.input.grab();
+    assert!(core.host_cursor_visible());
+    let shape = Message::CursorShape {
+        width: 2,
+        height: 2,
+        hot_x: 1,
+        hot_y: 1,
+        argb: vec![255; 16],
+    };
+    send(&server, &shape, &[]).unwrap();
+    process(&mut core);
+    let generation = core.cursor.generation;
+    assert!(!core.host_cursor_visible());
+    for (x, y, visible) in [(5, 6, true), (-1, 9, true), (7, 8, false)] {
+        send(&server, &Message::CursorState { x, y, visible }, &[]).unwrap();
+        process(&mut core);
+        assert_eq!(
+            (core.cursor.x, core.cursor.y, core.cursor.visible),
+            (x, y, visible)
+        );
+        assert_eq!(core.cursor.generation, generation);
+        assert_eq!((core.cursor.hot_x, core.cursor.hot_y), (1, 1));
+        assert_eq!(core.cursor.argb, vec![255; 16]);
+        assert!(
+            !core.host_cursor_visible(),
+            "explicit guest hide remains authoritative"
+        );
+    }
+    core.input.release();
+    assert!(core.host_cursor_visible());
+    core.input.grab();
+    send(
+        &server,
+        &Message::CursorShape {
+            width: 0,
+            height: 0,
+            hot_x: 0,
+            hot_y: 0,
+            argb: vec![],
+        },
+        &[],
+    )
+    .unwrap();
+    process(&mut core);
+    assert!(core.host_cursor_visible());
+    let fallback = vmlab_hv_viewer::Cursor::fallback();
+    assert!(fallback.has_shape() && fallback.visible);
+    assert_eq!(
+        fallback.argb.len(),
+        (fallback.width * fallback.height * 4) as usize
+    );
+    assert!(fallback.argb.as_chunks::<4>().0.iter().any(|p| p[3] != 0));
+}
+
+#[test]
 fn cursor_led_and_cli_wslg_negotiation() {
     let (mut core, server) = pair(true);
     for message in [
