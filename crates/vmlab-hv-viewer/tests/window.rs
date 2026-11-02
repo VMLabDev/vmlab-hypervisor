@@ -13,12 +13,24 @@ use x11rb::{
     connection::Connection,
     protocol::{
         xproto::{
-            BUTTON_PRESS_EVENT, ConfigureWindowAux, ConnectionExt, ImageFormat, InputFocus,
-            KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+            BUTTON_PRESS_EVENT, ClientMessageEvent, ConfigureWindowAux, ConnectionExt, EventMask,
+            ImageFormat, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
         },
         xtest::ConnectionExt as _,
     },
 };
+
+struct XServer(ManagedChild);
+impl Drop for XServer {
+    fn drop(&mut self) {
+        // SAFETY: this PID is the Xvfb child owned by this test. SIGTERM lets
+        // Xvfb remove its private display socket and lock before the guard reaps it.
+        unsafe {
+            libc::kill(self.0.id() as i32, libc::SIGTERM);
+        }
+        let _ = self.0.wait();
+    }
+}
 
 #[track_caller]
 fn wait(mut condition: impl FnMut() -> bool) {
@@ -38,31 +50,41 @@ fn executable_presents_letterbox_cursor_input_and_resize_on_private_display() {
         eprintln!("SKIP viewer window: Xvfb unavailable");
         return;
     }
-    // SAFETY: the loader is kept alive through this capability probe.
-    let vulkan = unsafe { ash::Entry::load() };
-    if vulkan.is_err() {
-        eprintln!("SKIP viewer window: Vulkan loader unavailable");
+    // SAFETY: this probe owns its instance and destroys it before unloading the loader.
+    let available = unsafe {
+        (|| -> anyhow::Result<bool> {
+            let entry = ash::Entry::load()?;
+            let instance = entry.create_instance(&ash::vk::InstanceCreateInfo::default(), None)?;
+            let devices = instance.enumerate_physical_devices();
+            instance.destroy_instance(None);
+            Ok(!devices?.is_empty())
+        })()
+    };
+    if !available.unwrap_or(false) {
+        eprintln!("SKIP viewer window: no Vulkan physical device");
         return;
     }
     let directory = tempfile::tempdir().unwrap();
-    let mut xvfb = ManagedChild::helper(
-        Command::new("Xvfb")
-            .args([
-                "-displayfd",
-                "1",
-                "-screen",
-                "0",
-                "1024x768x24",
-                "-nolisten",
-                "tcp",
-                "-ac",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null()),
-    )
-    .unwrap();
+    let mut xvfb = XServer(
+        ManagedChild::helper(
+            Command::new("Xvfb")
+                .args([
+                    "-displayfd",
+                    "1",
+                    "-screen",
+                    "0",
+                    "1024x768x24",
+                    "-nolisten",
+                    "tcp",
+                    "-ac",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap(),
+    );
     let mut number = String::new();
-    BufReader::new(xvfb.stdout.take().unwrap())
+    BufReader::new(xvfb.0.stdout.take().unwrap())
         .read_line(&mut number)
         .unwrap();
     assert!(
@@ -80,7 +102,6 @@ fn executable_presents_letterbox_cursor_input_and_resize_on_private_display() {
         Command::new(env!("CARGO_BIN_EXE_vmlab-hv-viewer"))
             .args(["--display"])
             .arg(&socket)
-            .arg("--shm")
             .env("DISPLAY", &display)
             .env_remove("WAYLAND_DISPLAY")
             .env("WINIT_UNIX_BACKEND", "x11")
@@ -184,6 +205,7 @@ fn executable_presents_letterbox_cursor_input_and_resize_on_private_display() {
         &[],
     )
     .unwrap();
+    let writer = stream.try_clone().unwrap();
     let (sender, receiver) = mpsc::channel();
     let reader = std::thread::spawn(move || {
         while let Ok(packet) = receive(&stream) {
@@ -313,6 +335,182 @@ fn executable_presents_letterbox_cursor_input_and_resize_on_private_display() {
             )
         })
     });
-    drop(viewer);
+    // An advertised but unimportable modifier must release the frame, request
+    // CPU pixels, and continue presenting on this same connection.
+    send(
+        &writer,
+        &Message::SurfaceConfigure {
+            surface_id: 2,
+            width: 64,
+            height: 32,
+            drm_fourcc: u32::from_le_bytes(*b"XR24"),
+            stride: 256,
+            modifier: u64::MAX,
+            kind: SurfaceKind::Dmabuf,
+            buffers: 1,
+        },
+        &[file.as_raw_fd()],
+    )
+    .unwrap();
+    send(
+        &writer,
+        &Message::FrameReady {
+            flags: FrameFlags::default(),
+            surface_id: 2,
+            buffer: 0,
+            seq: 2,
+            timestamp_ns: 0,
+            damage: vec![],
+        },
+        &[],
+    )
+    .unwrap();
+    let mut fallback = Vec::new();
+    wait(|| {
+        fallback.extend(receiver.try_iter());
+        fallback.contains(&Message::CpuCopy { surface_id: 2 })
+    });
+    assert!(fallback.contains(&Message::Release {
+        surface_id: 2,
+        buffer: 0,
+        seq: 2
+    }));
+    let green: Vec<_> = [0, 255, 0, 255]
+        .into_iter()
+        .cycle()
+        .take(64 * 32 * 4)
+        .collect();
+    file.write_all_at(&green, 0).unwrap();
+    send(
+        &writer,
+        &Message::SurfaceConfigure {
+            surface_id: 3,
+            width: 64,
+            height: 32,
+            drm_fourcc: u32::from_le_bytes(*b"XR24"),
+            stride: 256,
+            modifier: 0,
+            kind: SurfaceKind::Shm,
+            buffers: 1,
+        },
+        &[file.as_raw_fd()],
+    )
+    .unwrap();
+    send(
+        &writer,
+        &Message::FrameReady {
+            flags: FrameFlags::default(),
+            surface_id: 3,
+            buffer: 0,
+            seq: 3,
+            timestamp_ns: 0,
+            damage: vec![],
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| {
+        receiver
+            .try_iter()
+            .any(|m| matches!(m, Message::Release { seq: 3, .. }))
+    });
+    wait(|| pixel(500, 300)[..3] == [0, 255, 0]);
+    file.write_all_at(&[255, 0, 0, 255], 8 * 256 + 20 * 4)
+        .unwrap();
+    send(
+        &writer,
+        &Message::FrameReady {
+            flags: FrameFlags::default(),
+            surface_id: 3,
+            buffer: 0,
+            seq: 4,
+            timestamp_ns: 0,
+            damage: vec![Rect {
+                x: 20,
+                y: 8,
+                width: 1,
+                height: 1,
+            }],
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| {
+        receiver
+            .try_iter()
+            .any(|m| matches!(m, Message::Release { seq: 4, .. }))
+    });
+    wait(|| {
+        let sample = pixel(256, 206);
+        sample[0] > 230 && sample[1] < 25 && sample[2] == 0
+    });
+    assert_eq!(
+        &pixel(500, 300)[..3],
+        &[0, 255, 0],
+        "partial upload preserves the rest of the image"
+    );
+    connection.unmap_window(window).unwrap().check().unwrap();
+    connection.flush().unwrap();
+    let magenta: Vec<_> = [255, 0, 255, 255]
+        .into_iter()
+        .cycle()
+        .take(64 * 32 * 4)
+        .collect();
+    file.write_all_at(&magenta, 0).unwrap();
+    send(
+        &writer,
+        &Message::FrameReady {
+            flags: FrameFlags::default(),
+            surface_id: 3,
+            buffer: 0,
+            seq: 5,
+            timestamp_ns: 0,
+            damage: vec![Rect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 32,
+            }],
+        },
+        &[],
+    )
+    .unwrap();
+    wait(|| {
+        receiver
+            .try_iter()
+            .any(|m| matches!(m, Message::Release { seq: 5, .. }))
+    });
+    connection.map_window(window).unwrap().check().unwrap();
+    connection.flush().unwrap();
+    wait(|| pixel(500, 300)[..3] == [255, 0, 255]);
+    let protocols = connection
+        .intern_atom(false, b"WM_PROTOCOLS")
+        .unwrap()
+        .reply()
+        .unwrap()
+        .atom;
+    let delete = connection
+        .intern_atom(false, b"WM_DELETE_WINDOW")
+        .unwrap()
+        .reply()
+        .unwrap()
+        .atom;
+    connection
+        .send_event(
+            false,
+            window,
+            EventMask::NO_EVENT,
+            ClientMessageEvent::new(32, window, protocols, [delete, 0, 0, 0, 0]),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| viewer.try_wait().unwrap().is_some());
+    assert!(
+        viewer.wait().unwrap().success(),
+        "viewer close failed: {}",
+        std::fs::read_to_string(stderr).unwrap()
+    );
     reader.join().unwrap();
 }

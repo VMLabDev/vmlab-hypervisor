@@ -219,6 +219,12 @@ fn viewer_input_and_resize_reach_guest_via_s1() {
             (48, false),
             (58, true),
             (58, false),
+            (86, true),
+            (86, false),
+            (183, true),
+            (183, false),
+            (115, true),
+            (115, false),
         ] {
             let messages = core.input.key(code, down);
             core.send(messages).unwrap();
@@ -245,7 +251,7 @@ fn viewer_input_and_resize_reach_guest_via_s1() {
     });
     let check = r#"import json,time
 from pathlib import Path
-expected=[(1,30,1),(1,30,0),(1,48,1),(1,48,0),(3,0,16383),(3,1,16383),(1,272,1),(1,272,0),(1,274,1),(1,274,0),(2,8,-1)]
+expected=[(1,30,1),(1,30,0),(1,48,1),(1,48,0),(1,86,1),(1,86,0),(1,183,1),(1,183,0),(1,115,1),(1,115,0),(3,0,16383),(3,1,16383),(1,272,1),(1,272,0),(1,274,1),(1,274,0),(2,8,-1)]
 for _ in range(100):
  events=[tuple(json.loads(line)[1:]) for line in Path('/run/p3-events.jsonl').read_text().splitlines()]
  if all(event in events for event in expected):

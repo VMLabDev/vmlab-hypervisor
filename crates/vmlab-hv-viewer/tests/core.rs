@@ -17,6 +17,7 @@ use vmlab_hv_viewer::{
     render::pack_damage,
     shm_only,
 };
+use winit::platform::scancode::PhysicalKeyExtScancode;
 
 fn pair(shm: bool) -> (Core, UnixStream) {
     let (client, server) = UnixStream::pair().unwrap();
@@ -31,6 +32,7 @@ fn pair(shm: bool) -> (Core, UnixStream) {
             panic!("not Hello")
         };
         assert_eq!(capabilities.has(Capabilities::DMABUF_OK), !shm);
+        assert!(capabilities.has(Capabilities::STABLE_BUFFERS));
         send(
             &handshake,
             &Message::Hello {
@@ -198,6 +200,39 @@ fn dmabuf_import_identity_is_surface_and_slot_not_sequence() {
 }
 
 #[test]
+fn stable_buffer_formats_and_configure_replacement_follow_extension_contract() {
+    let (mut core, server) = pair(false);
+    for (id, fourcc) in [*b"XR24", *b"AR24", *b"XB24", *b"AB24"]
+        .into_iter()
+        .enumerate()
+    {
+        let message = Message::SurfaceConfigure {
+            surface_id: id as u64,
+            width: 4,
+            height: 3,
+            drm_fourcc: u32::from_le_bytes(fourcc),
+            stride: 20,
+            modifier: 0,
+            kind: SurfaceKind::Dmabuf,
+            buffers: 1,
+        };
+        let file = buffer(7);
+        send(&server, &message, &[file.as_raw_fd()]).unwrap();
+        process(&mut core);
+        assert_eq!(core.surfaces.len(), 1);
+        assert_eq!(
+            core.surfaces[&(id as u64)].fourcc,
+            u32::from_le_bytes(fourcc)
+        );
+    }
+    configure(&server, 3, &[buffer(7)], SurfaceKind::Dmabuf);
+    assert!(
+        core.receive(core.client.receive().unwrap()).is_err(),
+        "configure cannot silently reuse a cached import id"
+    );
+}
+
+#[test]
 fn malformed_surfaces_frames_and_damage_are_bounded() {
     let (mut core, server) = pair(true);
     let file = buffer(7);
@@ -249,6 +284,10 @@ fn keyboard_pointer_resize_and_grab_cross_the_fake_socket() {
     let (mut core, server) = pair(true);
     core.input.grab();
     for &(code, name) in KEYS {
+        assert_eq!(
+            winit::keyboard::PhysicalKey::from_scancode(code).to_scancode(),
+            Some(code)
+        );
         let down = core.input.key(code, true);
         core.send(down).unwrap();
         assert_eq!(

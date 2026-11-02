@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use vmlab_hv_display::{Client, Message, Packet, SurfaceKind};
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     platform::scancode::PhysicalKeyExtScancode,
     window::{CursorGrabMode, Window, WindowId},
@@ -33,6 +33,7 @@ struct App {
     clipboard: Option<Worker>,
     error: Option<anyhow::Error>,
     pointer: (f64, f64),
+    pointer_locked: bool,
     wheel: f64,
     last_title: String,
 }
@@ -77,21 +78,28 @@ impl App {
 
     fn ungrab(&mut self) -> Result<()> {
         let messages = self.core.input.release();
-        self.core.send(messages)?;
+        let sent = self.core.send(messages);
         self.keyboard.take();
         if let Some(window) = &self.window {
             window.set_cursor_grab(CursorGrabMode::None)?;
+            window.set_cursor_visible(true);
         }
+        self.pointer_locked = false;
         self.title();
+        sent?;
         Ok(())
     }
 
     fn grab(&mut self) -> Result<()> {
         let window = self.window.as_ref().context("window not ready")?;
         let keyboard = KeyboardGrab::new(window)?;
-        window
-            .set_cursor_grab(CursorGrabMode::Confined)
-            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked))?;
+        self.pointer_locked = if window.set_cursor_grab(CursorGrabMode::Confined).is_ok() {
+            false
+        } else {
+            window.set_cursor_grab(CursorGrabMode::Locked)?;
+            true
+        };
+        window.set_cursor_visible(false);
         self.keyboard = Some(keyboard);
         self.core.input.grab();
         self.title();
@@ -151,6 +159,14 @@ impl App {
                     self.ungrab()?;
                 }
             }
+            WindowEvent::Occluded(occluded) => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.occluded(occluded);
+                }
+                if !occluded && let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(code) = event.physical_key.to_scancode() {
                     let messages = self
@@ -179,13 +195,15 @@ impl App {
                     MouseButton::Forward => 16,
                     _ => 0,
                 };
+                self.send_pointer()?;
                 let messages = self.core.input.button(bit, state == ElementState::Pressed);
                 self.core.send(messages)?;
-                self.send_pointer()?;
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.pointer = (position.x, position.y);
-                self.send_pointer()?;
+                if !self.pointer_locked {
+                    self.pointer = (position.x, position.y);
+                    self.send_pointer()?;
+                }
             }
             WindowEvent::MouseWheel { delta, .. } if self.core.input.grabbed => {
                 self.wheel += match delta {
@@ -227,6 +245,21 @@ impl App {
 }
 
 impl ApplicationHandler<Event> for App {
+    fn device_event(&mut self, event_loop: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
+        if self.pointer_locked
+            && self.core.input.grabbed
+            && let DeviceEvent::MouseMotion { delta } = event
+            && let Some(window) = &self.window
+        {
+            let size = window.inner_size();
+            self.pointer.0 =
+                (self.pointer.0 + delta.0).clamp(0., size.width.saturating_sub(1) as f64);
+            self.pointer.1 =
+                (self.pointer.1 + delta.1).clamp(0., size.height.saturating_sub(1) as f64);
+            let result = self.send_pointer();
+            self.fail(event_loop, result);
+        }
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -308,7 +341,15 @@ pub fn run(options: Options) -> Result<()> {
         .name("viewer-display".into())
         .spawn(move || {
             loop {
-                let packet = source.receive();
+                let packet = source.receive().and_then(|packet| {
+                    if matches!(packet.message, Message::FrameReady { .. }) {
+                        for fd in &packet.fds {
+                            use std::os::fd::AsRawFd;
+                            crate::wait_fence(fd.as_raw_fd())?;
+                        }
+                    }
+                    Ok(packet)
+                });
                 let failed = packet.is_err();
                 if proxy.send_event(Event::Display(packet)).is_err() || failed {
                     break;
@@ -328,6 +369,7 @@ pub fn run(options: Options) -> Result<()> {
         clipboard,
         error: None,
         pointer: (0., 0.),
+        pointer_locked: false,
         wheel: 0.,
         last_title: String::new(),
     };

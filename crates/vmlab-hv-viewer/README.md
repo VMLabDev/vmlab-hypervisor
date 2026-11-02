@@ -30,8 +30,8 @@ Use `--release-chord ctrl_r+alt_r` to choose another chord. Chord components are
 QEMU key names, joined by `+`. Both modifiers in the default chord are left-side
 keys. Keyboard mapping follows physical evdev positions, including the main
 keyboard, keypad, international keys, F1-F24, and media/navigation keys that the
-QEMU vocabulary represents. Some international and application keys share a
-QEMU name. Host shortcuts reserved by the compositor may remain unavailable.
+QEMU vocabulary represents. Keys without a QEMU name are ignored. Host shortcuts
+reserved by the compositor may remain unavailable.
 
 Use `--shm` to disable dma-buf negotiation. WSLg detection also selects this
 mode when `/mnt/wslg` exists or `WAYLAND_DISPLAY` is under that directory.
@@ -48,7 +48,7 @@ Clipboard errors are printed without interrupting display or input.
 
 ## Frame ownership and rendering
 
-The viewer requests frames, cursor, input, frame flags, and CPU-copy support.
+The viewer requests frames, cursor, input, frame flags, stable buffers, and CPU-copy support.
 Dma-buf is requested unless shared memory was selected. Imports are cached by
 surface and buffer index, with the DRM modifier and plane pitch from configure.
 Unimportable formats or modifiers trigger CpuCopy on this connection.
@@ -74,7 +74,8 @@ test. The window test never uses the owner's display or clipboard. Missing
 Vulkan, Xvfb, KVM, firmware, or guest assets produce named skips where relevant.
 S1 uses the Ubuntu template discovered by the existing template convention, or
 `VMLAB_HV_UBUNTU_26_04`. `VMLAB_HV_BINARY` selects an already-built hypervisor.
-It checks input through the agent and applies an 800x600 DRM mode. VMs use the
+It checks input through the agent, including ISO, F13, and volume keys, and
+applies an 800x600 DRM mode. VMs use the
 host-wide four-VM permit and a systemd scope with 24 GiB RAM and no swap.
 Disposable overlays and sockets are removed at test exit.
 

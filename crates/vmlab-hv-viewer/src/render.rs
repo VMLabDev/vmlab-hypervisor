@@ -600,6 +600,7 @@ pub struct Renderer {
     cursor_generation: u64,
     surface: Option<u64>,
     dirty: bool,
+    occluded: bool,
 }
 
 impl Renderer {
@@ -626,6 +627,7 @@ impl Renderer {
             cursor_generation: 0,
             surface: None,
             dirty: true,
+            occluded: false,
         };
         // SAFETY: created handles are stored before any subsequent fallible operation.
         unsafe {
@@ -687,6 +689,10 @@ impl Renderer {
     }
     pub fn resize(&mut self) {
         self.dirty = true;
+    }
+
+    pub fn occluded(&mut self, occluded: bool) {
+        self.occluded = occluded;
     }
 
     fn recreate(&mut self, width: u32, height: u32) -> Result<()> {
@@ -1045,10 +1051,8 @@ impl Renderer {
         cursor: &crate::Cursor,
     ) -> Result<()> {
         let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
-            return Ok(());
-        }
-        if self.dirty || self.swapchain.is_none() {
+        let drawable = size.width != 0 && size.height != 0 && !self.occluded;
+        if drawable && (self.dirty || self.swapchain.is_none()) {
             self.recreate(size.width, size.height)?;
         }
         if let (Some(surface), Some(_)) = (surface, frame)
@@ -1172,16 +1176,33 @@ impl Renderer {
             }
             self.cursor_generation = cursor.generation;
         }
+        if !drawable {
+            // Keep the repaint cache current while hidden without blocking on WSI.
+            if let Some((_, image)) = &mut imported {
+                image.barrier(self.command, vk::ImageLayout::GENERAL, false, true);
+            }
+            self.submit(false)?;
+            if let Some((key, image)) = imported {
+                self.imports.insert(key, image);
+            }
+            self.repaint = repaint;
+            self.cursor = cursor_image;
+            return Ok(());
+        }
         let chain = self.swapchain.as_ref().unwrap();
         // SAFETY: acquire semaphore is consumed by the following submit before reuse.
         let acquired = unsafe {
             chain
                 .api
-                .acquire_next_image(chain.handle, u64::MAX, self.acquired, vk::Fence::null())
+                .acquire_next_image(chain.handle, 50_000_000, self.acquired, vk::Fence::null())
         };
         let (index, suboptimal) = match acquired {
             Ok(value) => value,
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+            Err(
+                error @ (vk::Result::ERROR_OUT_OF_DATE_KHR
+                | vk::Result::TIMEOUT
+                | vk::Result::NOT_READY),
+            ) => {
                 // Still complete uploads and foreign ownership transfers before releasing a frame.
                 if let Some((_, image)) = &mut imported {
                     image.barrier(self.command, vk::ImageLayout::GENERAL, false, true);
@@ -1192,7 +1213,7 @@ impl Renderer {
                 }
                 self.repaint = repaint;
                 self.cursor = cursor_image;
-                self.dirty = true;
+                self.dirty |= error == vk::Result::ERROR_OUT_OF_DATE_KHR;
                 return Ok(());
             }
             Err(error) => return Err(error.into()),

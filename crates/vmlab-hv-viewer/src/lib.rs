@@ -172,6 +172,9 @@ impl Core {
                 kind,
                 buffers,
             } => {
+                if self.surfaces.keys().any(|id| *id >= surface_id) {
+                    return Err(invalid("surface configure id did not increase"));
+                }
                 if width == 0
                     || height == 0
                     || width > 16384
@@ -185,12 +188,18 @@ impl Core {
                         vmlab_hv_display::protocol::ARGB8888,
                     ]
                     .contains(&drm_fourcc)
+                        && !(kind == SurfaceKind::Dmabuf
+                            && [
+                                vmlab_hv_display::protocol::XBGR8888,
+                                vmlab_hv_display::protocol::ABGR8888,
+                            ]
+                            .contains(&drm_fourcc))
                 {
                     return Err(invalid("invalid display surface"));
                 }
                 let size = u64::from(stride) * u64::from(height);
-                if size > 1 << 30 {
-                    return Err(invalid("display surface exceeds 1 GiB"));
+                if size > 256 << 20 {
+                    return Err(invalid("display surface exceeds 256 MiB"));
                 }
                 let files: Vec<File> = packet.fds.into_iter().map(File::from).collect();
                 if kind == SurfaceKind::Shm
@@ -296,7 +305,7 @@ impl Core {
                 self.cursor.y = y;
                 self.cursor.visible = visible;
             }
-            Message::LedState { mask } => self.leds = mask,
+            Message::LedState { mask } => self.leds = mask & 7,
             _ => return Err(invalid("unexpected server display message")),
         }
         Ok(None)
