@@ -73,7 +73,7 @@ const MAX_FRAME: usize = 65536 + 14;
 /// Bound host-side output while the switch is backpressured.
 const MAX_TX_STAGE: usize = 1024 * 1024;
 /// Largest read the worker takes from the switch socket in one go.
-const READ_CHUNK: usize = 128 * 1024;
+const READ_CHUNK: usize = 512 * 1024;
 /// Default reconnect interval after the switch socket closes.
 const RETRY: Duration = Duration::from_secs(1);
 /// The MTU at which `VIRTIO_NET_F_MTU` is not offered, matching vmlab's
@@ -875,8 +875,76 @@ fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize, mergeable: bool)
     }
 }
 
-/// Consume transmitq buffers: strip the header, frame the packet, and send it
-/// to the switch — or drop it while the link is down.
+/// One consumed transmit chain and its validated payload spans.
+struct TxPacket<'a> {
+    head: u16,
+    consumed: u32,
+    prefix: Option<[u8; 4]>,
+    slices: Vec<VolatileSlice<'a>>,
+}
+
+/// Preserve the unsent suffix before publishing any used descriptor.
+fn send_tx_batch(stream: &UnixStream, packets: &[TxPacket<'_>], output: &mut Vec<u8>) {
+    let guards: Vec<_> = packets
+        .iter()
+        .flat_map(|packet| packet.slices.iter())
+        .map(VolatileSlice::ptr_guard)
+        .collect();
+    let mut vectors = Vec::new();
+    let mut next = 0;
+    for packet in packets {
+        if let Some(prefix) = &packet.prefix {
+            vectors.push(libc::iovec {
+                iov_base: prefix.as_ptr().cast_mut().cast(),
+                iov_len: 4,
+            });
+            for slice in &packet.slices {
+                vectors.push(libc::iovec {
+                    iov_base: guards[next].as_ptr().cast_mut().cast(),
+                    iov_len: slice.len(),
+                });
+                next += 1;
+            }
+        }
+    }
+    let mut sent = 0;
+    if output.is_empty() && !vectors.is_empty() && vectors.len() <= 1024 {
+        loop {
+            // SAFETY: prefixes and validated guest mappings remain live and
+            // guarded until writev completes. No Rust references alias DMA.
+            let result =
+                unsafe { libc::writev(stream.as_raw_fd(), vectors.as_ptr(), vectors.len() as i32) };
+            if result >= 0 {
+                sent = result as usize;
+                break;
+            }
+            if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+        }
+    }
+    for packet in packets {
+        let Some(prefix) = &packet.prefix else {
+            continue;
+        };
+        let skip = sent.min(4);
+        sent -= skip;
+        output.extend_from_slice(&prefix[skip..]);
+        for slice in &packet.slices {
+            let skip = sent.min(slice.len());
+            sent -= skip;
+            if skip != slice.len() {
+                let slice = slice.offset(skip).unwrap();
+                let start = output.len();
+                output.resize(start + slice.len(), 0);
+                slice.copy_to(&mut output[start..]);
+            }
+        }
+    }
+}
+
+/// Drain transmit descriptors into bounded vectored batches, or drop them
+/// while the link is down.
 fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_len: usize) {
     loop {
         let mut blocked = false;
@@ -898,6 +966,10 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             let _ = q.disable_notification(mem);
             let mut used_any = false;
             let mut invalid = false;
+            let mut packets = Vec::new();
+            let mut bytes = sh.tx_out.len();
+            let mut vectors = 0;
+            let mut full_batch = false;
             loop {
                 let chain = match q.iter(mem) {
                     Ok(mut available) => available.next(),
@@ -907,33 +979,57 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
                     }
                 };
                 let Some(chain) = chain else { break };
-                if stream.is_some() && sh.tx_out.len() >= MAX_TX_STAGE {
+                if stream.is_some() && bytes >= MAX_TX_STAGE {
                     q.go_to_previous_position();
                     blocked = true;
                     break;
                 }
                 let head = chain.head_index();
-                let mut consumed = 0;
-                if let Ok(mut reader) = chain.reader(mem) {
-                    let mut hdr = [0u8; 12];
-                    let header_len = hdr_len.min(reader.available_bytes());
-                    if reader.read_exact(&mut hdr[..header_len]).is_ok() {
-                        if reader.available_bytes() > MAX_FRAME || stream.is_none() {
-                            consumed = (header_len + reader.available_bytes()) as u32;
-                        } else {
-                            let len = reader.available_bytes();
-                            let start = sh.tx_out.len();
-                            sh.tx_out.extend_from_slice(&(len as u32).to_be_bytes());
-                            sh.tx_out.resize(start + 4 + len, 0);
-                            if reader.read_exact(&mut sh.tx_out[start + 4..]).is_ok() {
-                                consumed = (header_len + len) as u32;
-                            } else {
-                                sh.tx_out.truncate(start);
-                            }
-                        }
+                let mut packet = TxPacket {
+                    head,
+                    consumed: 0,
+                    prefix: None,
+                    slices: Vec::new(),
+                };
+                let mut skip = hdr_len;
+                let mut total = Some(0usize);
+                for descriptor in chain.readable() {
+                    let Ok(slice) = mem.get_slice(descriptor.addr(), descriptor.len() as usize)
+                    else {
+                        total = None;
+                        break;
+                    };
+                    total = total.and_then(|bytes| bytes.checked_add(slice.len()));
+                    let offset = skip.min(slice.len());
+                    skip -= offset;
+                    if offset < slice.len() {
+                        packet.slices.push(slice.offset(offset).unwrap());
                     }
                 }
-                if q.add_used(mem, head, consumed).is_err() {
+                if let Some(total) = total {
+                    packet.consumed = total as u32;
+                    let len = total.saturating_sub(hdr_len);
+                    if stream.is_some() && len <= MAX_FRAME {
+                        packet.prefix = Some((len as u32).to_be_bytes());
+                        if !packets.is_empty() && vectors + 1 + packet.slices.len() > 1024 {
+                            q.go_to_previous_position();
+                            full_batch = true;
+                            break;
+                        }
+                        vectors += 1 + packet.slices.len();
+                        bytes += 4 + len;
+                    }
+                }
+                if packet.prefix.is_none() {
+                    packet.slices.clear();
+                }
+                packets.push(packet);
+            }
+            if let Some(socket) = stream.as_ref() {
+                send_tx_batch(socket, &packets, &mut sh.tx_out);
+            }
+            for packet in packets {
+                if q.add_used(mem, packet.head, packet.consumed).is_err() {
                     invalid = true;
                     break;
                 }
@@ -942,7 +1038,8 @@ fn process_tx(shared: &Arc<Mutex<Shared>>, stream: &mut Option<UnixStream>, hdr_
             // POLLOUT resumes a backpressured queue. Otherwise rearm kicks
             // and check for buffers published before the rearm became visible.
             blocked |= stream.is_some() && sh.tx_out.len() >= MAX_TX_STAGE;
-            more = !blocked && q.enable_notification(mem).unwrap_or(false) && !invalid;
+            more = !invalid
+                && (full_batch || (!blocked && q.enable_notification(mem).unwrap_or(false)));
             if used_any && needs_interrupt(q, mem) {
                 irq = sh.interrupt.clone().map(|irq| (irq, TXQ));
             }
@@ -970,8 +1067,7 @@ fn flush_tx(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(), 
         if sent == sh.tx_out.len() {
             break Ok(());
         }
-        let end = sh.tx_out.len().min(sent + READ_CHUNK);
-        match stream.write(&sh.tx_out[sent..end]) {
+        match stream.write(&sh.tx_out[sent..]) {
             Ok(0) => break Err(()),
             Ok(n) => sent += n,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => break Ok(()),
@@ -1433,6 +1529,56 @@ mod tests {
             .read_slice(&mut received, GuestAddress(address + 12))
             .unwrap();
         assert_eq!(received, frame);
+    }
+
+    #[test]
+    fn transmit_batch_preserves_framing_and_owns_every_unsent_guest_byte() {
+        let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 128 * 1024)]).unwrap();
+        let mut expected = Vec::new();
+        let mut packets = Vec::new();
+        let mut address = 0;
+        for (head, len) in [1usize, MAX_FRAME, 17].into_iter().enumerate() {
+            let bytes: Vec<_> = (0..len).map(|n| (n % 251) as u8).collect();
+            mem.write_slice(&bytes, GuestAddress(address)).unwrap();
+            let prefix = (len as u32).to_be_bytes();
+            expected.extend_from_slice(&prefix);
+            expected.extend_from_slice(&bytes);
+            packets.push(TxPacket {
+                head: head as u16,
+                consumed: (12 + len) as u32,
+                prefix: Some(prefix),
+                slices: vec![mem.get_slice(GuestAddress(address), len).unwrap()],
+            });
+            address += len as u64;
+        }
+        let (producer, mut receiver) = UnixStream::pair().unwrap();
+        producer.set_nonblocking(true).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let size: libc::c_int = 4096;
+        // SAFETY: producer is live and size is an initialized integer option.
+        let result = unsafe {
+            libc::setsockopt(
+                producer.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                std::ptr::from_ref(&size).cast(),
+                std::mem::size_of_val(&size) as libc::socklen_t,
+            )
+        };
+        assert_eq!(result, 0);
+        let mut output = Vec::new();
+        send_tx_batch(&producer, &packets, &mut output);
+        assert!(!output.is_empty());
+        let sent = expected.len() - output.len();
+        assert!(sent > 5);
+        mem.write_slice(&vec![0; address as usize], GuestAddress(0))
+            .unwrap();
+        let mut received = vec![0; sent];
+        receiver.read_exact(&mut received).unwrap();
+        received.extend_from_slice(&output);
+        assert_eq!(received, expected);
     }
     /// Guest memory: 288 MiB, room for the queues' rings plus buffers.
     const MEM_SIZE: u64 = 288 * 1024 * 1024;
