@@ -450,10 +450,8 @@ fn run_render_probe(agent: &mut AgentClient, stage: &str, path: &Path, probe: Re
         &output.stderr,
     )
     .unwrap();
-    assert_eq!(
-        output.exit_code, 0,
-        "interactive rendering failed at {name}: {output:?}"
-    );
+    let run_exit_code = output.exit_code;
+    let run_summary = String::from_utf8_lossy(&output.stdout).into_owned();
     let output = powershell(
         agent,
         &format!(
@@ -465,6 +463,27 @@ fn run_render_probe(agent: &mut AgentClient, stage: &str, path: &Path, probe: Re
         &output.stdout,
     )
     .unwrap();
+    let driver_log = powershell(
+        agent,
+        r"$ErrorActionPreference='Stop'; $p='C:\ProgramData\Yttrium\yttrium-errors.log'; $text=$null; if (Test-Path -LiteralPath $p) { $text=Get-Content -LiteralPath $p -Raw }; [ordered]@{path=$p;text=$text} | ConvertTo-Json -Compress",
+    );
+    std::fs::write(
+        path.join(format!("windows-render-{name}.driver-log.json")),
+        &driver_log.stdout,
+    )
+    .unwrap();
+    std::fs::write(
+        path.join(format!("windows-render-{name}.driver-log.stderr")),
+        &driver_log.stderr,
+    )
+    .unwrap();
+    assert_eq!(
+        run_exit_code,
+        0,
+        "interactive rendering failed at {name}: {run_summary}; probe: {}; driver log: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&driver_log.stdout)
+    );
     assert_eq!(
         output.exit_code, 0,
         "cannot read rendering result at {name}: {output:?}"
