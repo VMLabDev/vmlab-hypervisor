@@ -2506,6 +2506,7 @@ name = "vmlab-hv-display"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "log",
  "tempfile",
 ]
 

@@ -157,8 +157,13 @@ struct Shared {
     changed: Condvar,
     source: Arc<dyn FrameSource>,
     cpu_clients: AtomicUsize,
-    input: Mutex<Option<std::sync::mpsc::SyncSender<Message>>>,
+    input: Arc<crate::input::InputQueue>,
     input_worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+impl Drop for Shared {
+    fn drop(&mut self) {
+        self.input.close();
+    }
 }
 #[derive(Clone)]
 pub struct DisplayServer {
@@ -169,15 +174,12 @@ impl DisplayServer {
         let frame = source.frame()?;
         frame.validate()?;
         let closed = Arc::new(AtomicBool::new(false));
-        let stopping = closed.clone();
-        let (input, messages) = std::sync::mpsc::sync_channel(256);
+        let input = Arc::new(crate::input::InputQueue::default());
+        let messages = input.clone();
         let input_worker = std::thread::Builder::new()
             .name("display-input".into())
             .spawn(move || {
-                for message in messages {
-                    if stopping.load(Ordering::SeqCst) {
-                        break;
-                    }
+                while let Some(message) = messages.pop() {
                     sink.input(message);
                 }
             })?;
@@ -198,7 +200,7 @@ impl DisplayServer {
                 changed: Condvar::new(),
                 source,
                 cpu_clients: AtomicUsize::new(0),
-                input: Mutex::new(Some(input)),
+                input,
                 input_worker: Mutex::new(Some(input_worker)),
             }),
         })
@@ -206,7 +208,7 @@ impl DisplayServer {
     /// Interrupt all sessions, including unfinished handshakes and blocked writes.
     pub fn shutdown(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
-        self.shared.input.lock().unwrap().take();
+        self.shared.input.close();
         for stream in self
             .shared
             .sessions
@@ -349,14 +351,7 @@ impl DisplayServer {
         )
     }
     pub(crate) fn input(&self, message: Message) -> io::Result<()> {
-        self.shared
-            .input
-            .lock()
-            .unwrap()
-            .as_ref()
-            .ok_or_else(|| invalid("display server has stopped"))?
-            .try_send(message)
-            .map_err(|_| invalid("display input queue is full or stopped"))
+        self.shared.input.push(message)
     }
     pub(crate) fn cpu_pixels(&self, frame: &Frame) -> io::Result<Vec<u8>> {
         let mut bytes = match &frame.pixels {
@@ -494,14 +489,16 @@ impl DisplayServer {
                 | Message::Scroll { .. }
                     if caps.has(Capabilities::INPUT) =>
                 {
-                    self.input(msg)?
+                    self.input(msg)?;
+                    continue;
                 }
                 Message::RequestSize { width, height }
                     if caps.has(Capabilities::INPUT)
                         && (1..=16384).contains(&width)
                         && (1..=16384).contains(&height) =>
                 {
-                    self.input(msg)?
+                    self.input(msg)?;
+                    continue;
                 }
                 _ => return Err(invalid("unexpected client message or missing capability")),
             }

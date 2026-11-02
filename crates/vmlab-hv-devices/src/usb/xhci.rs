@@ -352,14 +352,15 @@ impl XhciController {
     }
 
     pub fn inject_pointer(&mut self, event: PointerEvent) -> Result<(), DeviceError> {
-        self.devices
+        let result = self
+            .devices
             .iter_mut()
             .flatten()
             .find(|device| device.state_id() == "usb-tablet")
             .ok_or_else(|| DeviceError::Other("USB tablet disconnected".into()))?
-            .inject_pointer(event)?;
+            .inject_pointer(event);
         self.poll();
-        Ok(())
+        result
     }
     pub fn has_keyboard(&self) -> bool {
         self.devices[super::KEYBOARD_PORT as usize - 1]

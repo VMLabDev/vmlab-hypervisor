@@ -4,6 +4,7 @@
 
 mod client;
 mod core;
+mod input;
 mod lease;
 pub mod protocol;
 pub mod rfb;

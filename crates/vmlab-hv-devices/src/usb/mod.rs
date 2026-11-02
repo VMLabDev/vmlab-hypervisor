@@ -104,6 +104,8 @@ pub trait UsbDevice: Snapshot {
     fn is_host_backed(&self) -> bool {
         false
     }
+    /// A full built-in tablet returns Io(WouldBlock) without consuming the event.
+    /// Retry that event after the guest has drained interrupt reports.
     fn inject_pointer(&mut self, _event: PointerEvent) -> Result<(), DeviceError> {
         Err(DeviceError::Other(
             "USB device does not accept pointer input".into(),

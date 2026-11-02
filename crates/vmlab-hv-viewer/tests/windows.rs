@@ -2,7 +2,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
+use vmlab_hv_display::Message;
 use vmlab_hv_proto::{
     client::Client,
     control::{Command as Control, Outcome},
@@ -11,6 +16,62 @@ use vmlab_hv_tests::{agent::AgentClient, process::ManagedChild};
 use vmlab_hv_viewer::{Core, input::pointer};
 
 struct Diagnostics<'a>(&'a Path);
+
+struct DisplayReader {
+    client: Arc<vmlab_hv_display::Client>,
+    error: Arc<Mutex<Option<String>>>,
+    frames: Arc<AtomicU64>,
+    nonblack: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl DisplayReader {
+    fn new(client: Arc<vmlab_hv_display::Client>) -> Self {
+        let source = client.clone();
+        let error = Arc::new(Mutex::new(None));
+        let failed = error.clone();
+        let frames = Arc::new(AtomicU64::new(0));
+        let count = frames.clone();
+        let nonblack = Arc::new(AtomicBool::new(false));
+        let painted = nonblack.clone();
+        let thread = std::thread::spawn(move || {
+            let mut core = Core::new(source.clone(), "ctrl+alt").unwrap();
+            loop {
+                let result = source.receive().and_then(|packet| {
+                    if let Some(frame) = core.receive(packet)? {
+                        let active = !frame.flags.has(vmlab_hv_display::FrameFlags::PLACEHOLDER)
+                            && core.surfaces[&frame.surface]
+                                .pixels
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .any(|pixel| pixel[..3] != [0, 0, 0]);
+                        painted.store(active, Ordering::SeqCst);
+                        core.release(&frame)?;
+                        count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    *failed.lock().unwrap() = Some(error.to_string());
+                    break;
+                }
+            }
+        });
+        Self {
+            client,
+            error,
+            frames,
+            nonblack,
+            thread: Some(thread),
+        }
+    }
+}
+impl Drop for DisplayReader {
+    fn drop(&mut self) {
+        let _ = self.client.stream().shutdown(std::net::Shutdown::Both);
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
 impl Drop for Diagnostics<'_> {
     fn drop(&mut self) {
         if std::thread::panicking() {
@@ -181,6 +242,7 @@ fn windows_tablet_and_first_release_chord_via_s1() {
     tablet_capabilities(&mut agent);
     let (width, height) = (1024, 768);
     let mut core = Core::connect(&display, true, "ctrl+alt").unwrap();
+    let reader = DisplayReader::new(core.client.clone());
     core.input.grab();
     for position in [
         (0., 0.),
@@ -204,6 +266,60 @@ fn windows_tablet_and_first_release_chord_via_s1() {
         std::thread::sleep(Duration::from_millis(250));
     }
     assert!(!core.input.grabbed, "first Ctrl+Alt press must release");
+    let before = reader.frames.load(Ordering::SeqCst);
+    let started = Instant::now();
+    for index in 0..20_000 {
+        core.send([Message::PointerAbs {
+            x: index % width,
+            y: index % height,
+            width,
+            height,
+        }])
+        .unwrap();
+        if index % 500 == 499 {
+            core.send([
+                Message::Buttons { mask: 1 },
+                Message::Buttons { mask: 0 },
+                Message::Scroll { dx: 0, dy: 1 },
+            ])
+            .unwrap();
+        }
+    }
+    core.send([Message::PointerAbs {
+        x: width - 1,
+        y: height - 1,
+        width,
+        height,
+    }])
+    .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let error = reader.error.lock().unwrap().clone();
+    assert!(
+        error.is_none(),
+        "Windows display disconnected during burst: {error:?}"
+    );
+    let after = reader.frames.load(Ordering::SeqCst);
+    assert!(
+        after > before,
+        "Windows display stopped updating during input: {before} -> {after}"
+    );
+    assert!(
+        reader.nonblack.load(Ordering::SeqCst),
+        "Windows final frame is black or a host placeholder"
+    );
+    let log = diagnostics();
+    assert!(
+        !log.contains("USB tablet input queue full"),
+        "Windows tablet backlog after 20,000 moves"
+    );
+    eprintln!(
+        "Windows frame count during burst: {before} -> {after}; final active frame is not black"
+    );
+    eprintln!(
+        "Windows 2D S1: 20,000 moves, 80 button transitions and 40 wheel events; no disconnect or tablet overflow in {:?}",
+        started.elapsed()
+    );
+    drop(reader);
     drop(core);
     assert!(matches!(
         control.call(Control::Quit).unwrap(),

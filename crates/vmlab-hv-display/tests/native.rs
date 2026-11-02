@@ -648,6 +648,85 @@ fn wrong_version_and_unnegotiated_input_disconnect() {
 }
 
 #[test]
+fn pointer_burst_with_clicks_does_not_disconnect_a_slow_input_sink() {
+    struct SlowSink(std::sync::Mutex<Vec<M>>);
+    impl vmlab_hv_display::InputSink for SlowSink {
+        fn input(&self, message: M) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            self.0.lock().unwrap().push(message);
+        }
+    }
+    let source = Arc::new(Source(std::sync::Mutex::new(frame(1, 4, 3))));
+    let sink = Arc::new(SlowSink(std::sync::Mutex::new(Vec::new())));
+    let server = vmlab_hv_display::DisplayServer::new(source, sink.clone()).unwrap();
+    let (client, worker) = client(&server, C::INPUT);
+    assert!(matches!(
+        client.receive().unwrap().message,
+        M::LedState { .. }
+    ));
+    for index in 0..10_000 {
+        client
+            .send(&M::PointerAbs {
+                x: index % 1024,
+                y: index % 768,
+                width: 1024,
+                height: 768,
+            })
+            .unwrap();
+        if index % 100 == 99 {
+            for mask in [1, 0] {
+                client.send(&M::Buttons { mask }).unwrap();
+            }
+            client.send(&M::Scroll { dx: 0, dy: 1 }).unwrap();
+        }
+    }
+    client
+        .send(&M::PointerAbs {
+            x: 1023,
+            y: 767,
+            width: 1024,
+            height: 768,
+        })
+        .unwrap();
+    until(|| {
+        matches!(
+            sink.0.lock().unwrap().last(),
+            Some(M::PointerAbs {
+                x: 1023,
+                y: 767,
+                ..
+            })
+        )
+        .then_some(())
+    });
+    let input = sink.0.lock().unwrap();
+    let buttons: Vec<_> = input
+        .iter()
+        .filter_map(|m| {
+            if let M::Buttons { mask } = m {
+                Some(*mask)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(buttons, [1, 0].repeat(100));
+    assert_eq!(
+        input
+            .iter()
+            .filter(|m| matches!(m, M::Scroll { dy: 1, .. }))
+            .count(),
+        100
+    );
+    drop(input);
+    server.set_leds(4);
+    assert_eq!(client.receive().unwrap().message, M::LedState { mask: 4 });
+    drop(client);
+    worker.join().unwrap().unwrap();
+    server.shutdown();
+}
+
+#[test]
 fn same_size_reset_reconfigures_without_overwriting_old_held_buffers() {
     let (server, source, _) = server();
     let (c, h) = client(&server, C::FRAMES);

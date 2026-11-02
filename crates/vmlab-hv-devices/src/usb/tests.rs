@@ -763,6 +763,89 @@ fn system_reset_clears_pci_slots_and_msix_and_keeps_the_tablet() {
 }
 
 #[test]
+fn tablet_motion_burst_preserves_button_wheel_edges_and_final_position() {
+    use super::{SetupPacket, Tablet, UsbDevice, UsbTransfer};
+    let mut tablet = Tablet::default();
+    tablet.control(SetupPacket::from_bytes([0, 9, 1, 0, 0, 0, 0, 0]), &[]);
+    let mut expected = Vec::new();
+    for group in 0..20 {
+        for offset in 0..1000 {
+            tablet
+                .inject_pointer(PointerEvent {
+                    x: group * 1000 + offset,
+                    y: offset,
+                    ..PointerEvent::default()
+                })
+                .unwrap();
+        }
+        let x = group * 1000 + 999;
+        for (buttons, wheel) in [(1, 0), (1, 1), (0, 0), (0, -1)] {
+            tablet
+                .inject_pointer(PointerEvent {
+                    x,
+                    y: 999,
+                    buttons,
+                    wheel,
+                })
+                .unwrap();
+            expected.push((buttons, x, 999, wheel));
+        }
+    }
+    tablet
+        .inject_pointer(PointerEvent {
+            x: 32767,
+            y: 12345,
+            ..PointerEvent::default()
+        })
+        .unwrap();
+    let snapshot = tablet.save_state().unwrap();
+    tablet.restore_state(&snapshot).unwrap();
+    let mut observed = Vec::new();
+    let mut buttons = 0;
+    let mut final_position = (0, 0);
+    let mut count = 0;
+    while let UsbTransfer::Ack(report) = tablet.transfer(0x81, &[], 8) {
+        count += 1;
+        let x = u16::from_le_bytes([report[1], report[2]]);
+        let y = u16::from_le_bytes([report[3], report[4]]);
+        let wheel = report[5] as i8;
+        if report[0] != buttons || wheel != 0 {
+            observed.push((report[0], x, y, wheel));
+        }
+        buttons = report[0];
+        final_position = (x, y);
+    }
+    assert_eq!(observed, expected);
+    assert_eq!(final_position, (32767, 12345));
+    assert!(count <= 101, "motion backlog: {count} reports");
+}
+
+#[test]
+fn tablet_full_of_transitions_retries_without_losing_the_pending_event() {
+    use super::{SetupPacket, Tablet, UsbDevice, UsbTransfer};
+    let mut tablet = Tablet::default();
+    tablet.control(SetupPacket::from_bytes([0, 9, 1, 0, 0, 0, 0, 0]), &[]);
+    let event = PointerEvent {
+        wheel: 1,
+        ..PointerEvent::default()
+    };
+    for _ in 0..1024 {
+        tablet.inject_pointer(event).unwrap();
+    }
+    assert!(
+        matches!(tablet.inject_pointer(event), Err(crate::DeviceError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert!(matches!(tablet.transfer(0x81, &[], 8), UsbTransfer::Ack(_)));
+    tablet.inject_pointer(event).unwrap();
+    for _ in 0..1024 {
+        assert!(
+            matches!(tablet.transfer(0x81, &[], 8), UsbTransfer::Ack(report) if report[5] == 1)
+        );
+    }
+    assert!(matches!(tablet.transfer(0x81, &[], 8), UsbTransfer::Nak));
+}
+
+#[test]
 fn tablet_class_requests_idle_and_snapshot_preserve_input() {
     use super::{SetupPacket, Tablet, UsbDevice, UsbTransfer};
     let mut t = Tablet::default();
