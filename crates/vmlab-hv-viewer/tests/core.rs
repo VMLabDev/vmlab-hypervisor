@@ -387,7 +387,13 @@ fn configurable_chord_focus_loss_buttons_repeat_and_pointer_edges() {
     let mut input = Input::new("shift_r+f12").unwrap();
     input.grab();
     assert!(!input.key(30, true).is_empty());
-    assert!(input.key(30, true).is_empty());
+    assert_eq!(
+        input.key(30, true),
+        vec![Message::Key {
+            qcode: "a".into(),
+            down: true
+        }]
+    );
     input.button(1, true);
     let released = input.release();
     assert!(released.contains(&Message::Key {
@@ -421,6 +427,49 @@ fn configurable_chord_focus_loss_buttons_repeat_and_pointer_edges() {
     );
     assert!(pointer((0., 0.), (0, 600), (800, 600)).is_none());
     assert!(pointer((f64::NAN, 0.), (800, 600), (800, 600)).is_none());
+}
+
+#[test]
+fn host_repeat_sends_each_make_and_only_one_matching_break() {
+    let (mut core, server) = pair(true);
+    core.input.grab();
+    for _ in 0..3 {
+        let messages = core.input.key(30, true);
+        assert_eq!(
+            messages,
+            vec![Message::Key {
+                qcode: "a".into(),
+                down: true
+            }]
+        );
+        core.send(messages).unwrap();
+        assert_eq!(
+            receive(&server).unwrap().message,
+            Message::Key {
+                qcode: "a".into(),
+                down: true
+            }
+        );
+    }
+    let up = core.input.key(30, false);
+    assert_eq!(
+        up,
+        vec![Message::Key {
+            qcode: "a".into(),
+            down: false
+        }]
+    );
+    core.send(up).unwrap();
+    assert_eq!(
+        receive(&server).unwrap().message,
+        Message::Key {
+            qcode: "a".into(),
+            down: false
+        }
+    );
+    assert!(core.input.key(30, false).is_empty());
+    assert!(core.input.release().is_empty());
+    assert!(core.input.key(30, true).is_empty());
 }
 
 #[test]

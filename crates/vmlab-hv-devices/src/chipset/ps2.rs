@@ -756,6 +756,30 @@ mod tests {
         assert_ne!(read(&mut d, 4) & 0x10, 0);
     }
     #[test]
+    fn repeated_makes_are_emitted_in_set2_and_translated_set1() {
+        for translated in [false, true] {
+            let mut keyboard = device();
+            if translated {
+                write(&mut keyboard, 4, 0x60);
+                write(&mut keyboard, 0, 0x43);
+            }
+            for _ in 0..3 {
+                keyboard.inject_key("a", true).unwrap();
+            }
+            keyboard.inject_key("a", false).unwrap();
+            let expected = if translated {
+                vec![0x1e, 0x1e, 0x1e, 0x9e]
+            } else {
+                vec![0x1c, 0x1c, 0x1c, 0xf0, 0x1c]
+            };
+            for byte in expected {
+                assert_eq!(read(&mut keyboard, 0), byte);
+            }
+            assert_eq!(read(&mut keyboard, 4) & 1, 0);
+        }
+    }
+
+    #[test]
     fn firmware_self_test_reset_and_qcodes() {
         let mut d = device();
         write(&mut d, 4, 0xaa);

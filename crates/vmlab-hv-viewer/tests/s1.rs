@@ -123,7 +123,7 @@ fn viewer_input_and_resize_reach_guest_via_s1() {
     let stderr = directory.path().join("stderr.log");
     let machine = directory.path().join("machine.json");
     std::fs::write(&machine, serde_json::to_vec(&serde_json::json!({
-        "machine":"q35", "name":"viewer-s1", "arch":"x86_64", "accel":"kvm", "vcpus":2, "memory_mib":4096,
+        "machine":"q35", "name":"viewer-s1", "arch":"x86_64", "accel":"kvm", "vcpus":2, "memory_mib":4096, "usb_keyboard":false,
         "boot":{"kind":"firmware","firmware":"seabios","code":"/usr/share/qemu/bios-256k.bin"},
         "disks":[{"id":"disk0","pci":{"bus":0,"device":2,"function":0},"path":disk,"format":"qcow2","read_only":false,"vmstate":true}],
         "console_pci":{"bus":0,"device":1,"function":0},
@@ -189,6 +189,57 @@ fn viewer_input_and_resize_reach_guest_via_s1() {
     let mut agent = AgentClient::connect(&agent_path, Duration::from_secs(120))
         .unwrap_or_else(|e| panic!("{e}: {}", diagnostics()));
     observer.wait(|core| core.current.is_some());
+    guest(&mut agent, &["systemctl", "stop", "getty@tty1.service"]);
+    let repeat = include_str!("guest_repeat.py");
+    guest(
+        &mut agent,
+        &[
+            "sh",
+            "-c",
+            &format!(
+                "python3 -c {} >/run/viewer-repeat.log 2>&1 &",
+                quote(repeat)
+            ),
+        ],
+    );
+    guest(
+        &mut agent,
+        &[
+            "sh",
+            "-c",
+            "for n in $(seq 1 100); do test -f /run/viewer-repeat-ready && exit 0; sleep .05; done; cat /run/viewer-repeat.log; exit 1",
+        ],
+    );
+    {
+        let mut core = observer.core.lock().unwrap();
+        core.input.grab();
+        for index in 0..3 {
+            let messages = core.input.key(30, true);
+            core.send(messages).unwrap();
+            // Linux atkbd debounces duplicate makes before half its repeat delay.
+            std::thread::sleep(if index == 0 {
+                Duration::from_secs(1)
+            } else {
+                Duration::from_millis(50)
+            });
+        }
+        for (code, down) in [(30, false), (28, true), (28, false)] {
+            let messages = core.input.key(code, down);
+            core.send(messages).unwrap();
+        }
+    }
+    let repeated = guest(
+        &mut agent,
+        &[
+            "python3",
+            "-c",
+            "import time; from pathlib import Path\np=Path('/run/viewer-repeat.txt')\nfor _ in range(100):\n if p.exists(): break\n time.sleep(.05)\nb=p.read_bytes(); print(repr(b)); assert b == b'aaa\\r', repr(b)",
+        ],
+    );
+    eprintln!(
+        "viewer S1 PS/2 console repeat: {}",
+        String::from_utf8_lossy(&repeated)
+    );
     let script = include_str!("../../vmlab-hv/tests/guest_display.py");
     guest(
         &mut agent,

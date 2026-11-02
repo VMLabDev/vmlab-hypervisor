@@ -14,9 +14,10 @@ use x11rb::{
     protocol::{
         xfixes::ConnectionExt as _,
         xproto::{
-            AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClientMessageEvent,
-            ConfigureWindowAux, ConnectionExt, EventMask, GrabMode, GrabStatus, ImageFormat,
-            InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+            AtomEnum, AutoRepeatMode, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT,
+            ChangeKeyboardControlAux, ClientMessageEvent, ConfigureWindowAux, ConnectionExt,
+            EventMask, GrabMode, GrabStatus, ImageFormat, InputFocus, KEY_PRESS_EVENT,
+            KEY_RELEASE_EVENT,
         },
         xtest::ConnectionExt as _,
     },
@@ -674,6 +675,59 @@ fn exercise(mode: &str) {
     }
     connection.flush().unwrap();
     wait(|| !ungrabbed());
+    connection
+        .change_keyboard_control(
+            &ChangeKeyboardControlAux::new().auto_repeat_mode(AutoRepeatMode::ON),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    connection
+        .change_keyboard_control(
+            &ChangeKeyboardControlAux::new()
+                .key(38)
+                .auto_repeat_mode(AutoRepeatMode::ON),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+    connection
+        .xtest_fake_input(KEY_PRESS_EVENT, 38, x11rb::CURRENT_TIME, root, 0, 0, 0)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    let mut repeated = Vec::new();
+    wait(|| {
+        repeated.extend(receiver.try_iter());
+        repeated
+            .iter()
+            .filter(|message| matches!(message, Message::Key { qcode, down: true } if qcode == "a"))
+            .count()
+            >= 3
+    });
+    connection
+        .xtest_fake_input(KEY_RELEASE_EVENT, 38, x11rb::CURRENT_TIME, root, 0, 0, 0)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| {
+        repeated.extend(receiver.try_iter());
+        repeated.contains(&Message::Key {
+            qcode: "a".into(),
+            down: false,
+        })
+    });
+    assert_eq!(
+        repeated
+            .iter()
+            .filter(
+                |message| matches!(message, Message::Key { qcode, down: false } if qcode == "a")
+            )
+            .count(),
+        1
+    );
     for (key, down) in [(38, true), (38, false), (37, true), (64, true)] {
         connection
             .xtest_fake_input(

@@ -39,6 +39,11 @@ chord without capture does not grab anything. Clicking while the full chord is
 held cannot start capture. The completing chord key stays local; only keys
 forwarded to the guest receive matching releases.
 
+Host auto-repeat key-down events are forwarded while the keyboard is captured.
+The compositor supplies the repeat delay and rate; the viewer has no repeat
+timer. Each held key still receives one matching release. The PS/2 keyboard
+emits every make code, while USB HID keeps duplicate held-key reports suppressed.
+
 Use `--release-chord ctrl_r+alt_r` to choose another chord. Chord components are
 QEMU key names, joined by `+`. Both modifiers in the default chord are left-side
 keys. Keyboard mapping follows physical evdev positions, including the main
@@ -117,6 +122,13 @@ control and display connections. VMs use the
 host-wide VM permit and a systemd scope with 24 GiB RAM and no swap.
 The permit defaults to four VMs; `VMLAB_HV_TEST_VM_LIMIT` overrides it.
 Disposable overlays and sockets are removed at test exit.
+
+The Linux S1 fixture also captures translated input from `/dev/tty1` with a
+PS/2 keyboard. One held key with two host repeat makes must produce `aaa`
+and one release. The fixture uses a one-second initial hold, then 50 ms between
+repeat makes, so Linux's early-duplicate debounce does not hide the repeats.
+Private Xvfb tests hold a native key until host auto-repeat produces multiple
+protocol key-downs, followed by one key-up.
 
 The Windows S1 test discovers the Windows 11 standard template, or uses
 `VMLAB_HV_VIEWER_WINDOWS` as its disk path. `VMLAB_HV_FIRMWARE_DIR` selects the

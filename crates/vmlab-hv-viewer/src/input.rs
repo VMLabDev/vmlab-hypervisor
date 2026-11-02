@@ -247,12 +247,10 @@ impl Input {
         if !self.grabbed {
             return Vec::new();
         }
-        let changed = if down {
-            self.forwarded.insert(key)
-        } else {
-            self.forwarded.remove(key)
-        };
-        if !changed {
+        if down {
+            // Host repeat supplies make events; membership tracks one matching break.
+            self.forwarded.insert(key);
+        } else if !self.forwarded.remove(key) {
             return Vec::new();
         }
         vec![Message::Key {

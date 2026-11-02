@@ -316,3 +316,41 @@ Formatting, workspace Clippy, and focused viewer tests pass. Evidence is in
 for this startup-only change. The optional hardware dma-buf test remains a
 named skip without an explicitly selected render node. No public protocol,
 headless Core API, or shared device interface changed.
+
+## Host key repeat
+
+F10. The shell already passed winit's repeated Pressed events to Input::key.
+Input::key discarded a down event when the key was already in the forwarded
+set. It now emits every captured key-down, while the set tracks one matching
+key-up. The compositor still owns repeat delay and rate. No repeat timer,
+protocol field, or backend device behavior was added.
+
+The i8042 already emits a make for each injected down, in raw set 2 and
+translated set 1. USB HID already treats repeated down events as unchanged
+held-key state and queues no extra reports. New device regressions verify both
+paths, including 2048 repeated USB downs followed by a single release.
+
+T10. The fake-socket core regression forwards three makes and one break, ignores
+an extra break, and stops forwarding after release of capture. Private Xvfb
+holds the native A key until actual host auto-repeat supplies at least three
+protocol key-downs, then verifies one key-up. Both presentation modes pass.
+
+Linux S1 uses a disposable PS/2 guest and reads translated bytes from its own
+`/dev/tty1` through the agent. With a one-second initial hold followed by two
+repeat makes, the old Input::key produced `a\r`; the fix produces `aaa\r`.
+The complete S1 input, resize, and reboot test passed in 28.46 s.
+
+The first positive S1 attempt sent all makes within 100 ms and still yielded
+one character. Linux atkbd filters duplicate makes before half its configured
+repeat delay. The fixture was corrected to model the normal initial delay,
+then rerun against both old and fixed viewer logic. This did not change guest
+keyboard behavior or the production host timing policy. Source:
+https://github.com/torvalds/linux/blob/master/drivers/input/keyboard/atkbd.c
+
+Evidence is in `.scratch/viewer-windows/repeat-core-before.log`,
+`repeat-linux-real-before.log`, `repeat-linux-real-after.log`,
+`repeat-viewer-after.log`, `repeat-devices.log`, and `repeat-clippy.log`.
+The early timing failure remains in `repeat-linux-after.log`.
+The owner's lab was down throughout these checks. Only disposable fixtures
+were used. Physical KDE and Windows desktop repeat remain owner checks;
+the optional hardware dma-buf test skips without a selected render node.
