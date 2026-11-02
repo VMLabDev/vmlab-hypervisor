@@ -204,7 +204,11 @@ impl Input {
     }
 
     pub fn grab(&mut self) {
-        self.grabbed = true;
+        self.grabbed = self.can_grab();
+    }
+
+    pub fn can_grab(&self) -> bool {
+        !self.chord.is_subset(&self.pressed)
     }
 
     pub fn release(&mut self) -> Vec<Message> {
@@ -258,9 +262,6 @@ impl Input {
     }
 
     pub fn button(&mut self, bit: u32, down: bool) -> Vec<Message> {
-        if !self.grabbed {
-            return Vec::new();
-        }
         if down {
             self.buttons |= bit;
         } else {

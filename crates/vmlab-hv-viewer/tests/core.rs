@@ -505,10 +505,70 @@ fn focus_loss_discards_physical_state_and_releases_forwarded_input() {
 }
 
 #[test]
+fn release_chord_without_a_grab_never_starts_one_even_on_a_held_chord_click() {
+    for (first, second) in [(29, 56), (56, 29)] {
+        let mut input = Input::new("ctrl+alt").unwrap();
+        assert!(input.key(first, true).is_empty());
+        assert!(input.key(second, true).is_empty());
+        assert!(!input.grabbed);
+        input.grab();
+        assert!(
+            !input.grabbed,
+            "clicking with the release chord held cannot capture input"
+        );
+        input.key(second, false);
+        input.grab();
+        assert!(input.grabbed);
+        input.key(second, true);
+        assert!(!input.grabbed);
+    }
+}
+
+#[test]
+fn pointer_buttons_work_without_keyboard_capture() {
+    let mut input = Input::new("ctrl+alt").unwrap();
+    assert_eq!(input.button(1, true), vec![Message::Buttons { mask: 1 }]);
+    assert_eq!(input.button(1, false), vec![Message::Buttons { mask: 0 }]);
+    assert!(!input.grabbed);
+}
+
+#[test]
 fn cursor_fallback_shape_hotspot_move_only_and_visibility() {
     let (mut core, server) = pair(true);
     core.input.grab();
-    assert!(core.host_cursor_visible());
+    assert!(core.host_cursor_visible(true), "no frame to draw");
+    configure(&server, 1, &[buffer(7)], SurfaceKind::Shm);
+    process(&mut core);
+    frame(&server, 1, 0, 1, vec![]);
+    let first = process(&mut core).unwrap();
+    core.release(&first).unwrap();
+    receive(&server).unwrap();
+    assert!(!core.host_cursor_visible(true));
+    assert!(core.host_cursor_visible(false));
+    assert!(
+        core.use_fallback_cursor(),
+        "placeholder needs a local arrow"
+    );
+    send(
+        &server,
+        &Message::FrameReady {
+            flags: FrameFlags::default(),
+            surface_id: 1,
+            buffer: 0,
+            seq: 2,
+            timestamp_ns: 0,
+            damage: vec![],
+        },
+        &[],
+    )
+    .unwrap();
+    let guest = process(&mut core).unwrap();
+    core.release(&guest).unwrap();
+    receive(&server).unwrap();
+    assert!(
+        !core.use_fallback_cursor(),
+        "active guest owns software cursor pixels"
+    );
     let shape = Message::CursorShape {
         width: 2,
         height: 2,
@@ -519,7 +579,7 @@ fn cursor_fallback_shape_hotspot_move_only_and_visibility() {
     send(&server, &shape, &[]).unwrap();
     process(&mut core);
     let generation = core.cursor.generation;
-    assert!(!core.host_cursor_visible());
+    assert!(!core.host_cursor_visible(true));
     for (x, y, visible) in [(5, 6, true), (-1, 9, true), (7, 8, false)] {
         send(&server, &Message::CursorState { x, y, visible }, &[]).unwrap();
         process(&mut core);
@@ -531,12 +591,16 @@ fn cursor_fallback_shape_hotspot_move_only_and_visibility() {
         assert_eq!((core.cursor.hot_x, core.cursor.hot_y), (1, 1));
         assert_eq!(core.cursor.argb, vec![255; 16]);
         assert!(
-            !core.host_cursor_visible(),
+            !core.host_cursor_visible(true),
             "explicit guest hide remains authoritative"
         );
     }
     core.input.release();
-    assert!(core.host_cursor_visible());
+    assert!(
+        !core.host_cursor_visible(true),
+        "cursor policy is independent of keyboard capture"
+    );
+    assert!(core.host_cursor_visible(false));
     core.input.grab();
     send(
         &server,
@@ -551,7 +615,8 @@ fn cursor_fallback_shape_hotspot_move_only_and_visibility() {
     )
     .unwrap();
     process(&mut core);
-    assert!(core.host_cursor_visible());
+    assert!(!core.host_cursor_visible(true));
+    assert!(!core.use_fallback_cursor());
     let fallback = vmlab_hv_viewer::Cursor::fallback();
     assert!(fallback.has_shape() && fallback.visible);
     assert_eq!(
@@ -559,6 +624,13 @@ fn cursor_fallback_shape_hotspot_move_only_and_visibility() {
         (fallback.width * fallback.height * 4) as usize
     );
     assert!(fallback.argb.as_chunks::<4>().0.iter().any(|p| p[3] != 0));
+    configure(&server, 2, &[buffer(7)], SurfaceKind::Shm);
+    process(&mut core);
+    assert!(
+        core.host_cursor_visible(true),
+        "replacement configure has no frame yet"
+    );
+    assert!(!core.use_fallback_cursor());
 }
 
 #[test]

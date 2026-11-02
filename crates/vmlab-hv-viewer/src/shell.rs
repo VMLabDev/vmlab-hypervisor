@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 use vmlab_hv_display::{Client, Message, Packet, SurfaceKind};
 use winit::{
     application::ApplicationHandler,
-    event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     platform::scancode::PhysicalKeyExtScancode,
-    window::{CursorGrabMode, Window, WindowId},
+    window::{Window, WindowId},
 };
 
 enum Event {
@@ -33,7 +33,7 @@ struct App {
     clipboard: Option<Worker>,
     error: Option<anyhow::Error>,
     pointer: (f64, f64),
-    pointer_locked: bool,
+    pointer_inside: bool,
     fallback_cursor: crate::Cursor,
     wheel: f64,
     last_title: String,
@@ -62,9 +62,9 @@ impl App {
             "{} - {} - release {} - {}",
             self.options.machine.as_deref().unwrap_or("vmlab-hv"),
             if self.core.input.grabbed {
-                "grabbed"
+                "keyboard grabbed"
             } else {
-                "click to grab"
+                "click to grab keyboard"
             },
             self.options.release_chord,
             locks.trim()
@@ -80,25 +80,18 @@ impl App {
     fn ungrab(&mut self) -> Result<()> {
         let messages = self.core.input.release();
         self.keyboard.take();
-        if let Some(window) = &self.window {
-            window.set_cursor_grab(CursorGrabMode::None)?;
-            window.set_cursor_visible(true);
-        }
-        self.pointer_locked = false;
+        self.update_cursor();
         self.title();
         self.core.send(messages)?;
         Ok(())
     }
 
     fn grab(&mut self) -> Result<()> {
+        if !self.core.input.can_grab() {
+            return Ok(());
+        }
         let window = self.window.as_ref().context("window not ready")?;
         let keyboard = KeyboardGrab::new(window)?;
-        self.pointer_locked = if window.set_cursor_grab(CursorGrabMode::Confined).is_ok() {
-            false
-        } else {
-            window.set_cursor_grab(CursorGrabMode::Locked)?;
-            true
-        };
         self.keyboard = Some(keyboard);
         self.core.input.grab();
         self.update_cursor();
@@ -106,9 +99,10 @@ impl App {
         Ok(())
     }
 
-    fn update_cursor(&self) {
+    fn update_cursor(&mut self) {
+        let _ = self.position_fallback();
         if let Some(window) = &self.window {
-            window.set_cursor_visible(self.core.host_cursor_visible() && !self.pointer_locked);
+            window.set_cursor_visible(self.core.host_cursor_visible(self.pointer_inside));
         }
     }
 
@@ -122,7 +116,7 @@ impl App {
                     .surfaces
                     .get(&frame.surface)
                     .context("missing surface")?;
-                let cursor = if self.pointer_locked && !self.core.cursor.has_shape() {
+                let cursor = if self.core.use_fallback_cursor() {
                     &self.fallback_cursor
                 } else {
                     &self.core.cursor
@@ -157,6 +151,7 @@ impl App {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize();
                 }
+                self.update_cursor();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -181,23 +176,25 @@ impl App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(code) = event.physical_key.to_scancode() {
+                    let was_grabbed = self.core.input.grabbed;
                     let messages = self
                         .core
                         .input
                         .key(code, event.state == ElementState::Pressed);
-                    if !self.core.input.grabbed {
+                    if was_grabbed && !self.core.input.grabbed {
                         self.ungrab()?;
                     }
                     self.core.send(messages)?;
                 }
             }
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::MouseInput { state, button, .. } if self.pointer_inside => {
                 if state == ElementState::Pressed
+                    && button == MouseButton::Left
+                    && self.pointer_inside
                     && !self.core.input.grabbed
                     && let Err(error) = self.grab()
                 {
                     eprintln!("input grab failed: {error:#}");
-                    return Ok(());
                 }
                 let bit = match button {
                     MouseButton::Left => 1,
@@ -212,12 +209,26 @@ impl App {
                 self.core.send(messages)?;
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if !self.pointer_locked {
-                    self.pointer = (position.x, position.y);
-                    self.send_pointer()?;
+                self.pointer = (position.x, position.y);
+                self.send_pointer()?;
+            }
+            WindowEvent::CursorEntered { .. } => {
+                self.pointer_inside = true;
+                self.fallback_cursor.visible = true;
+                self.update_cursor();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } if self.core.input.grabbed => {
+            WindowEvent::CursorLeft { .. } => {
+                self.pointer_inside = false;
+                self.fallback_cursor.visible = false;
+                self.ungrab()?;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } if self.pointer_inside => {
                 self.wheel += match delta {
                     MouseScrollDelta::LineDelta(_, y) => y as f64,
                     MouseScrollDelta::PixelDelta(p) => p.y / 40.,
@@ -230,7 +241,7 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 if let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer) {
-                    let cursor = if self.pointer_locked && !self.core.cursor.has_shape() {
+                    let cursor = if self.core.use_fallback_cursor() {
                         &self.fallback_cursor
                     } else {
                         &self.core.cursor
@@ -244,25 +255,29 @@ impl App {
         Ok(())
     }
 
+    fn position_fallback(&mut self) -> Option<Message> {
+        let frame = self.core.current.as_ref()?;
+        let surface = self.core.surfaces.get(&frame.surface)?;
+        let size = self.window.as_ref()?.inner_size();
+        let message = crate::input::pointer(
+            self.pointer,
+            (size.width, size.height),
+            (surface.width, surface.height),
+        )?;
+        if let Message::PointerAbs { x, y, .. } = &message {
+            self.fallback_cursor.x = *x as i32;
+            self.fallback_cursor.y = *y as i32;
+        }
+        Some(message)
+    }
+
     fn send_pointer(&mut self) -> Result<()> {
-        if self.core.input.grabbed
-            && let Some(frame) = &self.core.current
-            && let Some(surface) = self.core.surfaces.get(&frame.surface)
-            && let Some(window) = &self.window
-            && let Some(message) = {
-                let size = window.inner_size();
-                crate::input::pointer(
-                    self.pointer,
-                    (size.width, size.height),
-                    (surface.width, surface.height),
-                )
-            }
+        if self.pointer_inside
+            && let Some(message) = self.position_fallback()
         {
-            if let Message::PointerAbs { x, y, .. } = &message {
-                self.fallback_cursor.x = *x as i32;
-                self.fallback_cursor.y = *y as i32;
-            }
-            if self.pointer_locked && !self.core.cursor.has_shape() {
+            if self.core.use_fallback_cursor()
+                && let Some(window) = &self.window
+            {
                 window.request_redraw();
             }
             self.core.send([message])?;
@@ -272,21 +287,6 @@ impl App {
 }
 
 impl ApplicationHandler<Event> for App {
-    fn device_event(&mut self, event_loop: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
-        if self.pointer_locked
-            && self.core.input.grabbed
-            && let DeviceEvent::MouseMotion { delta } = event
-            && let Some(window) = &self.window
-        {
-            let size = window.inner_size();
-            self.pointer.0 =
-                (self.pointer.0 + delta.0).clamp(0., size.width.saturating_sub(1) as f64);
-            self.pointer.1 =
-                (self.pointer.1 + delta.1).clamp(0., size.height.saturating_sub(1) as f64);
-            let result = self.send_pointer();
-            self.fail(event_loop, result);
-        }
-    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -396,8 +396,11 @@ pub fn run(options: Options) -> Result<()> {
         clipboard,
         error: None,
         pointer: (0., 0.),
-        pointer_locked: false,
-        fallback_cursor: crate::Cursor::fallback(),
+        pointer_inside: false,
+        fallback_cursor: crate::Cursor {
+            visible: false,
+            ..crate::Cursor::fallback()
+        },
         wheel: 0.,
         last_title: String::new(),
     };

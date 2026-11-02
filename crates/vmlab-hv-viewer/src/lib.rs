@@ -130,7 +130,7 @@ impl Cursor {
         self.width != 0 && self.height != 0
     }
 
-    /// A local arrow for locked pointers when the guest supplies no shape.
+    /// A local arrow for host placeholder frames without a guest cursor shape.
     pub fn fallback() -> Self {
         let rows = [
             "X...........",
@@ -180,8 +180,16 @@ pub struct Core {
 }
 
 impl Core {
-    pub fn host_cursor_visible(&self) -> bool {
-        !self.input.grabbed || !self.cursor.has_shape()
+    pub fn host_cursor_visible(&self, pointer_inside: bool) -> bool {
+        !pointer_inside || self.current.is_none()
+    }
+
+    pub fn use_fallback_cursor(&self) -> bool {
+        !self.cursor.has_shape()
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|frame| frame.flags.has(FrameFlags::PLACEHOLDER))
     }
 
     pub fn connect(path: &Path, shm: bool, chord: &str) -> io::Result<Self> {

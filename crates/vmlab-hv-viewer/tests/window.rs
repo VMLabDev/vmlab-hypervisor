@@ -15,8 +15,8 @@ use x11rb::{
         xfixes::ConnectionExt as _,
         xproto::{
             AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClientMessageEvent,
-            ConfigureWindowAux, ConnectionExt, EventMask, ImageFormat, InputFocus, KEY_PRESS_EVENT,
-            KEY_RELEASE_EVENT,
+            ConfigureWindowAux, ConnectionExt, EventMask, GrabMode, GrabStatus, ImageFormat,
+            InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
         },
         xtest::ConnectionExt as _,
     },
@@ -81,7 +81,7 @@ fn exercise(mode: &str) {
                     "1",
                     "-screen",
                     "0",
-                    "1024x768x24",
+                    "1280x1024x24",
                     "-nolisten",
                     "tcp",
                     "-ac",
@@ -270,6 +270,60 @@ fn exercise(mode: &str) {
             .unwrap()
             .data
     };
+    let ungrabbed = || {
+        let property = connection
+            .get_property(false, window, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 256)
+            .unwrap()
+            .reply()
+            .unwrap();
+        String::from_utf8_lossy(&property.value).contains("click to grab")
+    };
+    let host_visible = || {
+        connection
+            .xfixes_get_cursor_image()
+            .unwrap()
+            .reply()
+            .unwrap()
+            .cursor_image
+            .iter()
+            .any(|p| p >> 24 != 0)
+    };
+    let keyboard_free = || {
+        let reply = connection
+            .grab_keyboard(
+                false,
+                root,
+                x11rb::CURRENT_TIME,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )
+            .unwrap()
+            .reply()
+            .unwrap();
+        assert_eq!(
+            reply.status,
+            GrabStatus::SUCCESS,
+            "native keyboard grab remained active"
+        );
+        connection
+            .ungrab_keyboard(x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        connection.flush().unwrap();
+    };
+    let leave = || {
+        connection
+            .warp_pointer(x11rb::NONE, root, 0, 0, 0, 0, 1100, 900)
+            .unwrap()
+            .check()
+            .unwrap();
+        connection.flush().unwrap();
+        wait(|| {
+            let pointer = connection.query_pointer(root).unwrap().reply().unwrap();
+            pointer.root_x == 1100 && pointer.root_y == 900 && host_visible()
+        });
+    };
     wait(|| pixel(500, 300)[..3] == [0, 0, 255]);
     assert_eq!(&pixel(10, 10)[..3], &[0, 0, 0], "letterbox is black");
     connection
@@ -277,6 +331,60 @@ fn exercise(mode: &str) {
         .unwrap()
         .check()
         .unwrap();
+    connection
+        .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, 500, 300)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| {
+        receiver.try_iter().any(|message| {
+            matches!(
+                message,
+                Message::PointerAbs {
+                    x: 31,
+                    y: 10,
+                    width: 64,
+                    height: 32
+                }
+            )
+        })
+    });
+    wait(|| !host_visible());
+    assert!(ungrabbed(), "hovering cannot capture the keyboard");
+    for key in [37, 64] {
+        connection
+            .xtest_fake_input(KEY_PRESS_EVENT, key, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    for kind in [BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT] {
+        connection
+            .xtest_fake_input(kind, 1, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    wait(|| {
+        receiver
+            .try_iter()
+            .any(|message| matches!(message, Message::Buttons { mask: 0 }))
+    });
+    assert!(
+        ungrabbed(),
+        "a chord without capture, including a held-chord click, cannot grab"
+    );
+    for key in [37, 64] {
+        connection
+            .xtest_fake_input(KEY_RELEASE_EVENT, key, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    keyboard_free();
+    leave();
     connection
         .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, 500, 300)
         .unwrap()
@@ -293,17 +401,23 @@ fn exercise(mode: &str) {
             .try_iter()
             .any(|message| matches!(message, Message::Buttons { mask: 1 }))
     });
-    assert!(
-        connection
-            .xfixes_get_cursor_image()
-            .unwrap()
-            .reply()
-            .unwrap()
-            .cursor_image
-            .iter()
-            .any(|p| p >> 24 != 0),
-        "grab must retain the host cursor when the guest has no shape"
-    );
+    connection
+        .xtest_fake_input(BUTTON_RELEASE_EVENT, 1, x11rb::CURRENT_TIME, root, 0, 0, 0)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| !ungrabbed());
+    leave();
+    wait(ungrabbed);
+    keyboard_free();
+    connection
+        .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, 500, 300)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| !host_visible());
     send(
         &writer,
         &Message::CursorShape {
@@ -381,16 +495,73 @@ fn exercise(mode: &str) {
         &[],
     )
     .unwrap();
+    assert!(
+        !host_visible(),
+        "software guest cursor replaces the host cursor without capture"
+    );
+    assert!(ungrabbed());
+    assert_eq!(
+        &pixel(536, 376)[..3],
+        &[0, 0, 255],
+        "active guest frame has no extra arrow"
+    );
+    send(
+        &writer,
+        &Message::FrameReady {
+            flags: FrameFlags(FrameFlags::PLACEHOLDER),
+            surface_id: 1,
+            buffer: 0,
+            seq: 2,
+            timestamp_ns: 0,
+            damage: vec![],
+        },
+        &[],
+    )
+    .unwrap();
     wait(|| {
-        connection
-            .xfixes_get_cursor_image()
-            .unwrap()
-            .reply()
-            .unwrap()
-            .cursor_image
-            .iter()
-            .any(|p| p >> 24 != 0)
+        receiver
+            .try_iter()
+            .any(|m| matches!(m, Message::Release { seq: 2, .. }))
     });
+    for (x, y) in [(501, 301), (500, 300)] {
+        connection
+            .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, x, y)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    wait(|| pixel(536, 376)[..3] == [255, 255, 255]);
+    connection
+        .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, 300, 400)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| pixel(328, 488)[..3] == [255, 255, 255]);
+    assert_eq!(
+        &pixel(536, 376)[..3],
+        &[0, 0, 255],
+        "fallback follows ungrabbed motion"
+    );
+    leave();
+    wait(|| pixel(328, 488)[..3] == [0, 0, 255]);
+    connection
+        .warp_pointer(x11rb::NONE, window, 0, 0, 0, 0, 300, 400)
+        .unwrap()
+        .check()
+        .unwrap();
+    connection.flush().unwrap();
+    wait(|| pixel(328, 488)[..3] == [255, 255, 255]);
+    for kind in [BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT] {
+        connection
+            .xtest_fake_input(kind, 1, x11rb::CURRENT_TIME, root, 0, 0, 0)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+    connection.flush().unwrap();
+    wait(|| !ungrabbed());
     for (key, down) in [(38, true), (38, false), (37, true), (64, true)] {
         connection
             .xtest_fake_input(
@@ -431,15 +602,8 @@ fn exercise(mode: &str) {
             .any(|message| matches!(message, Message::Key {qcode, ..} if qcode == "alt")),
         "completing chord key is never forwarded"
     );
-    let ungrabbed = || {
-        let property = connection
-            .get_property(false, window, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 256)
-            .unwrap()
-            .reply()
-            .unwrap();
-        String::from_utf8_lossy(&property.value).contains("click to grab")
-    };
     wait(ungrabbed);
+    keyboard_free();
     for (kind, detail) in [
         (KEY_RELEASE_EVENT, 37),
         (KEY_RELEASE_EVENT, 64),
@@ -505,13 +669,14 @@ fn exercise(mode: &str) {
         &[file.as_raw_fd()],
     )
     .unwrap();
+    wait(host_visible);
     send(
         &writer,
         &Message::FrameReady {
             flags: FrameFlags::default(),
             surface_id: 2,
             buffer: 0,
-            seq: 2,
+            seq: 3,
             timestamp_ns: 0,
             damage: vec![],
         },
@@ -526,7 +691,7 @@ fn exercise(mode: &str) {
     assert!(fallback.contains(&Message::Release {
         surface_id: 2,
         buffer: 0,
-        seq: 2
+        seq: 3
     }));
     let green: Vec<_> = [0, 255, 0, 255]
         .into_iter()
@@ -555,7 +720,7 @@ fn exercise(mode: &str) {
             flags: FrameFlags::default(),
             surface_id: 3,
             buffer: 0,
-            seq: 3,
+            seq: 4,
             timestamp_ns: 0,
             damage: vec![],
         },
@@ -565,7 +730,7 @@ fn exercise(mode: &str) {
     wait(|| {
         receiver
             .try_iter()
-            .any(|m| matches!(m, Message::Release { seq: 3, .. }))
+            .any(|m| matches!(m, Message::Release { seq: 4, .. }))
     });
     wait(|| pixel(500, 300)[..3] == [0, 255, 0]);
     file.write_all_at(&[255, 0, 0, 255], 8 * 256 + 20 * 4)
@@ -576,7 +741,7 @@ fn exercise(mode: &str) {
             flags: FrameFlags::default(),
             surface_id: 3,
             buffer: 0,
-            seq: 4,
+            seq: 5,
             timestamp_ns: 0,
             damage: vec![Rect {
                 x: 20,
@@ -591,7 +756,7 @@ fn exercise(mode: &str) {
     wait(|| {
         receiver
             .try_iter()
-            .any(|m| matches!(m, Message::Release { seq: 4, .. }))
+            .any(|m| matches!(m, Message::Release { seq: 5, .. }))
     });
     wait(|| {
         let sample = pixel(256, 206);
@@ -616,7 +781,7 @@ fn exercise(mode: &str) {
             flags: FrameFlags::default(),
             surface_id: 3,
             buffer: 0,
-            seq: 5,
+            seq: 6,
             timestamp_ns: 0,
             damage: vec![Rect {
                 x: 0,
@@ -631,7 +796,7 @@ fn exercise(mode: &str) {
     wait(|| {
         receiver
             .try_iter()
-            .any(|m| matches!(m, Message::Release { seq: 5, .. }))
+            .any(|m| matches!(m, Message::Release { seq: 6, .. }))
     });
     connection.map_window(window).unwrap().check().unwrap();
     connection.flush().unwrap();

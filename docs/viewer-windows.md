@@ -1,5 +1,29 @@
 # Viewer cursor and Windows input fixes
 
+## Verification outcome
+
+The workspace gate is not green. Its Windows 7 acceptance test failed during
+concurrent validation, and the owner stopped the already-failed gate while a
+later test waited for capacity under its original four-VM environment. A device
+test continuation passed 437 tests but timed out in the unchanged virtio-net
+link reconnect test. The other workspace packages then passed with
+`--no-fail-fast`. The full suite was not rerun.
+
+At the owner's request, the two failures were run individually, in order:
+
+- V1. `pc_acceptance::windows_7_agent_snapshot_reset` passed alone in 157.97 s.
+  Snapshot rollback completed in 7.06 s, and reset retained the process,
+  control connection, and agent socket. Evidence is in
+  `.scratch/viewer-windows/isolated-win7.log`.
+- V2. `virtio::net::tests::link_drops_and_reconnects_with_frames_discarded_while_down`
+  passed 20 consecutive isolated runs. Evidence is in
+  `.scratch/viewer-windows/isolated-net-20.log`.
+
+These are recorded as load-sensitive failures, not fixed by this work. The
+initial batch failures remain in `.scratch/viewer-windows/ci.log` and
+`ci-remaining.log`. Formatting and workspace Clippy passed. Focused viewer,
+USB, private-display, Linux S1, and Windows S1 checks cover the changes below.
+
 ## Causes
 
 F1. Grabbing hid the host cursor even when the guest supplied no cursor shape.
@@ -9,11 +33,17 @@ Ubuntu was a text console, so it supplied no evidence that desktop pointer input
 worked. SteamOS's initial cursor state alone does not establish its desktop state.
 The disappearance can affect any guest without a separate cursor shape.
 
-The viewer now retains the host cursor when the guest supplies no shape. A locked
-pointer uses a local arrow at the translated absolute position. A nonempty guest
-shape takes over, including the guest's explicit visibility setting. The renderer
-already applies hotspots and redraws move-only cursor updates; those paths did
-not need a rendering change.
+The first viewer fix retained the host cursor for an empty guest shape. After
+restarting on the corrected hypervisor, the owner confirmed mouse delivery but
+saw both the host cursor and Windows' software cursor. Windows still sends an
+empty hardware cursor shape; its cursor pixels are in the framebuffer.
+
+The owner approved hiding the host cursor over active guest frames, without
+adding an extra local arrow to those frames. Hardware cursor messages remain
+composited with their hotspot and visibility. A local fallback arrow is used
+only for host placeholder frames without a guest shape. It follows pointer
+motion without keyboard capture. Leaving the window or having no frame restores
+the host cursor. Absolute pointer, button, and wheel input do not need capture.
 
 F2. Windows could not enumerate the tablet. Its USB root hub reported Code 43 and
 "The USB hub failed to reset." Ubuntu enumerated the same emulated tablet.
@@ -35,18 +65,25 @@ Both defects reproduce without a guest. Physical key state is now separate from
 forwarded guest key state. Either key order releases on the completing press,
 including a modifier held before clicking or across re-grab. Focus loss clears
 physical state and releases forwarded input. LED messages do not affect it.
-The shell releases the native grabs before sending key releases to the guest.
-The owner's exact repeated-press sequence was not directly observed.
+The shell releases native keyboard capture before sending guest key releases.
+It no longer requests pointer confinement or locking. A no-capture chord stays
+uncaptured; clicking with the complete release chord held cannot capture input.
+Only a left-click can request keyboard capture. The owner's exact KDE
+confinement sequence was not reproduced on the private display, but the old
+held-chord capture and suppressed ungrabbed pointer input were reproduced.
 
 ## Regression checks
 
 - T1. Fake display-server tests cover cursor fallback, hotspot preservation,
   move-only and hide updates, both chord orders, pre-grab modifiers, repeated
-  grabs, interleaved LEDs, focus loss, and matching guest key releases.
+  grabs, interleaved LEDs, focus loss, matching guest key releases, no-capture
+  chords, held-chord clicks, and buttons without keyboard capture.
 - T2. Private Xvfb tests inspect displayed pixels and the X cursor image. They
-  cover no-shape grabs, guest cursor takeover, hotspot alignment, move-only
-  updates without new frames, explicit hiding, empty-shape fallback, and
-  first-press native release with a modifier held before grab. Both mailbox and
+  cover ungrabbed absolute motion, host cursor entry/leave policy, software
+  frames without a fallback overlay, hardware cursor takeover and hotspots,
+  move-only updates, placeholder fallback motion, no-capture chords, held-chord
+  clicks, free pointer exit while keyboard capture is active, and native keyboard
+  release on the first chord. Both mailbox and
   FIFO presentation modes run. These tests never use the owner's display.
 - T3. The USB device regression uses the captured Windows transfer layout.
   Descriptor data must complete successfully before Status is queued, including
@@ -58,7 +95,8 @@ The owner's exact repeated-press sequence was not directly observed.
   sends pointer, button, and key input and exercises the first Ctrl+Alt release.
   It does not assert desktop movement or button state in an interactive Windows
   session. Linux S1 and the USB device tests observe coordinates and reports;
-  Windows desktop input remains a manual check. Firmware, disk, and test
+  The owner confirmed Windows desktop mouse input after restarting on the
+  corrected hypervisor. Firmware, disk, and test
   selection are documented in the viewer README.
 
 Run focused checks with:
@@ -74,8 +112,9 @@ removed when the test exits. No display-protocol fields, shared device traits,
 or snapshot formats changed.
 
 The owner raised this run's host-wide limit from four to six.
-Subsequent focused runs use `VMLAB_HV_TEST_VM_LIMIT=6`; the gate already running
-keeps its original four-VM environment. Private hypervisor binaries must retain
+Subsequent focused runs use `VMLAB_HV_TEST_VM_LIMIT=6`. The original gate kept
+its four-VM environment and was stopped at the owner's request after a failure.
+Private hypervisor binaries must retain
 the `vmlab-hv-test-` prefix so the shared process counter recognizes them.
 
 ## Owner desktop retest
@@ -96,11 +135,14 @@ input, so the manual pointer and button checks below remain required.
 
 1. On Windows 11, check that USB Root Hub and HID-compliant mouse both report OK
    after starting a guest with the rebuilt hypervisor.
-2. Click the viewer and move across the window. Check corners, button clicks,
-   and cursor visibility. Repeat on SteamOS after switching to KDE Plasma.
+2. Move across the window without clicking. Check corners, buttons, wheel,
+   hidden host cursor inside, and restored host cursor outside. Click to capture
+   the keyboard, then move out freely. Repeat on SteamOS in KDE Plasma.
 3. Press left Ctrl then left Alt once. Repeat with the opposite order, and with
    one modifier held before clicking to grab. Each attempt must release the
-   native grab immediately and leave no guest modifier or mouse button held.
+   keyboard grab immediately and leave no guest modifier or mouse button held.
+   Press the chord before capturing and click while holding it. Neither action
+   may start capture or confine the pointer.
 4. Where the guest supplies a hardware cursor, check its hotspot, move-only
    updates, shape changes, and intentional hiding. Record whether the viewer
-   used a guest shape, host cursor, or locked-pointer local arrow.
+   used a hardware cursor, framebuffer software cursor, or placeholder arrow.

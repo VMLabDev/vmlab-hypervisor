@@ -19,19 +19,25 @@ vmlab-hv-viewer --display /path/to/display.sock \
 text clipboard synchronization. The socket must belong to the machine's lab
 daemon. The machine name is local to that daemon, without a lab prefix.
 
-Click to grab keyboard and pointer. Press left Ctrl+Alt to release. The title
+Left-click to grab the keyboard. Press left Ctrl+Alt to release it. The title
 shows the grab state, release chord, and the guest's Num, Caps, and Scroll Lock
 indicators. These indicators mirror protocol LED state. The compositor still
-owns physical host keyboard LEDs. Losing focus releases held guest keys and
-buttons. X11 grabs use winit's Xlib connection. Wayland requires pointer
-constraints and keyboard-shortcuts-inhibit support from the compositor.
+owns physical host keyboard LEDs. Losing focus or leaving the window releases
+held guest keys and buttons. X11 keyboard grabs use winit's Xlib connection.
+Wayland keyboard capture requires keyboard-shortcuts-inhibit support.
 
-The viewer keeps the host cursor visible until the guest supplies a nonempty
-cursor shape. If confinement is unavailable and the pointer must be locked,
-it draws a local arrow instead. Once a guest shape exists, the guest controls
-cursor visibility, including explicit hide requests. Chord detection tracks
-physical keys before and during a grab. The completing chord key stays local;
-only keys forwarded to the guest receive matching releases.
+The pointer is never locked or confined. Absolute motion, buttons, and wheel
+work without keyboard capture, so you can move in and out freely. The host
+cursor is hidden inside the window while a frame exists, including when the
+guest draws a software cursor in its framebuffer. Hardware cursor messages
+are composited separately. Host placeholder frames use a local fallback arrow
+when no guest shape exists. The host cursor returns on leave or when no frame
+exists. Active guest frames never get an extra fallback arrow.
+
+Chord detection tracks physical keys before and during capture. Pressing the
+chord without capture does not grab anything. Clicking while the full chord is
+held cannot start capture. The completing chord key stays local; only keys
+forwarded to the guest receive matching releases.
 
 Use `--release-chord ctrl_r+alt_r` to choose another chord. Chord components are
 QEMU key names, joined by `+`. Both modifiers in the default chord are left-side
