@@ -27,6 +27,32 @@ regression check (D2). TCG baseline method and first numbers:
 ceiling for a slow backend, `--keep` preserves per-run scratch, `--dry-run`
 prints the plan without booting anything.
 
+### Focused phase-2 quiet window
+
+`python3 bench/phase2_window.py` runs only sequential writes, UDP TX, and
+guest-to-guest TCP in both directions. Each backend gets three fresh-overlay
+repeats. The order alternates QEMU/HV, HV/QEMU, QEMU/HV for each suite.
+Allow 6-8 minutes on helios. Builds and CI run outside this window.
+
+Prepare the release binary, iPXE ROM, and existing C benchmark tools first.
+`python3 bench/phase2_window.py --preflight` checks these assets and prints
+their hashes without starting a VM. `--dry-run` prints the twelve-configuration
+plan. `--hv-bin PATH` selects a previously built binary. Its resolved basename
+must be `vmlab-hv` or `vmlab-hv-test-*` so host VM counting includes it.
+
+The script reserves all four shared admission locks and refuses a running
+project VM. Android is excluded. Every launch retains the 24 GiB, zero-swap
+scope and host-wide count check. A one-second monitor checks VM ownership,
+cgroup limits, and host load. Temporary VM directories are removed on success
+or failure; logs and the JSON result remain under `bench/run/phase2-window-*`.
+`--output PATH` selects a new result file and refuses an existing path.
+
+Only a complete cohort appends history: eight records for G4, G7, G9, and
+G10, with three samples each. UDP delivery below 90%, unequal TCP byte counts,
+an unexpected VM exit, or a monitor failure aborts the cohort. The JSON retains
+failed attempts. Exit 0 means measurement completed; strict numerical bar
+verdicts remain explicit in the result. The script changes no default.
+
 ## Workloads
 
 Per guest arch (aarch64, riscv64), per vCPU count (1 and 4), N repeats,
