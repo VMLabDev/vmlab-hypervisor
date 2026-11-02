@@ -267,7 +267,7 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
     d.transfer(1, 64, 64);
     d.ok(0x103, &[0, 0, 64, 64, 0, 1]);
     let first = d.dev.dma_frame().unwrap().unwrap();
-    assert_eq!(&first.pixels[..3], &pixels[..3]);
+    assert_eq!(&first.readback().unwrap()[..3], &pixels[..3]);
     let cpu = d.dev.frame();
     assert_eq!(&cpu.pixels[..3], &pixels[..3]);
     assert_eq!(
@@ -284,8 +284,8 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
         .unwrap();
     d.transfer(1, 64, 64);
     let second = d.dev.dma_frame().unwrap().unwrap();
-    assert_eq!(&second.pixels[..3], &[199, 31, 17]);
-    assert_eq!(&first.pixels[..3], &pixels[..3]);
+    assert_eq!(&second.readback().unwrap()[..3], &[199, 31, 17]);
+    assert_eq!(&first.readback().unwrap()[..3], &pixels[..3]);
     attach[..4].copy_from_slice(&0x202u32.to_le_bytes());
     attach[24..28].copy_from_slice(&1u32.to_le_bytes());
     assert_eq!(code(&d.submit_raw(0, &attach, 2048)), 0x1100);
@@ -318,11 +318,12 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
     }
     assert_eq!(code(&d.submit_raw(0, &submit, 2048)), 0x1100);
     let rendered = d.dev.dma_frame().unwrap().unwrap();
-    for (actual, expected) in rendered.pixels[..3].iter().zip([26u8, 51, 178]) {
+    let rendered = rendered.readback().unwrap();
+    for (actual, expected) in rendered[..3].iter().zip([26u8, 51, 178]) {
         assert!(
             actual.abs_diff(expected) <= 2,
             "virgl clear pixel {:?}",
-            &rendered.pixels[..4]
+            &rendered[..4]
         );
     }
     let mut destroy = vec![0; 24];

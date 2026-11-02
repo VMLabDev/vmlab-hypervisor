@@ -62,8 +62,8 @@ The work is organised in four phases. Where they stand:
 
 Device models in `vmlab-hv-devices` cover the virtio family, the ICH9 chipset,
 VGA and virtio-gpu, HDA, xHCI, and the TPM TIS. The `pipewire` and `pulse`
-cargo features enable the corresponding host audio backends; without them the
-null backend runs.
+cargo features are enabled by default in debug and release builds. Builds with
+`--no-default-features` use the null audio backend.
 
 ## Host requirements
 
@@ -73,7 +73,9 @@ null backend runs.
   edition 2024) and `just`.
 - pkg-config plus virglrenderer >= 1.3.0, EGL, and GBM development libraries.
   `vmlab-hv-devices` probes all three at build time.
-- For the audio features, the libpipewire and libpulse development files
+- For zero-copy GPU export, the Vulkan loader and a Vulkan ICD for the selected
+  render node. Modifier queries use `ash` and need no Vulkan build headers.
+- The libpipewire and libpulse development files for the default audio backends
   (PipeWire also needs libclang for bindgen).
 - Firmware arrives by machine description. SeaBIOS comes from your distro;
   vmlab pins and bundles the OVMF builds it passes, so the host needs no OVMF

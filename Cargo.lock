@@ -67,6 +67,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash"
+version = "0.38.0+1.3.281"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1292,6 +1301,7 @@ name = "vmlab-hv-devices"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "ash",
  "bitflags 2.13.2",
  "glow",
  "libc",
@@ -1311,6 +1321,7 @@ dependencies = [
  "vm-memory",
  "vm-superio",
  "vmlab-disk",
+ "vmlab-hv-display",
  "vmm-sys-util",
  "zerocopy",
 ]

@@ -7,6 +7,8 @@ pub const VERSION: u32 = 1;
 pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 pub const XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 pub const ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
+pub const XBGR8888: u32 = u32::from_le_bytes(*b"XB24");
+pub const ABGR8888: u32 = u32::from_le_bytes(*b"AB24");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capabilities(pub u32);
@@ -17,7 +19,9 @@ impl Capabilities {
     pub const DMABUF_OK: u32 = 8;
     pub const CPU_COPY: u32 = 16;
     pub const FRAME_FLAGS: u32 = 32;
-    pub const ALL: Self = Self(63);
+    /// Version 1 extension: reuse configured dma-buf indices until reconfigure.
+    pub const STABLE_BUFFERS: u32 = 64;
+    pub const ALL: Self = Self(127);
     pub fn has(self, bit: u32) -> bool {
         self.0 & bit != 0
     }

@@ -79,6 +79,7 @@ struct ClientState {
 impl DisplayServer {
     pub fn serve_rfb(&self, mut stream: UnixStream) -> io::Result<()> {
         let _session = self.session(&stream)?;
+        let _cpu = self.cpu_client();
         stream.write_all(b"RFB 003.008\n")?;
         if &read::<12>(&mut stream)? != b"RFB 003.008\n" {
             return Err(invalid("RFB 3.8 required"));
@@ -150,7 +151,7 @@ impl DisplayServer {
                         self.input(Message::Key {
                             qcode: qcode.to_owned(),
                             down: b[0] != 0,
-                        });
+                        })?;
                     }
                 }
                 5 => {
@@ -161,16 +162,16 @@ impl DisplayServer {
                         y: (be16(&b[3..]) as u32).min(frame.height - 1),
                         width: frame.width,
                         height: frame.height,
-                    });
+                    })?;
                     // Native buttons: left, middle, right. Wheel bits are edge pulses.
                     self.input(Message::Buttons {
                         mask: (b[0] & 7) as u32,
-                    });
+                    })?;
                     let pressed = b[0] & !buttons;
                     let dx = i32::from(pressed & 64 != 0) - i32::from(pressed & 32 != 0);
                     let dy = i32::from(pressed & 16 != 0) - i32::from(pressed & 8 != 0);
                     if dx != 0 || dy != 0 {
-                        self.input(Message::Scroll { dx, dy });
+                        self.input(Message::Scroll { dx, dy })?;
                     }
                     buttons = b[0];
                 }
@@ -215,6 +216,16 @@ impl DisplayServer {
                 continue;
             }
             let format = s.format.clone();
+            let pin = if matches!(&frame.pixels, crate::Pixels::Leased { .. }) {
+                Some(None)
+            } else {
+                frame.pixels.pin()
+            };
+            let Some(_pin) = pin else {
+                drop(s);
+                std::thread::park_timeout(Duration::from_millis(1));
+                continue;
+            };
             let encodings = s.encodings.clone();
             let es = s.encoding_seq;
             s.request = None;
@@ -241,7 +252,15 @@ impl DisplayServer {
                 let w = (be16(&request[5..7]) as u32).min(frame.width - x);
                 let h = (be16(&request[7..9]) as u32).min(frame.height - y);
                 if w != 0 && h != 0 {
-                    let pixels = self.cpu_pixels(&frame)?;
+                    let pixels = match self.cpu_pixels(&frame) {
+                        Ok(pixels) => pixels,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            state.lock().unwrap().request.get_or_insert(request);
+                            std::thread::park_timeout(Duration::from_millis(1));
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     rect(&mut out, x as u16, y as u16, w as u16, h as u16, RAW);
                     count += 1;
                     for row in y..y + h {

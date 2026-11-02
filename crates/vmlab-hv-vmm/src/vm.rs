@@ -1130,7 +1130,12 @@ impl VmShared {
             return;
         }
         if let Some(display) = self.display.lock().as_ref() {
-            if let Err(e) = display.publish() {
+            let poll = self
+                .vga
+                .lock()
+                .as_ref()
+                .is_none_or(|vga| vga.poll_scanout());
+            if poll && let Err(e) = display.publish() {
                 log::warn!("display frame: {e}");
             }
             if let Some(vga) = self.vga.lock().as_ref()
@@ -1477,6 +1482,11 @@ impl Vm {
     }
 
     fn join_workers(&mut self) {
+        // A vCPU may be waiting for a viewer's direct-buffer release.
+        // Disconnect readers before joining CPUs so quit cannot wait on a client.
+        if let Some(display) = self.shared.display.lock().as_ref() {
+            display.shutdown();
+        }
         // A kick can arrive between the state check and KVM_RUN. Reassert it
         // until every CPU has left, including CPUs blocked in guest HLT.
         while self.vcpus.iter().any(|cpu| !cpu.is_finished()) {

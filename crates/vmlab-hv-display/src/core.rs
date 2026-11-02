@@ -10,11 +10,11 @@ use std::os::unix::{
     fs::FileExt,
     net::{UnixListener, UnixStream},
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
-/// Published pixels must stay immutable for the lifetime of their Arc.
+/// Immutable snapshots or reusable allocations protected by publication leases.
 #[derive(Clone)]
 pub enum Pixels {
     Shm(Arc<Vec<u8>>),
@@ -22,6 +22,38 @@ pub enum Pixels {
         fd: Arc<OwnedFd>,
         acquire: Option<Arc<OwnedFd>>,
     },
+    /// A reusable allocation, lent only while its publication lease is valid.
+    Leased {
+        buffers: Arc<Vec<Arc<OwnedFd>>>,
+        buffer: u32,
+        acquire: Option<Arc<OwnedFd>>,
+        lease: Arc<crate::BufferLease>,
+        readback: Arc<dyn Fn() -> io::Result<Vec<u8>> + Send + Sync>,
+        cpu: Option<Arc<Vec<u8>>>,
+    },
+}
+
+type DmaDescriptors<'a> = (Vec<&'a Arc<OwnedFd>>, u32, Option<&'a Arc<OwnedFd>>);
+
+impl Pixels {
+    fn dma(&self) -> Option<DmaDescriptors<'_>> {
+        match self {
+            Self::Shm(_) => None,
+            Self::Dmabuf { fd, acquire } => Some((vec![fd], 0, acquire.as_ref())),
+            Self::Leased {
+                buffers,
+                buffer,
+                acquire,
+                ..
+            } => Some((buffers.iter().collect(), *buffer, acquire.as_ref())),
+        }
+    }
+    pub(crate) fn pin(&self) -> Option<Option<crate::BufferGuard>> {
+        match self {
+            Self::Leased { lease, .. } => lease.acquire().map(Some),
+            _ => Some(None),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -54,7 +86,13 @@ impl Frame {
             || self.height > 16384
             || self.stride < self.width * 4
             || self.stride as u64 * self.height as u64 > 256 * 1024 * 1024
-            || ![protocol::XRGB8888, protocol::ARGB8888].contains(&self.drm_fourcc)
+            || ![
+                protocol::XRGB8888,
+                protocol::ARGB8888,
+                protocol::XBGR8888,
+                protocol::ABGR8888,
+            ]
+            .contains(&self.drm_fourcc)
             || self.damage.len() > 65535
             || self.damage.iter().any(|r| {
                 r.x as u64 + r.width as u64 > self.width as u64
@@ -68,13 +106,20 @@ impl Frame {
         {
             return Err(invalid("invalid shm pixels"));
         }
+        if let Pixels::Leased {
+            buffers, buffer, ..
+        } = &self.pixels
+            && (buffers.is_empty() || buffers.len() > 16 || *buffer as usize >= buffers.len())
+        {
+            return Err(invalid("invalid dma-buf pool"));
+        }
         Ok(())
     }
 }
 
-/// Device integration supplies immutable snapshots and synchronized CPU readback.
-/// A dma-buf producer must retain its allocation without rewriting it until all
-/// Arcs to the published Frame have gone away. Readback must wait on acquire.
+/// Device integration supplies snapshots and synchronized CPU readback.
+/// Immutable dma-bufs stay unchanged while any Frame Arc exists. Leased buffers
+/// instead exclude writes until all sampling guards have been released.
 pub trait FrameSource: Send + Sync + 'static {
     fn frame(&self) -> io::Result<Frame>;
     fn readback(&self, frame: &Frame) -> io::Result<Vec<u8>>;
@@ -102,15 +147,18 @@ pub(crate) struct State {
     pub cursor_seq: u64,
     pub leds: u32,
     pub led_seq: u64,
+    revision: u64,
 }
 struct Shared {
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     sessions: Mutex<Vec<Weak<UnixStream>>>,
     capture: Mutex<()>,
     state: Mutex<State>,
     changed: Condvar,
     source: Arc<dyn FrameSource>,
-    sink: Arc<dyn InputSink>,
+    cpu_clients: AtomicUsize,
+    input: Mutex<Option<std::sync::mpsc::SyncSender<Message>>>,
+    input_worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 #[derive(Clone)]
 pub struct DisplayServer {
@@ -120,9 +168,22 @@ impl DisplayServer {
     pub fn new(source: Arc<dyn FrameSource>, sink: Arc<dyn InputSink>) -> io::Result<Self> {
         let frame = source.frame()?;
         frame.validate()?;
+        let closed = Arc::new(AtomicBool::new(false));
+        let stopping = closed.clone();
+        let (input, messages) = std::sync::mpsc::sync_channel(256);
+        let input_worker = std::thread::Builder::new()
+            .name("display-input".into())
+            .spawn(move || {
+                for message in messages {
+                    if stopping.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    sink.input(message);
+                }
+            })?;
         Ok(Self {
             shared: Arc::new(Shared {
-                closed: AtomicBool::new(false),
+                closed,
                 sessions: Mutex::new(Vec::new()),
                 capture: Mutex::new(()),
                 state: Mutex::new(State {
@@ -132,16 +193,20 @@ impl DisplayServer {
                     cursor_seq: 1,
                     leds: 0,
                     led_seq: 1,
+                    revision: 0,
                 }),
                 changed: Condvar::new(),
                 source,
-                sink,
+                cpu_clients: AtomicUsize::new(0),
+                input: Mutex::new(Some(input)),
+                input_worker: Mutex::new(Some(input_worker)),
             }),
         })
     }
     /// Interrupt all sessions, including unfinished handshakes and blocked writes.
     pub fn shutdown(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
+        self.shared.input.lock().unwrap().take();
         for stream in self
             .shared
             .sessions
@@ -152,7 +217,15 @@ impl DisplayServer {
         {
             let _ = stream.shutdown(Shutdown::Both);
         }
-        self.shared.changed.notify_all();
+        {
+            let _state = self.shared.state.lock().unwrap();
+            self.shared.changed.notify_all();
+        }
+        if let Some(worker) = self.shared.input_worker.lock().unwrap().take()
+            && worker.thread().id() != std::thread::current().id()
+        {
+            let _ = worker.join();
+        }
     }
 
     pub(crate) fn session(&self, stream: &UnixStream) -> io::Result<Arc<UnixStream>> {
@@ -171,12 +244,35 @@ impl DisplayServer {
         self.capture(false)
     }
 
+    /// Publish a device flush without calling back into the locked device.
+    pub fn publish_frame(&self, frame: Frame) -> io::Result<()> {
+        frame.validate()?;
+        self.replace(frame, false, None)
+    }
+
+    pub fn needs_cpu(&self) -> bool {
+        self.shared.cpu_clients.load(Ordering::SeqCst) != 0
+    }
+
+    pub(crate) fn cpu_client(&self) -> CpuClient {
+        self.shared.cpu_clients.fetch_add(1, Ordering::SeqCst);
+        CpuClient(self.clone())
+    }
+
     fn capture(&self, force: bool) -> io::Result<()> {
         // Keep capture order and publication order identical for dirty sources.
         let _capture = self.shared.capture.lock().unwrap();
-        let mut frame = self.shared.source.frame()?;
+        let seq = self.shared.state.lock().unwrap().seq;
+        let frame = self.shared.source.frame()?;
         frame.validate()?;
+        self.replace(frame, force, Some(seq))
+    }
+
+    fn replace(&self, mut frame: Frame, force: bool, expected: Option<u64>) -> io::Result<()> {
         let mut state = self.shared.state.lock().unwrap();
+        if expected.is_some_and(|seq| seq != state.seq) {
+            return Ok(());
+        }
         let previous = &state.frame;
         if !force
             && frame.damage.is_empty()
@@ -206,6 +302,7 @@ impl DisplayServer {
         }
         state.frame = Arc::new(frame);
         state.seq += 1;
+        state.revision += 1;
         self.shared.changed.notify_all();
         Ok(())
     }
@@ -226,6 +323,7 @@ impl DisplayServer {
         }
         state.cursor = cursor;
         state.cursor_seq += 1;
+        state.revision += 1;
         self.shared.changed.notify_all();
         Ok(())
     }
@@ -236,6 +334,7 @@ impl DisplayServer {
         }
         state.leds = mask & 7;
         state.led_seq += 1;
+        state.revision += 1;
         self.shared.changed.notify_all();
     }
     pub(crate) fn snapshot(&self) -> (Arc<Frame>, u64, Cursor, u64, u32, u64) {
@@ -249,16 +348,34 @@ impl DisplayServer {
             s.led_seq,
         )
     }
-    pub(crate) fn input(&self, message: Message) {
-        self.shared.sink.input(message);
+    pub(crate) fn input(&self, message: Message) -> io::Result<()> {
+        self.shared
+            .input
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| invalid("display server has stopped"))?
+            .try_send(message)
+            .map_err(|_| invalid("display input queue is full or stopped"))
     }
     pub(crate) fn cpu_pixels(&self, frame: &Frame) -> io::Result<Vec<u8>> {
-        let bytes = match &frame.pixels {
+        let mut bytes = match &frame.pixels {
             Pixels::Shm(b) => b.as_ref().clone(),
             Pixels::Dmabuf { .. } => self.shared.source.readback(frame)?,
+            Pixels::Leased { cpu, readback, .. } => match cpu {
+                Some(bytes) => bytes.as_ref().clone(),
+                None => readback()?,
+            },
         };
         if bytes.len() != frame.stride as usize * frame.height as usize {
             return Err(invalid("invalid readback length"));
+        }
+        if matches!(frame.drm_fourcc, protocol::XBGR8888 | protocol::ABGR8888) {
+            for row in bytes.chunks_mut(frame.stride as usize) {
+                for pixel in row[..frame.width as usize * 4].as_chunks_mut::<4>().0 {
+                    pixel.swap(0, 2);
+                }
+            }
         }
         Ok(bytes)
     }
@@ -288,6 +405,8 @@ impl DisplayServer {
             return Err(invalid("expected display v1 Hello"));
         };
         let caps = Capabilities(capabilities.0 & Capabilities::ALL.0);
+        let _cpu = (caps.has(Capabilities::FRAMES) && !caps.has(Capabilities::DMABUF_OK))
+            .then(|| self.cpu_client());
         if caps.has(Capabilities::FRAMES) {
             self.publish()?;
         }
@@ -305,7 +424,12 @@ impl DisplayServer {
         let server = self.clone();
         let handle = std::thread::spawn(move || {
             let result = server.native_input(&reader, caps, &state);
-            state.lock().unwrap().closed = true;
+            {
+                let mut local = state.lock().unwrap();
+                local.closed = true;
+                local.revision += 1;
+            }
+            let _state = server.shared.state.lock().unwrap();
             server.shared.changed.notify_all();
             let _ = reader.shutdown(Shutdown::Both);
             result
@@ -335,12 +459,18 @@ impl DisplayServer {
                     }
                 }
                 Message::CpuCopy { surface_id } if caps.has(Capabilities::CPU_COPY) => {
-                    let mut s = local.lock().unwrap();
-                    if s.surface != surface_id {
+                    if local.lock().unwrap().surface != surface_id {
                         return Err(invalid("CpuCopy names stale surface"));
                     }
-                    self.capture(true)?;
-                    s.cpu_copy = true;
+                    if matches!(
+                        self.shared.state.lock().unwrap().frame.pixels,
+                        Pixels::Leased { .. }
+                    ) {
+                        self.shared.state.lock().unwrap().seq += 1;
+                    } else {
+                        self.capture(true)?;
+                    }
+                    local.lock().unwrap().cpu_copy = true;
                 }
                 Message::Key { .. }
                 | Message::PointerAbs { .. }
@@ -348,17 +478,19 @@ impl DisplayServer {
                 | Message::Scroll { .. }
                     if caps.has(Capabilities::INPUT) =>
                 {
-                    self.input(msg)
+                    self.input(msg)?
                 }
                 Message::RequestSize { width, height }
                     if caps.has(Capabilities::INPUT)
                         && (1..=16384).contains(&width)
                         && (1..=16384).contains(&height) =>
                 {
-                    self.input(msg)
+                    self.input(msg)?
                 }
                 _ => return Err(invalid("unexpected client message or missing capability")),
             }
+            local.lock().unwrap().revision += 1;
+            let _state = self.shared.state.lock().unwrap();
             self.shared.changed.notify_all();
         }
     }
@@ -369,23 +501,26 @@ impl DisplayServer {
         local: &Mutex<ClientState>,
     ) -> io::Result<()> {
         let mut ring: Vec<File> = Vec::new();
+        let mut dma_buffers: Vec<Arc<OwnedFd>> = Vec::new();
         let mut geometry = None;
         let mut surface = 0;
         let mut last = 0;
         let mut cursor_seen = 0;
         let mut led_seen = 0;
         let mut cpu_mode = !caps.has(Capabilities::DMABUF_OK);
+        let mut cpu_client = None;
         loop {
-            let (closed, cpu_copy, can_send_frame) = {
+            let (closed, cpu_copy, can_send_frame, local_revision) = {
                 let s = local.lock().unwrap();
                 (
                     s.closed,
                     s.cpu_copy,
                     caps.has(Capabilities::FRAMES) && s.held.len() < 3,
+                    s.revision,
                 )
             };
             // Keep metadata flowing when the ring is full without pinning skipped pixels.
-            let (frame, seq, cursor, cs, leds, ls) = {
+            let (frame, seq, cursor, cs, leds, ls, revision) = {
                 let s = self.shared.state.lock().unwrap();
                 (
                     can_send_frame.then(|| s.frame.clone()),
@@ -394,6 +529,7 @@ impl DisplayServer {
                     s.cursor_seq,
                     s.leds,
                     s.led_seq,
+                    s.revision,
                 )
             };
             if closed || self.shared.closed.load(Ordering::SeqCst) {
@@ -430,26 +566,58 @@ impl DisplayServer {
                 && (seq != last || cpu_copy)
             {
                 cpu_mode |= cpu_copy;
-                let dma = matches!(frame.pixels, Pixels::Dmabuf { .. })
-                    && caps.has(Capabilities::DMABUF_OK)
-                    && !cpu_mode;
+                if cpu_copy && cpu_client.is_none() && caps.has(Capabilities::DMABUF_OK) {
+                    cpu_client = Some(self.cpu_client());
+                }
+                let dma =
+                    frame.pixels.dma().is_some() && caps.has(Capabilities::DMABUF_OK) && !cpu_mode;
                 let geom = (
                     frame.generation,
                     frame.width,
                     frame.height,
                     frame.stride,
-                    frame.drm_fourcc,
+                    if !dma && frame.drm_fourcc == protocol::XBGR8888 {
+                        protocol::XRGB8888
+                    } else if !dma && frame.drm_fourcc == protocol::ABGR8888 {
+                        protocol::ARGB8888
+                    } else {
+                        frame.drm_fourcc
+                    },
                     if dma { frame.modifier } else { 0 },
                     dma,
                 );
+                let pin = if !dma && matches!(&frame.pixels, Pixels::Leased { .. }) {
+                    Some(None)
+                } else {
+                    frame.pixels.pin()
+                };
+                let Some(pin) = pin else {
+                    std::thread::park_timeout(Duration::from_millis(1));
+                    continue;
+                };
                 let mut s = local.lock().unwrap();
                 // Old dma-buf Frames stay alive until Release, even after reconfigure.
                 if s.held.len() < 3 {
-                    let reconfigure = geometry != Some(geom) || dma;
+                    let stable = caps.has(Capabilities::STABLE_BUFFERS);
+                    let buffers_changed = dma
+                        && frame.pixels.dma().is_some_and(|(buffers, _, _)| {
+                            buffers.len() != dma_buffers.len()
+                                || buffers
+                                    .iter()
+                                    .zip(&dma_buffers)
+                                    .any(|(a, b)| !Arc::ptr_eq(a, b))
+                        });
+                    let reconfigure =
+                        geometry != Some(geom) || (dma && (!stable || buffers_changed));
                     if reconfigure {
                         surface += 1;
                         s.surface = surface;
                         ring.clear();
+                        dma_buffers = if dma {
+                            frame.pixels.dma().unwrap().0.into_iter().cloned().collect()
+                        } else {
+                            Vec::new()
+                        };
                         if !dma {
                             for _ in 0..3 {
                                 ring.push(memfd(frame.stride as u64 * frame.height as u64)?);
@@ -458,19 +626,28 @@ impl DisplayServer {
                         geometry = Some(geom);
                     }
                     let index = if dma {
-                        Some(0)
+                        Some(if stable {
+                            frame.pixels.dma().unwrap().1
+                        } else {
+                            0
+                        })
                     } else {
                         (0..3).find(|i| !s.held.keys().any(|(sid, b, _)| *sid == surface && b == i))
                     };
                     if let Some(index) = index {
-                        s.held.insert((surface, index, seq), frame.clone());
+                        // Only dma-buf clients retain a producer lease through Release.
+                        // CPU readback below owns its own transient lease.
+                        let (dma_pin, cpu_pin) = if dma { (pin, None) } else { (None, pin) };
+                        s.held
+                            .insert((surface, index, seq), (frame.clone(), dma_pin));
                         drop(s);
                         if reconfigure {
-                            let fds = if let Pixels::Dmabuf { fd, .. } = &frame.pixels {
-                                if dma {
-                                    vec![fd.as_raw_fd()]
+                            let fds = if dma {
+                                let (buffers, buffer, _) = frame.pixels.dma().unwrap();
+                                if stable {
+                                    buffers.iter().map(|fd| fd.as_raw_fd()).collect()
                                 } else {
-                                    ring.iter().map(AsRawFd::as_raw_fd).collect()
+                                    vec![buffers[buffer as usize].as_raw_fd()]
                                 }
                             } else {
                                 ring.iter().map(AsRawFd::as_raw_fd).collect()
@@ -481,7 +658,7 @@ impl DisplayServer {
                                     surface_id: surface,
                                     width: frame.width,
                                     height: frame.height,
-                                    drm_fourcc: frame.drm_fourcc,
+                                    drm_fourcc: geom.4,
                                     stride: frame.stride,
                                     modifier: geom.5,
                                     kind: if dma {
@@ -495,13 +672,28 @@ impl DisplayServer {
                             )?;
                         }
                         if !dma {
-                            ring[index as usize].write_all_at(&self.cpu_pixels(&frame)?, 0)?;
+                            let pixels = match self.cpu_pixels(&frame) {
+                                Ok(pixels) => pixels,
+                                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                    local.lock().unwrap().held.remove(&(surface, index, seq));
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            ring[index as usize].write_all_at(&pixels, 0)?;
+                            drop(cpu_pin);
+                            // Shm has its own immutable storage; it need not stall the guest.
                         }
-                        let sync = match &frame.pixels {
-                            Pixels::Dmabuf {
-                                acquire: Some(fd), ..
-                            } if dma => vec![fd.as_raw_fd()],
-                            _ => vec![],
+                        let sync = if dma {
+                            frame
+                                .pixels
+                                .dma()
+                                .unwrap()
+                                .2
+                                .map(|fd| vec![fd.as_raw_fd()])
+                                .unwrap_or_default()
+                        } else {
+                            vec![]
                         };
                         // A skipped frame may have damaged pixels outside the latest damage list.
                         let damage = if reconfigure || seq != last + 1 || cpu_copy {
@@ -533,22 +725,33 @@ impl DisplayServer {
                     }
                 }
             }
-            // Bounded wait also handles a Release racing with the snapshot above.
+            // The reader drops its local lock before taking state to notify.
+            // Checking both revisions under state prevents lost wakeups on Release.
             let state = self.shared.state.lock().unwrap();
-            let _ = self
-                .shared
-                .changed
-                .wait_timeout(state, Duration::from_millis(10))
-                .unwrap();
+            if state.revision == revision
+                && local.lock().unwrap().revision == local_revision
+                && !self.shared.closed.load(Ordering::SeqCst)
+            {
+                drop(self.shared.changed.wait(state).unwrap());
+            }
         }
     }
 }
 #[derive(Default)]
 struct ClientState {
-    held: BTreeMap<(u64, u32, u64), Arc<Frame>>,
+    held: BTreeMap<(u64, u32, u64), HeldFrame>,
     closed: bool,
     cpu_copy: bool,
     surface: u64,
+    revision: u64,
+}
+type HeldFrame = (Arc<Frame>, Option<crate::BufferGuard>);
+
+pub(crate) struct CpuClient(DisplayServer);
+impl Drop for CpuClient {
+    fn drop(&mut self) {
+        self.0.shared.cpu_clients.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 fn memfd(size: u64) -> io::Result<File> {
     // SAFETY: The name is NUL-terminated and flags are valid for memfd_create.

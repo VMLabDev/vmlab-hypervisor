@@ -631,7 +631,8 @@ mod tests {
         .unwrap();
         log::debug!("retained debug record");
         // Exercise the devices crate's real logging path with its null backend.
-        let _audio = vmlab_hv_devices::audio::select_backend("diagnostic-test", "diagnostic test");
+        let audio = vmlab_hv_devices::audio::select_backend("diagnostic-test", "diagnostic test");
+        assert_eq!(audio.name(), "null");
         let _locked_log_ring =
             std::env::var_os("VMLAB_HV_PANIC_TEST_LOCK").map(|_| LOGGER.get().unwrap().logs.lock());
         panic!("injected panic containing {fake}");
@@ -648,6 +649,8 @@ mod tests {
             ])
             .env("VMLAB_HV_PANIC_TEST_DIR", directory.path())
             .env("VMLAB_HV_LOG", "off")
+            .env("XDG_RUNTIME_DIR", directory.path())
+            .env_remove("PULSE_SERVER")
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(3));
@@ -726,6 +729,8 @@ mod tests {
             .env("VMLAB_HV_PANIC_TEST_DIR", directory.path())
             .env("VMLAB_HV_PANIC_TEST_LOCK", "1")
             .env("VMLAB_HV_LOG", "off")
+            .env("XDG_RUNTIME_DIR", directory.path())
+            .env_remove("PULSE_SERVER")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()

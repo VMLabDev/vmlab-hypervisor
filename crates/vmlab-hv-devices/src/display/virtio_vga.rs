@@ -116,6 +116,12 @@ impl VirtioVga {
     pub fn dma_frame(&self) -> Result<Option<crate::virtio::gpu::DmaFrame>, DeviceError> {
         self.gpu.dma_frame()
     }
+    pub fn set_display_sink(&self, sink: Arc<dyn crate::virtio::gpu::DisplaySink>) {
+        self.gpu.set_display_sink(sink);
+    }
+    pub fn poll_scanout(&self) -> bool {
+        self.gpu.poll_scanout()
+    }
 
     pub fn set_aperture_base(&self, base: Option<u64>) -> Result<(), DeviceError> {
         self.gpu.set_aperture_base(base)
