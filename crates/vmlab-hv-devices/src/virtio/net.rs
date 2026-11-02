@@ -35,7 +35,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use virtio_queue::{Queue, QueueOwnedT, QueueState, QueueT};
-use vm_memory::{Address, Bytes, GuestAddress};
+use vm_memory::bitmap::Bitmap;
+use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, VolatileSlice};
 
 use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
 
@@ -309,7 +310,16 @@ fn run(
             let revents = polls[1].revents;
             let dead = revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0;
             if revents & libc::POLLIN != 0 {
-                match read_frames(&shared, stream.as_mut().unwrap()) {
+                let features = negotiated.load(Ordering::Acquire);
+                let socket = stream.as_mut().unwrap();
+                let received = read_guest_frame(
+                    &shared,
+                    socket,
+                    hdr_len(features),
+                    features & F_MRG_RXBUF != 0,
+                )
+                .unwrap_or_else(|| read_frames(&shared, socket));
+                match received {
                     Ok(()) => {
                         let features = negotiated.load(Ordering::Acquire);
                         place_rx_frames(&shared, hdr_len(features), features & F_MRG_RXBUF != 0);
@@ -436,6 +446,168 @@ fn drop_link(stream: &mut Option<UnixStream>, shared: &Arc<Mutex<Shared>>) {
 /// always finishes first, and cannot coexist with a queued complete frame).
 fn rx_may_read(shared: &Arc<Mutex<Shared>>) -> bool {
     lock(shared).rx_pending.is_empty()
+}
+
+/// Read one complete packet directly into available guest buffers. A partial
+/// packet is copied into the existing decoder state without publishing DMA.
+/// Return None when the buffered decoder must handle framing or backpressure.
+fn read_guest_frame(
+    shared: &Arc<Mutex<Shared>>,
+    stream: &mut UnixStream,
+    hdr: usize,
+    mergeable: bool,
+) -> Option<Result<(), ()>> {
+    let mut guard = lock(shared);
+    let sh = &mut *guard;
+    if sh.snapshot_paused || !sh.rx_pending.is_empty() || !matches!(sh.rx, RxRead::Idle) {
+        return None;
+    }
+    let mem = sh.mem.as_ref()?;
+    let q = sh.queues.get_mut(usize::from(RXQ))?.as_mut()?;
+    let mut prefix = [0u8; 4];
+    let received = loop {
+        match stream.read(&mut prefix) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => break result,
+        }
+    };
+    match received {
+        Ok(4) => {}
+        Ok(0) => return Some(Err(())),
+        Ok(got) => {
+            sh.rx = RxRead::Prefix { buf: prefix, got };
+            return Some(Ok(()));
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Some(Ok(())),
+        Err(_) => return Some(Err(())),
+    }
+    let len = u32::from_be_bytes(prefix) as usize;
+    if len > MAX_FRAME {
+        return Some(Err(()));
+    }
+    if len == 0 {
+        sh.rx_pending.push_back(Vec::new());
+        return Some(Ok(()));
+    }
+    let start = q.next_avail();
+    let old_used = q.next_used();
+    let mut header = Vec::new();
+    let mut payload = Vec::new();
+    let mut entries = Vec::new();
+    let mut remaining = len;
+    let prepared = (|| {
+        while remaining != 0 {
+            let chain = q.iter(mem).ok()?.next()?;
+            let head = chain.head_index();
+            let mut capacity = 0usize;
+            let mut skip = if entries.is_empty() { hdr } else { 0 };
+            let mut written = skip;
+            for descriptor in chain.writable() {
+                let slice = mem
+                    .get_slice(descriptor.addr(), descriptor.len() as usize)
+                    .ok()?;
+                capacity = capacity.checked_add(slice.len())?;
+                let offset = skip.min(slice.len());
+                skip -= offset;
+                if offset != 0 {
+                    header.push(slice.subslice(0, offset).ok()?);
+                }
+                let count = (slice.len() - offset).min(remaining);
+                if count != 0 {
+                    payload.push(slice.subslice(offset, count).ok()?);
+                    remaining -= count;
+                    written += count;
+                }
+            }
+            if capacity < hdr || skip != 0 || payload.len() > 1024 {
+                return None;
+            }
+            entries.push((head, written as u32));
+            if remaining != 0 && (!mergeable || entries.len() >= usize::from(q.size())) {
+                return None;
+            }
+        }
+        Some(())
+    })();
+    if prepared.is_none() {
+        q.set_next_avail(start);
+        sh.rx = RxRead::Body {
+            buf: vec![0; len],
+            got: 0,
+        };
+        return Some(Ok(()));
+    }
+    let _ = q.disable_notification(mem);
+    let count = {
+        let guards: Vec<_> = payload.iter().map(VolatileSlice::ptr_guard_mut).collect();
+        let vectors: Vec<_> = guards
+            .iter()
+            .zip(&payload)
+            .map(|(guard, slice)| libc::iovec {
+                iov_base: guard.as_ptr().cast(),
+                iov_len: slice.len(),
+            })
+            .collect();
+        for slice in &payload {
+            slice.bitmap().mark_dirty(0, slice.len());
+        }
+        loop {
+            // SAFETY: validated writable mappings and their guards remain live
+            // until readv completes. No Rust reference aliases the guest bytes.
+            let read =
+                unsafe { libc::readv(stream.as_raw_fd(), vectors.as_ptr(), vectors.len() as i32) };
+            if read >= 0 {
+                break Ok(read as usize);
+            }
+            match io::Error::last_os_error().kind() {
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock => break Ok(0),
+                _ => break Err(()),
+            }
+        }
+    };
+    let Ok(count) = count else {
+        q.set_next_avail(start);
+        return Some(Err(()));
+    };
+    if count != len {
+        let mut bytes = vec![0; len];
+        let mut copied = 0;
+        for slice in &payload {
+            let take = slice.len().min(count - copied);
+            slice.copy_to(&mut bytes[copied..copied + take]);
+            copied += take;
+            if copied == count {
+                break;
+            }
+        }
+        sh.rx = RxRead::Body {
+            buf: bytes,
+            got: count,
+        };
+        q.set_next_avail(start);
+        return Some(Ok(()));
+    }
+    let mut bytes = [0; 12];
+    if hdr == 12 {
+        bytes[10..].copy_from_slice(&(entries.len() as u16).to_le_bytes());
+    }
+    let mut copied = 0;
+    for slice in header {
+        slice.copy_from(&bytes[copied..copied + slice.len()]);
+        copied += slice.len();
+    }
+    if publish_receive(mem, q, &entries).is_err() {
+        return Some(Err(()));
+    }
+    let irq = needs_receive_interrupt(q, mem, old_used)
+        .then(|| sh.interrupt.clone())
+        .flatten();
+    drop(guard);
+    if let Some(irq) = irq {
+        irq.notify_queue(RXQ);
+    }
+    Some(Ok(()))
 }
 
 /// Read length-prefixed frames off the switch socket into `rx_pending`.
@@ -1182,6 +1354,85 @@ mod tests {
         pending.store(false, Ordering::Release);
         notify_worker(&sender, &pending);
         assert_eq!(receiver.read(&mut bytes).unwrap(), 1);
+    }
+    #[test]
+    fn direct_receive_handles_split_headers_and_mergeable_buffers() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        let first = f.data(2);
+        let second = f.data(3);
+        let third = f.data(4);
+        f.vqs[0].add_chain(&f.mem, &[(first, 5, true), (second, 20, true)]);
+        f.vqs[0].add_chain(&f.mem, &[(third, 256, true)]);
+        let frame: Vec<_> = (0..128).map(|n| n as u8).collect();
+        let (mut producer, mut receiver) = UnixStream::pair().unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        producer
+            .write_all(&(frame.len() as u32).to_be_bytes())
+            .unwrap();
+        producer.write_all(&frame).unwrap();
+        assert_eq!(
+            read_guest_frame(&f.dev.shared, &mut receiver, 12, true),
+            Some(Ok(()))
+        );
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 2);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, 0).1, 25);
+        assert_eq!(f.vqs[0].used_entry(&f.mem, 1).1, 115);
+        let mut bytes = [0; 140];
+        f.mem
+            .read_slice(&mut bytes[..5], GuestAddress(first))
+            .unwrap();
+        f.mem
+            .read_slice(&mut bytes[5..25], GuestAddress(second))
+            .unwrap();
+        f.mem
+            .read_slice(&mut bytes[25..], GuestAddress(third))
+            .unwrap();
+        assert_eq!(&bytes[..10], &[0; 10]);
+        assert_eq!(&bytes[10..12], &2u16.to_le_bytes());
+        assert_eq!(&bytes[12..], &frame);
+    }
+
+    #[test]
+    fn partial_direct_receive_survives_snapshot_before_publication() {
+        let mut f = Fixture::new();
+        let _switch = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        let address = f.data(2);
+        f.vqs[0].add_chain(&f.mem, &[(address, 256, true)]);
+        let frame: Vec<_> = (0..128).map(|n| n as u8).collect();
+        let (mut producer, mut receiver) = UnixStream::pair().unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        producer
+            .write_all(&(frame.len() as u32).to_be_bytes())
+            .unwrap();
+        producer.write_all(&frame[..37]).unwrap();
+        assert_eq!(
+            read_guest_frame(&f.dev.shared, &mut receiver, 12, true),
+            Some(Ok(()))
+        );
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
+        assert!(matches!(
+            lock(&f.dev.shared).rx,
+            RxRead::Body { got: 37, .. }
+        ));
+        f.dev.quiesce();
+        let snapshot = f.dev.save_state().unwrap();
+        lock(&f.dev.shared).rx = RxRead::Idle;
+        f.dev.restore_state(&snapshot).unwrap();
+        producer.write_all(&frame[37..]).unwrap();
+        read_frames(&f.dev.shared, &mut receiver).unwrap();
+        lock(&f.dev.shared).snapshot_paused = false;
+        place_rx_frames(&f.dev.shared, 12, true);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 1);
+        let mut received = vec![0; frame.len()];
+        f.mem
+            .read_slice(&mut received, GuestAddress(address + 12))
+            .unwrap();
+        assert_eq!(received, frame);
     }
     /// Guest memory: 288 MiB, room for the queues' rings plus buffers.
     const MEM_SIZE: u64 = 288 * 1024 * 1024;
