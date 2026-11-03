@@ -793,7 +793,7 @@ fn read_frames(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(
         let mut counts = vec![0usize; usize::from(vnet.active_pairs)];
         for body in &sh.rx_pending {
             if let Ok((_, _, frame)) = Header::from_metadata(body) {
-                counts[pair_for(frame)] += 1;
+                counts[pair_for(frame)] += body.len();
             }
         }
         let mut accepted = Vec::new();
@@ -801,8 +801,8 @@ fn read_frames(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(
             let (_, _, frame) = Header::from_metadata(&body).map_err(|_| ())?;
             let count = &mut counts[pair_for(frame)];
             // A stalled queue must neither block other flows nor grow without bound.
-            if *count < 8 {
-                *count += 1;
+            if count.saturating_add(body.len()) <= MAX_TX_STAGE {
+                *count += body.len();
                 accepted.push(body);
             }
         }
@@ -2751,6 +2751,37 @@ mod tests {
                 assert!(lock(&f.dev.shared).rx_pending.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn vnet_receive_budget_accepts_bursts_and_bounds_stalled_queue_bytes() {
+        let mut f = Fixture::new_mode(Some(1));
+        let _socket = f.take_switch_side();
+        f.dev.quiesce();
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let (_, frame) = gso_packet(true, 64);
+        let body = vnet_body(Header::default(), &frame);
+        let mut burst = Vec::new();
+        for _ in 0..64 {
+            burst.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            burst.extend_from_slice(&body);
+        }
+        sender.write_all(&burst).unwrap();
+        read_frames(&f.dev.shared, &mut receiver).unwrap();
+        assert_eq!(lock(&f.dev.shared).rx_pending.len(), 64);
+        lock(&f.dev.shared).rx_pending.clear();
+        let body = vnet_body(Header::default(), &vec![0; MAX_FRAME]);
+        for _ in 0..32 {
+            sender
+                .write_all(&(body.len() as u32).to_be_bytes())
+                .unwrap();
+            sender.write_all(&body).unwrap();
+            read_frames(&f.dev.shared, &mut receiver).unwrap();
+        }
+        let state = lock(&f.dev.shared);
+        assert!(state.rx_pending.iter().map(Vec::len).sum::<usize>() <= MAX_TX_STAGE);
+        assert!(state.rx_pending.len() >= 15);
     }
 
     #[test]
