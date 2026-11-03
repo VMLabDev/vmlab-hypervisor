@@ -13,7 +13,12 @@ use vmlab_hv_vmm::{VmHandle, builder, control, diagnostics, vm::ExitReason};
 
 use crate::devices::DeviceSet;
 
-const USAGE: &str = "usage: vmlab-hv --machine <machine.json> --control <control.sock> [--paused]";
+const USAGE: &str = "usage: vmlab-hv --machine <machine.json> --control <control.sock> [--paused]\n       vmlab-hv --probe";
+
+enum Invocation {
+    Run(Args),
+    Probe,
+}
 
 struct Args {
     machine: PathBuf,
@@ -21,16 +26,18 @@ struct Args {
     paused: bool,
 }
 
-fn parse_args() -> Result<Args, String> {
+fn parse_args(argv: impl Iterator<Item = String>) -> Result<Invocation, String> {
     let mut machine = None;
     let mut control = None;
     let mut paused = false;
-    let mut argv = std::env::args().skip(1);
+    let mut probe = false;
+    let mut argv = argv;
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--machine" => machine = Some(next_value(&mut argv, &arg)?),
             "--control" => control = Some(next_value(&mut argv, &arg)?),
             "--paused" => paused = true,
+            "--probe" => probe = true,
             "--help" | "-h" => {
                 println!("{USAGE}");
                 log::info!("process exit: help; exit_code=0");
@@ -39,17 +46,53 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
-    Ok(Args {
+    if probe {
+        if machine.is_some() || control.is_some() || paused {
+            return Err("--probe cannot be combined with machine arguments".into());
+        }
+        return Ok(Invocation::Probe);
+    }
+    Ok(Invocation::Run(Args {
         machine: machine.ok_or("missing --machine")?,
         control: control.ok_or("missing --control")?,
         paused,
-    })
+    }))
 }
 
 fn next_value(argv: &mut impl Iterator<Item = String>, flag: &str) -> Result<PathBuf, String> {
     argv.next()
         .map(PathBuf::from)
         .ok_or_else(|| format!("{flag} needs a value"))
+}
+
+#[cfg(test)]
+mod args_tests {
+    use super::*;
+
+    #[test]
+    fn probe_needs_no_machine_and_refuses_launch_arguments() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(|s| s.to_string()));
+        assert!(matches!(parse(&["--probe"]), Ok(Invocation::Probe)));
+        for args in [
+            vec!["--probe", "--paused"],
+            vec!["--probe", "--machine", "unused"],
+            vec!["--probe", "--control", "unused"],
+            vec!["--probe", "--unknown"],
+            vec![],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+        assert!(matches!(
+            parse(&[
+                "--machine",
+                "machine.json",
+                "--control",
+                "control.sock",
+                "--paused"
+            ]),
+            Ok(Invocation::Run(Args { paused: true, .. }))
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -76,8 +119,23 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(ProcessExitReason::StartupError.exit_code());
     }
-    let args = match parse_args() {
-        Ok(args) => args,
+    let args = match parse_args(std::env::args().skip(1)) {
+        Ok(Invocation::Run(args)) => args,
+        Ok(Invocation::Probe) => {
+            return match vmlab_hv_vmm::host::probe() {
+                Ok(facts) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&facts).expect("serialize host facts")
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    log::error!("host probe: {error}; exit_reason=startup_error exit_code=2");
+                    ExitCode::from(ProcessExitReason::StartupError.exit_code())
+                }
+            };
+        }
         Err(message) => {
             log::error!("{message}\n{USAGE}; exit_reason=startup_error exit_code=2");
             return ExitCode::from(ProcessExitReason::StartupError.exit_code());

@@ -115,6 +115,7 @@ pub(crate) fn configure_tsc(
         .map_err(|e| VmmError::ioctl("KVM_GET_CPUID2", e))?
         .as_slice()
         .to_vec();
+    timing_leaves(&mut entries, khz);
     for entry in &mut entries {
         if entry.function == 1 && desc.vmware_cpuid_freq {
             entry.ecx |= 1 << 31;
@@ -122,16 +123,12 @@ pub(crate) fn configure_tsc(
         if entry.function == 0x80000007 {
             entry.edx = (entry.edx & !(1 << 8)) | (u32::from(desc.invtsc) << 8);
         }
-        if entry.function == 0x40000000 {
-            entry.eax = if desc.vmware_cpuid_freq {
-                0x40000010
-            } else {
-                0x40000001
-            };
+        if entry.function == 0x40000000 && desc.vmware_cpuid_freq {
+            entry.eax = 0x40000010;
         }
     }
-    entries.retain(|entry| entry.function != 0x40000010);
     if desc.vmware_cpuid_freq {
+        entries.retain(|entry| entry.function != 0x40000010);
         entries.push(kvm_cpuid_entry2 {
             function: 0x40000010,
             eax: khz,
@@ -142,6 +139,26 @@ pub(crate) fn configure_tsc(
     let cpuid = CpuId::from_entries(&entries).map_err(|e| VmmError::Other(e.to_string()))?;
     cpu.set_cpuid2(&cpuid)
         .map_err(|e| VmmError::ioctl("KVM_SET_CPUID2", e))
+}
+
+fn timing_leaves(entries: &mut [kvm_cpuid_entry2], khz: u32) {
+    // Keep the model's advertised leaves; never expose a host crystal ratio
+    // that describes a different TSC from the one KVM runs.
+    for entry in entries {
+        match entry.function {
+            0x15 => {
+                entry.eax = 1000;
+                entry.ebx = khz;
+                entry.ecx = 1_000_000;
+                entry.edx = 0;
+            }
+            0x16 => {
+                entry.eax = khz / 1000;
+                entry.ebx = khz / 1000;
+            }
+            _ => {}
+        }
+    }
 }
 
 pub(crate) fn configure_msrs(kvm: &KvmVm, policy: MsrPolicy) -> Result<(), VmmError> {
@@ -351,6 +368,74 @@ mod tests {
             .unwrap();
         assert_eq!(bytes, [0; 8]);
         assert_eq!(seen.len(), 1);
+    }
+
+    #[test]
+    fn timing_leaves_describe_the_pin_without_adding_leaves() {
+        let mut entries = [
+            kvm_cpuid_entry2 {
+                function: 0x15,
+                ..Default::default()
+            },
+            kvm_cpuid_entry2 {
+                function: 0x16,
+                ecx: 100,
+                ..Default::default()
+            },
+        ];
+        timing_leaves(&mut entries, 4_291_956);
+        assert_eq!(
+            u64::from(entries[0].ecx) * u64::from(entries[0].ebx) / u64::from(entries[0].eax),
+            4_291_956_000
+        );
+        assert_eq!(
+            (entries[1].eax, entries[1].ebx, entries[1].ecx),
+            (4291, 4291, 100)
+        );
+        timing_leaves(&mut [], 4_291_956);
+    }
+
+    #[test]
+    fn pinned_tsc_preserves_hyperv_leaves_on_every_vcpu() {
+        if !std::path::Path::new("/dev/kvm").exists() {
+            eprintln!("skipping pinned Hyper-V TSC: /dev/kvm unavailable");
+            return;
+        }
+        let _permit = vmlab_hv_tests::process::VmPermit::acquire().unwrap();
+        let vm = KvmVm::new().unwrap();
+        let khz = crate::host::probe().unwrap().tsc_khz.unwrap() / 2;
+        let desc: MachineDescription = serde_json::from_value(serde_json::json!({
+            "name":"tsc", "machine":"q35", "arch":"x86_64", "accel":"kvm", "vcpus":2, "memory_mib":16,
+            "boot":{"kind":"kernel","kernel":"unused","cmdline":""},
+            "disks":[],"nics":[],"ports":[],"serial_log":"unused",
+            "invtsc":true,"tsc_khz":khz
+        }))
+        .unwrap();
+        for id in 0..2 {
+            let cpu = vm
+                .create_vcpu_with_model(id, 2, vmlab_hv_proto::machine::CpuPolicy::Host, None)
+                .unwrap();
+            crate::hyperv::configure_vcpu(&vm.kvm, &cpu, crate::hyperv::WINDOWS_FEATURES).unwrap();
+            let before = cpu.get_cpuid2(KVM_MAX_CPUID_ENTRIES).unwrap();
+            configure_tsc(&cpu, &desc, false).unwrap();
+            assert_eq!(cpu.get_tsc_khz().unwrap(), khz);
+            let after = cpu.get_cpuid2(KVM_MAX_CPUID_ENTRIES).unwrap();
+            for leaf in before
+                .as_slice()
+                .iter()
+                .filter(|e| (0x40000000..0x50000000).contains(&e.function))
+            {
+                assert_eq!(
+                    after
+                        .as_slice()
+                        .iter()
+                        .find(|e| e.function == leaf.function && e.index == leaf.index),
+                    Some(leaf),
+                    "pin changed Hyper-V leaf {:#x} on vCPU {id}",
+                    leaf.function
+                );
+            }
+        }
     }
 
     #[test]

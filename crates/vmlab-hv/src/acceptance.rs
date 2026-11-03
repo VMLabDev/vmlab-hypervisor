@@ -58,6 +58,18 @@ fn boot_template(
     display_test: DisplayTest,
     firmware: Firmware,
 ) {
+    boot_template_with_tsc(name, variable, snapshot, bus, display_test, firmware, None);
+}
+
+fn boot_template_with_tsc(
+    name: &str,
+    variable: &str,
+    snapshot: bool,
+    bus: vmlab_hv_proto::machine::DiskBus,
+    display_test: DisplayTest,
+    firmware: Firmware,
+    tsc_khz: Option<u32>,
+) {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("skipping {name}: /dev/kvm is unavailable");
         return;
@@ -169,6 +181,10 @@ fn boot_template(
         "usb":{"bus":0,"device":5,"function":0},
         "ports":[{"name":"vmlab.agent.0", "socket":agent}], "nics":[],"serial_log":serial
     });
+    if let Some(khz) = tsc_khz {
+        description["invtsc"] = true.into();
+        description["tsc_khz"] = khz.into();
+    }
     if windows || secure {
         description["vcpus"] = 4.into();
         description["memory_mib"] = 8192.into();
@@ -431,6 +447,9 @@ fn boot_template(
         String::from_utf8_lossy(&result.stdout).trim(),
         "firmware-agent-ready"
     );
+    if let Some(khz) = tsc_khz.filter(|_| !windows) {
+        assert_guest_tsc(&mut guest, khz);
+    }
     // Soak runs repeat the reset and snapshot-load cycles; one is the default.
     let cycles = |variable: &str| -> usize {
         std::env::var(variable)
@@ -707,6 +726,9 @@ fn boot_template(
                 "{name}: snapshot load {cycle} answered in {:.1?}",
                 started.elapsed()
             );
+            if let Some(khz) = tsc_khz.filter(|_| !windows) {
+                assert_guest_tsc(&mut guest, khz);
+            }
         }
     }
     assert!(matches!(
@@ -746,6 +768,87 @@ fn boot_template(
         );
         eprintln!("{name}: secure OVMF snapshot round-tripped negotiated SMI mask {features:#x}");
     }
+}
+
+fn assert_guest_tsc(guest: &mut AgentClient, khz: u32) {
+    let output = guest.exec(&["dmesg"], Duration::from_secs(20)).unwrap();
+    assert_eq!(output.exit_code, 0, "dmesg: {output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mhz = text
+        .lines()
+        .find_map(|line| {
+            line.split_once("tsc: Detected ")?
+                .1
+                .split_once(" MHz")?
+                .0
+                .parse::<f64>()
+                .ok()
+        })
+        .unwrap_or_else(|| panic!("guest did not report its TSC frequency: {text}"));
+    assert!(
+        (mhz * 1000.0 - f64::from(khz)).abs() < 2.0,
+        "guest {mhz} MHz differs from pin {khz} kHz"
+    );
+    eprintln!("guest TSC {mhz} MHz matches pin {khz} kHz");
+}
+
+fn probe_tsc() -> Option<u32> {
+    if !Path::new("/dev/kvm").exists() {
+        eprintln!("skipping pinned TSC: /dev/kvm unavailable");
+        return None;
+    }
+    let _permit = vmlab_hv_tests::process::VmPermit::acquire().unwrap();
+    let binary = std::env::var_os("VMLAB_HV_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("vmlab-hv")
+        });
+    let output = Command::new(binary).arg("--probe").output().unwrap();
+    assert!(
+        output.status.success(),
+        "host probe: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let facts: vmlab_hv_proto::host::HostFacts = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        facts.kvm && facts.invariant_tsc && facts.stable_tsc,
+        "{facts:?}"
+    );
+    Some(facts.tsc_khz.filter(|khz| *khz > 0).unwrap())
+}
+
+#[test]
+fn pinned_tsc_linux_frequency_and_online_snapshot() {
+    let Some(khz) = probe_tsc() else { return };
+    boot_template_with_tsc(
+        "ubuntu-26.04",
+        "VMLAB_HV_TEMPLATE_UBUNTU_26_04",
+        true,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+        DisplayTest::None,
+        Firmware::SeaBios,
+        Some(khz / 2),
+    );
+}
+
+#[test]
+fn pinned_tsc_windows_hyperv_boot() {
+    let Some(khz) = probe_tsc() else { return };
+    boot_template_with_tsc(
+        "windows-10",
+        "VMLAB_HV_TEMPLATE_WINDOWS_10",
+        false,
+        vmlab_hv_proto::machine::DiskBus::Virtio,
+        DisplayTest::None,
+        Firmware::Ovmf,
+        Some(khz),
+    );
 }
 
 #[test]
