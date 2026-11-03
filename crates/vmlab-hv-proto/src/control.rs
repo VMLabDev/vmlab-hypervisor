@@ -54,6 +54,13 @@ pub enum Command {
     },
     /// Write a diagnostic report beside the control socket; emit its path.
     DumpDiagnostics,
+    /// Install one pre-created TAP per queue pair on the NIC with this MAC.
+    /// SCM_RIGHTS carries TAPs first, then one vhost-net fd per pair when enabled.
+    NetAttach {
+        mac: String,
+        queue_pairs: u16,
+        vhost: bool,
+    },
     /// Hot-plug a device. The fields carry what vmlab passes QEMU's
     /// `usb-host` today: `driver` selects the device model, `bus` names the
     /// controller root hub (`usbx.0`), and `hostbus`/`hostaddr`/`hostport`
@@ -146,6 +153,8 @@ pub enum Capability {
     Display,
     Input,
     Hotplug,
+    /// The control socket accepts TAP and optional vhost-net descriptors.
+    NetFds,
     /// An optional feature this build cannot use.
     #[serde(untagged)]
     Unknown(String),

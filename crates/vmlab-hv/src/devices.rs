@@ -11,7 +11,7 @@ use vmlab_hv_devices::serial::{Serial, SerialOut};
 use vmlab_hv_devices::virtio::block::Block;
 use vmlab_hv_devices::virtio::console::{Console, PortConfig};
 use vmlab_hv_devices::virtio::fs::{Fs, FsConfig, InProcessFs, InProcessFsConfig};
-use vmlab_hv_devices::virtio::net::{Net, NetConfig};
+use vmlab_hv_devices::virtio::net::{Net, NetBackendRegistry, NetConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
 use vmlab_hv_devices::{GuestMemory, IrqLine, VirtioDevice};
 use vmlab_hv_proto::machine::{Disk, FsBacking, FsShare, Nic, NicAttachment, SerialPort};
@@ -20,7 +20,9 @@ use vmlab_hv_vmm::factory::{BuiltBlk, BuiltPci, BuiltSerial, SharedDisk};
 
 /// The device set the binary ships.
 #[derive(Debug, Default)]
-pub struct DeviceSet;
+pub struct DeviceSet {
+    pub network: NetBackendRegistry,
+}
 
 impl DeviceSet {
     fn wrap(
@@ -146,6 +148,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
             NicAttachment::Stream { socket } | NicAttachment::StreamVnet { socket, .. } => {
                 socket.clone()
             }
+            NicAttachment::Tap { .. } | NicAttachment::TapRaw { .. } => Default::default(),
         };
         let config = NetConfig {
             id: id.clone(),
@@ -157,6 +160,19 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
             NicAttachment::Stream { .. } => Net::new(config),
             NicAttachment::StreamVnet { .. } => {
                 Net::with_offload(config, nic.attachment.queue_pairs())
+            }
+            NicAttachment::Tap { .. } | NicAttachment::TapRaw { .. } => {
+                let build = if matches!(nic.attachment, NicAttachment::TapRaw { .. }) {
+                    Net::with_tap_raw
+                } else {
+                    Net::with_tap
+                };
+                let (device, handle) = build(config, nic.attachment.queue_pairs(), mem.clone())
+                    .map_err(|e| DeviceUnavailable::new("virtio-net TAP", e.to_string()))?;
+                self.network
+                    .register(nic.mac.clone(), handle)
+                    .map_err(|e| DeviceUnavailable::new("virtio-net TAP", e.to_string()))?;
+                Ok(device)
             }
         }
         .map_err(|e| DeviceUnavailable::new("virtio-net", format!("cannot connect: {e}")))?;
@@ -248,7 +264,7 @@ mod tests {
         .unwrap();
         let mem = GuestMemory::new();
         for (transitional, expected) in [(false, 0u16), (true, 2)] {
-            let built = DeviceSet
+            let built = DeviceSet::default()
                 .virtio_blk(
                     &disk,
                     &mem,

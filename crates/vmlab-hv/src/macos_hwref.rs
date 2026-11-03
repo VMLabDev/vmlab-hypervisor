@@ -36,7 +36,7 @@ fn macos_p2_all_pci_identities_classes_and_bar_sizes_match_hwref() {
         Pam::new(&vec![0xff; 256 << 10], None, 0).unwrap(),
     ));
     devices.insert((0, 0), Arc::new(Mutex::new(Mch::new(pam))));
-    let console = super::devices::DeviceSet
+    let console = super::devices::DeviceSet::default()
         .virtio_console(
             &[SerialPort {
                 name: "vmlab.agent.0".into(),
@@ -48,7 +48,7 @@ fn macos_p2_all_pci_identities_classes_and_bar_sizes_match_hwref() {
         )
         .unwrap();
     devices.insert((1, 0), console.function);
-    let nic = super::devices::DeviceSet
+    let nic = super::devices::DeviceSet::default()
         .virtio_net(
             &Nic {
                 model: Default::default(),

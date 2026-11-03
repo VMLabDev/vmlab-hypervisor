@@ -18,7 +18,10 @@
 //!   is answered with the same `Hello` again: it needs no error code and a
 //!   client that retries the handshake is not a threat.
 
-use std::io::{self, BufReader};
+use std::io;
+#[cfg(test)]
+use std::io::BufReader;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -49,15 +52,27 @@ struct Shared<H> {
     hv_version: String,
     capabilities: Vec<Capability>,
     handler: Mutex<H>,
+    fd_handler: Option<Mutex<FdHandler>>,
     /// One write half per live connection; entries are pruned when the
     /// connection that owns them has gone away.
     writers: Mutex<Vec<Weak<Mutex<UnixStream>>>>,
 }
 
+type FdHandler = Box<dyn FnMut(Command, Vec<OwnedFd>) -> Outcome + Send + 'static>;
+
 impl<H: FnMut(Command) -> Outcome + Send + 'static> Server<H> {
     /// Build a server that introduces itself as `hv_version` advertising
     /// `capabilities` and answers commands with `handler`.
     pub fn new(hv_version: impl Into<String>, capabilities: Vec<Capability>, handler: H) -> Self {
+        Self::with_handlers(hv_version, capabilities, handler, None)
+    }
+
+    fn with_handlers(
+        hv_version: impl Into<String>,
+        capabilities: Vec<Capability>,
+        handler: H,
+        fd_handler: Option<FdHandler>,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 closed: AtomicBool::new(false),
@@ -65,6 +80,7 @@ impl<H: FnMut(Command) -> Outcome + Send + 'static> Server<H> {
                 hv_version: hv_version.into(),
                 capabilities,
                 handler: Mutex::new(handler),
+                fd_handler: fd_handler.map(Mutex::new),
                 writers: Mutex::new(Vec::new()),
             }),
         }
@@ -110,6 +126,27 @@ impl<H: FnMut(Command) -> Outcome + Send + 'static> Server<H> {
             let _ = worker.join();
         }
         Ok(())
+    }
+}
+
+impl Server<fn(Command) -> Outcome> {
+    /// Build a server whose handler owns each request's passed descriptors.
+    /// Requests without rights reach the same handler with an empty vector.
+    pub fn with_fds<H: FnMut(Command, Vec<OwnedFd>) -> Outcome + Send + 'static>(
+        hv_version: impl Into<String>,
+        capabilities: Vec<Capability>,
+        handler: H,
+    ) -> Server<impl FnMut(Command) -> Outcome + Send + 'static> {
+        let handler = Arc::new(Mutex::new(handler));
+        let legacy = Arc::clone(&handler);
+        Server::with_handlers(
+            hv_version,
+            capabilities,
+            move |command| (*lock(&legacy))(command, Vec::new()),
+            Some(Box::new(move |command, fds| {
+                (*lock(&handler))(command, fds)
+            })),
+        )
     }
 }
 
@@ -160,15 +197,14 @@ fn serve_connection<H: FnMut(Command) -> Outcome>(
             return Ok(());
         }
     }
-    let mut reader = BufReader::new(stream);
     let mut phase = Phase::AwaitingHello;
     // EOF means the peer closed; nothing to answer.
-    while let Some(msg) = codec::read_client_msg(&mut reader)? {
+    while let Some((msg, fds)) = crate::fd::read_client_msg(&stream)? {
         let _operation = lock(&shared.operation);
         if shared.closed.load(Ordering::SeqCst) {
             break;
         }
-        match respond(shared, &mut phase, msg) {
+        match respond_with_fds(shared, &mut phase, msg, fds) {
             Response::Send(msg) => write_to(&writer, &msg)?,
             Response::SendThenClose(msg) => {
                 write_to(&writer, &msg)?;
@@ -195,6 +231,56 @@ enum Response {
     Send(ServerMsg),
     /// Send this message, then close.
     SendThenClose(ServerMsg),
+}
+
+fn respond_with_fds<H: FnMut(Command) -> Outcome>(
+    shared: &Shared<H>,
+    phase: &mut Phase,
+    msg: ClientMsg,
+    fds: Vec<OwnedFd>,
+) -> Response {
+    if fds.is_empty()
+        && !matches!(
+            &msg,
+            ClientMsg::Request {
+                command: Command::NetAttach { .. },
+                ..
+            }
+        )
+    {
+        return respond(shared, phase, msg);
+    }
+    match msg {
+        ClientMsg::Hello { .. } => Response::SendThenClose(ServerMsg::Error {
+            code: ErrorCode::InvalidArgument,
+            message: "handshake cannot carry descriptors".into(),
+        }),
+        ClientMsg::Request { id, command } => {
+            if *phase == Phase::AwaitingHello {
+                return Response::Send(error_reply(
+                    id,
+                    ErrorCode::NoHandshake,
+                    "handshake required before requests",
+                ));
+            }
+            if let Err(error) = crate::fd::validate_count(&command, fds.len()) {
+                return Response::Send(error_reply(
+                    id,
+                    ErrorCode::InvalidArgument,
+                    error.to_string(),
+                ));
+            }
+            let Some(handler) = shared.fd_handler.as_ref() else {
+                return Response::Send(error_reply(
+                    id,
+                    ErrorCode::Unsupported,
+                    "this control handler does not accept descriptors",
+                ));
+            };
+            let outcome = (*lock(handler))(command, fds);
+            Response::Send(ServerMsg::Reply { id, outcome })
+        }
+    }
 }
 
 fn respond<H: FnMut(Command) -> Outcome>(
@@ -289,6 +375,7 @@ mod tests {
             handler: Mutex::new(|_| Outcome::Ok {
                 status: Some(RunState::Running),
             }),
+            fd_handler: None,
             writers: Mutex::new(Vec::new()),
         }
     }
@@ -631,5 +718,206 @@ mod tests {
         thread::sleep(std::time::Duration::from_millis(50));
         broadcaster.broadcast(Event::Reset);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_handler_rejects_passed_rights_and_closes_them() {
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixDatagram;
+        let (_dir, path) = socket_path("legacy-fds");
+        let server = Server::new("test-hv", vec![], |command| {
+            assert_eq!(command, Command::Status);
+            Outcome::Ok { status: None }
+        });
+        let owner = server.clone();
+        let listener = UnixListener::bind(&path).unwrap();
+        let worker = thread::spawn(move || server.serve(listener).unwrap());
+        let mut raw = RawClient::connect(&path);
+        raw.reader
+            .get_ref()
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let (fd, peer) = UnixDatagram::pair().unwrap();
+        crate::fd::write_client_msg(
+            &raw.writer,
+            &ClientMsg::Request {
+                id: 1,
+                command: Command::NetAttach {
+                    mac: "52:54:00:12:34:56".into(),
+                    queue_pairs: 1,
+                    vhost: false,
+                },
+            },
+            &[fd.as_fd()],
+        )
+        .unwrap();
+        drop(fd);
+        assert!(matches!(
+            raw.recv(),
+            Some(ServerMsg::Reply {
+                id: 1,
+                outcome: Outcome::Error {
+                    code: ErrorCode::Unsupported,
+                    ..
+                },
+            })
+        ));
+        assert!(
+            peer.send(b"closed").is_err(),
+            "legacy handler leaked a descriptor"
+        );
+        codec::write_client_msg(
+            &mut raw.writer,
+            &ClientMsg::Request {
+                id: 2,
+                command: Command::Status,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            raw.recv(),
+            Some(ServerMsg::Reply {
+                id: 2,
+                outcome: Outcome::Ok { .. }
+            })
+        ));
+        owner.shutdown();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn fd_server_validates_counts_and_keeps_pipelined_requests_separate() {
+        use std::io::Write;
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixDatagram;
+        let (_dir, path) = socket_path("pipelined-fds");
+        let (sent, received) = std::sync::mpsc::channel();
+        let server = Server::with_fds("test-hv", vec![Capability::NetFds], move |command, fds| {
+            sent.send((command, fds.len())).unwrap();
+            Outcome::Ok { status: None }
+        });
+        let owner = server.clone();
+        let listener = UnixListener::bind(&path).unwrap();
+        let worker = thread::spawn(move || server.serve(listener).unwrap());
+        let mut raw = RawClient::connect(&path);
+        raw.reader
+            .get_ref()
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let (fd, peer) = UnixDatagram::pair().unwrap();
+        let net = |pairs| Command::NetAttach {
+            mac: "52:54:00:12:34:56".into(),
+            queue_pairs: pairs,
+            vhost: false,
+        };
+        // A newline for request one immediately precedes rights on request two.
+        codec::write_client_msg(
+            &mut raw.writer,
+            &ClientMsg::Request {
+                id: 1,
+                command: Command::Status,
+            },
+        )
+        .unwrap();
+        crate::fd::write_client_msg(
+            &raw.writer,
+            &ClientMsg::Request {
+                id: 2,
+                command: net(1),
+            },
+            &[fd.as_fd()],
+        )
+        .unwrap();
+        crate::fd::write_client_msg(
+            &raw.writer,
+            &ClientMsg::Request {
+                id: 3,
+                command: net(2),
+            },
+            &[fd.as_fd()],
+        )
+        .unwrap();
+        crate::fd::write_client_msg(
+            &raw.writer,
+            &ClientMsg::Request {
+                id: 4,
+                command: Command::Pause,
+            },
+            &[fd.as_fd()],
+        )
+        .unwrap();
+        raw.writer
+            .write_all(b"{\"type\":\"request\",\"id\":5,\"command\":{\"command\":\"status\"}}\n")
+            .unwrap();
+        drop(fd);
+        for id in 1..=5 {
+            match raw.recv() {
+                Some(ServerMsg::Reply {
+                    id: actual,
+                    outcome,
+                }) => {
+                    assert_eq!(actual, id);
+                    if matches!(id, 3 | 4) {
+                        assert!(matches!(
+                            outcome,
+                            Outcome::Error {
+                                code: ErrorCode::InvalidArgument,
+                                ..
+                            }
+                        ));
+                    } else {
+                        assert_eq!(outcome, Outcome::Ok { status: None });
+                    }
+                }
+                message => panic!("unexpected pipelined reply {message:?}"),
+            }
+        }
+        assert_eq!(
+            received.try_iter().collect::<Vec<_>>(),
+            vec![(Command::Status, 0), (net(1), 1), (Command::Status, 0)]
+        );
+        assert!(
+            peer.send(b"closed").is_err(),
+            "rejected request leaked rights"
+        );
+        owner.shutdown();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn handshake_cannot_smuggle_rights_to_a_later_request() {
+        use std::os::fd::AsFd;
+        use std::os::unix::net::UnixDatagram;
+        let (_dir, path) = socket_path("hello-fds");
+        let server = Server::new("test-hv", vec![], |_| panic!("handler must not run"));
+        let owner = server.clone();
+        let listener = UnixListener::bind(&path).unwrap();
+        let worker = thread::spawn(move || server.serve(listener).unwrap());
+        let stream = UnixStream::connect(&path).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let (fd, peer) = UnixDatagram::pair().unwrap();
+        crate::fd::write_client_msg(
+            &stream,
+            &ClientMsg::Hello {
+                proto_version: PROTO_VERSION,
+            },
+            &[fd.as_fd()],
+        )
+        .unwrap();
+        drop(fd);
+        let mut reader = BufReader::new(stream);
+        assert!(matches!(
+            codec::read_server_msg(&mut reader).unwrap(),
+            Some(ServerMsg::Error {
+                code: ErrorCode::InvalidArgument,
+                ..
+            })
+        ));
+        assert!(codec::read_server_msg(&mut reader).unwrap().is_none());
+        assert!(peer.send(b"closed").is_err(), "hello leaked rights");
+        owner.shutdown();
+        worker.join().unwrap();
     }
 }

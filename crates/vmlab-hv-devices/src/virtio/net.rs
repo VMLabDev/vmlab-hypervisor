@@ -1,10 +1,12 @@
-//! virtio-net (VIRTIO 1.2 §5.1) attached to vmlab's network switch.
+//! virtio-net (VIRTIO 1.2 §5.1) on a switch stream or daemon-owned TAP queues.
 //!
 //! The device is a client of a unix stream socket (the switch's listener) and
 //! exchanges whole Ethernet frames in vmlab's stream framing: a 4-byte
 //! big-endian length prefix followed by one frame, capped at 65536 + 14 bytes
 //! (`src/net/framing.rs` in vmlab defines the format; the switch is the other
 //! end of the socket).
+//! Vnet streams preserve offload metadata. TAP descriptors arrive over the
+//! control socket before resume, with one optional vhost-net backend per pair.
 //!
 //! Legacy stream attachments use one receiveq and one transmitq. Vnet attachments
 //! preserve segmentation metadata and expose queue pairs plus a control queue.
@@ -20,8 +22,8 @@
 //!
 //! If the switch socket closes, frames are dropped, `VIRTIO_NET_S_LINK_UP` is
 //! cleared in the config space with a config-change interrupt, and the device
-//! reconnects on its own. All socket I/O runs on one worker thread the device
-//! owns; the vCPU path only sends wakeups. Receive is under backpressure: the
+//! reconnects on its own. Userspace I/O and vhost call-event forwarding run on
+//! one worker thread; the vCPU path sends wakeups or kernel kick eventfds. Receive is under backpressure: the
 //! worker stops reading the socket while frames are waiting for receiveq
 //! buffers.
 
@@ -46,8 +48,13 @@ use vmlab_hv_proto::net::{
     GSO_ECN, GSO_NONE, GSO_TCPV4, GSO_TCPV6, GSO_UDP, Header, METADATA_LEN, NEEDS_CSUM, flow_hash,
 };
 
+mod attach;
 mod buffer;
 mod checksum;
+mod tap;
+mod worker;
+
+pub use attach::{NetBackendHandle, NetBackendRegistry};
 
 use buffer::ReceiveWriter;
 use checksum::CopyChecksum;
@@ -71,6 +78,17 @@ const F_MQ: u64 = 1 << 22;
 const F_GUEST_USO4: u64 = 1 << 54;
 const F_GUEST_USO6: u64 = 1 << 55;
 const F_HOST_USO: u64 = 1 << 56;
+const F_NET_OFFLOADS: u64 = F_CSUM
+    | F_GUEST_CSUM
+    | F_GUEST_TSO4
+    | F_GUEST_TSO6
+    | F_GUEST_ECN
+    | F_HOST_TSO4
+    | F_HOST_TSO6
+    | F_HOST_ECN
+    | F_GUEST_USO4
+    | F_GUEST_USO6
+    | F_HOST_USO;
 const HDR_F_NEEDS_CSUM: u8 = 1;
 const HDR_F_DATA_VALID: u8 = 2;
 /// `VIRTIO_NET_F_MTU` (feature bit 3).
@@ -137,6 +155,9 @@ enum RxRead {
 
 /// Everything the device and its worker thread share.
 struct Shared {
+    tap_mode: bool,
+    tap: Option<tap::TapBackend>,
+    tap_error: Option<String>,
     vnet: Option<VnetState>,
     snapshot_paused: bool,
     config_pending: bool,
@@ -225,6 +246,9 @@ impl Net {
         let wake_pending = Arc::new(AtomicBool::new(false));
         let (commands, rx) = mpsc::channel();
         let shared = Arc::new(Mutex::new(Shared {
+            tap_mode: false,
+            tap: None,
+            tap_error: None,
             vnet: pairs.map(|max_pairs| VnetState {
                 max_pairs,
                 active_pairs: 1,
@@ -308,7 +332,11 @@ fn run(
     let mut shutdown = false;
     while !shutdown {
         // The live connection is the truth about the link.
-        if set_link(&shared, stream.is_some()) {
+        let (tap_mode, tap_up) = {
+            let sh = lock(&shared);
+            (sh.tap_mode, sh.tap.is_some() && sh.tap_error.is_none())
+        };
+        if set_link(&shared, stream.is_some() || tap_up) {
             fire_config(&shared);
         }
 
@@ -332,7 +360,16 @@ fn run(
                 revents: 0,
             });
         }
-        let timeout: i32 = if stream.is_none() {
+        let tap_start = polls.len();
+        {
+            let sh = lock(&shared);
+            if !sh.snapshot_paused
+                && let Some(tap) = &sh.tap
+            {
+                polls.extend(tap.pollfds().into_iter().map(|(_, poll)| poll));
+            }
+        }
+        let timeout: i32 = if stream.is_none() && !tap_mode {
             next_try
                 .saturating_duration_since(Instant::now())
                 .as_millis() as i32
@@ -429,7 +466,11 @@ fn run(
             }
         }
 
-        if stream.is_none() && Instant::now() >= next_try {
+        if tap_mode && polls[tap_start..].iter().any(|poll| poll.revents != 0) {
+            worker::process_tap(&shared);
+        }
+
+        if !tap_mode && stream.is_none() && Instant::now() >= next_try {
             match UnixStream::connect(&switch) {
                 Ok(conn) => {
                     let _ = conn.set_nonblocking(true);
@@ -473,6 +514,10 @@ fn process_wakeup(
     csum: bool,
     guest_csum: bool,
 ) {
+    if lock(shared).tap_mode {
+        worker::process_tap(shared);
+        return;
+    }
     place_rx_frames(shared, hdr, mergeable, guest_csum);
     if let Some(socket) = stream.as_mut()
         && flush_tx(shared, socket).is_err()
@@ -1138,14 +1183,11 @@ fn process_control(shared: &Arc<Mutex<Shared>>) {
         2
     };
     let Some(mem) = sh.mem.as_ref() else { return };
-    let Some(q) = sh
-        .queues
-        .get_mut(usize::from(index))
-        .and_then(Option::as_mut)
-    else {
+    let Some(mut q) = sh.queues.get_mut(usize::from(index)).and_then(Option::take) else {
         return;
     };
     if !q.ready() {
+        sh.queues[usize::from(index)] = Some(q);
         return;
     }
     let old_used = q.next_used();
@@ -1180,13 +1222,26 @@ fn process_control(shared: &Arc<Mutex<Shared>>) {
                 && (1..=vnet.max_pairs).contains(&pairs)
                 && vnet.features & F_MQ != 0;
             let written = if let Ok(mut writer) = ReceiveWriter::new(mem, chain)
-                && writer.write_all(&[u8::from(!valid)]).is_ok()
+                && writer.available_bytes() >= 1
             {
-                if valid {
+                if valid
+                    && let Some(tap) = sh.tap.as_mut()
+                    && let Err(error) = tap.configure(&mut sh.queues, vnet.features, pairs)
+                {
+                    valid = false;
+                    log::error!("changing TAP queue pairs: {error}");
+                    if let Err(error) =
+                        tap.configure(&mut sh.queues, vnet.features, vnet.active_pairs)
+                    {
+                        sh.tap_error = Some(error.to_string());
+                    }
+                }
+                let success = writer.write_all(&[u8::from(!valid)]).is_ok();
+                if success && valid {
                     vnet.active_pairs = pairs;
                     vnet.steering.retain(|_, pair| *pair < pairs);
                 }
-                1
+                u32::from(success)
             } else {
                 0
             };
@@ -1199,9 +1254,10 @@ fn process_control(shared: &Arc<Mutex<Shared>>) {
             break;
         }
     }
-    let irq = (q.next_used() != old_used && needs_receive_interrupt(q, mem, old_used))
+    let irq = (q.next_used() != old_used && needs_receive_interrupt(&mut q, mem, old_used))
         .then(|| sh.interrupt.clone())
         .flatten();
+    sh.queues[usize::from(index)] = Some(q);
     drop(guard);
     if let Some(irq) = irq {
         irq.notify_queue(index);
@@ -1682,6 +1738,9 @@ impl VirtioDevice for Net {
                 features |= F_MQ;
             }
         }
+        if let Some(tap) = lock(&self.shared).tap.as_ref() {
+            features &= tap.features();
+        }
         features
     }
 
@@ -1741,12 +1800,38 @@ impl VirtioDevice for Net {
                 None => queue,
             });
         }
+        let (features, pairs) = sh
+            .vnet
+            .as_ref()
+            .map_or((0, 1), |state| (state.features, state.active_pairs));
+        let Shared {
+            tap,
+            queues,
+            snapshot_paused,
+            ..
+        } = &mut *sh;
+        if !*snapshot_paused && let Some(tap) = tap {
+            tap.configure(queues, features, pairs)?;
+        }
         drop(sh);
         self.wake_worker();
         Ok(())
     }
 
     fn queue_notify(&mut self, index: u16) {
+        {
+            let mut state = lock(&self.shared);
+            let active = state.vnet.as_ref().map_or(1, |vnet| vnet.active_pairs);
+            if index < 2 * active
+                && let Some(tap) = &state.tap
+                && tap.kernel()
+            {
+                if let Err(error) = tap.kick(index) {
+                    state.tap_error = Some(error.to_string());
+                }
+                return;
+            }
+        }
         if usize::from(index) < self.queue_sizes.len() {
             self.wake_worker();
         }
@@ -1756,6 +1841,19 @@ impl VirtioDevice for Net {
         self.pending_queues = None;
         self.negotiated.store(0, Ordering::SeqCst);
         let mut sh = lock(&self.shared);
+        {
+            let Shared {
+                tap,
+                queues,
+                tap_error,
+                ..
+            } = &mut *sh;
+            if let Some(tap) = tap
+                && let Err(error) = tap.pause(queues)
+            {
+                *tap_error = Some(error.to_string());
+            }
+        }
         sh.queues = self.queue_sizes.iter().map(|_| None).collect();
         if let Some(vnet) = sh.vnet.as_mut() {
             vnet.active_pairs = 1;
@@ -1774,7 +1872,7 @@ impl VirtioDevice for Net {
 
 /// Snapshot format magic and version.
 const SNAPSHOT_MAGIC: &[u8; 5] = b"VLNET";
-const SNAPSHOT_VERSION: u16 = 2;
+const SNAPSHOT_VERSION: u16 = 3;
 
 impl Snapshot for Net {
     fn quiesce(&mut self) {
@@ -1784,11 +1882,51 @@ impl Snapshot for Net {
             self.wake_worker();
             let _ = wait.recv();
         }
+        let mut state = lock(&self.shared);
+        let Shared {
+            tap,
+            queues,
+            tap_error,
+            interrupt,
+            ..
+        } = &mut *state;
+        if let Some(tap) = tap {
+            if let Err(error) = tap.pause(queues) {
+                *tap_error = Some(error.to_string());
+            }
+            match tap.drain_calls() {
+                Ok(calls) => {
+                    for index in calls {
+                        if let Some(irq) = interrupt.as_ref() {
+                            irq.notify_queue(index);
+                        }
+                    }
+                }
+                Err(error) => *tap_error = Some(error.to_string()),
+            }
+        }
     }
 
     fn resume_snapshot(&mut self) {
         let pending = {
             let mut state = lock(&self.shared);
+            let (features, pairs) = state
+                .vnet
+                .as_ref()
+                .map_or((0, 1), |vnet| (vnet.features, vnet.active_pairs));
+            let Shared {
+                tap,
+                queues,
+                tap_error,
+                mem,
+                ..
+            } = &mut *state;
+            if mem.is_some()
+                && let Some(tap) = tap
+                && let Err(error) = tap.configure(queues, features, pairs)
+            {
+                *tap_error = Some(error.to_string());
+            }
             state.snapshot_paused = false;
             std::mem::take(&mut state.config_pending)
         };
@@ -1806,9 +1944,21 @@ impl Snapshot for Net {
 
     fn save_state(&self) -> Result<Vec<u8>, DeviceError> {
         let sh = lock(&self.shared);
+        if let Some(error) = &sh.tap_error {
+            return Err(DeviceError::State(format!("TAP backend: {error}")));
+        }
         let mut enc = Enc::new();
         enc.raw(SNAPSHOT_MAGIC);
         enc.u16(SNAPSHOT_VERSION);
+        enc.u8(if sh.tap_mode {
+            if sh.tap.as_ref().is_some_and(|tap| tap.kernel()) {
+                2
+            } else {
+                1
+            }
+        } else {
+            0
+        });
         match &sh.vnet {
             None => enc.u8(0),
             Some(vnet) => {
@@ -1863,12 +2013,30 @@ impl Snapshot for Net {
             return Err(DeviceError::State("not a virtio-net snapshot".into()));
         }
         let version = dec.u16()?;
-        if version != SNAPSHOT_VERSION && version != 1 {
+        if !(1..=SNAPSHOT_VERSION).contains(&version) {
             return Err(DeviceError::State(
                 "unsupported virtio-net snapshot version".into(),
             ));
         }
-        let vnet = if version == 2 && dec.u8()? != 0 {
+        let backend_mode = if version >= 3 { dec.u8()? } else { 0 };
+        {
+            let state = lock(&self.shared);
+            let expected = if state.tap_mode {
+                if state.tap.as_ref().is_some_and(|tap| tap.kernel()) {
+                    2
+                } else {
+                    1
+                }
+            } else {
+                0
+            };
+            if backend_mode != expected || (state.tap_mode && state.tap.is_none()) {
+                return Err(DeviceError::State(
+                    "snapshot network backend mode differs or TAP descriptors are missing".into(),
+                ));
+            }
+        }
+        let vnet = if version >= 2 && dec.u8()? != 0 {
             let max_pairs = dec.u16()?;
             let active_pairs = dec.u16()?;
             let features = dec.u64()?;
@@ -2076,6 +2244,7 @@ impl Dec<'_> {
 
 #[cfg(test)]
 mod tests {
+    include!("net/tap_integration_tests.rs");
     use super::*;
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::AtomicU32;
@@ -3255,6 +3424,9 @@ mod tests {
     fn transmit_staging_is_bounded_when_switch_stops_reading() {
         let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 2 << 20)]).unwrap();
         let shared = Arc::new(Mutex::new(Shared {
+            tap_mode: false,
+            tap: None,
+            tap_error: None,
             vnet: None,
             snapshot_paused: false,
             config_pending: false,
@@ -3618,6 +3790,9 @@ mod tests {
     #[test]
     fn frame_decoder_handles_fragmentation_jumbo_and_empty_frames() {
         let shared = Arc::new(Mutex::new(Shared {
+            tap_mode: false,
+            tap: None,
+            tap_error: None,
             vnet: None,
             snapshot_paused: false,
             config_pending: false,

@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 use std::io::BufReader;
+use std::os::fd::BorrowedFd;
 use std::os::unix::net::UnixStream;
 
 use crate::PROTO_VERSION;
@@ -128,6 +129,20 @@ impl Client {
         let id = self.next_id;
         self.next_id += 1;
         codec::write_client_msg(&mut self.writer, &ClientMsg::Request { id, command })?;
+        self.await_reply(id)
+    }
+
+    /// Send one request with borrowed descriptors. Ownership stays with the caller.
+    /// For `NetAttach`, pass TAPs in queue-pair order, then matching vhost fds.
+    pub fn call_with_fds(
+        &mut self,
+        command: Command,
+        fds: &[BorrowedFd<'_>],
+    ) -> Result<Outcome, ClientError> {
+        crate::fd::validate_count(&command, fds.len())?;
+        let id = self.next_id;
+        self.next_id += 1;
+        crate::fd::write_client_msg(&self.writer, &ClientMsg::Request { id, command }, fds)?;
         self.await_reply(id)
     }
 
@@ -291,6 +306,114 @@ mod tests {
         assert_eq!(client.take_events(), vec![Event::Stopped, Event::Resumed]);
         assert!(client.take_events().is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fd_call_keeps_descriptor_order_and_buffers_events_before_its_reply() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsFd;
+        use std::time::Duration;
+
+        let (_dir, path) = socket_path("fds");
+        let (saw_request, request_seen) = mpsc::channel();
+        let (event_sent, send_event) = mpsc::channel();
+        let server = Server::with_fds("test-hv", vec![Capability::NetFds], move |command, fds| {
+            match command {
+                Command::NetAttach {
+                    mac,
+                    queue_pairs,
+                    vhost,
+                } => {
+                    assert_eq!(mac, "52:54:00:12:34:56");
+                    assert_eq!(queue_pairs, 1);
+                    assert!(vhost);
+                    assert_eq!(fds.len(), 2);
+                    for (fd, expected) in fds.into_iter().zip(*b"tv") {
+                        assert!(
+                            rustix::io::fcntl_getfd(&fd)
+                                .unwrap()
+                                .contains(rustix::io::FdFlags::CLOEXEC)
+                        );
+                        let mut passed = UnixStream::from(fd);
+                        let mut byte = [0];
+                        passed.read_exact(&mut byte).unwrap();
+                        assert_eq!(byte[0], expected);
+                    }
+                    saw_request.send(()).unwrap();
+                    send_event.recv().unwrap();
+                }
+                Command::Status => assert!(fds.is_empty()),
+                other => panic!("unexpected command {other:?}"),
+            }
+            Outcome::Ok { status: None }
+        });
+        let broadcaster = server.clone();
+        let owner = server.clone();
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let worker = thread::spawn(move || server.serve(listener).unwrap());
+        let events = thread::spawn(move || {
+            request_seen.recv().unwrap();
+            broadcaster.broadcast(Event::Stopped);
+            event_sent.send(()).unwrap();
+        });
+        let mut client = Client::connect(&path).unwrap();
+        client
+            .reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (tap, mut tap_peer) = UnixStream::pair().unwrap();
+        let (vhost, mut vhost_peer) = UnixStream::pair().unwrap();
+        tap_peer.write_all(b"t").unwrap();
+        vhost_peer.write_all(b"v").unwrap();
+        assert_eq!(
+            client
+                .call_with_fds(
+                    Command::NetAttach {
+                        mac: "52:54:00:12:34:56".into(),
+                        queue_pairs: 1,
+                        vhost: true,
+                    },
+                    &[tap.as_fd(), vhost.as_fd()]
+                )
+                .unwrap(),
+            Outcome::Ok { status: None }
+        );
+        assert_eq!(client.take_events(), vec![Event::Stopped]);
+        assert_eq!(
+            client.call(Command::Status).unwrap(),
+            Outcome::Ok { status: None }
+        );
+        owner.shutdown();
+        events.join().unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn invalid_fd_counts_do_not_consume_a_request_id_or_write_a_request() {
+        use std::os::fd::AsFd;
+        let (_dir, path) = socket_path("bad-fds");
+        let server = Server::new("test-hv", vec![], |command| {
+            assert_eq!(command, Command::Status);
+            Outcome::Ok { status: None }
+        });
+        let owner = server.clone();
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let worker = thread::spawn(move || server.serve(listener).unwrap());
+        let mut client = Client::connect(&path).unwrap();
+        let (fd, _peer) = UnixStream::pair().unwrap();
+        assert!(
+            client
+                .call_with_fds(Command::Status, &[fd.as_fd()])
+                .is_err()
+        );
+        assert_eq!(client.next_id, 1);
+        assert_eq!(
+            client.call(Command::Status).unwrap(),
+            Outcome::Ok { status: None }
+        );
+        owner.shutdown();
+        worker.join().unwrap();
     }
 
     #[test]
