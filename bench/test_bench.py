@@ -501,7 +501,7 @@ class NoiseControlTests(unittest.TestCase):
         backend_a = argparse.Namespace(agent_socket=lambda: "a", session=argparse.Namespace(exit_code=None))
         backend_b = argparse.Namespace(agent_socket=lambda: "b", session=argparse.Namespace(exit_code=None))
 
-        def direction(sender, _receiver, _ip, _port, _window):
+        def direction(sender, _receiver, _ip, _port, _window, flows=1):
             return (100 if sender is agent_a else 200), {"bytes": 1}, {"bytes": 1}
 
         with tempfile.TemporaryDirectory() as tmp, \
@@ -676,6 +676,71 @@ class X86WorkloadTests(unittest.TestCase):
         self.assertEqual(lib.workloads("x86_64", "windows-10"), ("boot_to_agent_ready",))
         self.assertEqual(lib.workloads("x86_64", "windows-server-2025"), ("boot_to_agent_ready",))
         self.assertEqual(lib.workloads("x86_64", suite="g2g"), lib.X86_G2G_WORKLOADS)
+        self.assertEqual(lib.workloads("x86_64", suite="g2g1500"), lib.X86_G2G1500_WORKLOADS)
+        self.assertEqual(lib.workloads("x86_64", suite="g2g-multiflow"), lib.X86_G2G_MULTIFLOW_WORKLOADS)
+
+    def test_new_network_suites_preserve_jumbo_samples_and_bars(self):
+        self.assertEqual(lib.G2G_SUITES["g2g"]["mtu"], 65520)
+        self.assertEqual(lib.G2G_SUITES["g2g"]["flows"], 1)
+        self.assertFalse(lib.G2G_SUITES["g2g"]["vnet"])
+        for suite, flows in (("g2g1500", 1), ("g2g-multiflow", 4)):
+            config = lib.G2G_SUITES[suite]
+            self.assertEqual(config["mtu"], 1500)
+            self.assertEqual(config["flows"], flows)
+            self.assertTrue(config["vnet"])
+            for name in config["workloads"]:
+                self.assertNotIn(name, lib.X86_G2G_WORKLOADS)
+                self.assertNotIn(name, lib.D28_BAR)
+                self.assertEqual(lib.UNIT[name], "Mbit/s")
+                self.assertEqual(lib.DIRECTION[name], "higher")
+
+    def test_pair_suites_use_distinct_short_run_names(self):
+        names = [lib.run_dir_name("vmlab-hv", "x86_64", "ubuntu-26.04", 2, 1, suite)
+                 for suite in ("full", *lib.G2G_SUITES)]
+        self.assertEqual(len(set(names)), 4)
+        self.assertTrue(all(len(name) < 30 for name in names))
+
+    def test_pair_launch_selects_mtu_and_hypervisor_framing(self):
+        import run
+        for backend in ("qemu", "vmlab-hv"):
+            for suite, config in lib.G2G_SUITES.items():
+                with self.subTest(backend=backend, suite=suite), \
+                        mock.patch.object(lib, "prepare_run_dir", return_value=("ov", "code", "vars")), \
+                        mock.patch.object(lib, "latest_template", return_value="version"), \
+                        mock.patch.object(run, "X86QemuBackend") as qemu, \
+                        mock.patch.object(run, "X86HvBackend") as hv:
+                    args = run.parse_args(["--backend", backend, "--suite", suite])
+                    run.g2g_launch(args, "a", "ubuntu-26.04", 2, "16-19", "hub", "mac", "run")
+                    factory = qemu if backend == "qemu" else hv
+                    self.assertEqual(factory.call_args.args[9], config["mtu"])
+                    if backend == "vmlab-hv":
+                        self.assertEqual(factory.call_args.kwargs, {"vnet": config["vnet"]})
+                    else:
+                        self.assertEqual(factory.call_args.kwargs, {})
+
+    def test_pair_guest_setup_uses_selected_mtu(self):
+        import run
+        with mock.patch.object(run, "guest_nic", return_value="eth0"), \
+                mock.patch.object(run, "must_sh") as execute, \
+                mock.patch.object(run, "copy_in_tools"):
+            run.g2g_setup_guest(object(), "192.168.60.2", mtu=1500)
+            self.assertIn("mtu 1500", execute.call_args.args[1])
+
+    def test_multiflow_direction_checks_each_flow(self):
+        import run
+        sent = {"bytes": 16, "flows": 4, "per_flow_bytes": [4, 4, 4, 4]}
+        received = {"bytes": 16, "flows": 4, "per_flow_bytes": [4, 4, 4, 4]}
+        for counts in ([4, 4, 4, 4], [8, 4, 4, 0]):
+            received["per_flow_bytes"] = counts
+            with mock.patch.object(run, "must_sh", side_effect=["", json.dumps(sent), json.dumps(received)]) as execute, \
+                    mock.patch.object(run.time, "sleep"):
+                if counts[-1]:
+                    run.g2g_direction(object(), object(), "192.168.60.2", 5903, 12, flows=4)
+                    self.assertIn("tcp-multisink 5903 4", execute.call_args_list[0].args[1])
+                    self.assertIn("tcp-multiblast 192.168.60.2 5903 12 4", execute.call_args_list[1].args[1])
+                else:
+                    with self.assertRaisesRegex(lib.BenchError, "missing concurrent flows"):
+                        run.g2g_direction(object(), object(), "192.168.60.2", 5903, 12, flows=4)
 
     def test_every_workload_has_unit_and_direction(self):
         for name in set(lib.UNIT) | set(lib.DIRECTION):
@@ -862,13 +927,13 @@ class X86QemuArgvTests(unittest.TestCase):
 
 
 class X86HvMachineTests(unittest.TestCase):
-    def make(self, guest, mtu=65520):
+    def make(self, guest, mtu=65520, *, vnet=False):
         from backends import hv_x86_machine_description
 
         return hv_x86_machine_description(
             "/run", guest, lib.X86_GUESTS[guest]["vcpus"], "/run/ov.qcow2",
             "/fw/code.fd", "/run/vars.fd", "/run/switch.sock",
-            "52:54:00:12:34:56", mtu, "/run/ipxe.rom",
+            "52:54:00:12:34:56", mtu, "/run/ipxe.rom", vnet=vnet,
         )
 
     def test_fields_fit_proto_schema(self):
@@ -931,6 +996,13 @@ class X86HvMachineTests(unittest.TestCase):
         self.assertFalse(disk["read_only"])
         self.assertTrue(disk["vmstate"])
 
+    def test_vnet_attachment_has_one_queue_pair_per_vcpu(self):
+        desc = self.make("ubuntu-26.04", mtu=1500, vnet=True)
+        self.assertEqual(desc["nics"][0]["attachment"], {
+            "kind": "stream_vnet", "socket": "/run/switch.sock", "queue_pairs": desc["vcpus"],
+        })
+        self.assertEqual(desc["nics"][0]["mtu"], 1500)
+
 
 class GuestToolTests(unittest.TestCase):
     """nettool runs on the host here: its modes are host-agnostic."""
@@ -976,6 +1048,100 @@ class GuestToolTests(unittest.TestCase):
         self.assertGreater(out["bytes"], 0)
         sink_out = json.loads(sink.communicate(timeout=10)[0].strip().splitlines()[-1])
         self.assertGreater(sink_out["bytes"], 0)
+
+    def test_four_tcp_flows_transfer_concurrently_over_loopback(self):
+        import subprocess
+        import sys
+
+        tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nettool.py")
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = str(reservation.getsockname()[1])
+        sink = subprocess.Popen(
+            [sys.executable, tool, "tcp-multisink", port, "4"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            time.sleep(0.5)
+            blast = subprocess.run(
+                [sys.executable, tool, "tcp-multiblast", "127.0.0.1", port, "0.3", "4"],
+                capture_output=True, text=True, check=True, timeout=10,
+            )
+            sent = json.loads(blast.stdout.strip())
+            stdout, stderr = sink.communicate(timeout=10)
+            self.assertEqual(sink.returncode, 0, stderr)
+            received = json.loads(stdout.strip())
+            for result in (sent, received):
+                self.assertEqual(result["flows"], 4)
+                self.assertEqual(len(result["per_flow_bytes"]), 4)
+                self.assertTrue(all(count > 0 for count in result["per_flow_bytes"]))
+                self.assertEqual(sum(result["per_flow_bytes"]), result["bytes"])
+            self.assertEqual(sent["bytes"], received["bytes"])
+            self.assertEqual(sorted(sent["per_flow_bytes"]), sorted(received["per_flow_bytes"]))
+        finally:
+            if sink.poll() is None:
+                sink.kill()
+            sink.communicate(timeout=5)
+
+    def test_multiflow_arguments_are_bounded(self):
+        import nettool
+        for flows in (0, -1, 257):
+            with self.assertRaises(ValueError):
+                nettool.tcp_multiblast("127.0.0.1", 1, 1, flows)
+            with self.assertRaises(ValueError):
+                nettool.tcp_multisink(1, flows)
+        for seconds in (0, -1, float("inf"), float("nan")):
+            with self.assertRaises(ValueError):
+                nettool.tcp_multiblast("127.0.0.1", 1, seconds, 4)
+
+    def test_multiflow_sender_supplies_every_connection_before_drain(self):
+        import concurrent.futures
+        import subprocess
+        import sys
+
+        tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nettool.py")
+        sockets = []
+        sender = None
+
+        def drain(conn):
+            count = 1
+            while data := conn.recv(1024 * 1024):
+                count += len(data)
+            return count
+
+        try:
+            with socket.socket() as listener:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(4)
+                listener.settimeout(3)
+                port = str(listener.getsockname()[1])
+                sender = subprocess.Popen(
+                    [sys.executable, tool, "tcp-multiblast", "127.0.0.1", port, "0.2", "4"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                for _ in range(4):
+                    conn, _ = listener.accept()
+                    conn.settimeout(3)
+                    sockets.append(conn)
+                # A serial sender blocks filling the first connection while
+                # the receiver waits for the other three to carry data.
+                for conn in sockets:
+                    self.assertEqual(conn.recv(1), b"t")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                    received = list(pool.map(drain, sockets))
+                stdout, stderr = sender.communicate(timeout=5)
+                self.assertEqual(sender.returncode, 0, stderr)
+                report = json.loads(stdout)
+                self.assertEqual(sum(received), report["bytes"])
+                self.assertEqual(sorted(received), sorted(report["per_flow_bytes"]))
+        finally:
+            for conn in sockets:
+                conn.close()
+            if sender is not None:
+                if sender.poll() is None:
+                    sender.kill()
+                sender.communicate(timeout=5)
 
 
 class NetPeerTests(unittest.TestCase):
@@ -1069,6 +1235,31 @@ class NetPeerTests(unittest.TestCase):
             self.assertEqual(b.recv(64), struct.pack(">I", 3) + b"aaa")
             b.sendall(struct.pack(">I", 2) + b"bb")
             self.assertEqual(a.recv(64), struct.pack(">I", 2) + b"bb")
+
+    def test_hub_preserves_large_vnet_records_and_queue_ids(self):
+        import struct
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hub = self.netpeer.Hub(tmp)
+            self.addCleanup(hub.kill)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as a, \
+                    socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as b:
+                a.connect(hub.switch_sock)
+                b.connect(hub.switch_sock)
+                a.settimeout(2)
+                b.settimeout(2)
+                for source, target, queue in ((a, b, 3), (b, a, 1)):
+                    metadata = struct.pack(">HH", 1, queue) + struct.pack("<BBHHHHH", 1, 1, 54, 1460, 34, 16, 0)
+                    body = metadata + b"\x00" * 14 + b"t" * 65535
+                    record = struct.pack(">I", len(body)) + body
+                    source.sendall(record[:2])
+                    source.sendall(record[2:])
+                    received = bytearray()
+                    while len(received) < len(record):
+                        data = target.recv(len(record) - len(received))
+                        self.assertTrue(data, "hub disconnected before the full vnet record")
+                        received.extend(data)
+                    self.assertEqual(received, record)
 
 
 class CpuSamplingTests(unittest.TestCase):

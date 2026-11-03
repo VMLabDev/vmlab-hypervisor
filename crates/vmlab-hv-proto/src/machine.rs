@@ -289,6 +289,18 @@ pub enum NicAttachment {
     /// Client connection to vmlab's switch: each frame is a 4-byte big-endian
     /// length followed by one Ethernet frame (vmlab `src/net/framing.rs`).
     Stream { socket: PathBuf },
+    /// Versioned virtio-net metadata followed by Ethernet, selected at attach.
+    StreamVnet { socket: PathBuf, queue_pairs: u16 },
+}
+
+impl NicAttachment {
+    /// Queue pairs offered by this backend. The PCI transport supports at most 31.
+    pub fn queue_pairs(&self) -> u16 {
+        match self {
+            Self::Stream { .. } => 1,
+            Self::StreamVnet { queue_pairs, .. } => (*queue_pairs).clamp(1, 31),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

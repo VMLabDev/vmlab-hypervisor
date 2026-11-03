@@ -143,7 +143,9 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         let mac = parse_mac(&nic.mac)?;
         let id = format!("nic-{}", nic.mac);
         let switch = match &nic.attachment {
-            NicAttachment::Stream { socket } => socket.clone(),
+            NicAttachment::Stream { socket } | NicAttachment::StreamVnet { socket, .. } => {
+                socket.clone()
+            }
         };
         let config = NetConfig {
             id: id.clone(),
@@ -151,8 +153,13 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
             mtu: nic.mtu.unwrap_or(1500),
             switch,
         };
-        let net = Net::new(config)
-            .map_err(|e| DeviceUnavailable::new("virtio-net", format!("cannot connect: {e}")))?;
+        let net = match nic.attachment {
+            NicAttachment::Stream { .. } => Net::new(config),
+            NicAttachment::StreamVnet { .. } => {
+                Net::with_offload(config, nic.attachment.queue_pairs())
+            }
+        }
+        .map_err(|e| DeviceUnavailable::new("virtio-net", format!("cannot connect: {e}")))?;
         self.wrap(id, Box::new(net), mem, msi, nic.rom.as_deref())
     }
 

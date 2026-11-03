@@ -18,6 +18,7 @@ pub mod debug;
 pub mod gdb;
 pub mod host;
 pub mod machine;
+pub mod net;
 pub mod server;
 
 pub use machine::MachineDescription;

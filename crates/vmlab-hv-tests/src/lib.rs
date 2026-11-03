@@ -219,6 +219,8 @@ pub struct MachineSpec {
     pub mode: Mode,
     /// NIC count (each attached to a switch socket the test hosts).
     pub nics: u32,
+    /// Offload framing and maximum queue pairs; absent keeps raw framing.
+    pub vnet_pairs: Option<u16>,
     pub memory_mib: u64,
     pub vcpus: u32,
     pub paused: bool,
@@ -232,6 +234,7 @@ impl MachineSpec {
             name: name.to_string(),
             mode: Mode::Idle,
             nics: 0,
+            vnet_pairs: None,
             memory_mib: MEMORY_MIB,
             vcpus: 1,
             paused: false,
@@ -249,6 +252,13 @@ impl MachineSpec {
 
     pub fn with_nics(mut self, nics: u32) -> Self {
         self.nics = nics;
+        self
+    }
+
+    pub fn with_vnet_pairs(mut self, pairs: u16) -> Self {
+        assert!((1..=31).contains(&pairs), "vnet needs 1..31 queue pairs");
+        self.nics = 1;
+        self.vnet_pairs = Some(pairs);
         self
     }
 
@@ -380,7 +390,12 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
 
     let (switch_sock, mini) = if spec.nics > 0 {
         let sock = dir.join("switch.sock");
-        let mini = switch::MiniSwitch::bind(&sock).expect("bind test switch");
+        let mini = if spec.vnet_pairs.is_some() {
+            switch::MiniSwitch::bind_vnet(&sock)
+        } else {
+            switch::MiniSwitch::bind(&sock)
+        }
+        .expect("bind test switch");
         (Some(sock), Some(mini))
     } else {
         (None, None)
@@ -454,8 +469,14 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
                 pci: None,
                 mac: mac_string(TEST_MAC),
                 mtu: None,
-                attachment: NicAttachment::Stream {
-                    socket: switch_sock.clone().expect("bound above"),
+                attachment: match spec.vnet_pairs {
+                    Some(queue_pairs) => NicAttachment::StreamVnet {
+                        socket: switch_sock.clone().expect("bound above"),
+                        queue_pairs,
+                    },
+                    None => NicAttachment::Stream {
+                        socket: switch_sock.clone().expect("bound above"),
+                    },
                 },
             }]
         } else {

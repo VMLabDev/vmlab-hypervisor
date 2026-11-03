@@ -2533,6 +2533,7 @@ dependencies = [
  "vm-superio",
  "vmlab-disk",
  "vmlab-hv-display",
+ "vmlab-hv-proto",
  "vmm-sys-util",
  "zerocopy",
 ]

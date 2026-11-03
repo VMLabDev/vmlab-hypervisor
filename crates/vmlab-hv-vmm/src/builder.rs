@@ -1163,7 +1163,11 @@ pub fn build(
     for nic in &desc.nics {
         let built = add_pci(
             &pci_root,
-            factory.virtio_net(nic, &ram.mem, wiring(nic.pci, 4, true)?),
+            factory.virtio_net(
+                nic,
+                &ram.mem,
+                wiring(nic.pci, 2 * nic.attachment.queue_pairs() + 2, true)?,
+            ),
             format!("nic {}", nic.mac),
         )?;
         place(built.function.clone(), nic.pci)?;
