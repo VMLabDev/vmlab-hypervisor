@@ -1549,6 +1549,76 @@ mod tests {
     }
 
     #[test]
+    fn large_scatter_gather_output_survives_partial_socket_writes() {
+        let mut f = Fixture::new();
+        let mut client = UnixStream::connect(&f.agent_sock).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        f.device_ready(8, 5);
+        let payload: Vec<u8> = (0..5 * READ_CHUNK).map(|i| (i % 251) as u8).collect();
+        let addr = f.data(64);
+        f.mem.write_slice(&payload, GuestAddress(addr)).unwrap();
+        let legs = [READ_CHUNK - 1, 1, READ_CHUNK + 1, 3 * READ_CHUNK - 1];
+        let mut offset = 0;
+        let descriptors: Vec<_> = legs
+            .into_iter()
+            .map(|len| {
+                let descriptor = (addr + offset as u64, len as u32, false);
+                offset += len;
+                descriptor
+            })
+            .collect();
+        f.vqs[7].add_chain(&f.mem, &descriptors);
+        f.dev.queue_notify(7);
+        wait_for("large transmit chain returned", || {
+            f.vqs[7].used_idx(&f.mem) == 1
+        });
+        assert_eq!(f.vqs[7].used_entry(&f.mem, 0).1 as usize, payload.len());
+        wait_for("partial socket write staged", || {
+            !lock(&f.dev.shared).ports[1].tx_stage.is_empty()
+        });
+        let mut received = vec![0; payload.len()];
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(received, payload);
+        wait_for("remaining socket output drained", || {
+            lock(&f.dev.shared).ports[1].tx_stage.is_empty()
+        });
+    }
+
+    #[test]
+    fn large_host_write_spans_receive_chains_without_truncation() {
+        let mut f = Fixture::new();
+        let mut client = UnixStream::connect(&f.agent_sock).unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        f.device_ready(8, 5);
+        let addr = f.data(64);
+        for i in 0..128 {
+            f.vqs[6].add_chain(&f.mem, &[(addr + i * 4096, 4096, true)]);
+        }
+        f.dev.queue_notify(6);
+        let payload: Vec<u8> = (0..5 * READ_CHUNK).map(|i| (i % 251) as u8).collect();
+        client.write_all(&payload).unwrap();
+        wait_for("large host write delivered", || {
+            (0..f.vqs[6].used_idx(&f.mem))
+                .map(|i| f.vqs[6].used_entry(&f.mem, i).1 as usize)
+                .sum::<usize>()
+                == payload.len()
+        });
+        let mut received = Vec::new();
+        for i in 0..f.vqs[6].used_idx(&f.mem) {
+            let (head, len) = f.vqs[6].used_entry(&f.mem, i);
+            let address = f.vqs[6].desc_addr(&f.mem, head as u16);
+            let mut bytes = vec![0; len as usize];
+            f.mem.read_slice(&mut bytes, GuestAddress(address)).unwrap();
+            received.extend(bytes);
+        }
+        assert_eq!(received, payload);
+    }
+
+    #[test]
     fn guest_output_reaches_the_connected_client() {
         let mut f = Fixture::new();
         let mut client = UnixStream::connect(&f.ctl_sock).unwrap();
