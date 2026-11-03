@@ -824,6 +824,7 @@ fn probe_tsc() -> Option<u32> {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn pinned_tsc_linux_frequency_and_online_snapshot() {
     let Some(khz) = probe_tsc() else { return };
     boot_template_with_tsc(
@@ -838,6 +839,7 @@ fn pinned_tsc_linux_frequency_and_online_snapshot() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn pinned_tsc_windows_hyperv_boot() {
     let Some(khz) = probe_tsc() else { return };
     boot_template_with_tsc(
