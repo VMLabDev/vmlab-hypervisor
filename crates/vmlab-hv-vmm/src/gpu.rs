@@ -136,6 +136,7 @@ mod tests {
     use vm_memory::{GuestAddress, GuestMemoryBackend};
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn blob_slots_map_relocate_reject_overlap_and_unmap() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("SKIP GPU blob registration: /dev/kvm is absent");

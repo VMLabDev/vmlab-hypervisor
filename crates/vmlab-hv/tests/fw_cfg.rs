@@ -241,6 +241,7 @@ fn boot(label: &str, firmware: &Path, ovmf: bool, files: serde_json::Value) {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ovmf_honours_fw_cfg_gop_resolution() {
     let Some(firmware) = firmware_directory() else {
         return;
@@ -263,6 +264,7 @@ fn ovmf_honours_fw_cfg_gop_resolution() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn seabios_displays_fw_cfg_jpeg_splash() {
     let Some(firmware) = firmware_directory() else {
         return;

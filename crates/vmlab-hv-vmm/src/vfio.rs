@@ -734,6 +734,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn routing_preserves_the_q35_timer_and_all_isa_routes() {
         if !Path::new("/dev/kvm").exists() {
             eprintln!("SKIP VFIO IRQ routes: /dev/kvm absent");

@@ -87,6 +87,7 @@ fn serial_log_text(dir: &Dir) -> String {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn legacy_vga_writes_are_visible_while_the_guest_is_halted() {
     use std::fs::File;
     use std::os::unix::fs::FileExt;
@@ -248,6 +249,7 @@ fn malformed_secret_descriptions_do_not_echo_values() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn display_startup_failure_preserves_targets_and_never_advertises_control() {
     if !Path::new("/dev/kvm").exists()
         || !Path::new("/usr/share/qemu/bios-256k.bin").exists()
@@ -301,6 +303,7 @@ fn display_startup_failure_preserves_targets_and_never_advertises_control() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn panic_after_control_ready_kills_and_reaps_vm() {
     if !kernel_available() {
         eprintln!("skipping: /dev/kvm or container kernel is absent");
@@ -340,6 +343,7 @@ fn panic_after_control_ready_kills_and_reaps_vm() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn boots_kernel_and_exits_zero_on_guest_reset() {
     if !kernel_available() {
         eprintln!("skipping: /dev/kvm or the container kernel is not present");
@@ -369,6 +373,7 @@ fn boots_kernel_and_exits_zero_on_guest_reset() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn kernel_reset_reboots_in_the_same_process_and_control_connection() {
     if !kernel_available() {
         eprintln!("skipping: /dev/kvm or the container kernel is not present");
@@ -469,6 +474,7 @@ fn kernel_reset_with_method(method: &str) {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn paused_machine_resumes_over_the_control_socket() {
     if !kernel_available() {
         eprintln!("skipping: /dev/kvm or the container kernel is not present");
@@ -543,6 +549,7 @@ fn paused_machine_resumes_over_the_control_socket() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn quit_stops_the_machine_with_exit_zero() {
     if !kernel_available() {
         eprintln!("skipping: /dev/kvm or the container kernel is not present");
@@ -590,6 +597,7 @@ fn quit_stops_the_machine_with_exit_zero() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn virtio_devices_are_enumerated_through_the_pci_root() {
     if !kernel_available() {
         eprintln!("skipping: /dev/kvm or the container kernel is not present");

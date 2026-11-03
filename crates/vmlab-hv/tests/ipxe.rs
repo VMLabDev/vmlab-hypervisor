@@ -51,6 +51,7 @@ fn nic_rom_decode_requires_enable_and_memory_space() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and built firmware")]
 fn seabios_executes_ipxe_option_rom() {
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware/ipxe/boot.py");

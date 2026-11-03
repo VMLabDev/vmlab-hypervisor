@@ -389,6 +389,10 @@ fn make_executable(path: &Path) {
 }
 
 #[test]
+#[cfg_attr(
+    vmlab_ci_no_host_assets,
+    ignore = "requires the vmlab container initrd"
+)]
 fn initrd_overlay_is_complete_before_returning() {
     if !Path::new(INITRD).exists() {
         eprintln!("skipping: needs {INITRD}");
@@ -506,6 +510,7 @@ fn teardown(vm: Vm) {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn guest_mounts_the_share_and_the_session_is_real() {
     let Some(()) = or_skip() else {
         return;
@@ -551,6 +556,7 @@ fn guest_mounts_the_share_and_the_session_is_real() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn device_state_round_trips_through_virtiofsd() {
     let Some(()) = or_skip() else {
         return;

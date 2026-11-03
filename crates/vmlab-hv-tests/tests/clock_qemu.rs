@@ -54,6 +54,7 @@ impl Drop for Qemu {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn fixed_base_matches_qemu_container() {
     let assets = probe_assets();
     if let Some(reason) = assets.skip_reason() {

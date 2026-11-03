@@ -159,6 +159,7 @@ fn spawn(binary: &Path, machine: &Path, control: &Path, stderr: &Path) -> Manage
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn windows_tablet_and_first_release_chord_via_s1() {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("SKIP Windows viewer S1: /dev/kvm unavailable");

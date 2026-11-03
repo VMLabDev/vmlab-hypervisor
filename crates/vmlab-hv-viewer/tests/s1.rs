@@ -87,6 +87,7 @@ fn template() -> Option<PathBuf> {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn viewer_input_and_resize_reach_guest_via_s1() {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("SKIP viewer S1: /dev/kvm unavailable");

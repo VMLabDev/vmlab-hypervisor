@@ -74,6 +74,10 @@ fn virtual_gadget() -> Option<(u32, u32)> {
 /// Open the virtual device, take over its interfaces, run one control and
 /// one data transfer, and hand it back to the host.
 #[test]
+#[cfg_attr(
+    vmlab_ci_no_host_assets,
+    ignore = "requires a configured dummy_hcd USB gadget"
+)]
 fn usb_loopback_over_virtual_hardware() {
     let Some((bus, devnum)) = virtual_gadget() else {
         return;

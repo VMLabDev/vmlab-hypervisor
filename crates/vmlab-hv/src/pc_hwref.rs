@@ -1218,6 +1218,7 @@ fn pc_hwref_reference_anchors_and_parsers_without_guest() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_host_assets, ignore = "requires VMLAB_HV_PC_HWREF_DUMP")]
 fn pc_hwref_existing_dump_without_guest() {
     let Some(path) = std::env::var_os("VMLAB_HV_PC_HWREF_DUMP") else {
         eprintln!("SKIP offline P2 replay: set VMLAB_HV_PC_HWREF_DUMP to an existing probe.log");
@@ -1257,6 +1258,7 @@ fn pc_hwref_pci_exceptions_are_bounded_without_guest() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn pc_hwref_differential_all_four_captures() {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("SKIP P2 pc differential: /dev/kvm is unavailable");

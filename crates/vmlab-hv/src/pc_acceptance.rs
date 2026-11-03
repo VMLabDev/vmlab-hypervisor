@@ -693,26 +693,31 @@ fn exercise(guest: Guest) {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn templeos_agent_snapshot_reset() {
     exercise(Guest::Temple);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn freedos_agent_snapshot_reset() {
     exercise(Guest::Dos);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn windows_7_agent_snapshot_reset() {
     exercise(Guest::Windows7);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn windows_server_2008_r2_core_agent_snapshot_reset() {
     exercise(Guest::Server2008R2Core);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn windows_98_a20_boot_cost_with_standard_vga() {
     let Some(mut running) = Running::boot(Guest::Windows98) else {
         return;

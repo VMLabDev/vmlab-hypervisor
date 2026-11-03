@@ -248,6 +248,7 @@ fn mount_and_exchange(vm: &Vm, agent: &mut AgentClient) {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn q35_template_mounts_an_in_process_share() {
     let Some(mut vm) = launch(Share::Path) else {
         return;
@@ -258,6 +259,7 @@ fn q35_template_mounts_an_in_process_share() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn q35_template_mounts_an_external_virtiofsd_share() {
     // Regression: the vhost-user front-end used to refuse the q35 machine's
     // DMA view (anonymous PAM/SMRAM overlays) and the guest's first FUSE

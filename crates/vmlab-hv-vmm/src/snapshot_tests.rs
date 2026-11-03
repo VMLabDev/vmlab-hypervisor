@@ -240,6 +240,7 @@ fn machine_with_ram_setup(
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn dropping_vm_joins_vcpus_and_releases_ram() {
     for paused in [false, true] {
         for _ in 0..8 {
@@ -272,6 +273,7 @@ fn dropping_vm_joins_vcpus_and_releases_ram() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn control_server_releases_exited_vm() {
     use vmlab_hv_proto::{client::Client, control::Command};
     let Some(machine) = machine(&counter_payload(), 32) else {
@@ -325,6 +327,7 @@ fn settle(m: &Machine) -> Vec<u8> {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_preserves_a_broadcast_smi_waiting_for_its_vcpu() {
     let Some(m) = machine(&counter_payload(), 16) else {
         return;
@@ -344,6 +347,7 @@ fn snapshot_preserves_a_broadcast_smi_waiting_for_its_vcpu() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn save_load_rolls_back_counter_and_scratch() {
     let Some(m) = machine(&counter_payload(), 16) else {
         return;
@@ -411,6 +415,7 @@ fn save_load_rolls_back_counter_and_scratch() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn load_clears_pages_that_were_zero_at_save() {
     let Some(m) = machine(&counter_payload(), 16) else {
         return;
@@ -429,6 +434,7 @@ fn load_clears_pages_that_were_zero_at_save() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_is_visible_to_qemu_img_with_vm_state() {
     let Some(m) = machine(&counter_payload(), 16) else {
         return;
@@ -453,6 +459,7 @@ fn snapshot_is_visible_to_qemu_img_with_vm_state() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn delete_removes_and_missing_snapshots_error() {
     let Some(m) = machine(&counter_payload(), 8) else {
         return;
@@ -467,6 +474,7 @@ fn delete_removes_and_missing_snapshots_error() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn failed_smi_restore_rolls_back_disks_ram_cpu_devices_and_run_state() {
     use snapshot::format;
     use vmlab_hv_devices::{BusDevice, Snapshot};
@@ -624,6 +632,7 @@ fn failed_smi_restore_rolls_back_disks_ram_cpu_devices_and_run_state() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn paused_snapshots_stay_paused() {
     let Some(m) = machine(&counter_payload(), 8) else {
         return;
@@ -648,6 +657,7 @@ fn paused_snapshots_stay_paused() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn control_snapshot_restores_extended_cpu_state() {
     use kvm_bindings::{Msrs, kvm_msr_entry};
     use vmlab_hv_proto::{client::Client, control::Command};
@@ -733,6 +743,7 @@ fn control_snapshot_restores_extended_cpu_state() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn control_snapshot_restores_cet_user_shadow_stack() {
     use kvm_bindings::{Msrs, kvm_msr_entry};
     use vmlab_hv_proto::{
@@ -857,6 +868,7 @@ fn control_snapshot_restores_cet_user_shadow_stack() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn control_snapshot_restores_ram_outside_the_boot_layout() {
     use vmlab_hv_proto::{
         client::Client,
@@ -920,21 +932,25 @@ fn control_snapshot_restores_ram_outside_the_boot_layout() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn io_instruction_completed_before_snapshot() {
     snapshot_at_io(&[0xec], 0x42);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn mmio_instruction_completed_before_snapshot() {
     snapshot_at_io(&[0x67, 0xa0, 0, 0, 0, 0x10], 0x42);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn output_instruction_completed_before_snapshot() {
     snapshot_at_io(&[0xee], 0x11);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn mmio_write_instruction_completed_before_snapshot() {
     snapshot_at_io(&[0x67, 0xa2, 0, 0, 0, 0x10], 0x11);
 }
@@ -1012,6 +1028,7 @@ fn snapshot_at_io(instruction: &[u8], expected: u16) {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_load_completes_deferred_hyperv_hypercalls() {
     // Save just before the marker store, then load while PostMessage exits
     // repeatedly. A stale completion overwrites restored registers and uses
@@ -1108,6 +1125,7 @@ fn snapshot_load_completes_deferred_hyperv_hypercalls() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_stops_console_dma_before_saving_ram() {
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1274,11 +1292,13 @@ fn snapshot_stops_console_dma_before_saving_ram() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn rapid_snapshot_loads_roll_back_guest_tsc() {
     snapshot_tsc_roundtrip(Duration::ZERO, Duration::ZERO);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_load_excludes_device_restore_time_from_guest_clock() {
     use std::sync::atomic::{AtomicU64, Ordering};
     use vmlab_hv_devices::{DeviceError, Snapshot};
@@ -1369,11 +1389,13 @@ fn snapshot_load_excludes_device_restore_time_from_guest_clock() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_tsc_rollback_allows_delayed_save_observation() {
     snapshot_tsc_roundtrip(Duration::from_millis(150), Duration::ZERO);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_tsc_rollback_allows_delayed_guest_execution() {
     snapshot_tsc_roundtrip(Duration::ZERO, Duration::from_millis(150));
 }
@@ -1469,6 +1491,7 @@ fn snapshot_tsc_roundtrip(save_delay: Duration, load_delay: Duration) {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn macos_snapshot_preserves_cpuid_msr_log_and_refuses_changed_tsc_frequency() {
     use vmlab_hv_proto::{
         client::Client,
@@ -1595,6 +1618,7 @@ fn macos_snapshot_preserves_cpuid_msr_log_and_refuses_changed_tsc_frequency() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_restores_tsc_deadline_after_lapic() {
     use kvm_bindings::{Msrs, kvm_msr_entry};
     let Some(m) = machine(&counter_payload(), 8) else {

@@ -299,6 +299,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM")]
     fn kvm_unknown_msr_exits_return_zero_drop_writes_and_complete() {
         if std::fs::read_to_string("/sys/module/kvm/parameters/ignore_msrs")
             .is_ok_and(|value| value.trim() == "Y")
@@ -354,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM")]
     fn frequency_leaf_uses_the_pinned_kvm_frequency() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("skipping TSC: /dev/kvm unavailable");
@@ -397,6 +399,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM")]
     fn kvm_fault_policy_delivers_unknown_msr_gp_to_the_guest() {
         if !std::path::Path::new("/dev/kvm").exists()
             || std::fs::read_to_string("/sys/module/kvm/parameters/ignore_msrs")

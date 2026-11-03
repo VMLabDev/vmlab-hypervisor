@@ -9,6 +9,7 @@ use vmlab_hv_proto::control::{Command as Ctrl, Outcome};
 use vmlab_hv_tests::{agent::AgentClient, process::ManagedChild};
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ubuntu_sees_designated_vfio_function_and_refuses_online_snapshots() {
     let Ok(address) = std::env::var("VMLAB_HV_TEST_VFIO_DEVICE") else {
         eprintln!("SKIP VFIO S1: VMLAB_HV_TEST_VFIO_DEVICE is unset; no host device is claimed");

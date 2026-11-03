@@ -225,6 +225,7 @@ impl Machine {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn recorder_rip_is_opt_in_at_startup_and_switches_both_directions() {
     const DEBUG: &str = "info,vmlab_hv_vmm::diagnostics::flight=debug";
     const METADATA: &str = "info,vmlab_hv_vmm::diagnostics::flight::metadata=debug";
@@ -303,6 +304,7 @@ fn recorder_rip_is_opt_in_at_startup_and_switches_both_directions() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn guest_poweroff_is_zero_and_final_event_precedes_eof() {
     // Configure Q35's LPC PMBASE and ACPI decode through CF8/CFC, then enter S5.
     // Q35's DSDT encodes S5 with SLP_TYP=0.
@@ -319,6 +321,7 @@ fn guest_poweroff_is_zero_and_final_event_precedes_eof() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn guest_reset_has_its_own_final_reason_and_exits_zero() {
     let code = [0xba, 0xf9, 0x0c, 0xb0, 2, 0xee, 0xb0, 6, 0xee, 0xf4];
     let Some(mut machine) = Machine::launch(&code, false) else {
@@ -329,6 +332,7 @@ fn guest_reset_has_its_own_final_reason_and_exits_zero() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn host_signal_has_its_own_final_reason_and_exit_code() {
     let Some(mut machine) = Machine::launch(&[0xfa, 0xf4, 0xeb, 0xfd], false) else {
         return;
@@ -353,6 +357,7 @@ fn host_signal_has_its_own_final_reason_and_exit_code() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn runtime_filter_dump_and_quit_round_trip() {
     let Some(mut machine) = Machine::launch(&[0xfa, 0xf4, 0xeb, 0xfd], false) else {
         return;
@@ -388,6 +393,7 @@ fn runtime_filter_dump_and_quit_round_trip() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn deliberate_runtime_error_writes_report_and_exits_one() {
     let Some(mut machine) = Machine::launch(&[0xf4], true) else {
         return;

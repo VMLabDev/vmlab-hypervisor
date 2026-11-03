@@ -173,11 +173,13 @@ fn launch() -> Option<Vm> {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn vm_snapshot_during_fsync_writes() {
     vm_restore(10);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn vm_poweroff_root_filesystem_clean() {
     vm_restore(0);
 }

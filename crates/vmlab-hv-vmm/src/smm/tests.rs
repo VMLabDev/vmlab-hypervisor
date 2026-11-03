@@ -34,6 +34,7 @@ fn default_smbase_query_lock_and_restore() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM")]
 fn kvm_tseg_alias_executes_and_snapshots_without_opening_legacy_smram() {
     let kvm = match crate::kvm::KvmVm::new() {
         Ok(kvm) => kvm,
@@ -298,6 +299,7 @@ fn edk2_dma_negotiation() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM")]
 fn kvm_smi_handler_writes_private_smram_and_returns_with_rsm() {
     let kvm = match crate::kvm::KvmVm::new() {
         Ok(kvm) => kvm,

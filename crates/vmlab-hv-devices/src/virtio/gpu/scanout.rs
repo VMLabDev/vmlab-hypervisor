@@ -1046,6 +1046,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        vmlab_ci_no_host_assets,
+        ignore = "requires an owner-selected DRM render node"
+    )]
     fn external_only_scanout_reuses_pool_and_keeps_held_gpu_pixels() {
         let Some(node) = std::env::var_os("VMLAB_HV_TEST_RENDER_NODE") else {
             eprintln!("SKIP external-only scanout: set VMLAB_HV_TEST_RENDER_NODE");

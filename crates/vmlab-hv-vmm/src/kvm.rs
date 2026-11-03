@@ -593,6 +593,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn creates_vm_with_irqchip_and_vcpu() {
         let Some(vm) = kvm_or_skip() else { return };
         assert!(vm.max_vcpus() >= 1);
@@ -601,6 +602,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn irq_line_round_trip() {
         let Some(vm) = kvm_or_skip() else { return };
         assert!(vm.set_irq_line(4, true).is_ok());

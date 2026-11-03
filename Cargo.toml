@@ -36,6 +36,8 @@ unsafe_op_in_unsafe_fn = "deny"
 # fuse-backend-rs's feature gates; this build only ever compiles the
 # virtqueue path, and the values below keep the dead gates from warning.
 unexpected_cfgs = { level = "deny", check-cfg = [
+    'cfg(vmlab_ci_no_kvm)',
+    'cfg(vmlab_ci_no_host_assets)',
     'cfg(feature, values("async-io", "fuse-t", "fusedev", "macfuse", "persist", "vhost-user-fs", "virtiofs"))',
 ] }
 

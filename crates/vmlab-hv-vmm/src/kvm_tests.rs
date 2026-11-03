@@ -34,6 +34,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PAYLOAD_ADDR: u64 = 0x8000;
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn repeated_byte_io_preserves_fw_cfg_stream_access_width() {
     let code = [
         0xba, 0x10, 0x05, 0x31, 0xc0, 0xef, 0xba, 0x11, 0x05, 0xbf, 0x00, 0x81, 0xb9, 4, 0, 0xf3,
@@ -52,6 +53,7 @@ fn repeated_byte_io_preserves_fw_cfg_stream_access_width() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn q35_seabios_banner_through_control_socket() {
     const BIOS: &str = "/usr/share/qemu/bios-256k.bin";
     if !Path::new(BIOS).exists() {
@@ -183,6 +185,7 @@ fn q35_seabios_banner_through_control_socket() {
 /// address, and the machine's running-time clock can pace it (hv-audio
 /// D2's second device).
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn audio_virtio_snd_builds_and_joins_the_machine_clock() {
     const BIOS: &str = "/usr/share/qemu/bios-256k.bin";
     if !Path::new(BIOS).exists() {
@@ -630,6 +633,7 @@ fn temp_socket(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn guest_s5_after_powerdown_is_guest_shutdown() {
     let Some((vm, handle, serial)) = payload_vm(&s5_payload(), false, false) else {
         return;
@@ -647,6 +651,7 @@ fn guest_s5_after_powerdown_is_guest_shutdown() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn triple_fault_is_guest_reset() {
     // Exception delivery in flat real mode goes through KVM's emulator,
     // which does not turn a null-IDT int3 into a shutdown; in protected
@@ -666,6 +671,7 @@ fn triple_fault_is_guest_reset() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn q35_reset_sources_restart_firmware_and_keep_control_connected() {
     let Some(kvm) = kvm_or_skip() else { return };
     drop(kvm);
@@ -821,6 +827,7 @@ fn q35_reset_sources_restart_firmware_and_keep_control_connected() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn paused_machine_resumes_and_reports_events() {
     let Some((mut vm, handle, serial)) = payload_vm(&s5_payload(), true, false) else {
         return;
@@ -843,6 +850,7 @@ fn paused_machine_resumes_and_reports_events() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn q35_reset_allows_three_application_processors_to_start_again() {
     let Some(kvm) = kvm_or_skip() else { return };
     drop(kvm);
@@ -933,6 +941,7 @@ fn q35_reset_allows_three_application_processors_to_start_again() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn control_socket_end_to_end() {
     let Some((vm, handle, serial)) = payload_vm(&s5_payload(), false, false) else {
         return;
@@ -996,6 +1005,7 @@ fn control_socket_end_to_end() {
 ///
 /// Skips when the kernel asset is not on this host.
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn real_kernel_boots_and_resets() {
     const KERNEL: &str = "/home/wil/dev/vmlab/guest/dist/x86_64/vmlinuz";
     if !Path::new(KERNEL).exists() {
@@ -1070,6 +1080,7 @@ fn real_kernel_boots_and_resets() {
 
 /// S3 through the PM block suspends the machine without ending the run.
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn guest_s3_suspends() {
     let mut code = Vec::new();
     // Wait for SCI-less S3: write SLP_TYP=3 | SLP_EN to PM1a_CNT directly.

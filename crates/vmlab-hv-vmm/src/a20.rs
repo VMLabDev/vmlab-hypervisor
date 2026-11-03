@@ -247,6 +247,7 @@ mod tests {
     use vm_memory::Bytes;
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn bios_alias_retains_the_mapped_suffix_of_a_partial_megabyte() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("skipping BIOS alias test: /dev/kvm is unavailable");
@@ -279,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn cpu_aliases_each_odd_megabyte_without_aliasing_dma_or_losing_ram() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("skipping A20 mapping test: /dev/kvm is unavailable");

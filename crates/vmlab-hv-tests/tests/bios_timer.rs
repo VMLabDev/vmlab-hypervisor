@@ -20,6 +20,7 @@ impl Drop for Process {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn alpine_syslinux_countdown_reaches_login() {
     let image = vmlab_hv_tests::target_dir().join("s1/alpine-bios.qcow2");
     for path in [

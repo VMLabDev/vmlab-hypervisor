@@ -270,6 +270,7 @@ fn password_glyph_detector_matches_the_captured_five_key_exercise() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn macos_tahoe_p1_agent_display_keyboard_network_reset_snapshot_stop() {
     // The live macOS boot is intermittent (OpenCore and early-boot stalls) and is
     // parked under https://github.com/VMLabDev/vmlab/issues/200, so it runs only on

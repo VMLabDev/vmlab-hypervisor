@@ -360,6 +360,7 @@ fn window_rms(pcm: &[u8], range: std::ops::Range<usize>) -> f64 {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn virtio_snd_guest_plays_and_records() {
     let Some(mut vm) = launch(true) else {
         return;
@@ -452,6 +453,7 @@ fn virtio_snd_guest_plays_and_records() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn virtio_snd_microphone_off_opens_no_capture_stream() {
     let Some(vm) = launch(false) else {
         return;

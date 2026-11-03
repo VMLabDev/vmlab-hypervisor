@@ -8,19 +8,31 @@ on:
 jobs:
   check:
     name: just ci::check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      VIRGL_PREFIX: ${{ github.workspace }}/target/virgl
+      PKG_CONFIG_PATH: ${{ github.workspace }}/target/virgl/lib/pkgconfig
+      LD_LIBRARY_PATH: ${{ github.workspace }}/target/virgl/lib
+      # Compile every test, but report KVM/guest-only cases as ignored.
+      RUSTFLAGS: --cfg vmlab_ci_no_kvm --cfg vmlab_ci_no_host_assets
+      RUST_TEST_THREADS: 2
     steps:
       - uses: actions/checkout@v4
-      - name: Allow access to /dev/kvm
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - name: Install qemu-img and libraries
-        run: sudo apt-get update && sudo apt-get install -y qemu-utils libpipewire-0.3-dev libpulse-dev clang
+      - uses: extractions/setup-just@v2
+      - run: just ci::native-deps-install
+      - id: virgl-key
+        run: just ci::virgl-cache-key >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: virgl-cache
+        with:
+          path: target/virgl
+          key: ${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ steps.virgl-key.outputs.key }}-${{ hashFiles('.just/ci/mod.just') }}
+      - if: steps.virgl-cache.outputs.cache-hit != 'true'
+        run: just ci::virgl-build
+      - uses: astral-sh/setup-uv@v6
+      - run: just firmware-ipxe-build
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: extractions/setup-just@v2
       - uses: Swatinem/rust-cache@v2
       - run: just ci::check
