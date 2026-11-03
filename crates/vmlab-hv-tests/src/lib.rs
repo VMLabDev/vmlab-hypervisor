@@ -223,6 +223,8 @@ pub struct MachineSpec {
     pub vnet_pairs: Option<u16>,
     /// Wait for TAP descriptors over the control socket instead of a stream.
     pub tap: bool,
+    /// Disable offloads for a raw kernel fabric such as AF_XDP.
+    pub tap_raw: bool,
     pub memory_mib: u64,
     pub vcpus: u32,
     pub paused: bool,
@@ -238,6 +240,7 @@ impl MachineSpec {
             nics: 0,
             vnet_pairs: None,
             tap: false,
+            tap_raw: false,
             memory_mib: MEMORY_MIB,
             vcpus: 1,
             paused: false,
@@ -473,6 +476,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
                 mac: mac_string(TEST_MAC),
                 mtu: None,
                 attachment: match spec.vnet_pairs {
+                    Some(queue_pairs) if spec.tap_raw => NicAttachment::TapRaw { queue_pairs },
                     Some(queue_pairs) if spec.tap => NicAttachment::Tap { queue_pairs },
                     Some(queue_pairs) => NicAttachment::StreamVnet {
                         socket: switch_sock.clone().expect("bound above"),

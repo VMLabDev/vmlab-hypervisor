@@ -78,6 +78,17 @@ const F_MQ: u64 = 1 << 22;
 const F_GUEST_USO4: u64 = 1 << 54;
 const F_GUEST_USO6: u64 = 1 << 55;
 const F_HOST_USO: u64 = 1 << 56;
+const F_NET_OFFLOADS: u64 = F_CSUM
+    | F_GUEST_CSUM
+    | F_GUEST_TSO4
+    | F_GUEST_TSO6
+    | F_GUEST_ECN
+    | F_HOST_TSO4
+    | F_HOST_TSO6
+    | F_HOST_ECN
+    | F_GUEST_USO4
+    | F_GUEST_USO6
+    | F_HOST_USO;
 const HDR_F_NEEDS_CSUM: u8 = 1;
 const HDR_F_DATA_VALID: u8 = 2;
 /// `VIRTIO_NET_F_MTU` (feature bit 3).

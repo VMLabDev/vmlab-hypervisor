@@ -148,7 +148,7 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
             NicAttachment::Stream { socket } | NicAttachment::StreamVnet { socket, .. } => {
                 socket.clone()
             }
-            NicAttachment::Tap { .. } => Default::default(),
+            NicAttachment::Tap { .. } | NicAttachment::TapRaw { .. } => Default::default(),
         };
         let config = NetConfig {
             id: id.clone(),
@@ -161,10 +161,14 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
             NicAttachment::StreamVnet { .. } => {
                 Net::with_offload(config, nic.attachment.queue_pairs())
             }
-            NicAttachment::Tap { .. } => {
-                let (device, handle) =
-                    Net::with_tap(config, nic.attachment.queue_pairs(), mem.clone())
-                        .map_err(|e| DeviceUnavailable::new("virtio-net TAP", e.to_string()))?;
+            NicAttachment::Tap { .. } | NicAttachment::TapRaw { .. } => {
+                let build = if matches!(nic.attachment, NicAttachment::TapRaw { .. }) {
+                    Net::with_tap_raw
+                } else {
+                    Net::with_tap
+                };
+                let (device, handle) = build(config, nic.attachment.queue_pairs(), mem.clone())
+                    .map_err(|e| DeviceUnavailable::new("virtio-net TAP", e.to_string()))?;
                 self.network
                     .register(nic.mac.clone(), handle)
                     .map_err(|e| DeviceUnavailable::new("virtio-net TAP", e.to_string()))?;

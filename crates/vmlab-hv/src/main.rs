@@ -173,6 +173,7 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
             matches!(
                 nic.attachment,
                 vmlab_hv_proto::machine::NicAttachment::Tap { .. }
+                    | vmlab_hv_proto::machine::NicAttachment::TapRaw { .. }
             )
         })
     {

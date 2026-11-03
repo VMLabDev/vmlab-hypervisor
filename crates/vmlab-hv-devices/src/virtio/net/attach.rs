@@ -98,6 +98,17 @@ impl NetBackendRegistry {
 }
 
 impl Net {
+    /// Use completed packets when the kernel fabric cannot carry offload metadata.
+    pub fn with_tap_raw(
+        config: NetConfig,
+        pairs: u16,
+        memory: GuestMemory,
+    ) -> io::Result<(Self, NetBackendHandle)> {
+        let (net, mut handle) = Self::with_tap(config, pairs, memory)?;
+        handle.offered &= !super::F_NET_OFFLOADS;
+        Ok((net, handle))
+    }
+
     /// Build a NIC whose daemon installs TAP queues before the first resume.
     pub fn with_tap(
         config: NetConfig,
@@ -134,6 +145,25 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         let mut byte = [0];
         assert_eq!(std::io::Read::read(&mut peer, &mut byte).unwrap(), 0);
+    }
+
+    #[test]
+    fn raw_fabric_masks_offloads_and_preserves_multiqueue() {
+        use vm_memory::GuestAddress;
+        let memory = GuestMemory::from_ranges(&[(GuestAddress(0), 65536)]).unwrap();
+        let (_net, handle) = Net::with_tap_raw(
+            NetConfig {
+                id: "raw0".into(),
+                mac: [2, 0, 0, 0, 0, 1],
+                mtu: 1500,
+                switch: Default::default(),
+            },
+            2,
+            memory,
+        )
+        .unwrap();
+        assert_eq!(handle.offered & super::super::F_NET_OFFLOADS, 0);
+        assert_ne!(handle.offered & super::super::F_MQ, 0);
     }
 
     #[test]

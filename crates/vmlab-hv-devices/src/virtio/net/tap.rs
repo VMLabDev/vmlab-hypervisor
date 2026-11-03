@@ -355,7 +355,11 @@ impl TapBackend {
                 return Err(io::Error::last_os_error());
             }
             let base = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6 | TUN_F_TSO_ECN;
-            let probe = result.ops.offload(&tap, base | TUN_F_USO4 | TUN_F_USO6);
+            let probe = if offered & super::F_NET_OFFLOADS != 0 {
+                result.ops.offload(&tap, base | TUN_F_USO4 | TUN_F_USO6)
+            } else {
+                Ok(())
+            };
             let supported = match probe {
                 Ok(()) => Ok(()),
                 Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
@@ -1000,6 +1004,31 @@ mod tests {
     ) -> (TapBackend, Vec<UnixDatagram>) {
         let (backend, _, packets, _) = fixture(pairs, vhost, memory);
         (backend, packets)
+    }
+
+    #[test]
+    fn raw_fabric_never_enables_tun_offloads() {
+        let memory = memory();
+        let (socket, _peer) = UnixDatagram::pair().unwrap();
+        let fake = Arc::new(Fake::default());
+        let backend = TapBackend::with_ops(
+            vec![socket.into()],
+            1,
+            false,
+            memory,
+            offered() & !super::super::F_NET_OFFLOADS,
+            fake.clone(),
+        )
+        .unwrap();
+        assert_eq!(backend.features() & super::super::F_NET_OFFLOADS, 0);
+        let state = fake.0.lock().unwrap();
+        assert!(state.calls.contains(&Call::Offload(0)));
+        assert!(
+            !state
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::Offload(flags) if *flags != 0))
+        );
     }
 
     #[test]

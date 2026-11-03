@@ -118,7 +118,7 @@ fn passed_tap_and_vhost_queues_exchange_traffic_and_restore() {
         eprintln!("skip TAP S1: {reason}");
         return;
     }
-    for vhost in [false, true] {
+    for (vhost, raw) in [(false, false), (true, false), (true, true)] {
         let (name, mut fds) = match tap_queues(2) {
             Ok(result) => result,
             Err(error) if matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES)) => {
@@ -147,6 +147,7 @@ fn passed_tap_and_vhost_queues_exchange_traffic_and_restore() {
         let mut spec =
             MachineSpec::idle(if vhost { "s1-vhost-net" } else { "s1-tap-net" }).with_vnet_pairs(2);
         spec.tap = true;
+        spec.tap_raw = raw;
         spec.paused = true;
         spec.vcpus = 2;
         let mut guest = vmlab_hv_tests::launch(&spec, &assets);
@@ -199,6 +200,16 @@ fn passed_tap_and_vhost_queues_exchange_traffic_and_restore() {
             CtlEvent::Idle
         ));
         let mut agent = AgentClient::connect(&guest.agent_sock, Duration::from_secs(60)).unwrap();
+        if raw {
+            let output = agent.exec(&[BUSYBOX, "sh", "-c", "for d in /sys/bus/virtio/devices/*; do k=$(/.vmlab/busybox cat \"$d/device\"); [ \"$((k))\" -eq 1 ] && /.vmlab/busybox cat \"$d/features\"; done"], Duration::from_secs(15)).unwrap();
+            for bit in [0, 1, 7, 8, 9, 11, 12, 13, 54, 55, 56] {
+                assert_eq!(
+                    output.stdout.get(bit),
+                    Some(&b'0'),
+                    "raw TAP offload bit {bit}: {output:?}"
+                );
+            }
+        }
         let output = agent.exec(&[BUSYBOX, "sh", "-c", "/.vmlab/busybox ip link set dev eth0 up && /.vmlab/busybox ip addr add 192.0.2.2/24 dev eth0; set -- /sys/class/net/eth0/queues/rx-*; [ \"$#\" -eq 2 ]"], Duration::from_secs(15)).unwrap();
         assert_eq!(output.exit_code, 0, "TAP guest configuration: {output:?}");
         let echo = Echo::start();

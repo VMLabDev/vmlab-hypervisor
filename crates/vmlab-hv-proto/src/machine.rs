@@ -292,6 +292,8 @@ pub enum NicAttachment {
     StreamVnet { socket: PathBuf, queue_pairs: u16 },
     /// TAP queues installed with SCM_RIGHTS while the machine is paused.
     Tap { queue_pairs: u16 },
+    /// TAP on a raw kernel fabric that cannot preserve checksum/GSO metadata.
+    TapRaw { queue_pairs: u16 },
 }
 
 impl NicAttachment {
@@ -299,9 +301,9 @@ impl NicAttachment {
     pub fn queue_pairs(&self) -> u16 {
         match self {
             Self::Stream { .. } => 1,
-            Self::StreamVnet { queue_pairs, .. } | Self::Tap { queue_pairs } => {
-                (*queue_pairs).clamp(1, 31)
-            }
+            Self::StreamVnet { queue_pairs, .. }
+            | Self::Tap { queue_pairs }
+            | Self::TapRaw { queue_pairs } => (*queue_pairs).clamp(1, 31),
         }
     }
 }
