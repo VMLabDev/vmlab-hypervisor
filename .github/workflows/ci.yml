@@ -29,6 +29,8 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ steps.virgl-key.outputs.key }}-${{ hashFiles('.just/ci/mod.just') }}
       - if: steps.virgl-cache.outputs.cache-hit != 'true'
         run: just ci::virgl-build
+      - uses: astral-sh/setup-uv@v6
+      - run: just firmware-ipxe-build
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

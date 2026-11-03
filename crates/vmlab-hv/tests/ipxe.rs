@@ -1,7 +1,6 @@
 //! P1: execute our upstream iPXE ROM under SeaBIOS through the control socket.
 
 #[test]
-#[cfg_attr(vmlab_ci_no_host_assets, ignore = "requires locally built iPXE ROMs")]
 fn nic_rom_decode_requires_enable_and_memory_space() {
     use parking_lot::Mutex;
     use std::sync::Arc;
@@ -52,6 +51,7 @@ fn nic_rom_decode_requires_enable_and_memory_space() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and built firmware")]
 fn seabios_executes_ipxe_option_rom() {
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../firmware/ipxe/boot.py");

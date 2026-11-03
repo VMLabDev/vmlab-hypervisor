@@ -107,10 +107,11 @@ setup on Ubuntu 24.04. The install defaults to `target/virgl`; builds need
 The workflow sets `--cfg vmlab_ci_no_kvm` in `RUSTFLAGS` because hosted runners
 have no guest images or guaranteed KVM access. It also sets
 `--cfg vmlab_ci_no_host_assets` for tests needing an owner-selected render
-node, live audio session, virtual USB gadget, or locally built firmware assets.
+node, live audio session, virtual USB gadget, container initrd, or probe dump.
 Those tests still compile and
 appear as `ignored` with a reason, rather than passed. Pure launch validation,
-protocol, device, disk and private-display tests still run. The local
+protocol, device, disk and private-display tests still run. CI also builds the
+pinned iPXE ROMs so their guest-free checks run. The local
 `just ci::check` does not set this flag and keeps its existing behaviour.
 
 The convention for a full suite run on the development host is a systemd-run

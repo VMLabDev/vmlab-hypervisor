@@ -31,7 +31,12 @@ rust-test:
 [group('ci')]
 native-deps-install:
 	sudo apt-get update
-	sudo apt-get install -y --no-install-recommends build-essential curl pkg-config meson ninja-build python3-yaml libepoxy-dev libdrm-dev libgbm-dev libegl-dev libvulkan-dev glslang-tools libpipewire-0.3-dev libpulse-dev clang libclang-dev qemu-utils nasm acpica-tools imagemagick cpio xvfb libvulkan1 mesa-vulkan-drivers seabios xorriso edid-decode pipewire-bin
+	sudo apt-get install -y --no-install-recommends build-essential gcc-multilib liblzma-dev curl pkg-config meson ninja-build python3-yaml libepoxy-dev libdrm-dev libgbm-dev libegl-dev libvulkan-dev glslang-tools libpipewire-0.3-dev libpulse-dev clang libclang-dev qemu-utils nasm acpica-tools imagemagick cpio xvfb libvulkan1 mesa-vulkan-drivers seabios xorriso edid-decode pipewire-bin
+	sudo apt-get install -y --no-install-recommends libxkbcommon-x11-0 libxkbcommon0 libwayland-client0 libx11-6 libxcursor1 libxrandr2 libxi6 libxfixes3 libxtst6
+	sudo install -d /usr/share/qemu
+	test -e /usr/share/qemu/vgabios-stdvga.bin || sudo ln -s /usr/share/seabios/vgabios-stdvga.bin /usr/share/qemu/vgabios-stdvga.bin
+	test -e /usr/share/qemu/vgabios-virtio.bin || sudo ln -s /usr/share/seabios/vgabios-virtio.bin /usr/share/qemu/vgabios-virtio.bin
+	command -v magick || sudo ln -s /usr/bin/convert /usr/local/bin/magick
 
 # Emit the virglrenderer cache identity for GitHub Actions
 [group('ci')]

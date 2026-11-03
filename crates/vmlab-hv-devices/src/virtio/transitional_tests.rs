@@ -170,7 +170,6 @@ fn option_rom_identity_sizing_reads_and_snapshot() {
 }
 
 #[test]
-#[cfg_attr(vmlab_ci_no_host_assets, ignore = "requires locally built iPXE ROMs")]
 fn built_ipxe_rom_headers_and_bytes() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ipxe");
     if !root.join("virtio-net.rom").exists() {
