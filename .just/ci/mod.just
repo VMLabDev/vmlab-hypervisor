@@ -2,7 +2,7 @@ set working-directory := '../..'
 
 virgl_version := '1.3.0'
 virgl_sha256 := '065bc56e89e6f631f96101cd62eba0748e48eb888b434edc86e89d05395e76f3'
-virgl_prefix := env('VIRGL_PREFIX', justfile_directory() / 'target/virgl')
+virgl_prefix := env('VIRGL_PREFIX', justfile_directory() / '.ci-cache/virgl')
 
 [default, private]
 main:

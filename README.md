@@ -106,9 +106,9 @@ a prerequisite is missing.
 GitHub CI builds virglrenderer 1.3.0 from the same SHA-256-pinned source and
 Meson options as vmlab's e2e image, then caches the install. Run
 `just ci::native-deps-install` and `just ci::virgl-build` to reproduce that
-setup on Ubuntu 24.04. The install defaults to `target/virgl`; builds need
-`PKG_CONFIG_PATH=$PWD/target/virgl/lib/pkgconfig` and executables need
-`LD_LIBRARY_PATH=$PWD/target/virgl/lib`.
+setup on Ubuntu 24.04. The install defaults to `.ci-cache/virgl`; builds need
+`PKG_CONFIG_PATH=$PWD/.ci-cache/virgl/lib/pkgconfig` and executables need
+`LD_LIBRARY_PATH=$PWD/.ci-cache/virgl/lib`.
 
 The workflow sets `--cfg vmlab_ci_no_kvm` in `RUSTFLAGS` because hosted runners
 have no guest images or guaranteed KVM access. It also sets
