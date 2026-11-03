@@ -10,9 +10,9 @@ jobs:
     name: just ci::check
     runs-on: ubuntu-24.04
     env:
-      VIRGL_PREFIX: ${{ github.workspace }}/target/virgl
-      PKG_CONFIG_PATH: ${{ github.workspace }}/target/virgl/lib/pkgconfig
-      LD_LIBRARY_PATH: ${{ github.workspace }}/target/virgl/lib
+      VIRGL_PREFIX: ${{ github.workspace }}/.ci-cache/virgl
+      PKG_CONFIG_PATH: ${{ github.workspace }}/.ci-cache/virgl/lib/pkgconfig
+      LD_LIBRARY_PATH: ${{ github.workspace }}/.ci-cache/virgl/lib
       # Compile every test, but report KVM/guest-only cases as ignored.
       RUSTFLAGS: --cfg vmlab_ci_no_kvm --cfg vmlab_ci_no_host_assets
       RUST_TEST_THREADS: 2
@@ -25,7 +25,7 @@ jobs:
       - uses: actions/cache@v4
         id: virgl-cache
         with:
-          path: target/virgl
+          path: .ci-cache/virgl
           key: ${{ runner.os }}-${{ runner.arch }}-ubuntu-24.04-${{ steps.virgl-key.outputs.key }}-${{ hashFiles('.just/ci/mod.just') }}
       - if: steps.virgl-cache.outputs.cache-hit != 'true'
         run: just ci::virgl-build
