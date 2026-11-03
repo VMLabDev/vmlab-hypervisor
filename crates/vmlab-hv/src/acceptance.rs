@@ -749,6 +749,7 @@ fn boot_template(
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ubuntu_26_04_firmware_agent_and_snapshot() {
     boot_template(
         "ubuntu-26.04",
@@ -761,6 +762,7 @@ fn ubuntu_26_04_firmware_agent_and_snapshot() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn almalinux_10_firmware_agent() {
     boot_template(
         "almalinux-10",
@@ -773,6 +775,7 @@ fn almalinux_10_firmware_agent() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ubuntu_26_04_ahci_firmware_agent() {
     boot_template(
         "ubuntu-26.04",
@@ -785,6 +788,7 @@ fn ubuntu_26_04_ahci_firmware_agent() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ubuntu_26_04_native_display_input_and_rfb() {
     boot_template(
         "ubuntu-26.04",
@@ -797,6 +801,7 @@ fn ubuntu_26_04_native_display_input_and_rfb() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn debian_13_ovmf_agent() {
     boot_template(
         "debian-13",
@@ -809,6 +814,7 @@ fn debian_13_ovmf_agent() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ubuntu_24_04_secure_ovmf_agent_and_snapshot() {
     boot_template(
         "ubuntu-24.04",
@@ -821,6 +827,7 @@ fn ubuntu_24_04_secure_ovmf_agent_and_snapshot() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ubuntu_24_04_ovmf_agent() {
     boot_template(
         "ubuntu-24.04",
@@ -833,6 +840,7 @@ fn ubuntu_24_04_ovmf_agent() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn windows_10_ovmf_agent_and_snapshot() {
     boot_template(
         "windows-10",
@@ -845,6 +853,7 @@ fn windows_10_ovmf_agent_and_snapshot() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ubuntu_26_04_agent_reboot_keeps_process_control_and_display() {
     boot_template(
         "ubuntu-26.04",
@@ -857,6 +866,7 @@ fn ubuntu_26_04_agent_reboot_keeps_process_control_and_display() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn windows_10_agent_reboot_keeps_process_control_and_display() {
     boot_template(
         "windows-10",
@@ -869,6 +879,7 @@ fn windows_10_agent_reboot_keeps_process_control_and_display() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn windows_server_2022_ovmf_tpm_agent() {
     boot_template(
         "windows-server-2022",
@@ -881,6 +892,7 @@ fn windows_server_2022_ovmf_tpm_agent() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ubuntu_26_04_first_screenshot_after_unobserved_boot() {
     for device in ["std-vga", "virtio-vga"] {
         boot_template(
@@ -961,6 +973,7 @@ fn usb_test_device() -> Option<UsbDeviceFacts> {
 /// to the ubuntu-26.04 template, shows up inside the guest, detaches with
 /// a `device_deleted` event, and the host kernel driver rebinds.
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn usb_host_passthrough_real_device() {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("skipping: /dev/kvm is unavailable");

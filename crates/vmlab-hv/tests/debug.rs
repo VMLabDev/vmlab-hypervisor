@@ -196,6 +196,7 @@ impl Machine {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn long_mode_high_address_breakpoints_and_eight_byte_watchpoints_through_s1() {
     if !Command::new("nasm")
         .arg("-v")
@@ -293,6 +294,7 @@ fn long_mode_high_address_breakpoints_and_eight_byte_watchpoints_through_s1() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn memory_registers_and_validation_through_s1() {
     let Some(mut guest) = Machine::launch(2) else {
         return;
@@ -440,6 +442,7 @@ fn memory_registers_and_validation_through_s1() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn virtual_memory_uses_current_page_tables_and_preflights_every_page() {
     let Some(mut guest) = Machine::launch(1) else {
         return;
@@ -506,6 +509,7 @@ fn virtual_memory_uses_current_page_tables_and_preflights_every_page() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn hardware_breakpoints_watchpoints_and_smp_step_through_s1() {
     let Some(mut guest) = Machine::launch(2) else {
         return;
@@ -592,6 +596,7 @@ fn hardware_breakpoints_watchpoints_and_smp_step_through_s1() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn gdb_attaches_edits_memory_and_registers_and_hits_a_breakpoint() {
     if !Command::new("gdb")
         .arg("--version")
@@ -658,6 +663,7 @@ fn gdb_attaches_edits_memory_and_registers_and_hits_a_breakpoint() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn debugger_interrupt_stops_the_guest_and_eof_removes_breakpoints() {
     use std::io::{Read, Write};
     let Some(mut guest) = Machine::launch(2) else {
@@ -717,6 +723,7 @@ fn debugger_interrupt_stops_the_guest_and_eof_removes_breakpoints() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn lldb_attaches_edits_memory_and_registers_and_steps() {
     let lldb = std::env::var_os("VMLAB_HV_TEST_LLDB").unwrap_or_else(|| "lldb".into());
     let probe = Command::new(&lldb).arg("--version").output();

@@ -337,6 +337,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_host_assets, ignore = "requires a live PulseAudio session")]
     fn real_pulse_streams() {
         let server_set = std::env::var_os("PULSE_SERVER").is_some_and(|v| !v.is_empty());
         let socket_reachable = std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|dir| {

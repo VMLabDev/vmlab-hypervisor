@@ -523,6 +523,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn avic_policy_requires_host_support_and_discards_missed_pit_ticks() {
         let Some(vm) = kvm() else { return };
         let mut features = WINDOWS_FEATURES.to_vec();
@@ -546,6 +547,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn tiny_guest_reads_cpuid_and_hyperv_msrs() {
         let Some(vm) = kvm() else { return };
         let ram =
@@ -623,6 +625,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn guest_synic_page_enables_clear_reused_memory() {
         let Some(vm) = kvm() else { return };
         let ram =
@@ -672,6 +675,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn hyperv_migration_msrs_round_trip_to_fresh_vcpu() {
         let Some(source) = kvm() else { return };
         let destination = KvmVm::new().unwrap();
@@ -725,6 +729,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn control_socket_snapshot_restores_hyperv_state_and_guest_reset() {
         use crate::snapshot::{DiskNode, SnapshotRegistry};
         use crate::vm::{ExitReason, Vm, VmShared};

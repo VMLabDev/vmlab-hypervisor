@@ -1741,6 +1741,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn exit_waiter_observes_the_legacy_shutdown_before_finalization() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("SKIP exit-event ordering: /dev/kvm is unavailable");
@@ -1788,6 +1789,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM")]
     fn virtio_config_window_does_not_park_other_vcpus() {
         use vmlab_hv_devices::{BarInfo, PciDevice};
         struct Probe;
@@ -1849,6 +1851,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM")]
     fn ordinary_io_does_not_scan_pci_errors_without_vfio() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use vmlab_hv_devices::{BarInfo, BarKind, PciDevice};
@@ -1898,6 +1901,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn smi_delivery_waits_for_all_targets_and_preserves_queued_targets_on_pause() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("skipping SMI delivery test: /dev/kvm is unavailable");
@@ -1941,6 +1945,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM")]
     fn display_publication_without_clients_is_rate_limited() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use vmlab_hv_display::{DisplayServer, Frame, FrameSource, InputSink, Pixels};
@@ -1998,6 +2003,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM")]
     fn slow_display_does_not_block_audio_clock() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
@@ -2096,11 +2102,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn quiesce_recovers_a_kick_lost_before_entering_kvm() {
         lost_kick(false);
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn shutdown_recovers_a_kick_lost_before_entering_kvm() {
         lost_kick(true);
     }

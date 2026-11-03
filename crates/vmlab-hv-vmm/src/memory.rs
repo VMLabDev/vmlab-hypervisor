@@ -209,6 +209,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn registering_ram_ignores_device_regions_in_the_dma_view() {
         if !std::path::Path::new("/dev/kvm").exists() {
             return;

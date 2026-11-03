@@ -571,11 +571,13 @@ impl Drop for Observer {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn qemu_ubuntu_display_reference() {
     qemu_display_reference("virtio-vga");
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn qemu_ubuntu_standard_vga_display_reference() {
     qemu_display_reference("VGA");
 }

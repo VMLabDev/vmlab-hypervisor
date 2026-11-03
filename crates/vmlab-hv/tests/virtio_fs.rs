@@ -384,6 +384,7 @@ fn boot(dir: &Dir, share: &Path, read_only: bool) -> (Vm, PathBuf) {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn guest_mounts_reads_and_writes_the_share() {
     let Some(()) = or_skip() else {
         return;
@@ -414,6 +415,7 @@ fn guest_mounts_reads_and_writes_the_share() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_with_an_open_file_restores_readable() {
     let Some(()) = or_skip() else {
         return;

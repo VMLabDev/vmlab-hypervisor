@@ -1992,6 +1992,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn build_fails_clearly_when_devices_are_missing() {
         // /dev/kvm is needed; without it the device error cannot be reached.
         if !std::path::Path::new("/dev/kvm").exists() {

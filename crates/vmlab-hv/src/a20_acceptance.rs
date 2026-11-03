@@ -599,6 +599,7 @@ fn launch() -> Option<ProbeVm> {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn pc_a20_cpu_wraparound_reset_and_snapshot() {
     let Some(mut vm) = launch() else { return };
     vm.call(Control::Resume);
@@ -637,6 +638,7 @@ fn pc_a20_cpu_wraparound_reset_and_snapshot() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn pc_a20_real_mode_loop_cost() {
     let Some(mut vm) = launch() else { return };
     vm.call(Control::Resume);

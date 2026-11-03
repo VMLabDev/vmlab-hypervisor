@@ -647,6 +647,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn apmc_enables_acpi_without_smm() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("skipping APMC routing test: /dev/kvm is unavailable");
@@ -671,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn apmc_leaves_acpi_enable_to_smm_when_available() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("skipping APMC routing test: /dev/kvm is unavailable");
@@ -695,6 +697,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn hpet_legacy_timer_uses_pic_irq0_and_ioapic_pin2() {
         if !std::path::Path::new("/dev/kvm").exists() {
             eprintln!("skipping HPET routing test: /dev/kvm is unavailable");
@@ -729,6 +732,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn pit_keeps_delivering_after_pic_acknowledgements() {
         use kvm_ioctls::VcpuExit;
         use vm_memory::{Bytes, GuestAddress};
@@ -818,6 +822,7 @@ mod tests {
         );
     }
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn platform_timers_freeze_between_pause_and_resume() {
         let kvm = match crate::kvm::KvmVm::new() {
             Ok(kvm) => kvm,
@@ -884,6 +889,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn audio_clock_freezes_between_pause_and_resume() {
         let kvm = match crate::kvm::KvmVm::new() {
             Ok(kvm) => kvm,

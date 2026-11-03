@@ -97,6 +97,22 @@ squashfs rootfs; `just s1-tests-run` builds the rootfs from the pinned Alpine
 minirootfs and runs the suite. Every S1 test skips with a printed reason when
 a prerequisite is missing.
 
+GitHub CI builds virglrenderer 1.3.0 from the same SHA-256-pinned source and
+Meson options as vmlab's e2e image, then caches the install. Run
+`just ci::native-deps-install` and `just ci::virgl-build` to reproduce that
+setup on Ubuntu 24.04. The install defaults to `target/virgl`; builds need
+`PKG_CONFIG_PATH=$PWD/target/virgl/lib/pkgconfig` and executables need
+`LD_LIBRARY_PATH=$PWD/target/virgl/lib`.
+
+The workflow sets `--cfg vmlab_ci_no_kvm` in `RUSTFLAGS` because hosted runners
+have no guest images or guaranteed KVM access. It also sets
+`--cfg vmlab_ci_no_host_assets` for tests needing an owner-selected render
+node, live audio session, virtual USB gadget, or locally built firmware assets.
+Those tests still compile and
+appear as `ignored` with a reason, rather than passed. Pure launch validation,
+protocol, device, disk and private-display tests still run. The local
+`just ci::check` does not set this flag and keeps its existing behaviour.
+
 The convention for a full suite run on the development host is a systemd-run
 scope with a memory cap and one test thread, for example
 `systemd-run --user --scope -p MemoryMax=24G -p MemorySwapMax=0 -- env

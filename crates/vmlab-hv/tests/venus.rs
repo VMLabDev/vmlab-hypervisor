@@ -14,6 +14,7 @@ use vmlab_hv_tests::{agent::AgentClient, process::ManagedChild};
 mod windows;
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn steamos_venus_vulkan_device_and_frames() {
     let Some(node) = std::env::var_os("VMLAB_HV_TEST_VENUS_RENDER_NODE") else {
         eprintln!("SKIP Venus S1: set VMLAB_HV_TEST_VENUS_RENDER_NODE to a DRM render node");

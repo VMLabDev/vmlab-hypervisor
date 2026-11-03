@@ -534,6 +534,7 @@ fn reboot_guest(control: &mut Client, mut agent: AgentClient, path: &Path) -> Ag
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn windows_win3d_venus_context_cleanup() {
     let Some(node) = std::env::var_os("VMLAB_HV_TEST_VENUS_RENDER_NODE") else {
         eprintln!("SKIP Windows Venus S1: set VMLAB_HV_TEST_VENUS_RENDER_NODE");

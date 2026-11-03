@@ -417,6 +417,7 @@ mod usb_tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn attach_and_detach_round_trip_with_events() {
         let Some(f) = fixture() else { return };
         // The device lands on a USB2 root port past the tablet.
@@ -510,6 +511,7 @@ mod usb_tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn a_machine_without_hotplug_refuses_attaches() {
         let Some(f) = fixture() else { return };
         f.shared
@@ -522,6 +524,7 @@ mod usb_tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn concurrent_detaches_emit_one_event() {
         let Some(f) = fixture() else { return };
         assert!(matches!(
@@ -561,6 +564,7 @@ mod usb_tests {
     }
 
     #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
     fn a_lost_host_device_detaches_with_an_event() {
         let Some(f) = fixture() else { return };
         assert!(matches!(

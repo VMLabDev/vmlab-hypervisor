@@ -28,6 +28,7 @@ const BUSYBOX: &str = "/.vmlab/busybox";
 const BOOT: Duration = Duration::from_secs(120);
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn control_protocol_unknown_request_preserves_the_connection() {
     use std::io::{BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -177,16 +178,19 @@ fn snapshot_roundtrip(paused: bool, check_disk: bool) {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_running_guest() {
     snapshot_roundtrip(false, false);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_paused_guest() {
     snapshot_roundtrip(true, false);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn snapshot_disk_integrity() {
     snapshot_roundtrip(false, true);
 }
@@ -219,6 +223,7 @@ fn rtc_seconds(agent: &mut AgentClient) -> i64 {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn clock_fixed_base() {
     let Some(assets) = check() else { return };
     let mut spec = MachineSpec::idle("s1-clock-fixed");
@@ -236,11 +241,13 @@ fn clock_fixed_base() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn clock_snapshot_keeps_captured_time() {
     clock_snapshot_roundtrip(None, 1);
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn clock_fixed_base_and_cmos_survive_smp_snapshot() {
     clock_snapshot_roundtrip(Some("2020-01-01T00:00:00Z"), 2);
 }
@@ -383,6 +390,7 @@ fn agent_ready(guest: &vmlab_hv_tests::Guest) -> AgentClient {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn blocked_serial_client_bounds_rss_and_resumes_without_losing_bytes() {
     use std::io::Read;
     let Some(assets) = check() else { return };
@@ -462,6 +470,7 @@ fn blocked_serial_client_bounds_rss_and_resumes_without_losing_bytes() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn boots_to_idle_exec_and_scratch_roundtrip() {
     let Some(assets) = check() else { return };
 
@@ -506,6 +515,7 @@ fn boots_to_idle_exec_and_scratch_roundtrip() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn workload_container_exit_powers_off_machine() {
     let Some(assets) = check() else { return };
 
@@ -570,6 +580,7 @@ fn workload_container_exit_powers_off_machine() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn powerdown_accepted_and_guest_poweroff_exits_zero() {
     let Some(assets) = check() else { return };
 
@@ -636,6 +647,7 @@ fn powerdown_accepted_and_guest_poweroff_exits_zero() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn nic_dhcp_exchange_with_test_switch() {
     let Some(assets) = check() else { return };
 
@@ -680,6 +692,7 @@ fn nic_dhcp_exchange_with_test_switch() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn nic_traffic_survives_snapshot_load() {
     let Some(assets) = check() else { return };
 
@@ -866,6 +879,7 @@ fn nic_traffic_survives_snapshot_load() {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn quit_exits_cleanly_while_booting() {
     let Some(assets) = check() else { return };
 

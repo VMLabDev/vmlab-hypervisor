@@ -199,6 +199,10 @@ impl crate::virtio::gpu::BlobMapper for ProbeMapper {
 }
 
 #[test]
+#[cfg_attr(
+    vmlab_ci_no_host_assets,
+    ignore = "requires an owner-selected DRM render node"
+)]
 fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
     let Some(node) = std::env::var_os("VMLAB_HV_TEST_RENDER_NODE") else {
         eprintln!("SKIP accelerated GPU protocol: VMLAB_HV_TEST_RENDER_NODE is unset");

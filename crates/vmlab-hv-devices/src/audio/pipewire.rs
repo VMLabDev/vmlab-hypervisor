@@ -394,6 +394,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        vmlab_ci_no_host_assets,
+        ignore = "requires a live PipeWire session and default sink"
+    )]
     fn real_pipewire_playback_smoke() {
         if !super::super::probe_environment().pipewire_socket_reachable {
             eprintln!(
@@ -430,6 +434,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        vmlab_ci_no_host_assets,
+        ignore = "requires a live PipeWire session and default sink"
+    )]
     fn real_pipewire_formats() {
         if !super::super::probe_environment().pipewire_socket_reachable {
             eprintln!(

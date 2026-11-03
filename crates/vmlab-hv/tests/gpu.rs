@@ -61,6 +61,7 @@ fn template() -> Option<PathBuf> {
 }
 
 #[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ubuntu_virgl_scanout_and_cpu_copy() {
     let Some(node) = render_node() else {
         eprintln!("SKIP GPU S1: no usable /dev/dri render node");

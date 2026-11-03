@@ -19,6 +19,10 @@ impl BlobMapper for Mapper {
 }
 
 #[test]
+#[cfg_attr(
+    vmlab_ci_no_host_assets,
+    ignore = "requires an owner-selected DRM render node"
+)]
 fn renderer_initializes_on_selected_node() {
     let Some(node) = std::env::var_os("VMLAB_HV_TEST_RENDER_NODE") else {
         eprintln!("SKIP: set VMLAB_HV_TEST_RENDER_NODE to exercise the host renderer");
