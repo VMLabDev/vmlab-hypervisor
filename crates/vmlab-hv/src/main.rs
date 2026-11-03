@@ -168,7 +168,18 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
         ));
     }
 
-    let mut vm = builder::build(&desc, &DeviceSet, true)
+    if !args.paused
+        && desc.nics.iter().any(|nic| {
+            matches!(
+                nic.attachment,
+                vmlab_hv_proto::machine::NicAttachment::Tap { .. }
+            )
+        })
+    {
+        return Err("TAP attachments require --paused and net_attach before resume".into());
+    }
+    let devices = DeviceSet::default();
+    let mut vm = builder::build(&desc, &devices, true)
         .map_err(|e| format!("building machine `{}`: {e}", desc.name))?;
     vm.attach_diagnostics();
     let handle = vm.handle();
@@ -188,8 +199,8 @@ fn run(desc: MachineDescription, args: Args) -> Result<ExitReason, String> {
             .serve_display(&native, &rfb)
             .map_err(|e| e.to_string())?;
     }
-    let control =
-        control::serve(&args.control, &handle).map_err(|e| format!("control socket: {e}"))?;
+    let control = control::serve_with_network(&args.control, &handle, devices.network.clone())
+        .map_err(|e| format!("control socket: {e}"))?;
 
     diagnostics::signal::checkpoint()?;
 

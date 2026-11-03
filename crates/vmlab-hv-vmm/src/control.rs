@@ -1,6 +1,7 @@
 //! The control-socket side: mapping protocol commands onto a machine and
 //! serving the socket with the protocol crate's server.
 
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use crate::vm::VmHandle;
 /// framing, reply ids) live in `vmlab-hv-proto`'s server; this is the VMM's
 /// policy.
 pub struct ControlHandler {
+    network: vmlab_hv_devices::virtio::net::NetBackendRegistry,
     vm: VmHandle,
     /// Builds the backend for one attach: the real path opens the usbdevfs
     /// node; tests substitute a fake device.
@@ -37,6 +39,7 @@ fn open_usb_host(bus: u16, dev: u16) -> Result<Box<dyn vmlab_hv_devices::usb::Us
 impl ControlHandler {
     pub fn new(vm: VmHandle) -> Self {
         ControlHandler {
+            network: Default::default(),
             vm,
             usb_opener: Arc::new(open_usb_host),
         }
@@ -45,13 +48,60 @@ impl ControlHandler {
     /// A handler whose attach path builds its devices through `opener`.
     pub fn with_usb_opener(vm: VmHandle, opener: UsbOpener) -> Self {
         ControlHandler {
+            network: Default::default(),
             vm,
             usb_opener: opener,
         }
     }
 
+    pub fn with_network(
+        vm: VmHandle,
+        network: vmlab_hv_devices::virtio::net::NetBackendRegistry,
+    ) -> Self {
+        Self {
+            vm,
+            network,
+            usb_opener: Arc::new(open_usb_host),
+        }
+    }
+
+    pub fn handle_with_fds(&self, command: Command, fds: Vec<OwnedFd>) -> Outcome {
+        if let Command::NetAttach {
+            mac,
+            queue_pairs,
+            vhost,
+        } = command
+        {
+            if self.vm.status() != RunState::Paused {
+                return Outcome::Error {
+                    code: ErrorCode::InvalidState,
+                    message: "net_attach requires a paused machine before NIC activation".into(),
+                };
+            }
+            return match self.network.install(&mac, queue_pairs, vhost, fds) {
+                Ok(()) => Outcome::Ok { status: None },
+                Err(error) => Outcome::Error {
+                    code: if error.kind() == std::io::ErrorKind::NotFound {
+                        ErrorCode::DeviceNotFound
+                    } else {
+                        ErrorCode::InvalidArgument
+                    },
+                    message: error.to_string(),
+                },
+            };
+        }
+        if !fds.is_empty() {
+            return Outcome::Error {
+                code: ErrorCode::InvalidArgument,
+                message: "this command does not accept descriptors".into(),
+            };
+        }
+        self.handle(command)
+    }
+
     pub fn handle(&self, command: Command) -> Outcome {
         match command {
+            Command::NetAttach { .. } => self.handle_with_fds(command, Vec::new()),
             Command::Debug { request } => crate::debug::handle(self.vm.shared(), request),
             Command::Unsupported => Outcome::Error {
                 code: ErrorCode::Unsupported,
@@ -73,6 +123,10 @@ impl ControlHandler {
             },
             Command::Status => Outcome::Ok {
                 status: Some(self.vm.status()),
+            },
+            Command::Resume if !self.network.ready() => Outcome::Error {
+                code: ErrorCode::InvalidState,
+                message: "TAP network descriptors must be installed before resume".into(),
             },
             Command::Resume => match self.vm.resume() {
                 Ok(state) => Outcome::Ok {
@@ -193,6 +247,14 @@ fn snapshot_outcome(
 /// events are broadcast to every connected client through the returned
 /// wiring; the caller keeps the machine handle.
 pub fn serve(path: &Path, vm: &VmHandle) -> Result<std::thread::JoinHandle<()>, VmmError> {
+    serve_with_network(path, vm, Default::default())
+}
+
+pub fn serve_with_network(
+    path: &Path,
+    vm: &VmHandle,
+    network: vmlab_hv_devices::virtio::net::NetBackendRegistry,
+) -> Result<std::thread::JoinHandle<()>, VmmError> {
     if path.exists() {
         return Err(VmmError::Control(format!(
             "control socket path {} already exists",
@@ -203,7 +265,7 @@ pub fn serve(path: &Path, vm: &VmHandle) -> Result<std::thread::JoinHandle<()>, 
         .map_err(|e| VmmError::Control(format!("binding {}: {e}", path.display())))?;
 
     let weak = Arc::downgrade(vm.shared());
-    let mut capabilities = vec![Capability::Snapshots];
+    let mut capabilities = vec![Capability::Snapshots, Capability::NetFds];
     if vm
         .shared()
         .kvm
@@ -221,18 +283,20 @@ pub fn serve(path: &Path, vm: &VmHandle) -> Result<std::thread::JoinHandle<()>, 
     if vm.shared().usb_hotplug() {
         capabilities.push(Capability::Hotplug);
     }
-    let server: Server<_> =
-        Server::new(
-            env!("CARGO_PKG_VERSION"),
-            capabilities,
-            move |command| match weak.upgrade() {
-                Some(shared) => ControlHandler::new(VmHandle::from_shared(shared)).handle(command),
-                None => Outcome::Error {
-                    code: ErrorCode::InvalidState,
-                    message: "machine has exited".into(),
-                },
+    let server: Server<_> = Server::with_fds(
+        env!("CARGO_PKG_VERSION"),
+        capabilities,
+        move |command, fds| match weak.upgrade() {
+            Some(shared) => {
+                ControlHandler::with_network(VmHandle::from_shared(shared), network.clone())
+                    .handle_with_fds(command, fds)
+            }
+            None => Outcome::Error {
+                code: ErrorCode::InvalidState,
+                message: "machine has exited".into(),
             },
-        );
+        },
+    );
     let broadcaster = server.clone();
     vm.set_event_sink(Arc::new(move |event| broadcaster.broadcast(event)));
 

@@ -221,6 +221,8 @@ pub struct MachineSpec {
     pub nics: u32,
     /// Offload framing and maximum queue pairs; absent keeps raw framing.
     pub vnet_pairs: Option<u16>,
+    /// Wait for TAP descriptors over the control socket instead of a stream.
+    pub tap: bool,
     pub memory_mib: u64,
     pub vcpus: u32,
     pub paused: bool,
@@ -235,6 +237,7 @@ impl MachineSpec {
             mode: Mode::Idle,
             nics: 0,
             vnet_pairs: None,
+            tap: false,
             memory_mib: MEMORY_MIB,
             vcpus: 1,
             paused: false,
@@ -388,7 +391,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
         .expect("create scratch qcow2");
     let rootfs = assets.rootfs.clone().expect("caller checked rootfs");
 
-    let (switch_sock, mini) = if spec.nics > 0 {
+    let (switch_sock, mini) = if spec.nics > 0 && !spec.tap {
         let sock = dir.join("switch.sock");
         let mini = if spec.vnet_pairs.is_some() {
             switch::MiniSwitch::bind_vnet(&sock)
@@ -470,6 +473,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
                 mac: mac_string(TEST_MAC),
                 mtu: None,
                 attachment: match spec.vnet_pairs {
+                    Some(queue_pairs) if spec.tap => NicAttachment::Tap { queue_pairs },
                     Some(queue_pairs) => NicAttachment::StreamVnet {
                         socket: switch_sock.clone().expect("bound above"),
                         queue_pairs,

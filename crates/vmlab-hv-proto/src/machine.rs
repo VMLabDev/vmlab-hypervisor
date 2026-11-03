@@ -290,6 +290,8 @@ pub enum NicAttachment {
     Stream { socket: PathBuf },
     /// Versioned virtio-net metadata followed by Ethernet, selected at attach.
     StreamVnet { socket: PathBuf, queue_pairs: u16 },
+    /// TAP queues installed with SCM_RIGHTS while the machine is paused.
+    Tap { queue_pairs: u16 },
 }
 
 impl NicAttachment {
@@ -297,7 +299,9 @@ impl NicAttachment {
     pub fn queue_pairs(&self) -> u16 {
         match self {
             Self::Stream { .. } => 1,
-            Self::StreamVnet { queue_pairs, .. } => (*queue_pairs).clamp(1, 31),
+            Self::StreamVnet { queue_pairs, .. } | Self::Tap { queue_pairs } => {
+                (*queue_pairs).clamp(1, 31)
+            }
         }
     }
 }
