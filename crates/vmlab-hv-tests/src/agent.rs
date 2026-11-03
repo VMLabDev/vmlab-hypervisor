@@ -237,6 +237,29 @@ impl AgentClient {
 
     /// Run `argv` to completion and collect stdout/stderr/exit code.
     pub fn exec(&mut self, argv: &[&str], timeout: Duration) -> Result<ExecOutput, Error> {
+        self.exec_inner(argv, None, timeout)
+    }
+
+    /// Run an exec with stdin, then collect its output. The input must fit
+    /// the initial credit window; larger duplex transfers need concurrent I/O.
+    pub fn exec_with_stdin(
+        &mut self,
+        argv: &[&str],
+        stdin: &[u8],
+        timeout: Duration,
+    ) -> Result<ExecOutput, Error> {
+        self.exec_inner(argv, Some(stdin), timeout)
+    }
+
+    fn exec_inner(
+        &mut self,
+        argv: &[&str],
+        stdin: Option<&[u8]>,
+        timeout: Duration,
+    ) -> Result<ExecOutput, Error> {
+        if stdin.is_some_and(|bytes| bytes.len() as u64 > INITIAL_WINDOW) {
+            return Err("S1 exec stdin exceeds the initial credit window".into());
+        }
         let channel = self.next_channel;
         self.next_channel += 1;
         self.send_windows
@@ -251,6 +274,9 @@ impl AgentClient {
             logon: None,
             tree: None,
         })?;
+        if let Some(bytes) = stdin {
+            self.send_stdin(channel, bytes)?;
+        }
 
         let deadline = Instant::now() + timeout;
         let mut stdout = Vec::new();
@@ -365,6 +391,75 @@ mod tests {
                 instance: None,
             }))
             .unwrap();
+    }
+
+    #[test]
+    fn exec_only_sends_stdin_and_eof_when_requested() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let input: Vec<_> = (0..192 * 1024).map(|i| (i % 251) as u8).collect();
+        let expected = input.clone();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut decoder = FrameDecoder::new();
+            let HostMsg::Hello { token, .. } = receive(&mut stream, &mut decoder) else {
+                panic!("expected handshake");
+            };
+            hello(&mut stream, token, "test");
+            for with_stdin in [false, true] {
+                let HostMsg::OpenExec { id, .. } = receive(&mut stream, &mut decoder) else {
+                    panic!("expected exec");
+                };
+                if with_stdin {
+                    let mut received = Vec::new();
+                    loop {
+                        let frame = loop {
+                            if let Some(frame) = decoder.next_frame() {
+                                break frame;
+                            }
+                            let mut bytes = [0; 4093];
+                            let count = stream.read(&mut bytes).unwrap();
+                            assert_ne!(count, 0);
+                            decoder.push(&bytes[..count]);
+                        };
+                        if frame.kind == FrameKind::Ctrl {
+                            assert!(matches!(serde_json::from_slice(&frame.payload).unwrap(),
+                                HostMsg::Eof { id: actual } if actual == id));
+                            break;
+                        }
+                        assert_eq!(frame.kind, FrameKind::Data);
+                        assert_eq!(frame.channel, id);
+                        assert!(frame.payload.len() <= MAX_PAYLOAD);
+                        received.extend(frame.payload);
+                    }
+                    assert_eq!(received, expected);
+                }
+                stream
+                    .write_all(&encode_ctrl(&AgentMsg::Exited { id, code: 0 }))
+                    .unwrap();
+                assert!(matches!(receive(&mut stream, &mut decoder),
+                    HostMsg::Close { id: actual } if actual == id));
+            }
+        });
+        let mut client = AgentClient::connect(&path, Duration::from_secs(3)).unwrap();
+        client.exec(&["test"], Duration::from_secs(3)).unwrap();
+        client
+            .exec_with_stdin(&["test"], &input, Duration::from_secs(3))
+            .unwrap();
+        assert!(
+            client
+                .exec_with_stdin(
+                    &["test"],
+                    &vec![0; INITIAL_WINDOW as usize + 1],
+                    Duration::from_secs(3)
+                )
+                .is_err()
+        );
+        peer.join().unwrap();
     }
 
     #[test]

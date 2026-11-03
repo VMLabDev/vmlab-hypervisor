@@ -28,6 +28,32 @@ const BUSYBOX: &str = "/.vmlab/busybox";
 const BOOT: Duration = Duration::from_secs(120);
 
 #[test]
+fn agent_streams_larger_than_64k_preserve_every_byte() {
+    let Some(assets) = check() else { return };
+    let mut spec = MachineSpec::idle("s1-agent-large-frames");
+    spec.nics = 0;
+    let mut guest = vmlab_hv_tests::launch(&spec, &assets);
+    let (_ctl, _) = boot_to_idle(&guest, &spec.container_spec(), BOOT);
+    let mut agent = agent_ready(&guest);
+    let payload: Vec<u8> = (0..192 * 1024).map(|i| (i % 251) as u8).collect();
+    let output = agent
+        .exec_with_stdin(&[BUSYBOX, "cat"], &payload, Duration::from_secs(30))
+        .unwrap();
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, payload);
+    assert!(output.stderr.is_empty());
+    let output = agent
+        .exec(
+            &[BUSYBOX, "dd", "if=/dev/zero", "bs=1048576", "count=1"],
+            Duration::from_secs(30),
+        )
+        .unwrap();
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, vec![0; 1024 * 1024]);
+    guest.quit_and_exit_zero();
+}
+
+#[test]
 fn control_protocol_unknown_request_preserves_the_connection() {
     use std::io::{BufReader, Write};
     use std::os::unix::net::UnixStream;
