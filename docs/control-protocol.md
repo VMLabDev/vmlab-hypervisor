@@ -5,6 +5,36 @@ Its source inventory is `src/control.rs`, `src/codec.rs`, `src/client.rs`,
 and `src/server.rs` under `crates/vmlab-hv-proto/`.
 The separate launch schema is `src/machine.rs`.
 
+## Host probe and pinned TSC
+
+`vmlab-hv --probe` prints one JSON object and exits, without a machine
+description or control socket. It cannot be combined with launch arguments.
+The object uses `vmlab_hv_proto::host::HostFacts`:
+
+```json
+{"kvm":true,"tsc_khz":4291956,"invariant_tsc":true,"stable_tsc":true}
+```
+
+`kvm` reports whether KVM can create a scratch VM and vCPU. `tsc_khz` is
+the unscaled frequency from `KVM_GET_TSC_KHZ`, or null without KVM or a stable
+TSC. `invariant_tsc` is host CPUID.80000007H:EDX[8]. `stable_tsc` reports
+a successful, nonzero KVM frequency query. No guest memory or devices are
+created, and the vCPU never runs. Missing or inaccessible KVM produces
+`kvm: false`; other probe errors exit 2 with a diagnostic on stderr.
+
+On a q35 KVM machine, `tsc_khz` in the launch description sets every vCPU's
+frequency before execution. Zero is invalid; an unsupported frequency fails
+launch. `invtsc` advertises CPUID.80000007H:EDX[8]. Existing timing leaves
+0x15 and 0x16 reflect the configured frequency. `vmware_cpuid_freq` additionally
+exposes leaf 0x40000010 and remains exclusive with Hyper-V. A pin without
+that flag preserves the Hyper-V CPUID range.
+
+Online snapshots record the frequency per vCPU and reject a changed
+destination frequency before changing guest state. A new host must support
+the original pin, including KVM scaling when required. The host's native
+frequency may differ; the configured guest frequency must match the snapshot.
+The KVM frequency API is documented at https://docs.kernel.org/virt/kvm/api.html.
+
 ## Transport and handshake
 
 Each Unix socket message is one JSON object followed by a newline.

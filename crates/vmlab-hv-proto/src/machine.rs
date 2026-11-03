@@ -28,6 +28,7 @@ pub struct MachineDescription {
     pub cpu_model: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub invtsc: bool,
+    /// Per-vCPU KVM TSC frequency, also recorded in online snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tsc_khz: Option<u32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

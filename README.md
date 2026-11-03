@@ -10,6 +10,12 @@ control protocol on a unix socket:
 vmlab-hv --machine <machine.json> --control <control.sock> [--paused]
 ```
 
+`vmlab-hv --probe` prints JSON host facts without running a guest: KVM
+availability, the TSC frequency in kHz, and invariant and stable TSC flags.
+The optional machine field `tsc_khz` pins every vCPU to that frequency;
+`invtsc` advertises an invariant TSC. Online snapshots retain the frequency
+and refuse a destination configured at a different frequency.
+
 The machine description and control protocol live in `vmlab-hv-proto`, and the
 disk image code in `vmlab-disk`; vmlab consumes both as git dependencies.
 Snapshots are the hypervisor's own versioned device-state format stored in qcow2
