@@ -9,7 +9,8 @@ bench/history/<arch>.jsonl (format in bench/README.md).
 Two suites: the phase-3 TCG suites (aarch64/riscv64, seconds) and the
 phase-2 x86_64 KVM suite (HV-D28: boot to agent ready, virtio-blk and
 virtio-net throughput, idle host CPU; `--suite g2g` runs the guest-to-guest
-net pair). The x86_64 net workloads need the framing peer built from
+net pair; `g2g1500` and `g2g-multiflow` add default-MTU networking). The
+x86_64 net workloads need the framing peer built from
 bench/netpeer.c; it is compiled on demand.
 
 Exit code: 0 on success and on a skipped backend (with the reason printed);
@@ -59,8 +60,9 @@ def parse_args(argv):
                         "the template's own for x86_64)")
     p.add_argument("--repeats", type=int, default=3, help="repeats per configuration")
     p.add_argument("--guest", default="debian-13", help="template name")
-    p.add_argument("--suite", choices=("full", "g2g"), default="full",
-                   help="x86_64: full single-VM set, or the guest-to-guest net pair")
+    p.add_argument("--suite", choices=("full", *lib.G2G_SUITES), default="full",
+                   help="x86_64: full single-VM set, jumbo g2g, MTU-1500 g2g1500, "
+                        "or four-flow MTU-1500 g2g-multiflow")
     p.add_argument("--cpus", default=None, help="taskset window override (e.g. 16-19)")
     p.add_argument("--hv-bin", default=os.path.join(lib.REPO_DIR, "target/release/vmlab-hv"))
     p.add_argument("--timeout-scale", type=float, default=1.0)
@@ -911,16 +913,17 @@ def x86_run_config(args, guest, smp, pin, version, commit, dirty, host):
 def g2g_launch(args, tag, guest, smp, pin, hub_sock, mac, run_dir):
     overlay, code_fd, vars_fd = lib.prepare_run_dir(run_dir, "x86_64", guest,
                                                     lib.latest_template("x86_64", guest))
+    settings = lib.G2G_SUITES.get(args.suite, lib.G2G_SUITES["g2g"])
     if args.backend == "qemu":
         backend = X86QemuBackend(
             run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
-            hub_sock, mac, lib.BENCH_NET["mtu"], log,
+            hub_sock, mac, settings["mtu"], log,
         )
     else:
         backend = X86HvBackend(
             run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
-            hub_sock, mac, lib.BENCH_NET["mtu"], log,
-            args.hv_bin, lib.IPXE_ROM,
+            hub_sock, mac, settings["mtu"], log,
+            args.hv_bin, lib.IPXE_ROM, vnet=settings["vnet"],
         )
     backend.launch()
     backend.release_cpus()
@@ -951,43 +954,59 @@ def args_backend_quit(backend):
     return backend.name == "vmlab-hv"
 
 
-def g2g_setup_guest(agent, ip, mac_peer=None):
+def g2g_setup_guest(agent, ip, mac_peer=None, *, mtu=None):
     nic = guest_nic(agent)
+    if mtu is None:
+        mtu = lib.BENCH_NET["mtu"]
     must_sh(
         agent,
-        f"ip link set dev {nic} mtu {lib.BENCH_NET['mtu']} && "
+        f"ip link set dev {nic} mtu {mtu} && "
         f"ip addr add {ip}/24 dev {nic} && ip link set {nic} up",
         "g2g NIC setup",
     )
     copy_in_tools(agent, netpeer.randblke_path())
 
 
-def g2g_direction(sender, receiver, receiver_ip, port, window):
-    """One TCP transfer: receiver listens guest-side, sender blasts."""
+def g2g_direction(sender, receiver, receiver_ip, port, window, flows=1):
+    """One TCP window with the requested number of concurrent connections."""
+    sink_mode = "tcp-sink" if flows == 1 else "tcp-multisink"
+    blast_mode = "tcp-blast" if flows == 1 else "tcp-multiblast"
+    flow_arg = "" if flows == 1 else f" {flows}"
     must_sh(
         receiver,
-        f"rm -f /tmp/sink.json && nohup python3 /tmp/vmlab-nettool.py tcp-sink {port} "
+        f"rm -f /tmp/sink.json && nohup python3 /tmp/vmlab-nettool.py {sink_mode} {port}{flow_arg} "
         f"> /tmp/sink.json 2>&1 &",
         "g2g sink start",
     )
     time.sleep(1)
     out = must_sh(
         sender,
-        f"python3 /tmp/vmlab-nettool.py tcp-blast {receiver_ip} {port} {window}",
+        f"python3 /tmp/vmlab-nettool.py {blast_mode} {receiver_ip} {port} {window}{flow_arg}",
         "g2g blast", timeout=window * 4,
     )
     blast = json.loads(out.strip().splitlines()[-1])
     time.sleep(1)
     sink_out = must_sh(receiver, "cat /tmp/sink.json", "g2g sink read")
     sink = json.loads(sink_out.strip().splitlines()[-1])
+    if flows != 1:
+        for result in (blast, sink):
+            counts = result.get("per_flow_bytes", [])
+            if result.get("flows") != flows or len(counts) != flows or any(count <= 0 for count in counts):
+                raise lib.BenchError(f"g2g missing concurrent flows: {result}")
+            if sum(counts) != result["bytes"]:
+                raise lib.BenchError(f"g2g flow byte counts disagree: {result}")
+        if blast["bytes"] != sink["bytes"]:
+            raise lib.BenchError(f"g2g TCP delivery incomplete: sent {blast}, received {sink}")
     mbps = round(sink["bytes"] * 8 / window / 1e6, 2)
     return mbps, blast, sink
 
 
 def g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, index):
     lib.require_vm_slots(2)
+    suite = args.suite if args.suite in lib.G2G_SUITES else "g2g"
+    settings = lib.G2G_SUITES[suite]
     root = os.path.join(
-        lib.RUN_DIR, lib.run_dir_name(args.backend, "x86_64", guest, smp, index, "g2g")
+        lib.RUN_DIR, lib.run_dir_name(args.backend, "x86_64", guest, smp, index, suite)
     )
     shutil.rmtree(root, ignore_errors=True)
     os.makedirs(root)
@@ -1000,23 +1019,26 @@ def g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, index):
     a = b = None
     agent_a = agent_b = None
     result = {"run": root, "arch": "x86_64", "guest": guest, "vcpus": smp,
-              "backend": args.backend, "suite": "g2g"}
+              "backend": args.backend, "suite": suite,
+              "nic_mtu": settings["mtu"], "tcp_flows": settings["flows"]}
     try:
         a = g2g_launch(args, "a", guest, smp, pin_a, hub.switch_sock, net["g2g_a_mac"], a_dir)
         b = g2g_launch(args, "b", guest, smp, pin_b, hub.switch_sock, net["g2g_b_mac"], b_dir)
         agent_a, _hello_a = lib.wait_for_agent(a.agent_socket(), 300.0, vm_exited=a.session.exit_code)
         agent_b, _hello_b = lib.wait_for_agent(b.agent_socket(), 300.0, vm_exited=b.session.exit_code)
-        g2g_setup_guest(agent_a, net["g2g_a_ip"])
-        g2g_setup_guest(agent_b, net["g2g_b_ip"])
+        g2g_setup_guest(agent_a, net["g2g_a_ip"], mtu=settings["mtu"])
+        g2g_setup_guest(agent_b, net["g2g_b_ip"], mtu=settings["mtu"])
 
         port = 5903
-        b2a, blast, sink = g2g_direction(agent_b, agent_a, net["g2g_a_ip"], port, NET_WINDOW)
+        b2a, blast, sink = g2g_direction(agent_b, agent_a, net["g2g_a_ip"], port, NET_WINDOW,
+                                       flows=settings["flows"])
         log(f"g2g b->a: {b2a} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
-        a2b, blast, sink = g2g_direction(agent_a, agent_b, net["g2g_b_ip"], port, NET_WINDOW)
+        a2b, blast, sink = g2g_direction(agent_a, agent_b, net["g2g_b_ip"], port, NET_WINDOW,
+                                       flows=settings["flows"])
         log(f"g2g a->b: {a2b} Mbit/s (blast {blast['bytes']}B, sink {sink['bytes']}B)")
         result["samples"] = {
-            "net_g2g_a2b_tcp_mbps": a2b,
-            "net_g2g_b2a_tcp_mbps": b2a,
+            settings["workloads"][0]: a2b,
+            settings["workloads"][1]: b2a,
         }
         return result, a
     finally:
@@ -1027,7 +1049,8 @@ def g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, index):
 
 
 def g2g_run_config(args, guest, smp, pin_a, pin_b, version, commit, dirty, host):
-    all_samples = {w: [] for w in lib.X86_G2G_WORKLOADS}
+    settings = lib.G2G_SUITES[args.suite]
+    all_samples = {w: [] for w in settings["workloads"]}
     env = {
         "governor": lib.read_governor(),
         "loadavg_start": lib.read_loadavg(),
@@ -1035,12 +1058,15 @@ def g2g_run_config(args, guest, smp, pin_a, pin_b, version, commit, dirty, host)
         "memory_max": lib.MEMORY_MAX,
         "template": version,
         "host_cpus": os.cpu_count(),
-        "nic_mtu": lib.BENCH_NET["mtu"],
+        "nic_mtu": settings["mtu"],
+        "tcp_flows": settings["flows"],
+        "nic_framing": "vnet-v1" if args.backend == "vmlab-hv" and settings["vnet"] else "raw",
+        "queue_pairs": smp if args.backend == "vmlab-hv" and settings["vnet"] else 1,
         "net_peer": "bench/netpeer.c hub (2 ports)",
         "repeat_loadavg": [],
     }
     for i in range(1, args.repeats + 1):
-        log(f"=== {args.backend} x86_64 g2g {guest} repeat {i}/{args.repeats}")
+        log(f"=== {args.backend} x86_64 {args.suite} {guest} repeat {i}/{args.repeats}")
         loadavg_start = lib.read_loadavg()
         result, a = g2g_one_repeat(args, guest, smp, pin_a, pin_b, version, i)
         env["repeat_loadavg"].append({
@@ -1080,8 +1106,10 @@ def main(argv=None):
     if args.repeats < 2:
         log("note: --repeats < 2 leaves no spread; bench-check treats that as zero noise")
     arches = resolve_arches(args.arch)
-    if args.suite == "g2g" and arches != ["x86_64"]:
-        raise lib.BenchError("--suite g2g is an x86_64 suite")
+    if args.suite in lib.G2G_SUITES and arches != ["x86_64"]:
+        raise lib.BenchError(f"--suite {args.suite} is an x86_64 suite")
+    if args.suite in lib.G2G_SUITES and args.guest.startswith("windows-"):
+        raise lib.BenchError(f"--suite {args.suite} requires the Linux guest tools")
     commit, dirty = git_commit()
     host = os.uname().nodename
     if "x86_64" in arches:
@@ -1099,11 +1127,11 @@ def main(argv=None):
                 smp_list = ([int(v) for v in args.vcpus.split(",") if v.strip()]
                             if args.vcpus else [profile_smp])
                 for smp in smp_list:
-                    if args.suite == "g2g":
+                    if args.suite in lib.G2G_SUITES:
                         pin_a, pin_b = "16-19", "20-23"
                         if args.cpus:
                             pin_a, pin_b = args.cpus, args.cpus
-                        log(f"### {args.backend} x86_64 g2g {guest}@{version} "
+                        log(f"### {args.backend} x86_64 {args.suite} {guest}@{version} "
                             f"pins={pin_a}+{pin_b} governor={lib.read_governor()}")
                         if args.dry_run:
                             continue

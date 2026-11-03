@@ -12,11 +12,16 @@ Modes:
     udp-sink  PORT SECS               big-rcvbuf discard sink, counts bytes
     tcp-blast DST PORT SECS           connect, sendall of a 1 MiB buffer
     tcp-sink  PORT                    accept one connection, count until EOF
+    tcp-multiblast DST PORT SECS FLOWS  simultaneous TCP connections
+    tcp-multisink PORT FLOWS           count each connection through EOF
 """
 
+import concurrent.futures
 import json
+import math
 import socket
 import sys
+import threading
 import time
 
 
@@ -90,6 +95,73 @@ def tcp_sink(port):
     emit("tcp_sink", bytes=got)
 
 
+def tcp_multiblast(dst, port, secs, flows):
+    if not 1 <= flows <= 256 or not math.isfinite(secs) or secs <= 0:
+        raise ValueError("TCP flows must be 1..256 and duration must be positive")
+    sockets = []
+    deadline = [0.0]
+
+    def start():
+        deadline[0] = now() + secs
+
+    ready = threading.Barrier(flows, action=start)
+
+    def blast(sock):
+        buf = b"t" * (1024 * 1024)
+        sent = 0
+        ready.wait()
+        while now() < deadline[0]:
+            sock.sendall(buf)
+            sent += len(buf)
+        sock.shutdown(socket.SHUT_WR)
+        return sent
+
+    try:
+        # Establish every flow before releasing the common send window.
+        for _ in range(flows):
+            sockets.append(socket.create_connection((dst, port), timeout=30))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=flows) as pool:
+            futures = [pool.submit(blast, sock) for sock in sockets]
+            counts = [future.result() for future in futures]
+    finally:
+        for sock in sockets:
+            sock.close()
+    emit("tcp_multiblast", bytes=sum(counts), secs=round(secs, 3),
+         flows=flows, per_flow_bytes=counts)
+
+
+def tcp_multisink(port, flows):
+    if not 1 <= flows <= 256:
+        raise ValueError("TCP flows must be 1..256")
+    sockets = []
+
+    def receive(sock):
+        got = 0
+        while True:
+            data = sock.recv(1024 * 1024)
+            if not data:
+                return got
+            got += len(data)
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)
+            server.bind(("0.0.0.0", port))
+            server.listen(flows)
+            server.settimeout(30)
+            for _ in range(flows):
+                sock, _ = server.accept()
+                sock.settimeout(60)
+                sockets.append(sock)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=flows) as pool:
+                counts = list(pool.map(receive, sockets))
+    finally:
+        for sock in sockets:
+            sock.close()
+    emit("tcp_multisink", bytes=sum(counts), flows=flows, per_flow_bytes=counts)
+
+
 def udp_blast(dst, port, payload, secs):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     buf = b"v" * payload
@@ -119,6 +191,10 @@ def main(argv):
         tcp_blast(argv[2], int(argv[3]), float(argv[4]))
     elif len(argv) >= 2 and argv[1] == "tcp-sink" and len(argv) == 3:
         tcp_sink(int(argv[2]))
+    elif len(argv) == 6 and argv[1] == "tcp-multiblast":
+        tcp_multiblast(argv[2], int(argv[3]), float(argv[4]), int(argv[5]))
+    elif len(argv) == 4 and argv[1] == "tcp-multisink":
+        tcp_multisink(int(argv[2]), int(argv[3]))
     else:
         sys.stderr.write(__doc__)
         return 2

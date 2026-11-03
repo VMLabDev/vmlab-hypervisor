@@ -113,10 +113,36 @@ count and memory), N repeats, fresh qcow2 overlay per repeat:
    threads) over a 60 s idle window, as a percentage of one core.
    Reported against QEMU; D28 sets no bar for it.
 
-Both sides measure ethernet-level bytes, and both carry the one forced
+The original `full` and `g2g` suites carry the one forced
 deviation: `host_mtu=65520` (jumbo frames keep the stdlib guest tools and
 the framing peer off the measured ceiling). The windows-10 template runs
 boot_to_agent_ready only.
+
+### Default-MTU and multi-flow networking
+
+The additional guest-to-guest suites use Linux guests at MTU 1500:
+
+| Suite | TCP connections per direction | Workloads |
+|---|---|---|
+| `g2g1500` | 1 | `net_g2g1500_a2b_tcp_mbps`, `net_g2g1500_b2a_tcp_mbps` |
+| `g2g-multiflow` | 4 concurrent | `net_g2g1500_multiflow_a2b_tcp_mbps`, `net_g2g1500_multiflow_b2a_tcp_mbps` |
+
+The runner accepts `--suite g2g1500` or `--suite g2g-multiflow` with
+`--arch x86_64 --guest ubuntu-26.04`. These suites use a 12-second send
+window in each direction and count TCP payload bytes at the receiver.
+The multi-flow sender establishes every connection before releasing a
+shared send window. The receiver reports bytes per flow. A missing flow or
+byte mismatch fails the repeat.
+
+For these suites, vmlab-hv attaches both guests using `stream_vnet` with one
+offered queue pair per vCPU. The two-port hub passes the versioned metadata
+and large segments unchanged. QEMU retains its raw stream framing. The
+environment records `nic_mtu`, `tcp_flows`, `nic_framing`, and `queue_pairs`.
+
+The new workload names keep MTU-1500 samples separate from jumbo history.
+They have no D28 bar and do not change the existing gates. The QEMU/HV
+comparison runs in the release quiet window. Tool regression checks use
+host loopback and do not run that comparison.
 
 ## Backends (x86_64)
 

@@ -8,7 +8,7 @@
 //! beyond mask/router/dns/lease/server-id, broadcast replies — enough for
 //! busybox `udhcpc`, which is what cinit runs.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -19,6 +19,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use vmlab_hv_proto::net::{Header, MAX_FRAME_LEN, METADATA_LEN, NEEDS_CSUM};
 
 /// The lease handed to the guest.
 pub const LEASE_IP: Ipv4Addr = Ipv4Addr::new(10, 42, 0, 50);
@@ -39,6 +40,12 @@ pub struct SwitchStats {
     pub dhcp_acked: bool,
     /// UDP echo requests with valid IPv4 and nonzero UDP checksums.
     pub udp_echoes: usize,
+    /// Transmit pair ids carried by offload-framed records.
+    pub queues: BTreeSet<u16>,
+    /// Records which requested checksum completion or segmentation.
+    pub offload_packets: usize,
+    /// Ethernet frames produced by completing offload-framed records.
+    pub normalized_frames: usize,
     /// Every (source MAC, ethertype) seen, for diagnostics.
     pub seen: Vec<([u8; 6], u16)>,
 }
@@ -61,6 +68,14 @@ impl MiniSwitch {
     /// Bind and serve on a background thread. Safe to bind before the
     /// hypervisor spawns: its NIC connects during machine build.
     pub fn bind(path: &Path) -> std::io::Result<Self> {
+        Self::bind_mode(path, false)
+    }
+
+    pub fn bind_vnet(path: &Path) -> std::io::Result<Self> {
+        Self::bind_mode(path, true)
+    }
+
+    fn bind_mode(path: &Path, vnet: bool) -> std::io::Result<Self> {
         let listener = UnixListener::bind(path)?;
         listener.set_nonblocking(true)?;
         let inner = Arc::new(Mutex::new(Inner {
@@ -73,7 +88,7 @@ impl MiniSwitch {
         let handle = std::thread::Builder::new()
             .name("test-switch".to_string())
             .spawn(move || {
-                serve(listener, thread_inner, thread_stopped);
+                serve(listener, thread_inner, thread_stopped, vnet);
             })?;
         Ok(MiniSwitch {
             path: path.to_path_buf(),
@@ -98,7 +113,7 @@ impl Drop for MiniSwitch {
     }
 }
 
-fn serve(listener: UnixListener, inner: Arc<Mutex<Inner>>, stopped: Arc<AtomicBool>) {
+fn serve(listener: UnixListener, inner: Arc<Mutex<Inner>>, stopped: Arc<AtomicBool>, vnet: bool) {
     let mut clients: Vec<UnixStream> = Vec::new();
     let mut rx: Vec<u8> = Vec::new();
     let mut fresh: VecDeque<Vec<u8>> = VecDeque::new();
@@ -138,21 +153,47 @@ fn serve(listener: UnixListener, inner: Arc<Mutex<Inner>>, stopped: Arc<AtomicBo
         // queued for the clients.
         while rx.len() >= 4 {
             let len = u32::from_be_bytes(rx[..4].try_into().unwrap()) as usize;
-            if len > 65536 + 14 {
+            if len > MAX_FRAME_LEN + if vnet { METADATA_LEN } else { 0 } {
                 rx.clear();
                 break;
             }
             if rx.len() < 4 + len {
                 break;
             }
-            let frame: Vec<u8> = rx[4..4 + len].to_vec();
+            let body: Vec<u8> = rx[4..4 + len].to_vec();
             rx.drain(..4 + len);
-            if let Some(reply) = handle_frame(&frame, &inner) {
-                let mut inner = inner.lock();
-                inner
-                    .out
-                    .extend_from_slice(&(reply.len() as u32).to_be_bytes());
-                inner.out.extend_from_slice(&reply);
+            let (queue, frames) = if vnet {
+                let decoded = Header::from_metadata(&body).and_then(|(header, queue, frame)| {
+                    header
+                        .segments(frame, 1500)
+                        .map(|frames| (header, queue, frames))
+                });
+                let (header, queue, frames) = match decoded {
+                    Ok(decoded) => decoded,
+                    Err(error) => {
+                        eprintln!("test switch: invalid vnet record: {error}");
+                        continue;
+                    }
+                };
+                let mut state = inner.lock();
+                state.stats.queues.insert(queue);
+                state.stats.offload_packets += usize::from(header.flags & NEEDS_CSUM != 0);
+                state.stats.normalized_frames += frames.len();
+                (queue, frames)
+            } else {
+                (0, vec![body])
+            };
+            for frame in frames {
+                if let Some(reply) = handle_frame(&frame, &inner) {
+                    let mut inner = inner.lock();
+                    let metadata = vnet.then(|| Header::default().metadata(queue));
+                    let len = reply.len() + metadata.as_ref().map_or(0, |bytes| bytes.len());
+                    inner.out.extend_from_slice(&(len as u32).to_be_bytes());
+                    if let Some(bytes) = metadata {
+                        inner.out.extend_from_slice(&bytes);
+                    }
+                    inner.out.extend_from_slice(&reply);
+                }
             }
         }
         // Write what we can; the rest waits in `out`.
@@ -461,6 +502,80 @@ fn ip_checksum(header: &[u8]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn udp_request(payload: &[u8]) -> Vec<u8> {
+        let length = 20 + 8 + payload.len();
+        let mut frame = vec![0; 14 + length];
+        frame[..6].copy_from_slice(&SWITCH_MAC);
+        frame[6..12].copy_from_slice(&crate::TEST_MAC);
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame[14] = 0x45;
+        frame[16..18].copy_from_slice(&(length as u16).to_be_bytes());
+        frame[22] = 64;
+        frame[23] = 17;
+        frame[26..30].copy_from_slice(&LEASE_IP.octets());
+        frame[30..34].copy_from_slice(&SERVER_IP.octets());
+        frame[34..36].copy_from_slice(&12345u16.to_be_bytes());
+        frame[36..38].copy_from_slice(&46000u16.to_be_bytes());
+        frame[38..40].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        frame[42..].copy_from_slice(payload);
+        let checksum = ip_checksum(&frame[14..34]);
+        frame[24..26].copy_from_slice(&checksum.to_be_bytes());
+        let checksum = udp_checksum(&frame[14..34], &frame[34..]);
+        frame[40..42].copy_from_slice(&checksum.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn vnet_socket_segments_udp_with_valid_checksums_and_preserves_queue_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("switch.sock");
+        let switch = MiniSwitch::bind_vnet(&socket).unwrap();
+        let mut client = UnixStream::connect(socket).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let payload: Vec<u8> = (0..4097).map(|index| index as u8).collect();
+        let mut frame = udp_request(&payload);
+        frame[40..42].fill(0);
+        let header = Header {
+            flags: NEEDS_CSUM,
+            gso_type: vmlab_hv_proto::net::GSO_UDP,
+            hdr_len: 42,
+            gso_size: 1000,
+            csum_start: 34,
+            csum_offset: 6,
+        };
+        let metadata = header.metadata(1);
+        client
+            .write_all(&((METADATA_LEN + frame.len()) as u32).to_be_bytes())
+            .unwrap();
+        client.write_all(&metadata[..3]).unwrap();
+        client.write_all(&metadata[3..]).unwrap();
+        client.write_all(&frame).unwrap();
+
+        let mut received = Vec::new();
+        for _ in 0..5 {
+            let mut prefix = [0; 4];
+            client.read_exact(&mut prefix).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(prefix) as usize];
+            client.read_exact(&mut body).unwrap();
+            let (header, queue, reply) = Header::from_metadata(&body).unwrap();
+            assert_eq!(header, Header::default());
+            assert_eq!(queue, 1);
+            let length = usize::from(u16::from_be_bytes([reply[16], reply[17]]));
+            assert!(length <= 1500);
+            assert_eq!(ip_checksum(&reply[14..34]), 0);
+            assert_eq!(udp_checksum(&reply[14..34], &reply[34..14 + length]), 0);
+            received.extend_from_slice(&reply[42..14 + length]);
+        }
+        assert_eq!(received, payload);
+        let stats = switch.stats();
+        assert_eq!(stats.queues, BTreeSet::from([1]));
+        assert_eq!(stats.offload_packets, 1);
+        assert_eq!(stats.normalized_frames, 5);
+        assert_eq!(stats.udp_echoes, 5);
+    }
 
     #[test]
     fn udp_echo_requires_valid_wire_checksums_and_returns_exact_payload() {

@@ -6,7 +6,9 @@
 //! (`src/net/framing.rs` in vmlab defines the format; the switch is the other
 //! end of the socket).
 //!
-//! One receiveq and one transmitq, no control queue: the offered features are
+//! Legacy stream attachments use one receiveq and one transmitq. Vnet attachments
+//! preserve segmentation metadata and expose queue pairs plus a control queue.
+//! The common offered features are
 //! `VIRTIO_NET_F_CSUM`, `VIRTIO_NET_F_GUEST_CSUM`, `VIRTIO_NET_F_MAC`,
 //! `VIRTIO_NET_F_STATUS`, `VIRTIO_NET_F_MRG_RXBUF` and
 //! `VIRTIO_NET_F_MTU` (only when
@@ -24,7 +26,7 @@
 //! buffers.
 
 use parking_lot::{Mutex, MutexGuard};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -40,6 +42,9 @@ use vm_memory::bitmap::Bitmap;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemoryBackend, VolatileSlice};
 
 use crate::{DeviceError, GuestMemory, Snapshot, VirtioDevice, VirtioInterrupt};
+use vmlab_hv_proto::net::{
+    GSO_ECN, GSO_NONE, GSO_TCPV4, GSO_TCPV6, GSO_UDP, Header, METADATA_LEN, NEEDS_CSUM, flow_hash,
+};
 
 mod buffer;
 mod checksum;
@@ -55,6 +60,17 @@ const DEVICE_ID: u32 = 1;
 const F_CSUM: u64 = 1;
 /// The device validates receive checksums before setting DATA_VALID.
 const F_GUEST_CSUM: u64 = 1 << 1;
+const F_GUEST_TSO4: u64 = 1 << 7;
+const F_GUEST_TSO6: u64 = 1 << 8;
+const F_GUEST_ECN: u64 = 1 << 9;
+const F_HOST_TSO4: u64 = 1 << 11;
+const F_HOST_TSO6: u64 = 1 << 12;
+const F_HOST_ECN: u64 = 1 << 13;
+const F_CTRL_VQ: u64 = 1 << 17;
+const F_MQ: u64 = 1 << 22;
+const F_GUEST_USO4: u64 = 1 << 54;
+const F_GUEST_USO6: u64 = 1 << 55;
+const F_HOST_USO: u64 = 1 << 56;
 const HDR_F_NEEDS_CSUM: u8 = 1;
 const HDR_F_DATA_VALID: u8 = 2;
 /// `VIRTIO_NET_F_MTU` (feature bit 3).
@@ -80,6 +96,7 @@ const AVAIL_F_NO_INTERRUPT: u16 = 1;
 /// The receiveq index.
 const RXQ: u16 = 0;
 /// The transmitq index.
+#[cfg(test)]
 const TXQ: u16 = 1;
 /// Largest Ethernet frame the wire format accepts (64 KiB payload + header).
 const MAX_FRAME: usize = 65536 + 14;
@@ -120,6 +137,7 @@ enum RxRead {
 
 /// Everything the device and its worker thread share.
 struct Shared {
+    vnet: Option<VnetState>,
     snapshot_paused: bool,
     config_pending: bool,
     mem: Option<GuestMemory>,
@@ -132,6 +150,14 @@ struct Shared {
     rx_pending: VecDeque<Vec<u8>>,
     /// Framed bytes not yet accepted by the switch socket.
     tx_out: Vec<u8>,
+}
+
+struct VnetState {
+    max_pairs: u16,
+    active_pairs: u16,
+    features: u64,
+    mtu: u16,
+    steering: HashMap<u32, u16>,
 }
 
 /// Lifecycle commands sent to the worker thread.
@@ -158,6 +184,7 @@ fn hdr_len(negotiated: u64) -> usize {
 /// reconciles `link_up` with the live connection, so restoring into a fresh
 /// device degrades gracefully (it reconnects).
 pub struct Net {
+    queue_sizes: Vec<u16>,
     config: NetConfig,
     negotiated: Arc<AtomicU64>,
     shared: Arc<Mutex<Shared>>,
@@ -175,19 +202,43 @@ impl Net {
         Net::with_retry_interval(config, RETRY)
     }
 
+    /// Carry offload metadata over the switch connection and offer multiple pairs.
+    pub fn with_offload(config: NetConfig, pairs: u16) -> io::Result<Self> {
+        if !(1..=31).contains(&pairs) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "virtio-net needs 1..31 queue pairs",
+            ));
+        }
+        Self::create(config, RETRY, Some(pairs))
+    }
+
     /// Create the device with a non-default switch reconnect interval.
     fn with_retry_interval(config: NetConfig, retry: Duration) -> io::Result<Self> {
+        Self::create(config, retry, None)
+    }
+
+    fn create(config: NetConfig, retry: Duration, pairs: Option<u16>) -> io::Result<Self> {
         let (wake_dev, wake_worker) = UnixStream::pair()?;
         wake_dev.set_nonblocking(true)?;
         wake_worker.set_nonblocking(true)?;
         let wake_pending = Arc::new(AtomicBool::new(false));
         let (commands, rx) = mpsc::channel();
         let shared = Arc::new(Mutex::new(Shared {
+            vnet: pairs.map(|max_pairs| VnetState {
+                max_pairs,
+                active_pairs: 1,
+                features: 0,
+                mtu: config.mtu,
+                steering: HashMap::new(),
+            }),
             snapshot_paused: false,
             config_pending: false,
             mem: None,
             interrupt: None,
-            queues: (0..2).map(|_| None).collect(),
+            queues: (0..pairs.map_or(2, |pairs| 2 * pairs + 1))
+                .map(|_| None)
+                .collect(),
             link_up: false,
             rx: RxRead::Idle,
             rx_pending: VecDeque::new(),
@@ -202,6 +253,7 @@ impl Net {
             move || run(switch, retry, shared, negotiated, rx, wake_worker, pending)
         })?;
         Ok(Net {
+            queue_sizes: vec![QUEUE_SIZE; usize::from(pairs.map_or(2, |pairs| 2 * pairs + 1))],
             config,
             negotiated,
             shared,
@@ -475,7 +527,8 @@ fn drop_link(stream: &mut Option<UnixStream>, shared: &Arc<Mutex<Shared>>) {
 /// only reads the switch socket under this condition (a partially read frame
 /// always finishes first, and cannot coexist with a queued complete frame).
 fn rx_may_read(shared: &Arc<Mutex<Shared>>) -> bool {
-    lock(shared).rx_pending.is_empty()
+    let sh = lock(shared);
+    sh.vnet.is_some() || sh.rx_pending.is_empty()
 }
 
 /// Read one complete packet directly into available guest buffers. A partial
@@ -490,7 +543,11 @@ fn read_guest_frame(
 ) -> Option<Result<(), ()>> {
     let mut guard = lock(shared);
     let sh = &mut *guard;
-    if sh.snapshot_paused || !sh.rx_pending.is_empty() || !matches!(sh.rx, RxRead::Idle) {
+    if sh.vnet.is_some()
+        || sh.snapshot_paused
+        || !sh.rx_pending.is_empty()
+        || !matches!(sh.rx, RxRead::Idle)
+    {
         return None;
     }
     let mem = sh.mem.as_ref()?;
@@ -691,7 +748,7 @@ fn read_frames(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(
                 bytes = &bytes[take..];
                 if *got == 4 {
                     let len = u32::from_be_bytes(*buf) as usize;
-                    if len > MAX_FRAME {
+                    if len > MAX_FRAME + if sh.vnet.is_some() { METADATA_LEN } else { 0 } {
                         // A length past the cap is a corrupt stream, exactly
                         // as vmlab's framing codec treats it.
                         sh.rx = RxRead::Idle;
@@ -722,7 +779,37 @@ fn read_frames(shared: &Arc<Mutex<Shared>>, stream: &mut UnixStream) -> Result<(
             }
         }
     }
-    sh.rx_pending.extend(complete);
+    if let Some(vnet) = sh.vnet.as_ref() {
+        let pair_for = |frame: &[u8]| {
+            let hash = flow_hash(frame);
+            usize::from(
+                vnet.steering
+                    .get(&hash)
+                    .copied()
+                    .unwrap_or((hash % u32::from(vnet.active_pairs)) as u16)
+                    % vnet.active_pairs,
+            )
+        };
+        let mut counts = vec![0usize; usize::from(vnet.active_pairs)];
+        for body in &sh.rx_pending {
+            if let Ok((_, _, frame)) = Header::from_metadata(body) {
+                counts[pair_for(frame)] += 1;
+            }
+        }
+        let mut accepted = Vec::new();
+        for body in complete {
+            let (_, _, frame) = Header::from_metadata(&body).map_err(|_| ())?;
+            let count = &mut counts[pair_for(frame)];
+            // A stalled queue must neither block other flows nor grow without bound.
+            if *count < 8 {
+                *count += 1;
+                accepted.push(body);
+            }
+        }
+        sh.rx_pending.extend(accepted);
+    } else {
+        sh.rx_pending.extend(complete);
+    }
     Ok(())
 }
 
@@ -768,6 +855,16 @@ fn receive_merged(
     frame: &[u8],
     guest_csum: bool,
 ) -> Result<Receive, ()> {
+    receive_merged_header(mem, q, frame, guest_csum, Header::default())
+}
+
+fn receive_merged_header(
+    mem: &GuestMemory,
+    q: &mut Queue,
+    frame: &[u8],
+    guest_csum: bool,
+    metadata: Header,
+) -> Result<Receive, ()> {
     let start = q.next_avail();
     let need = 12 + frame.len();
     let mut buffers = Vec::new();
@@ -800,7 +897,7 @@ fn receive_merged(
             return Ok(Receive::Delivered);
         }
     }
-    let mut header = [0; 12];
+    let mut header = metadata.encode();
     header[10..].copy_from_slice(&(buffers.len() as u16).to_le_bytes());
     let mut checksum = guest_csum.then(|| CopyChecksum::receive(frame)).flatten();
     let mut remaining = frame;
@@ -823,6 +920,294 @@ fn receive_merged(
     Ok(Receive::Delivered)
 }
 
+fn receive_offload_supported(header: Header, frame: &[u8], features: u64) -> bool {
+    if header.flags & NEEDS_CSUM != 0 && features & F_GUEST_CSUM == 0 {
+        return false;
+    }
+    if header.gso_type & GSO_ECN != 0 && features & F_GUEST_ECN == 0 {
+        return false;
+    }
+    let required = match header.gso_type & !GSO_ECN {
+        GSO_NONE => return true,
+        GSO_TCPV4 => F_GUEST_TSO4,
+        GSO_TCPV6 => F_GUEST_TSO6,
+        GSO_UDP => {
+            let mut at = 14;
+            let mut kind = u16::from_be_bytes([frame[12], frame[13]]);
+            for _ in 0..2 {
+                if !matches!(kind, 0x8100 | 0x88a8) {
+                    break;
+                }
+                let Some(bytes) = frame.get(at + 2..at + 4) else {
+                    return false;
+                };
+                kind = u16::from_be_bytes([bytes[0], bytes[1]]);
+                at += 4;
+            }
+            if kind == 0x0800 {
+                F_GUEST_USO4
+            } else {
+                F_GUEST_USO6
+            }
+        }
+        _ => return false,
+    };
+    features & required != 0
+}
+
+/// Decode metadata before DMA, and leave a blocked flow independent of other RX queues.
+fn place_vnet_rx_frames(
+    shared: &Arc<Mutex<Shared>>,
+    hdr_len: usize,
+    mergeable: bool,
+    guest_csum: bool,
+) {
+    let mut guard = lock(shared);
+    let sh = &mut *guard;
+    if sh.snapshot_paused {
+        return;
+    }
+    let Some(vnet) = sh.vnet.as_ref() else { return };
+    let Some(mem) = sh.mem.as_ref() else { return };
+    let mut pending = std::mem::take(&mut sh.rx_pending);
+    let mut interrupts = Vec::new();
+    while let Some(packet) = pending.pop_front() {
+        let Ok((mut metadata, _, frame)) = Header::from_metadata(&packet) else {
+            continue;
+        };
+        if vnet.features & F_GUEST_CSUM == 0 {
+            metadata.flags &= !HDR_F_DATA_VALID;
+        }
+        if !receive_offload_supported(metadata, frame, vnet.features) {
+            if let Ok(parts) = metadata.segments(frame, vnet.mtu) {
+                for part in parts.into_iter().rev() {
+                    let mut body = Header::default().metadata(0).to_vec();
+                    body.extend_from_slice(&part);
+                    pending.push_front(body);
+                }
+            }
+            continue;
+        }
+        let hash = flow_hash(frame);
+        let pair = vnet
+            .steering
+            .get(&hash)
+            .copied()
+            .unwrap_or((hash % u32::from(vnet.active_pairs)) as u16)
+            % vnet.active_pairs;
+        let index = 2 * pair;
+        let Some(q) = sh
+            .queues
+            .get_mut(usize::from(index))
+            .and_then(Option::as_mut)
+        else {
+            sh.rx_pending.push_back(packet);
+            continue;
+        };
+        if !q.ready() {
+            sh.rx_pending.push_back(packet);
+            continue;
+        }
+        let old_used = q.next_used();
+        let _ = q.disable_notification(mem);
+        let result = if mergeable {
+            receive_merged_header(mem, q, frame, guest_csum && metadata.flags == 0, metadata)
+        } else {
+            match q.iter(mem).ok().and_then(|mut iter| iter.next()) {
+                None => Ok(Receive::Wait(q.next_avail())),
+                Some(chain) => {
+                    let head = chain.head_index();
+                    let mut header = metadata.encode();
+                    if hdr_len == 12 {
+                        header[10..].copy_from_slice(&1u16.to_le_bytes());
+                    }
+                    let need = hdr_len + frame.len();
+                    let mut checksum = (guest_csum && metadata.flags == 0)
+                        .then(|| CopyChecksum::receive(frame))
+                        .flatten();
+                    let written = if let Ok(mut writer) = ReceiveWriter::new(mem, chain)
+                        && writer.available_bytes() >= need
+                        && writer.write_all(&header[..hdr_len]).is_ok()
+                        && writer.write_frame(frame, checksum.as_mut()).is_ok()
+                        && (!checksum.as_ref().is_some_and(CopyChecksum::valid)
+                            || writer.set_flags(HDR_F_DATA_VALID).is_ok())
+                    {
+                        need as u32
+                    } else {
+                        0
+                    };
+                    q.add_used(mem, head, written).map_err(|_| ()).map(|()| {
+                        if written == 0 {
+                            Receive::Retry
+                        } else {
+                            Receive::Delivered
+                        }
+                    })
+                }
+            }
+        };
+        match result {
+            Ok(Receive::Delivered) => {}
+            Ok(Receive::Retry) => pending.push_front(packet),
+            Ok(Receive::Wait(observed)) => {
+                let next = q.next_avail();
+                q.set_next_avail(observed);
+                let raced = q.enable_notification(mem).unwrap_or(false);
+                q.set_next_avail(next);
+                if raced {
+                    pending.push_front(packet);
+                } else {
+                    sh.rx_pending.push_back(packet);
+                }
+            }
+            Err(()) => {}
+        }
+        if q.next_used() != old_used && needs_receive_interrupt(q, mem, old_used) {
+            interrupts.push(index);
+        }
+    }
+    let irq = sh.interrupt.clone();
+    drop(guard);
+    if let Some(irq) = irq {
+        for index in interrupts {
+            irq.notify_queue(index);
+        }
+    }
+}
+
+fn prepare_vnet_tx(
+    packet: &mut TxPacket<'_>,
+    bytes: &[u8; 12],
+    len: usize,
+    pair: u16,
+    vnet: &mut VnetState,
+) -> bool {
+    let Ok(header) = Header::decode(bytes) else {
+        return false;
+    };
+    let required = match header.gso_type & !GSO_ECN {
+        GSO_NONE => 0,
+        GSO_TCPV4 => F_HOST_TSO4,
+        GSO_TCPV6 => F_HOST_TSO6,
+        GSO_UDP => F_HOST_USO,
+        _ => return false,
+    };
+    if (required != 0 && vnet.features & required == 0)
+        || header.flags & HDR_F_DATA_VALID != 0
+        || (header.flags & NEEDS_CSUM != 0 && vnet.features & F_CSUM == 0)
+        || (header.gso_type & GSO_ECN != 0 && vnet.features & F_HOST_ECN == 0)
+    {
+        return false;
+    }
+    let mut body = header.metadata(pair).to_vec();
+    body.resize(METADATA_LEN + len, 0);
+    let mut at = METADATA_LEN;
+    for slice in &packet.slices {
+        let Some(target) = body.get_mut(at..at + slice.len()) else {
+            return false;
+        };
+        slice.copy_to(target);
+        at += slice.len();
+    }
+    if at != body.len() || header.validate(&body[METADATA_LEN..]).is_err() {
+        return false;
+    }
+    if vnet.steering.len() >= 65536 {
+        vnet.steering.clear();
+    }
+    vnet.steering.insert(flow_hash(&body[METADATA_LEN..]), pair);
+    packet.owned = Some(body);
+    packet.slices.clear();
+    true
+}
+
+/// MQ VQ_PAIRS_SET; unknown classes, malformed payloads and invalid counts return ERR.
+fn process_control(shared: &Arc<Mutex<Shared>>) {
+    let mut guard = lock(shared);
+    let sh = &mut *guard;
+    if sh.snapshot_paused {
+        return;
+    }
+    let Some(vnet) = sh.vnet.as_mut() else { return };
+    if vnet.features & F_CTRL_VQ == 0 {
+        return;
+    }
+    let index = if vnet.features & F_MQ != 0 {
+        2 * vnet.max_pairs
+    } else {
+        2
+    };
+    let Some(mem) = sh.mem.as_ref() else { return };
+    let Some(q) = sh
+        .queues
+        .get_mut(usize::from(index))
+        .and_then(Option::as_mut)
+    else {
+        return;
+    };
+    if !q.ready() {
+        return;
+    }
+    let old_used = q.next_used();
+    let mut invalid = false;
+    loop {
+        let _ = q.disable_notification(mem);
+        loop {
+            let chain = match q.iter(mem) {
+                Ok(mut iter) => iter.next(),
+                Err(_) => {
+                    invalid = true;
+                    break;
+                }
+            };
+            let Some(chain) = chain else { break };
+            let head = chain.head_index();
+            let mut command = [0; 4];
+            let mut len = 0usize;
+            let mut valid = true;
+            for desc in chain.clone().readable() {
+                let count = desc.len() as usize;
+                if let Some(target) = command.get_mut(len..len.saturating_add(count)) {
+                    valid &= mem.read_slice(target, desc.addr()).is_ok();
+                } else {
+                    valid = false;
+                }
+                len = len.saturating_add(count);
+            }
+            let pairs = u16::from_le_bytes([command[2], command[3]]);
+            valid &= len == 4
+                && command[..2] == [4, 0]
+                && (1..=vnet.max_pairs).contains(&pairs)
+                && vnet.features & F_MQ != 0;
+            let written = if let Ok(mut writer) = ReceiveWriter::new(mem, chain)
+                && writer.write_all(&[u8::from(!valid)]).is_ok()
+            {
+                if valid {
+                    vnet.active_pairs = pairs;
+                    vnet.steering.retain(|_, pair| *pair < pairs);
+                }
+                1
+            } else {
+                0
+            };
+            if q.add_used(mem, head, written).is_err() {
+                invalid = true;
+                break;
+            }
+        }
+        if invalid || !q.enable_notification(mem).unwrap_or(false) {
+            break;
+        }
+    }
+    let irq = (q.next_used() != old_used && needs_receive_interrupt(q, mem, old_used))
+        .then(|| sh.interrupt.clone())
+        .flatten();
+    drop(guard);
+    if let Some(irq) = irq {
+        irq.notify_queue(index);
+    }
+}
+
 fn needs_receive_interrupt(q: &mut Queue, mem: &GuestMemory, old_used: u16) -> bool {
     let normal = needs_interrupt(q, mem);
     if !q.event_idx_enabled() {
@@ -841,6 +1226,10 @@ fn needs_receive_interrupt(q: &mut Queue, mem: &GuestMemory, old_used: u16) -> b
 
 /// Move pending frames into free receiveq buffers, header first.
 fn place_rx_frames(shared: &Arc<Mutex<Shared>>, hdr_len: usize, mergeable: bool, guest_csum: bool) {
+    if lock(shared).vnet.is_some() {
+        place_vnet_rx_frames(shared, hdr_len, mergeable, guest_csum);
+        return;
+    }
     let mut irq: Option<(Arc<dyn VirtioInterrupt>, u16)> = None;
     {
         let mut guard = lock(shared);
@@ -1072,6 +1461,23 @@ fn process_tx(
     hdr_len: usize,
     csum: bool,
 ) {
+    process_control(shared);
+    let pairs = lock(shared)
+        .vnet
+        .as_ref()
+        .map_or(1, |vnet| vnet.active_pairs);
+    for pair in 0..pairs {
+        process_tx_queue(shared, stream, hdr_len, csum, 2 * pair + 1);
+    }
+}
+
+fn process_tx_queue(
+    shared: &Arc<Mutex<Shared>>,
+    stream: &mut Option<UnixStream>,
+    hdr_len: usize,
+    csum: bool,
+    tx_queue: u16,
+) {
     loop {
         let mut blocked = false;
         let more;
@@ -1086,9 +1492,16 @@ fn process_tx(
             let Some(mem) = sh.mem.as_ref() else {
                 return;
             };
-            let Some(q) = sh.queues.get_mut(usize::from(TXQ)).and_then(|q| q.as_mut()) else {
+            let Some(q) = sh
+                .queues
+                .get_mut(usize::from(tx_queue))
+                .and_then(|q| q.as_mut())
+            else {
                 return;
             };
+            if !q.ready() {
+                return;
+            }
             let _ = q.disable_notification(mem);
             let mut used_any = false;
             let mut invalid = false;
@@ -1144,8 +1557,14 @@ fn process_tx(
                     if stream.is_some()
                         && len <= MAX_FRAME
                         && skip == 0
-                        && complete_tx_checksum(&mut packet, &header, len, csum)
+                        && match sh.vnet.as_mut() {
+                            Some(vnet) => {
+                                prepare_vnet_tx(&mut packet, &header, len, tx_queue / 2, vnet)
+                            }
+                            None => complete_tx_checksum(&mut packet, &header, len, csum),
+                        }
                     {
+                        let len = packet.owned.as_ref().map_or(len, Vec::len);
                         packet.prefix = Some((len as u32).to_be_bytes());
                         let count = 1 + packet.slices.len() + usize::from(packet.owned.is_some());
                         if !packets.is_empty() && vectors + count > 1024 {
@@ -1179,7 +1598,7 @@ fn process_tx(
             more = !invalid
                 && (full_batch || (!blocked && q.enable_notification(mem).unwrap_or(false)));
             if used_any && needs_interrupt(q, mem) {
-                irq = sh.interrupt.clone().map(|irq| (irq, TXQ));
+                irq = sh.interrupt.clone().map(|irq| (irq, tx_queue));
             }
         }
         if let Some((irq, queue)) = irq {
@@ -1229,7 +1648,7 @@ impl VirtioDevice for Net {
     }
 
     fn queue_max_sizes(&self) -> &[u16] {
-        &[QUEUE_SIZE, QUEUE_SIZE]
+        &self.queue_sizes
     }
 
     fn config_len(&self) -> u64 {
@@ -1248,10 +1667,28 @@ impl VirtioDevice for Net {
         if self.config.mtu != DEFAULT_MTU {
             features |= F_MTU;
         }
+        if let Some(vnet) = lock(&self.shared).vnet.as_ref() {
+            features |= F_GUEST_TSO4
+                | F_GUEST_TSO6
+                | F_GUEST_ECN
+                | F_HOST_TSO4
+                | F_HOST_TSO6
+                | F_HOST_ECN
+                | F_GUEST_USO4
+                | F_GUEST_USO6
+                | F_HOST_USO
+                | F_CTRL_VQ;
+            if vnet.max_pairs > 1 {
+                features |= F_MQ;
+            }
+        }
         features
     }
 
     fn ack_features(&mut self, features: u64) {
+        if let Some(vnet) = lock(&self.shared).vnet.as_mut() {
+            vnet.features = features;
+        }
         self.negotiated.store(features, Ordering::Release);
     }
 
@@ -1263,7 +1700,11 @@ impl VirtioDevice for Net {
         config[0..6].copy_from_slice(&self.config.mac);
         let status = if link_up { S_LINK_UP } else { 0 };
         config[6..8].copy_from_slice(&status.to_le_bytes());
-        config[8..10].copy_from_slice(&1u16.to_le_bytes());
+        let pairs = lock(&self.shared)
+            .vnet
+            .as_ref()
+            .map_or(1, |vnet| vnet.max_pairs);
+        config[8..10].copy_from_slice(&pairs.to_le_bytes());
         if self.config.mtu != DEFAULT_MTU {
             config[10..12].copy_from_slice(&self.config.mtu.to_le_bytes());
         }
@@ -1282,9 +1723,10 @@ impl VirtioDevice for Net {
         interrupt: Arc<dyn VirtioInterrupt>,
         queues: Vec<Queue>,
     ) -> Result<(), DeviceError> {
-        if queues.len() != 2 {
+        if queues.len() != self.queue_sizes.len() {
             return Err(DeviceError::Other(format!(
-                "virtio-net needs 2 queues, got {}",
+                "virtio-net needs {} queues, got {}",
+                self.queue_sizes.len(),
                 queues.len()
             )));
         }
@@ -1305,7 +1747,7 @@ impl VirtioDevice for Net {
     }
 
     fn queue_notify(&mut self, index: u16) {
-        if index <= TXQ {
+        if usize::from(index) < self.queue_sizes.len() {
             self.wake_worker();
         }
     }
@@ -1314,7 +1756,12 @@ impl VirtioDevice for Net {
         self.pending_queues = None;
         self.negotiated.store(0, Ordering::SeqCst);
         let mut sh = lock(&self.shared);
-        sh.queues = (0..2).map(|_| None).collect();
+        sh.queues = self.queue_sizes.iter().map(|_| None).collect();
+        if let Some(vnet) = sh.vnet.as_mut() {
+            vnet.active_pairs = 1;
+            vnet.features = 0;
+            vnet.steering.clear();
+        }
         sh.mem = None;
         sh.interrupt = None;
         sh.rx_pending.clear();
@@ -1327,7 +1774,7 @@ impl VirtioDevice for Net {
 
 /// Snapshot format magic and version.
 const SNAPSHOT_MAGIC: &[u8; 5] = b"VLNET";
-const SNAPSHOT_VERSION: u16 = 1;
+const SNAPSHOT_VERSION: u16 = 2;
 
 impl Snapshot for Net {
     fn quiesce(&mut self) {
@@ -1348,7 +1795,7 @@ impl Snapshot for Net {
         if pending {
             fire_config(&self.shared);
         }
-        for queue in 0..2 {
+        for queue in 0..self.queue_sizes.len() as u16 {
             self.queue_notify(queue);
         }
     }
@@ -1362,6 +1809,22 @@ impl Snapshot for Net {
         let mut enc = Enc::new();
         enc.raw(SNAPSHOT_MAGIC);
         enc.u16(SNAPSHOT_VERSION);
+        match &sh.vnet {
+            None => enc.u8(0),
+            Some(vnet) => {
+                enc.u8(1);
+                enc.u16(vnet.max_pairs);
+                enc.u16(vnet.active_pairs);
+                enc.u64(vnet.features);
+                enc.u32(vnet.steering.len() as u32);
+                let mut steering: Vec<_> = vnet.steering.iter().collect();
+                steering.sort_unstable_by_key(|(hash, _)| **hash);
+                for (&hash, &pair) in steering {
+                    enc.u32(hash);
+                    enc.u16(pair);
+                }
+            }
+        }
         enc.u8(sh.link_up as u8);
         enc.bytes(&sh.tx_out);
         match &sh.rx {
@@ -1399,9 +1862,50 @@ impl Snapshot for Net {
         if dec.raw(SNAPSHOT_MAGIC.len())? != SNAPSHOT_MAGIC.as_slice() {
             return Err(DeviceError::State("not a virtio-net snapshot".into()));
         }
-        if dec.u16()? != SNAPSHOT_VERSION {
+        let version = dec.u16()?;
+        if version != SNAPSHOT_VERSION && version != 1 {
             return Err(DeviceError::State(
                 "unsupported virtio-net snapshot version".into(),
+            ));
+        }
+        let vnet = if version == 2 && dec.u8()? != 0 {
+            let max_pairs = dec.u16()?;
+            let active_pairs = dec.u16()?;
+            let features = dec.u64()?;
+            let count = dec.u32()?;
+            if !(1..=31).contains(&max_pairs)
+                || !(1..=max_pairs).contains(&active_pairs)
+                || count > 65536
+            {
+                return Err(DeviceError::State("invalid virtio-net queue state".into()));
+            }
+            let mut steering = HashMap::new();
+            for _ in 0..count {
+                let hash = dec.u32()?;
+                let pair = dec.u16()?;
+                if pair >= active_pairs {
+                    return Err(DeviceError::State("invalid receive steering queue".into()));
+                }
+                steering.insert(hash, pair);
+            }
+            Some(VnetState {
+                max_pairs,
+                active_pairs,
+                features,
+                mtu: self.config.mtu,
+                steering,
+            })
+        } else {
+            None
+        };
+        if vnet.as_ref().map(|state| state.max_pairs)
+            != lock(&self.shared)
+                .vnet
+                .as_ref()
+                .map(|state| state.max_pairs)
+        {
+            return Err(DeviceError::State(
+                "snapshot network framing or queue pairs differ".into(),
             ));
         }
         let link_up = dec.u8()? == 1;
@@ -1427,9 +1931,10 @@ impl Snapshot for Net {
             rx_pending.push_back(dec.bytes()?);
         }
         let nqueues = dec.u32()? as usize;
-        if nqueues != 2 {
+        if nqueues != self.queue_sizes.len() {
             return Err(DeviceError::State(format!(
-                "snapshot has {nqueues} queues, device needs 2"
+                "snapshot has {nqueues} queues, device needs {}",
+                self.queue_sizes.len()
             )));
         }
         let mut queues = Vec::with_capacity(nqueues);
@@ -1441,6 +1946,7 @@ impl Snapshot for Net {
             });
         }
         let mut sh = lock(&self.shared);
+        sh.vnet = vnet;
         sh.link_up = link_up;
         sh.tx_out = tx_out;
         sh.rx = rx;
@@ -2127,6 +2633,263 @@ mod tests {
         }
     }
 
+    fn gso_packet(tcp: bool, payload: usize) -> (Header, Vec<u8>) {
+        let mut frame = vec![0; 34 + if tcp { 20 } else { 8 } + payload];
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame[14] = 0x45;
+        frame[23] = if tcp { 6 } else { 17 };
+        frame[26..34].copy_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
+        frame[34..38].copy_from_slice(&[0, 80, 1, 2]);
+        if tcp {
+            frame[46] = 0x50;
+            frame[47] = 0x18;
+        }
+        let header = Header {
+            flags: NEEDS_CSUM,
+            gso_type: if tcp { GSO_TCPV4 } else { GSO_UDP },
+            hdr_len: if tcp { 54 } else { 42 },
+            gso_size: 1000,
+            csum_start: 34,
+            csum_offset: if tcp { 16 } else { 6 },
+        };
+        (header, frame)
+    }
+
+    fn vnet_body(header: Header, frame: &[u8]) -> Vec<u8> {
+        let mut body = header.metadata(0).to_vec();
+        body.extend_from_slice(frame);
+        body
+    }
+
+    #[test]
+    fn multiqueue_control_rejects_invalid_counts_and_falls_back_without_mq() {
+        let mut f = Fixture::new_mode(Some(2));
+        let _socket = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        assert_eq!(f.dev.queue_max_sizes(), &[256; 5]);
+        assert_eq!(f.control_pairs(0, 4), 1);
+        assert_eq!(f.control_pairs(3, 4), 1);
+        assert_eq!(f.control_pairs(2, 4), 0);
+        assert_eq!(lock(&f.dev.shared).vnet.as_ref().unwrap().active_pairs, 2);
+        assert_eq!(f.control_pairs(1, 4), 0);
+        f.dev.ack_features(f.dev.features() & !F_MQ);
+        assert_eq!(f.control_pairs(2, 2), 1);
+        assert_eq!(lock(&f.dev.shared).vnet.as_ref().unwrap().active_pairs, 1);
+    }
+
+    #[test]
+    fn vnet_transmit_preserves_tso_uso_headers_and_queue_ids() {
+        for tcp in [true, false] {
+            let mut f = Fixture::new_mode(Some(2));
+            let mut socket = f.take_switch_side();
+            f.dev.quiesce();
+            lock(&f.dev.shared).snapshot_paused = false;
+            assert_eq!(f.control_pairs(2, 4), 0);
+            let (header, frame) = gso_packet(tcp, 5000);
+            let address = f.data(0);
+            f.mem
+                .write_slice(&header.encode(), GuestAddress(address))
+                .unwrap();
+            f.mem
+                .write_slice(&frame, GuestAddress(address + 12))
+                .unwrap();
+            f.vqs[3].add_chain(&f.mem, &[(address, (12 + frame.len()) as u32, false)]);
+            f.dev.queue_notify(3);
+            let mut prefix = [0; 4];
+            socket.read_exact(&mut prefix).unwrap();
+            let mut body = vec![0; u32::from_be_bytes(prefix) as usize];
+            socket.read_exact(&mut body).unwrap();
+            let (actual_header, pair, actual_frame) = Header::from_metadata(&body).unwrap();
+            assert_eq!(
+                (actual_header, pair, actual_frame),
+                (header, 1, frame.as_slice())
+            );
+            assert_eq!(f.vqs[3].used_idx(&f.mem), 1);
+        }
+    }
+
+    #[test]
+    fn vnet_receive_preserves_gso_or_segments_when_guest_declines() {
+        for tcp in [true, false] {
+            for supported in [true, false] {
+                let mut f = Fixture::new_mode(Some(1));
+                let _socket = f.take_switch_side();
+                f.dev.quiesce();
+                lock(&f.dev.shared).snapshot_paused = false;
+                if !supported {
+                    f.dev.ack_features(
+                        f.dev.features()
+                            & !(F_GUEST_TSO4 | F_GUEST_TSO6 | F_GUEST_USO4 | F_GUEST_USO6),
+                    );
+                }
+                let (header, frame) = gso_packet(tcp, 5000);
+                for index in 0..8 {
+                    let address = f.data(index);
+                    f.vqs[0].add_chain(&f.mem, &[(address, 8192, true)]);
+                }
+                lock(&f.dev.shared)
+                    .rx_pending
+                    .push_back(vnet_body(header, &frame));
+                place_rx_frames(&f.dev.shared, 12, true, true);
+                let count = f.vqs[0].used_idx(&f.mem);
+                assert_eq!(count, if supported { 1 } else { 5 });
+                let mut received = [0; 12];
+                f.mem
+                    .read_slice(&mut received, GuestAddress(f.data(0)))
+                    .unwrap();
+                let actual = Header::decode(&received).unwrap();
+                assert_eq!(
+                    actual.gso_type,
+                    if supported { header.gso_type } else { GSO_NONE }
+                );
+                if supported {
+                    assert_eq!(actual, header);
+                } else {
+                    assert_eq!(actual.flags, HDR_F_DATA_VALID);
+                }
+                assert!(lock(&f.dev.shared).rx_pending.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_control_available_index_returns_without_spinning() {
+        let mut f = Fixture::new_mode(Some(2));
+        let _socket = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        f.mem
+            .write_obj(257u16, GuestAddress(f.vqs[4].avail + 2))
+            .unwrap();
+        process_control(&f.dev.shared);
+        assert_eq!(f.vqs[4].used_idx(&f.mem), 0);
+    }
+
+    #[test]
+    fn data_valid_is_never_accepted_from_guest_or_sent_without_negotiation() {
+        let mut f = Fixture::new_mode(Some(1));
+        let _socket = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        let (_, frame) = gso_packet(true, 64);
+        let metadata = Header {
+            flags: HDR_F_DATA_VALID,
+            ..Header::default()
+        };
+        let slice = f
+            .mem
+            .get_slice(GuestAddress(f.data(0)), frame.len())
+            .unwrap();
+        slice.copy_from(&frame);
+        let mut packet = TxPacket {
+            head: 0,
+            consumed: 0,
+            prefix: None,
+            slices: vec![slice],
+            owned: None,
+        };
+        assert!(!prepare_vnet_tx(
+            &mut packet,
+            &metadata.encode(),
+            frame.len(),
+            0,
+            lock(&f.dev.shared).vnet.as_mut().unwrap()
+        ));
+        f.dev.ack_features(f.dev.features() & !F_GUEST_CSUM);
+        let address = f.data(1);
+        f.vqs[0].add_chain(&f.mem, &[(address, 1024, true)]);
+        lock(&f.dev.shared)
+            .rx_pending
+            .push_back(vnet_body(metadata, &frame));
+        place_rx_frames(&f.dev.shared, 12, true, false);
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 1);
+        assert_eq!(f.mem.read_obj::<u8>(GuestAddress(address)).unwrap(), 0);
+    }
+
+    #[test]
+    fn blocked_vnet_queue_keeps_socket_readable_for_other_flows() {
+        let mut f = Fixture::new_mode(Some(2));
+        let mut socket = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        assert_eq!(f.control_pairs(2, 4), 0);
+        let (_, blocked) = gso_packet(true, 128);
+        let mut ready = blocked.clone();
+        ready[35] ^= 1;
+        {
+            let mut state = lock(&f.dev.shared);
+            let steering = &mut state.vnet.as_mut().unwrap().steering;
+            steering.insert(flow_hash(&blocked), 0);
+            steering.insert(flow_hash(&ready), 1);
+        }
+        let address = f.data(0);
+        f.vqs[2].add_chain(&f.mem, &[(address, 1024, true)]);
+        let body = vnet_body(Header::default(), &blocked);
+        socket
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .unwrap();
+        socket.write_all(&body).unwrap();
+        wait_for("blocked flow buffered", || {
+            !lock(&f.dev.shared).rx_pending.is_empty()
+        });
+        let body = vnet_body(Header::default(), &ready);
+        socket
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .unwrap();
+        socket.write_all(&body).unwrap();
+        wait_for("unblocked queue receives later socket packet", || {
+            f.vqs[2].used_idx(&f.mem) == 1
+        });
+        assert_eq!(f.vqs[0].used_idx(&f.mem), 0);
+    }
+
+    #[test]
+    fn multiqueue_steering_avoids_blocked_queue_and_survives_snapshot() {
+        let mut f = Fixture::new_mode(Some(2));
+        let _socket = f.take_switch_side();
+        f.dev.quiesce();
+        lock(&f.dev.shared).snapshot_paused = false;
+        assert_eq!(f.control_pairs(2, 4), 0);
+        let (_, mut frame) = gso_packet(true, 128);
+        let first = flow_hash(&frame);
+        let mut blocked = frame.clone();
+        blocked[35] ^= 1;
+        let other = flow_hash(&blocked);
+        {
+            let mut state = lock(&f.dev.shared);
+            let vnet = state.vnet.as_mut().unwrap();
+            vnet.steering.insert(first, 1);
+            vnet.steering.insert(other, 0);
+            state
+                .rx_pending
+                .push_back(vnet_body(Header::default(), &blocked));
+            state
+                .rx_pending
+                .push_back(vnet_body(Header::default(), &frame));
+        }
+        let address = f.data(0);
+        f.vqs[2].add_chain(&f.mem, &[(address, 1024, true)]);
+        place_rx_frames(&f.dev.shared, 12, false, false);
+        assert_eq!(f.vqs[2].used_idx(&f.mem), 1);
+        assert_eq!(lock(&f.dev.shared).rx_pending.len(), 1);
+        let state = f.dev.save_state().unwrap();
+        assert_eq!(f.control_pairs(1, 4), 0);
+        f.dev.restore_state(&state).unwrap();
+        let state = lock(&f.dev.shared);
+        assert_eq!(state.vnet.as_ref().unwrap().active_pairs, 2);
+        assert_eq!(state.vnet.as_ref().unwrap().steering.get(&first), Some(&1));
+        assert_eq!(state.rx_pending.len(), 1);
+        drop(state);
+        frame.swap(26, 30);
+        frame.swap(27, 31);
+        frame.swap(28, 32);
+        frame.swap(29, 33);
+        frame.swap(34, 36);
+        frame.swap(35, 37);
+        assert_eq!(flow_hash(&frame), first);
+    }
+
     /// One NIC wired to a switch listener the tests drive by hand.
     struct Fixture {
         _dir: TempDir,
@@ -2141,11 +2904,15 @@ mod tests {
 
     impl Fixture {
         fn new() -> Fixture {
+            Self::new_mode(None)
+        }
+
+        fn new_mode(pairs: Option<u16>) -> Fixture {
             let dir = TempDir::new();
             let switch_path = dir.0.join("switch.sock");
             let switch = UnixListener::bind(&switch_path).unwrap();
             switch.set_nonblocking(true).unwrap();
-            let dev = Net::with_retry_interval(
+            let dev = Net::create(
                 NetConfig {
                     id: "nic0".into(),
                     mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
@@ -2153,11 +2920,14 @@ mod tests {
                     switch: switch_path.clone(),
                 },
                 RETRY,
+                pairs,
             )
             .unwrap();
             let mem = GuestMemory::from_ranges(&[(GuestAddress(0), MEM_SIZE as usize)]).unwrap();
             let irq = Arc::new(TestInterrupt::default());
-            let vqs = vec![TestVq::new(0x1000, 256), TestVq::new(0x2_0000, 256)];
+            let vqs = (0..pairs.map_or(2, |pairs| 2 * pairs + 1))
+                .map(|index| TestVq::new(0x1000 + u64::from(index) * 0x20000, 256))
+                .collect();
             let mut f = Fixture {
                 _dir: dir,
                 switch_path: switch_path.clone(),
@@ -2184,6 +2954,21 @@ mod tests {
         /// The address of scratch data buffer `i`.
         fn data(&self, i: u64) -> u64 {
             DATA_BASE + 0x1_0000 * i
+        }
+
+        fn control_pairs(&mut self, pairs: u16, index: usize) -> u8 {
+            let command = self.data(8);
+            let reply = self.data(9);
+            self.mem
+                .write_slice(
+                    &[4, 0, pairs as u8, (pairs >> 8) as u8],
+                    GuestAddress(command),
+                )
+                .unwrap();
+            self.mem.write_obj(0xabu8, GuestAddress(reply)).unwrap();
+            self.vqs[index].add_chain(&self.mem, &[(command, 4, false), (reply, 1, true)]);
+            process_control(&self.dev.shared);
+            self.mem.read_obj(GuestAddress(reply)).unwrap()
         }
 
         /// The config status field.
@@ -2439,6 +3224,7 @@ mod tests {
     fn transmit_staging_is_bounded_when_switch_stops_reading() {
         let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 2 << 20)]).unwrap();
         let shared = Arc::new(Mutex::new(Shared {
+            vnet: None,
             snapshot_paused: false,
             config_pending: false,
             mem: Some(mem.clone()),
@@ -2801,6 +3587,7 @@ mod tests {
     #[test]
     fn frame_decoder_handles_fragmentation_jumbo_and_empty_frames() {
         let shared = Arc::new(Mutex::new(Shared {
+            vnet: None,
             snapshot_paused: false,
             config_pending: false,
             mem: None,

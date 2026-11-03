@@ -447,7 +447,7 @@ class X86QemuBackend(QemuBackend):
 
 
 def hv_x86_machine_description(run_dir, guest, smp, overlay, code_fd, vars_fd,
-                               switch_sock, nic_mac, host_mtu, ipxe_rom):
+                               switch_sock, nic_mac, host_mtu, ipxe_rom, *, vnet=False):
     """The MachineDescription for the machine the argv above builds.
 
     Devices sit at QEMU's own auto-assigned functions for that argv, so the
@@ -486,6 +486,10 @@ def hv_x86_machine_description(run_dir, guest, smp, overlay, code_fd, vars_fd,
             "attachment": {"kind": "stream", "socket": switch_sock},
             "rom": ipxe_rom,
         }
+        if vnet:
+            nic["attachment"] = {
+                "kind": "stream_vnet", "socket": switch_sock, "queue_pairs": smp,
+            }
         if host_mtu:
             nic["mtu"] = host_mtu
         nics.append(nic)
@@ -529,7 +533,7 @@ class X86HvBackend(HvBackend):
     """The same machine as a vmlab-hv machine description."""
 
     def __init__(self, run_dir, guest, smp, pin, overlay, code_fd, vars_fd,
-                 switch_sock, nic_mac, host_mtu, log, hv_bin, ipxe_rom):
+                 switch_sock, nic_mac, host_mtu, log, hv_bin, ipxe_rom, *, vnet=False):
         if not os.path.isfile(hv_bin):
             raise lib.BenchError(
                 f"{hv_bin} not built; run `cargo build --release -p vmlab-hv`"
@@ -546,7 +550,7 @@ class X86HvBackend(HvBackend):
         self.log = log
         desc = hv_x86_machine_description(
             run_dir, guest, smp, overlay, code_fd, vars_fd,
-            switch_sock, nic_mac, host_mtu, ipxe_rom,
+            switch_sock, nic_mac, host_mtu, ipxe_rom, vnet=vnet,
         )
         with open(self.machine_path, "w") as f:
             json.dump(desc, f, indent=1)

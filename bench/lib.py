@@ -151,6 +151,17 @@ X86_UBUNTU_WORKLOADS = (
 )
 X86_WINDOWS_WORKLOADS = ("boot_to_agent_ready",)
 X86_G2G_WORKLOADS = ("net_g2g_a2b_tcp_mbps", "net_g2g_b2a_tcp_mbps")
+X86_G2G1500_WORKLOADS = ("net_g2g1500_a2b_tcp_mbps", "net_g2g1500_b2a_tcp_mbps")
+X86_G2G_MULTIFLOW_WORKLOADS = (
+    "net_g2g1500_multiflow_a2b_tcp_mbps", "net_g2g1500_multiflow_b2a_tcp_mbps",
+)
+G2G_SUITES = {
+    "g2g": {"mtu": 65520, "flows": 1, "vnet": False, "workloads": X86_G2G_WORKLOADS},
+    "g2g1500": {"mtu": 1500, "flows": 1, "vnet": True, "workloads": X86_G2G1500_WORKLOADS},
+    "g2g-multiflow": {
+        "mtu": 1500, "flows": 4, "vnet": True, "workloads": X86_G2G_MULTIFLOW_WORKLOADS,
+    },
+}
 
 UNIT = {
     "boot_to_agent_ready": "s",
@@ -164,6 +175,7 @@ UNIT = {
     "net_rx_udp_mbps": "Mbit/s",
     "net_g2g_a2b_tcp_mbps": "Mbit/s",
     "net_g2g_b2a_tcp_mbps": "Mbit/s",
+    **{name: "Mbit/s" for name in X86_G2G1500_WORKLOADS + X86_G2G_MULTIFLOW_WORKLOADS},
     "idle_cpu_pct": "%cpu",
 }
 
@@ -172,8 +184,8 @@ def workloads(arch, guest="debian-13", suite="full"):
     """The workload list for one run, in report order."""
     if arch != "x86_64":
         return TCG_WORKLOADS
-    if suite == "g2g":
-        return X86_G2G_WORKLOADS
+    if suite in G2G_SUITES:
+        return G2G_SUITES[suite]["workloads"]
     return X86_WINDOWS_WORKLOADS if guest.startswith("windows-") else X86_UBUNTU_WORKLOADS
 
 
@@ -627,7 +639,7 @@ def run_dir_name(backend, arch, guest, smp, index, suite="full"):
     stamp = time.strftime("%H%M%S")
     if arch == "x86_64":
         guest = {"ubuntu-26.04": "u2604", "windows-10": "win10"}.get(guest, guest[:8])
-        tag = "g2g" if suite == "g2g" else guest
+        tag = {"g2g": "g2g", "g2g1500": "g1500", "g2g-multiflow": "g4"}.get(suite, guest)
         return f"{stamp}-{short_backend(backend)}-x86_{tag}-r{index}"
     return f"{stamp}-{short_backend(backend)}-{arch}-smp{smp}-r{index}"
 

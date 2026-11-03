@@ -17,6 +17,7 @@ pub mod debug;
 #[cfg(feature = "gdb")]
 pub mod gdb;
 pub mod machine;
+pub mod net;
 pub mod server;
 
 pub use machine::MachineDescription;

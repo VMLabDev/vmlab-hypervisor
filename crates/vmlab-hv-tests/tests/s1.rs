@@ -866,6 +866,148 @@ fn nic_traffic_survives_snapshot_load() {
 }
 
 #[test]
+fn nic_vnet_multiqueue_traffic_survives_snapshot_load() {
+    let Some(assets) = check() else { return };
+
+    let mut spec = MachineSpec::idle("s1-vnet-mq-snapshot").with_vnet_pairs(2);
+    spec.vcpus = 2;
+    let mut guest = vmlab_hv_tests::launch(&spec, &assets);
+    let container = spec.container_spec();
+    let (_ctl, seen) = boot_to_idle(&guest, &container, BOOT);
+    assert!(
+        seen.iter()
+            .any(|event| matches!(event, CtlEvent::NetUp { ip } if ip == &LEASE_IP.to_string()))
+    );
+    let mut agent = agent_ready(&guest);
+
+    let exchange = |agent: &mut AgentClient, guest: &vmlab_hv_tests::Guest, phase: &str| {
+        let output = agent
+            .exec(
+                &[
+                    BUSYBOX,
+                    "sh",
+                    "-c",
+                    "for device in /sys/bus/virtio/devices/*; do \
+             kind=$(/.vmlab/busybox cat \"$device/device\"); \
+             [ \"$((kind))\" -eq 1 ] || continue; \
+             /.vmlab/busybox cat \"$device/features\"; done",
+                ],
+                Duration::from_secs(15),
+            )
+            .unwrap_or_else(|error| panic!("{phase}: {error}\n{}", guest.diagnostics(phase)));
+        assert_eq!(output.exit_code, 0, "{phase}: features: {output:?}");
+        for bit in [0, 1, 7, 8, 11, 12, 15, 17, 22, 54, 55, 56] {
+            assert_eq!(
+                output.stdout.get(bit),
+                Some(&b'1'),
+                "{phase}: feature {bit} not negotiated: {output:?}"
+            );
+        }
+        let output = agent
+            .exec(
+                &[
+                    BUSYBOX,
+                    "sh",
+                    "-c",
+                    "set -- /sys/class/net/eth0/queues/rx-*; \
+             [ \"$#\" -eq 2 ] || exit 1; \
+             set -- /sys/class/net/eth0/queues/tx-*; [ \"$#\" -eq 2 ] || exit 2; \
+             [ \"$(/.vmlab/busybox cat /sys/class/net/eth0/mtu)\" -eq 1500 ]",
+                ],
+                Duration::from_secs(15),
+            )
+            .unwrap_or_else(|error| panic!("{phase}: {error}\n{}", guest.diagnostics(phase)));
+        assert_eq!(
+            output.exit_code, 0,
+            "{phase}: expected two RX/TX pairs at MTU1500: {output:?}"
+        );
+
+        let switch = guest.switch.as_ref().expect("vnet switch");
+        let before = switch.stats();
+        let script = format!(
+            "for flow in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+             (printf 'mq-%s {phase}\\n' \"$flow\" | /.vmlab/busybox nc -u -w 1 {SERVER_IP} 46000) & \
+             done; wait"
+        );
+        let output = agent
+            .exec(&[BUSYBOX, "sh", "-c", &script], Duration::from_secs(15))
+            .unwrap_or_else(|error| panic!("{phase}: {error}\n{}", guest.diagnostics(phase)));
+        assert_eq!(output.exit_code, 0, "{phase}: UDP exchanges: {output:?}");
+        let text = String::from_utf8(output.stdout).expect("ASCII echo payloads");
+        let mut received: Vec<_> = text.lines().map(str::to_string).collect();
+        let mut expected: Vec<_> = (0..16).map(|flow| format!("mq-{flow} {phase}")).collect();
+        received.sort();
+        expected.sort();
+        assert_eq!(received, expected, "{phase}: exact UDP echo payloads");
+        let after = switch.stats();
+        assert!(
+            after.udp_echoes >= before.udp_echoes + 16,
+            "{phase}: no checksum-valid UDP exchanges: {after:?}"
+        );
+        assert!(
+            after.offload_packets > before.offload_packets,
+            "{phase}: guest did not transmit offload metadata: {after:?}"
+        );
+
+        let output = agent
+            .exec(
+                &[
+                    BUSYBOX,
+                    "ping",
+                    "-q",
+                    "-c",
+                    "300",
+                    "-i",
+                    "0.005",
+                    "-W",
+                    "3",
+                    "-s",
+                    "1024",
+                    &SERVER_IP.to_string(),
+                ],
+                Duration::from_secs(30),
+            )
+            .unwrap_or_else(|error| panic!("{phase}: {error}\n{}", guest.diagnostics(phase)));
+        assert_eq!(output.exit_code, 0, "{phase}: ping: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("300 packets transmitted, 300 packets received, 0% packet loss"),
+            "{phase}: queue wrap traffic: {output:?}"
+        );
+        assert_eq!(
+            switch.stats().queues,
+            std::collections::BTreeSet::from([0, 1]),
+            "{phase}: both transmit pairs must carry traffic"
+        );
+    };
+
+    exchange(&mut agent, &guest, "before snapshot");
+    assert!(matches!(
+        guest
+            .control
+            .call(Ctrl::SnapshotSave {
+                name: "vnet-mq".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    exchange(&mut agent, &guest, "after save");
+    assert!(matches!(
+        guest
+            .control
+            .call(Ctrl::SnapshotLoad {
+                name: "vnet-mq".into()
+            })
+            .unwrap(),
+        Outcome::Ok { .. }
+    ));
+    drop(agent);
+    let mut agent = agent_ready(&guest);
+    exchange(&mut agent, &guest, "after load");
+    guest.quit_and_exit_zero();
+}
+
+#[test]
 fn quit_exits_cleanly_while_booting() {
     let Some(assets) = check() else { return };
 
