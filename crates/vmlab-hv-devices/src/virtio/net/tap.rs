@@ -27,6 +27,7 @@ const TUN_F_USO4: u32 = 0x20;
 const TUN_F_USO6: u32 = 0x40;
 const IFF_ATTACH_QUEUE: i16 = 0x200;
 const IFF_DETACH_QUEUE: i16 = 0x400;
+const F_ANY_LAYOUT: u64 = 1 << 27;
 const RING_FEATURES: u64 =
     super::F_INDIRECT_DESC | super::F_EVENT_IDX | super::F_VERSION_1 | super::F_MRG_RXBUF;
 
@@ -416,7 +417,8 @@ impl TapBackend {
         if active == 0 || usize::from(active) > self.pairs.len() {
             return Err(invalid("active queue count exceeds TAP queue pairs"));
         }
-        if features & !self.available != 0 {
+        // The transitional PCI transport offers ANY_LAYOUT on the device's behalf.
+        if features & !(self.available | F_ANY_LAYOUT) != 0 {
             return Err(invalid(
                 "negotiated network features exceed backend capabilities",
             ));
@@ -1049,6 +1051,28 @@ mod tests {
                 .contains(&Call::Offload(TUN_F_CSUM | TUN_F_TSO4))
         );
         assert_eq!(state.active.len(), 2);
+    }
+
+    #[test]
+    fn transport_any_layout_does_not_require_backend_support() {
+        for kernel in [false, true] {
+            let memory = memory();
+            let (mut backend, fake, _, _) = fixture(1, kernel, memory.clone());
+            let mut queues = queues(&memory, 1);
+            let any_layout = 1 << 27;
+            assert_eq!(backend.features() & any_layout, 0);
+            backend
+                .configure(&mut queues, offered() | any_layout, 1)
+                .unwrap();
+            if kernel {
+                assert_eq!(fake.0.lock().unwrap().active.len(), 2);
+            }
+            assert!(
+                backend
+                    .configure(&mut queues, offered() | (1 << 63), 1)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

@@ -256,18 +256,34 @@ fn passed_tap_and_vhost_queues_exchange_traffic_and_restore() {
         };
         traffic(&mut agent, &guest, "before save");
         assert!(matches!(
+            guest.control.call(Ctrl::Pause).unwrap(),
+            Outcome::Ok { .. }
+        ));
+        assert!(matches!(
             guest
                 .control
                 .call(Ctrl::SnapshotSave { name: "tap".into() })
                 .unwrap(),
             Outcome::Ok { .. }
         ));
+        let resumed = guest.control.call(Ctrl::Resume).unwrap();
+        assert!(
+            matches!(resumed, Outcome::Ok { .. }),
+            "TAP resume after paused snapshot: {resumed:?}; backend diagnostic: {:?}",
+            guest.control.call(Ctrl::SnapshotSave {
+                name: "resume-diagnostic".into()
+            })
+        );
         traffic(&mut agent, &guest, "after save");
         assert!(matches!(
             guest
                 .control
                 .call(Ctrl::SnapshotLoad { name: "tap".into() })
                 .unwrap(),
+            Outcome::Ok { .. }
+        ));
+        assert!(matches!(
+            guest.control.call(Ctrl::Resume).unwrap(),
             Outcome::Ok { .. }
         ));
         drop(agent);
