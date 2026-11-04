@@ -16,6 +16,8 @@ use vmlab_hv_proto::{
 };
 use vmlab_hv_tests::{agent::AgentClient, process::ManagedChild};
 
+#[path = "support/audio_pipewire.rs"]
+mod audio_pipewire;
 #[path = "support/audio_quality.rs"]
 mod audio_quality;
 
@@ -71,6 +73,23 @@ impl Drop for Vm {
         let _ = self.child.kill();
         let _ = self.child.wait();
         if std::thread::panicking() {
+            if let Some(root) = std::env::var_os("VMLAB_HV_AUDIO_QUALITY_ARTIFACTS") {
+                let destination = Path::new(&root).join(self.dir.path().file_name().unwrap());
+                if std::fs::create_dir_all(&destination).is_ok() {
+                    for file in [
+                        "hv.log",
+                        "machine.json",
+                        "playback.pcm",
+                        "playback.timing",
+                        "playback.rendered",
+                        "pw-record.log",
+                        "pipewire.log",
+                        "wireplumber.log",
+                    ] {
+                        let _ = std::fs::copy(self.dir.path().join(file), destination.join(file));
+                    }
+                }
+            }
             eprintln!(
                 "Windows HDA log:\n{}",
                 std::fs::read_to_string(self.dir.path().join("hv.log")).unwrap_or_default()
@@ -96,16 +115,28 @@ fn pipewire_node(remote: &Path) -> Option<Value> {
 #[test]
 #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn windows_inbox_hda_starts_and_plays_via_s1() {
-    windows_hda(false);
+    windows_hda(false, false, false);
 }
 
 #[test]
 #[ignore = "opt-in 10-second silent Windows HDA quality measurement"]
 fn windows_hda_playback_quality_via_s1() {
-    windows_hda(true);
+    windows_hda(true, false, false);
 }
 
-fn windows_hda(quality: bool) {
+#[test]
+#[ignore = "opt-in 30-second Windows HDA quality measurement under load"]
+fn windows_hda_playback_load_quality_via_s1() {
+    windows_hda(true, true, false);
+}
+
+#[test]
+#[ignore = "opt-in 30-second Windows HDA load measurement through private PipeWire"]
+fn windows_hda_pipewire_load_quality_via_s1() {
+    windows_hda(true, true, true);
+}
+
+fn windows_hda(quality: bool, load: bool, private_pipewire: bool) {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("SKIP Windows HDA S1: /dev/kvm unavailable");
         return;
@@ -114,6 +145,15 @@ fn windows_hda(quality: bool) {
         eprintln!("SKIP Windows HDA S1: Windows 11 standard template unavailable");
         return;
     };
+    let render_node = load
+        .then(|| std::env::var_os("VMLAB_HV_TEST_VENUS_RENDER_NODE"))
+        .flatten();
+    if load && render_node.is_none() {
+        eprintln!(
+            "SKIP Windows HDA load S1: set VMLAB_HV_TEST_VENUS_RENDER_NODE and a win3d template for D3D11 hardware load"
+        );
+        return;
+    }
     let firmware = std::env::var_os("VMLAB_HV_FIRMWARE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -133,11 +173,12 @@ fn windows_hda(quality: bool) {
         .tempdir_in("/tmp")
         .unwrap();
     let path = directory.path();
+    let mut silent_pipewire = private_pipewire.then(|| audio_pipewire::SilentPipeWire::start(path));
     eprintln!("Windows HDA S1 directory: {}", path.display());
     let disk = path.join("disk.qcow2");
     vmlab_disk::ops::create_linked_clone(&template, &disk).unwrap();
     std::fs::copy(vars, path.join("vars.fd")).unwrap();
-    let description = json!({
+    let mut description = json!({
         "machine":"q35", "name":"windows-audio-s1", "arch":"x86_64", "accel":"kvm",
         "vcpus":4, "memory_mib":8192,
         "hyperv":["relaxed","vapic","spinlocks","vpindex","runtime","time","synic","stimer","frequencies","reset","tlbflush","ipi"],
@@ -153,6 +194,10 @@ fn windows_hda(quality: bool) {
             "node_name":"vmlab.test.windows-audio","node_description":"Windows HDA S1",
             "pci":{"bus":0,"device":27,"function":0}}
     });
+    if let Some(node) = render_node {
+        description["display"]["gpu"] = json!("venus");
+        description["display"]["render_node"] = json!(PathBuf::from(node));
+    }
     std::fs::write(
         path.join("machine.json"),
         serde_json::to_vec(&description).unwrap(),
@@ -194,9 +239,12 @@ fn windows_hda(quality: bool) {
         command.env("VMLAB_HV_TEST_AUDIO_PLAYBACK", path.join("playback.pcm"));
     }
     if quality {
-        command
-            .env("VMLAB_HV_TEST_AUDIO_TIMING", "1")
-            .env("VMLAB_HV_TEST_AUDIO_PACED", "1");
+        command.env("VMLAB_HV_TEST_AUDIO_TIMING", "1");
+        if private_pipewire {
+            command.env("VMLAB_HV_TEST_AUDIO_TEE", "1");
+        } else {
+            command.env("VMLAB_HV_TEST_AUDIO_PACED", "1");
+        }
     }
     let mut vm = Vm {
         child: ManagedChild::spawn(&mut command).unwrap(),
@@ -235,7 +283,40 @@ if ($codec.Count -eq 0 -or $codec[0].Status -ne 'OK' -or $endpoints.Count -eq 0)
 "#,
     );
 
-    let quality_tone = format!("& {{ {} }} -Quality", include_str!("audio_windows.ps1"));
+    let quality_tone = format!(
+        "& {{ {} }} -Quality {}",
+        include_str!("audio_windows.ps1"),
+        if load { "-Load" } else { "" }
+    );
+    if load && description["display"]["gpu"] == "venus" {
+        let source = path.join("gpu-load.c");
+        let binary = path.join("gpu-load.exe");
+        std::fs::write(&source, include_str!("support/audio_gpu_load.c")).unwrap();
+        let result = Command::new("x86_64-w64-mingw32-gcc")
+            .args(["-O2", "-s", "-Wall", "-Wextra", "-Werror"])
+            .arg(source)
+            .args(["-o"])
+            .arg(&binary)
+            .args(["-ld3d11", "-lole32", "-luuid", "-lavrt"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "GPU load build: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let bytes = Command::new("base64")
+            .args(["-w0"])
+            .arg(binary)
+            .output()
+            .unwrap();
+        assert!(bytes.status.success());
+        let output = agent.exec_with_stdin(
+            &["powershell.exe", "-NoProfile", "-Command",
+                "[IO.File]::WriteAllBytes(\"$env:TEMP\\hda-gpu-load.exe\", [Convert]::FromBase64String([Console]::In.ReadToEnd()))"],
+            &bytes.stdout, Duration::from_secs(30)).unwrap();
+        assert_eq!(output.exit_code, 0, "GPU load upload: {output:?}");
+    }
     let tone = if quality {
         quality_tone.as_str()
     } else {
@@ -271,7 +352,23 @@ if ($codec.Count -eq 0 -or $codec[0].Status -ne 'OK' -or $endpoints.Count -eq 0)
         if quality {
             // Stop closes and joins the paced sink before inspecting its files.
             powershell(&mut agent, "Start-Sleep -Milliseconds 100");
-            audio_quality::report(&path.join("playback.pcm"), "windows");
+            if let Some(pipewire) = &mut silent_pipewire {
+                pipewire.stop_recording();
+            }
+            if load {
+                audio_quality::report_for(
+                    &path.join("playback.pcm"),
+                    if private_pipewire {
+                        "windows-pipewire-load"
+                    } else {
+                        "windows-load"
+                    },
+                    30,
+                    997.0,
+                );
+            } else {
+                audio_quality::report(&path.join("playback.pcm"), "windows");
+            }
         }
         let pcm = std::fs::read(path.join("playback.pcm")).unwrap();
         assert!(

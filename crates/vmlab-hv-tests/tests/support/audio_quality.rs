@@ -14,6 +14,7 @@ pub struct Quality {
     pub wall_speed_error_percent: Option<f64>,
     pub dropouts: usize,
     pub discontinuities: usize,
+    pub discontinuity_spacing_frames: std::collections::BTreeMap<usize, usize>,
     pub thdn_db: f64,
     pub clicks: usize,
     pub click_interval_error_percent: f64,
@@ -27,6 +28,10 @@ struct Period {
 }
 
 pub fn measure(pcm: &[u8], timing: Option<&str>) -> Quality {
+    measure_at(pcm, timing, 1000.0)
+}
+
+fn measure_at(pcm: &[u8], timing: Option<&str>, nominal_hz: f64) -> Quality {
     assert!(pcm.len().is_multiple_of(4), "partial stereo frame");
     let left: Vec<f64> = pcm
         .as_chunks::<4>()
@@ -54,7 +59,7 @@ pub fn measure(pcm: &[u8], timing: Option<&str>) -> Quality {
     let mut cos = 0.0;
     let dc = signal.iter().sum::<f64>() / signal.len() as f64;
     for (i, x) in signal.iter().enumerate() {
-        let angle = std::f64::consts::TAU * 1000.0 * i as f64 / 48000.0;
+        let angle = std::f64::consts::TAU * nominal_hz * i as f64 / 48000.0;
         sin += (x - dc) * angle.sin();
         cos += (x - dc) * angle.cos();
     }
@@ -63,7 +68,7 @@ pub fn measure(pcm: &[u8], timing: Option<&str>) -> Quality {
     let mut residual = 0.0;
     let mut power = 0.0;
     for (i, x) in signal.iter().enumerate() {
-        let angle = std::f64::consts::TAU * 1000.0 * i as f64 / 48000.0;
+        let angle = std::f64::consts::TAU * nominal_hz * i as f64 / 48000.0;
         let fitted = sin * angle.sin() + cos * angle.cos();
         residual += (x - dc - fitted).powi(2);
         power += fitted.powi(2);
@@ -80,11 +85,23 @@ pub fn measure(pcm: &[u8], timing: Option<&str>) -> Quality {
             zero_run = 0;
         }
     }
-    let max_step = 2.0 * peak * (std::f64::consts::PI * 1000.0 / 48000.0).sin();
-    let discontinuities = signal
-        .windows(2)
-        .filter(|w| (w[1] - w[0]).abs() > max_step * 1.5 + 2.0)
-        .count();
+    let max_curvature = 2.0 * peak * (1.0 - (std::f64::consts::TAU * nominal_hz / 48000.0).cos());
+    let discontinuity_positions: Vec<_> = signal
+        .windows(3)
+        .enumerate()
+        .filter(|(_, w)| (w[2] - 2.0 * w[1] + w[0]).abs() > max_curvature * 1.5 + 4.0)
+        .map(|(i, _)| i)
+        .collect();
+    let mut discontinuity_spacing_frames = std::collections::BTreeMap::new();
+    for pair in discontinuity_positions.windows(2) {
+        *discontinuity_spacing_frames
+            .entry(pair[1] - pair[0])
+            .or_insert(0) += 1;
+    }
+    let mut common: Vec<_> = discontinuity_spacing_frames.into_iter().collect();
+    common.sort_by_key(|&(spacing, count)| (std::cmp::Reverse(count), spacing));
+    common.truncate(8);
+    let discontinuity_spacing_frames = common.into_iter().collect();
     let mut clicks = Vec::new();
     let mut was_high = false;
     for (i, frame) in pcm.as_chunks::<4>().0.iter().enumerate() {
@@ -115,13 +132,14 @@ pub fn measure(pcm: &[u8], timing: Option<&str>) -> Quality {
     });
     Quality {
         frequency_hz: frequency,
-        speed_error_percent: (frequency / 1000.0 - 1.0) * 100.0,
+        speed_error_percent: (frequency / nominal_hz - 1.0) * 100.0,
         duration_seconds: (last - first + 1) as f64 / 48000.0,
         wall_seconds,
         wall_speed_error_percent: wall_seconds
             .map(|wall| ((last - first) as f64 / 48000.0 / wall - 1.0) * 100.0),
         dropouts,
-        discontinuities,
+        discontinuities: discontinuity_positions.len(),
+        discontinuity_spacing_frames,
         thdn_db: 10.0 * (residual / power).log10(),
         clicks: clicks.len(),
         click_interval_error_percent: click_error,
@@ -130,20 +148,31 @@ pub fn measure(pcm: &[u8], timing: Option<&str>) -> Quality {
 
 impl Quality {
     pub fn assert_clean(&self) {
+        self.assert_clean_for(10);
+    }
+
+    pub fn assert_clean_for(&self, seconds: usize) {
         assert!(self.speed_error_percent.abs() <= 0.1, "{self:?}");
-        assert!((self.duration_seconds - 10.0).abs() <= 0.01, "{self:?}");
+        assert!(
+            (self.duration_seconds - seconds as f64).abs() <= 0.01,
+            "{self:?}"
+        );
         if let Some(error) = self.wall_speed_error_percent {
             assert!(error.abs() <= 0.1, "{self:?}");
         }
         assert_eq!(self.dropouts, 0, "{self:?}");
         assert_eq!(self.discontinuities, 0, "{self:?}");
         assert!(self.thdn_db < -50.0, "{self:?}");
-        assert_eq!(self.clicks, 10, "{self:?}");
+        assert_eq!(self.clicks, seconds, "{self:?}");
         assert!(self.click_interval_error_percent <= 0.1, "{self:?}");
     }
 }
 
 pub fn report(path: &Path, guest: &str) {
+    report_for(path, guest, 10, 1000.0);
+}
+
+pub fn report_for(path: &Path, guest: &str, seconds: usize, hz: f64) {
     if let Some(root) = std::env::var_os("VMLAB_HV_AUDIO_QUALITY_ARTIFACTS") {
         let root = Path::new(&root).join(guest);
         std::fs::create_dir_all(&root).unwrap();
@@ -153,6 +182,7 @@ pub fn report(path: &Path, guest: &str) {
                 std::fs::copy(source, root.join(format!("playback.{extension}"))).unwrap();
             }
         }
+        std::fs::copy(path.with_file_name("hv.log"), root.join("hv.log")).unwrap();
     }
     let pcm = std::fs::read(path).expect("guest playback PCM");
     let timing = std::fs::read_to_string(path.with_extension("timing")).unwrap();
@@ -167,24 +197,24 @@ pub fn report(path: &Path, guest: &str) {
     let start = first_click
         .checked_sub(12000)
         .expect("missing signal lead-in");
-    let end = (start + 480000) * 4;
-    assert!(pcm.len() >= end, "incomplete ten-second guest signal");
+    let end = (start + seconds * 48000) * 4;
+    assert!(pcm.len() >= end, "incomplete {seconds}-second guest signal");
     let mut signal = pcm[..end].to_vec();
     signal[..start * 4].fill(0);
-    let submitted = measure(&signal, Some(&timing));
+    let submitted = measure_at(&signal, Some(&timing), hz);
     eprintln!(
         "QUALITY {guest} submitted {}",
         serde_json::to_string(&submitted).unwrap()
     );
     let pcm = std::fs::read(path.with_extension("rendered")).expect("paced sink output");
-    let rendered = measure(&pcm, None);
+    let rendered = measure_at(&pcm, None, hz);
     eprintln!(
         "QUALITY {guest} rendered {}",
         serde_json::to_string(&rendered).unwrap()
     );
     if std::env::var_os("VMLAB_HV_AUDIO_QUALITY_REPORT_ONLY").is_none() {
-        submitted.assert_clean();
-        rendered.assert_clean();
+        submitted.assert_clean_for(seconds);
+        rendered.assert_clean_for(seconds);
     }
 }
 
@@ -193,11 +223,14 @@ mod tests {
     use super::*;
 
     fn reference(rate: usize) -> Vec<u8> {
-        (0..rate * 10)
+        reference_at(rate, 1000.0, 10)
+    }
+
+    fn reference_at(rate: usize, hz: f64, seconds: usize) -> Vec<u8> {
+        (0..rate * seconds)
             .flat_map(|i| {
-                let sine = (6000.0
-                    * (std::f64::consts::TAU * 1000.0 * i as f64 / rate as f64).sin())
-                    as i16;
+                let sine =
+                    (6000.0 * (std::f64::consts::TAU * hz * i as f64 / rate as f64).sin()) as i16;
                 let click = if i % rate >= rate / 4 && i % rate < rate / 4 + 48 {
                     6000i16
                 } else {
@@ -211,6 +244,28 @@ mod tests {
     #[test]
     fn clean_reference_meets_the_quality_bars() {
         measure(&reference(48000), None).assert_clean();
+    }
+
+    #[test]
+    fn thirty_second_load_reference_meets_the_quality_bars() {
+        measure_at(&reference_at(48000, 997.0, 30), None, 997.0).assert_clean_for(30);
+    }
+
+    #[test]
+    fn load_signal_exposes_whole_ten_millisecond_period_repeats() {
+        for hz in [1000.0, 997.0] {
+            let mut pcm = reference_at(48000, hz, 10);
+            let repeated = pcm[48000 * 4..48480 * 4].to_vec();
+            pcm[48480 * 4..48960 * 4].copy_from_slice(&repeated);
+            let quality = measure_at(&pcm, None, hz);
+            if hz == 1000.0 {
+                assert_eq!(quality.discontinuities, 0);
+            } else {
+                assert!(quality.discontinuities >= 2, "{quality:?}");
+                assert!(quality.thdn_db > -50.0, "{quality:?}");
+                assert!(quality.discontinuity_spacing_frames.contains_key(&1));
+            }
+        }
     }
 
     #[test]

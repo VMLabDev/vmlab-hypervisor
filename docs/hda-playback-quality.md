@@ -13,7 +13,9 @@ The fix retains deferred frame time and allows two callback periods in the
 playback queue. Transfers remain at most 256 frames. Deferred time is capped
 at 8,192 frames to bound recovery after a long host stall. Stop, reset, and
 stream errors clear whole-frame debt. Capture retains its elapsed-time pacing.
-Position and completion interrupts still follow host consumption.
+At that revision, position and completion interrupts still follow host consumption.
+The subsequent load investigation changes this behavior and is recorded in
+`hda-load-quality.md`.
 
 No shared trait, protocol, dependency, or PCI register changed. The `HDA1`
 snapshot layout is unchanged. Its existing `fraction` field now also holds

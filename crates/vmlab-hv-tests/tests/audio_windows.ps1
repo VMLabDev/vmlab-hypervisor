@@ -1,4 +1,4 @@
-param([switch]$Quality)
+param([switch]$Quality, [switch]$Load)
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -157,4 +157,34 @@ public static class HdaTone {
     }
 }
 '@
-[HdaTone]::Play($Quality.IsPresent)
+$gpu = $null
+$stop = "$env:TEMP\hda-gpu-stop"
+$gpuLog = "$env:TEMP\hda-gpu.log"
+try {
+    if ($Load) {
+        if (-not (Test-Path "$env:TEMP\hda-gpu-load.exe")) { throw 'Native HDA load executable missing' }
+        Remove-Item $stop -ErrorAction SilentlyContinue
+        $gpu = Start-Process "$env:TEMP\hda-gpu-load.exe" -ArgumentList $stop -PassThru -RedirectStandardOutput $gpuLog -RedirectStandardError "$gpuLog.err"
+        $null = $gpu.Handle
+        for ($n = 0; $n -lt 300; $n++) {
+            if ((Test-Path $gpuLog) -and (Get-Content $gpuLog -Raw) -match 'load ready') { break }
+            if ($gpu.HasExited) { throw "D3D11 load failed: $(Get-Content \"$gpuLog.err\")" }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($n -eq 300) { throw 'D3D11 load startup timed out' }
+    }
+    if ($Load) {
+        & "$env:TEMP\hda-gpu-load.exe" --tone
+        if ($LASTEXITCODE -ne 0) { throw "Native WASAPI load exit $LASTEXITCODE" }
+    } else {
+        [HdaTone]::Play($Quality.IsPresent)
+    }
+} finally {
+    if ($null -ne $gpu) {
+        if ($gpu.HasExited) { throw 'D3D11 load ended before playback completed' }
+        [IO.File]::WriteAllText($stop, 'stop')
+        if (-not $gpu.WaitForExit(10000)) { $gpu.Kill(); throw 'D3D11 load stop timed out' }
+        Get-Content $gpuLog
+        if ($gpu.ExitCode -ne 0) { throw "D3D11 load exit $($gpu.ExitCode)" }
+    }
+}

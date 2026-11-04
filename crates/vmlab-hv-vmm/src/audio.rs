@@ -26,6 +26,8 @@ pub fn host(section: &Audio) -> Arc<dyn HostAudio> {
             return Arc::new(FileRecordingHost {
                 playback: playback.map(std::path::PathBuf::from),
                 capture: capture.map(std::path::PathBuf::from),
+                downstream: std::env::var_os("VMLAB_HV_TEST_AUDIO_TEE")
+                    .map(|_| select_backend(&section.node_name, &section.node_description)),
             });
         }
     }
@@ -65,6 +67,7 @@ mod file_recording {
     pub struct FileRecordingHost {
         pub playback: Option<PathBuf>,
         pub capture: Option<PathBuf>,
+        pub downstream: Option<Arc<dyn HostAudio>>,
     }
 
     impl HostAudio for FileRecordingHost {
@@ -75,12 +78,15 @@ mod file_recording {
             if let Some(path) = &self.playback {
                 log_event(path, "playback", format);
             }
-            let paced = std::env::var_os("VMLAB_HV_TEST_AUDIO_PACED").is_some();
-            Ok(Box::new(FileSink::new(
-                self.playback.clone(),
-                format,
-                paced,
-            )?))
+            let paced = self.downstream.is_none()
+                && std::env::var_os("VMLAB_HV_TEST_AUDIO_PACED").is_some();
+            let mut sink = FileSink::new(self.playback.clone(), format, paced)?;
+            sink.downstream = self
+                .downstream
+                .as_ref()
+                .map(|host| host.open_playback(format))
+                .transpose()?;
+            Ok(Box::new(sink))
         }
         fn open_capture(&self, format: AudioFormat) -> Result<Box<dyn CaptureSource>, DeviceError> {
             let mut script = Vec::new();
@@ -105,6 +111,7 @@ mod file_recording {
         queue: Option<Arc<Mutex<VecDeque<u8>>>>,
         stop: Arc<AtomicBool>,
         worker: Option<std::thread::JoinHandle<()>>,
+        downstream: Option<Box<dyn PlaybackSink>>,
     }
 
     impl FileSink {
@@ -175,6 +182,7 @@ mod file_recording {
                 queue,
                 stop,
                 worker,
+                downstream: None,
             })
         }
     }
@@ -208,9 +216,20 @@ mod file_recording {
             if let Some(queue) = &self.queue {
                 queue.lock().extend(pcm);
             }
+            if let Some(sink) = &mut self.downstream {
+                sink.write_period(pcm);
+            }
         }
         fn latency_bytes(&self) -> usize {
+            if let Some(sink) = &self.downstream {
+                return sink.latency_bytes();
+            }
             self.queue.as_ref().map_or(0, |queue| queue.lock().len())
+        }
+        fn queued_bytes(&self) -> usize {
+            self.downstream
+                .as_ref()
+                .map_or_else(|| self.latency_bytes(), |sink| sink.queued_bytes())
         }
     }
 
