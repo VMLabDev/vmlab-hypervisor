@@ -23,6 +23,8 @@ use codec::Codec;
 
 const REGS: usize = 0x100;
 const PERIOD_FRAMES: usize = 256;
+const PLAYBACK_QUEUE_FRAMES: usize = 2 * PERIOD_FRAMES;
+const MAX_PENDING_FRAMES: u64 = 8192;
 const STREAM_BASE: usize = 0x80;
 
 #[derive(Clone, Default)]
@@ -31,6 +33,8 @@ struct Stream {
     offset: u32,
     submitted: u64,
     consumed: u64,
+    // Frame time in billionths, including whole frames deferred by a full
+    // host queue. Retaining that debt prevents callback phase from changing rate.
     fraction: u64,
     completions: VecDeque<u64>,
 }
@@ -229,18 +233,22 @@ impl Hda {
             self.update_position(index);
             let frames = elapsed.as_nanos() * u128::from(format.rate)
                 + u128::from(self.streams[index].fraction);
-            self.streams[index].fraction = (frames % 1_000_000_000) as u64;
-            // A delayed timer drops elapsed host time rather than allocating an
-            // unbounded guest-controlled buffer or monopolizing the vCPU.
-            let mut bytes = ((frames / 1_000_000_000).min(8192) as usize) * format.frame_bytes();
+            // Bound recovery after a host stall, but retain frames deferred by
+            // backpressure. A single callback period is not a queue capacity:
+            // timer ticks and host pulls have independent phases.
+            self.streams[index].fraction = frames
+                .min(u128::from(MAX_PENDING_FRAMES) * 1_000_000_000 + frames % 1_000_000_000)
+                as u64;
+            let mut bytes =
+                (self.streams[index].fraction / 1_000_000_000) as usize * format.frame_bytes();
             while bytes != 0 {
                 let latency = self.playback.as_ref().map_or(0, |sink| sink.queued_bytes());
-                if index == 1 && latency >= PERIOD_FRAMES * format.frame_bytes() {
+                if index == 1 && latency >= PLAYBACK_QUEUE_FRAMES * format.frame_bytes() {
                     break;
                 }
                 let mut count = bytes.min(PERIOD_FRAMES * format.frame_bytes());
                 if index == 1 {
-                    count = count.min(PERIOD_FRAMES * format.frame_bytes() - latency);
+                    count = count.min(PLAYBACK_QUEUE_FRAMES * format.frame_bytes() - latency);
                 }
                 count -= count % format.frame_bytes();
                 if count == 0 {
@@ -251,6 +259,8 @@ impl Hda {
                     break;
                 }
                 bytes -= count;
+                self.streams[index].fraction -=
+                    (count / format.frame_bytes()) as u64 * 1_000_000_000;
                 self.update_position(index);
             }
         }
@@ -262,6 +272,7 @@ impl Hda {
         let base = STREAM_BASE + index * 32;
         self.regs[base + 3] |= 0x10;
         self.regs[base] &= !2;
+        self.streams[index].fraction %= 1_000_000_000;
         if index == 0 {
             self.capture = None;
         } else {
@@ -639,6 +650,7 @@ impl BusDevice for Hda {
                 self.reset_stream(index);
                 self.regs[base] = 1;
             } else if old & 2 != 0 && self.regs[base] & 2 == 0 {
+                self.streams[index].fraction %= 1_000_000_000;
                 if index == 0 {
                     self.capture = None;
                 } else {
@@ -794,7 +806,7 @@ impl Snapshot for Hda {
             }
             if stream.descriptor > 255
                 || stream.consumed > stream.submitted
-                || stream.fraction >= 1_000_000_000
+                || stream.fraction >= (MAX_PENDING_FRAMES + 1) * 1_000_000_000
             {
                 return Err(DeviceError::State("invalid HDA stream state".into()));
             }

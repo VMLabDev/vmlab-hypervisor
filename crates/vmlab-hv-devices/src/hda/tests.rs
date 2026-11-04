@@ -551,21 +551,24 @@ fn position_and_completion_interrupt_follow_host_consumption_not_submission() {
     setup_stream(&mut hda, &mem, false, 1024);
     hda.config_write(0x60 / 4, 2, &[0x81]);
     write(&mut hda, 0x20, 0x80000002, 4);
-    hda.advance(Duration::from_millis(10)).unwrap();
-    assert_eq!(latency.load(Ordering::SeqCst), 1024);
+    hda.advance(Duration::from_millis(30)).unwrap();
+    assert_eq!(latency.load(Ordering::SeqCst), 2048);
     assert_eq!(read(&mut hda, 0xa4, 4), 0);
     assert_eq!(read(&mut hda, 0xa3, 1) & 4, 0);
     assert!(interrupts.0.lock().is_empty());
     hda.advance(Duration::from_millis(10)).unwrap();
-    assert_eq!(periods.lock().len(), 1);
-    latency.store(512, Ordering::SeqCst);
-    hda.advance(Duration::ZERO).unwrap();
+    assert_eq!(periods.lock().len(), 2);
+    latency.store(1536, Ordering::SeqCst);
+    hda.update_position(1);
+    hda.update_irq();
     assert_eq!(read(&mut hda, 0xa4, 4), 512);
-    latency.store(900, Ordering::SeqCst);
-    hda.advance(Duration::ZERO).unwrap();
+    latency.store(1900, Ordering::SeqCst);
+    hda.update_position(1);
+    hda.update_irq();
     assert_eq!(read(&mut hda, 0xa4, 4), 512);
     latency.store(0, Ordering::SeqCst);
-    hda.advance(Duration::ZERO).unwrap();
+    hda.update_position(1);
+    hda.update_irq();
     assert_eq!(read(&mut hda, 0xa4, 4), 0); // cyclic wrap
     assert_eq!(read(&mut hda, 0xa3, 1) & 4, 4);
     assert_eq!(interrupts.0.lock().len(), 1);
@@ -706,4 +709,93 @@ fn wall_clock_does_not_go_backwards_when_restoring_an_older_snapshot() {
     assert_eq!(read(&mut hda, 0x30, 4), wall);
     interval(&mut hda);
     assert_eq!(read(&mut hda, 0x30, 4), wall + 24000);
+}
+
+#[test]
+fn playback_keeps_rate_when_host_pulls_256_frames_between_timer_ticks() {
+    let queued = Arc::new(AtomicUsize::new(0));
+    let (mut hda, mem, _) = fixture(Arc::new(GraphHost(queued.clone())), false);
+    setup_stream(&mut hda, &mem, false, 8192);
+    let mut rendered = 0;
+    let mut dropouts = 0;
+    let mut due = 0;
+    for tick in 0..10_000 {
+        interval(&mut hda);
+        due += 48;
+        if due >= 256 {
+            due -= 256;
+            let available = queued.load(Ordering::SeqCst);
+            let take = available.min(1024);
+            queued.fetch_sub(take, Ordering::SeqCst);
+            rendered += take;
+            if tick > 20 && take < 1024 {
+                dropouts += 1;
+            }
+        }
+    }
+    let submitted = hda.streams[1].submitted;
+    eprintln!("10 s paced playback: submitted={submitted} rendered={rendered} dropouts={dropouts}");
+    assert_eq!(dropouts, 0);
+    assert_eq!(submitted, 48000 * 10 * 4);
+}
+
+#[test]
+fn playback_rates_remain_exact_with_jittered_timer_and_quantum_phases() {
+    for (raw, rate) in [(0x4011, 44100u64), (0x11, 48000), (0x811, 96000)] {
+        let queued = Arc::new(AtomicUsize::new(0));
+        let (mut hda, mem, _) = fixture(Arc::new(GraphHost(queued.clone())), false);
+        setup_stream(&mut hda, &mem, false, 8192);
+        write(&mut hda, 0xa0, 0, 1);
+        write(&mut hda, 0xb2, raw, 2);
+        verb(&mut hda, 2, 0x20000 | raw);
+        write(&mut hda, 0xa0, 0x1e, 1);
+        let mut due = 0;
+        let mut time = 0;
+        let mut dropouts = 0;
+        for _ in 0..2500 {
+            for micros in [100, 300, 2100, 1500] {
+                hda.advance(Duration::from_micros(micros)).unwrap();
+                time += micros;
+                due += micros * rate;
+                while due >= 256 * 1_000_000 {
+                    due -= 256 * 1_000_000;
+                    let take = queued.load(Ordering::SeqCst).min(1024);
+                    queued.fetch_sub(take, Ordering::SeqCst);
+                    if time > 20000 && take < 1024 {
+                        dropouts += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(dropouts, 0, "rate={rate}");
+        assert_eq!(hda.streams[1].submitted, rate * 10 * 4);
+        assert_eq!(hda.streams[1].fraction, 0);
+    }
+}
+
+#[test]
+fn deferred_frame_time_survives_snapshot_and_clears_on_stop() {
+    let queued = Arc::new(AtomicUsize::new(0));
+    let (mut hda, mem, _) = fixture(Arc::new(GraphHost(queued.clone())), false);
+    setup_stream(&mut hda, &mem, false, 8192);
+    hda.advance(Duration::from_millis(20)).unwrap();
+    assert_eq!(hda.streams[1].submitted, 512 * 4);
+    assert_eq!(hda.streams[1].fraction, 448 * 1_000_000_000);
+    let state = hda.save_state().unwrap();
+    hda.restore_state(&state).unwrap();
+    assert_eq!(hda.save_state().unwrap(), state);
+    queued.store(0, Ordering::SeqCst);
+    hda.advance(Duration::ZERO).unwrap();
+    assert_eq!(hda.streams[1].submitted, 960 * 4);
+    assert_eq!(hda.streams[1].fraction, 0);
+    hda.advance(Duration::from_secs(1)).unwrap();
+    assert!(hda.streams[1].fraction <= MAX_PENDING_FRAMES * 1_000_000_000);
+    write(&mut hda, 0xa0, 0, 1);
+    assert_eq!(hda.streams[1].fraction, 0);
+    queued.store(0, Ordering::SeqCst);
+    mem.write_slice(&[0; 16], GuestAddress(0x2000)).unwrap();
+    write(&mut hda, 0xa0, 0x1e, 1);
+    hda.advance(Duration::from_millis(20)).unwrap();
+    assert_eq!(read(&mut hda, 0xa0, 1) & 2, 0);
+    assert_eq!(hda.streams[1].fraction, 0);
 }
