@@ -324,6 +324,9 @@ impl Chipset {
 
     fn clock_step_at(&self, now: Instant, running: Option<bool>) {
         let mut clock = self.clock.lock();
+        // vCPU callers timestamp before acquiring this lock and can arrive
+        // out of order. Never replay elapsed time after an older caller.
+        let now = now.max(clock.0);
         if clock.1 {
             let ns = now.duration_since(clock.0).as_nanos().min(u64::MAX as u128) as u64;
             self.lpc.lock().advance(ns);
@@ -928,5 +931,42 @@ mod tests {
         assert_eq!(wall(), 24_000_000);
         chipset.clock_step_at(base + Duration::from_secs(4), None);
         assert_eq!(wall(), 48_000_000);
+    }
+
+    #[test]
+    #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
+    fn reordered_timer_calls_do_not_replay_elapsed_audio_time() {
+        let kvm = match crate::kvm::KvmVm::new() {
+            Ok(kvm) => kvm,
+            Err(error) => {
+                eprintln!("skipping reordered clock test: {error}");
+                return;
+            }
+        };
+        struct Probe(Arc<std::sync::atomic::AtomicU64>);
+        impl vmlab_hv_devices::audio::AudioClock for Probe {
+            fn advance(&mut self, elapsed: Duration) -> Result<(), vmlab_hv_devices::DeviceError> {
+                self.0
+                    .fetch_add(elapsed.as_nanos() as u64, Ordering::SeqCst);
+                Ok(())
+            }
+            fn set_paused(&mut self, _: bool) {}
+        }
+        let chipset = Chipset::new(kvm.vm, &MemLayout::q35(64).unwrap(), 0, false).unwrap();
+        let elapsed = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        chipset
+            .audio
+            .lock()
+            .replace(Arc::new(Mutex::new(Probe(elapsed.clone()))));
+        let base = chipset.clock.lock().0;
+        chipset.clock_step_at(base, Some(true));
+        chipset.clock_step_at(base + Duration::from_millis(2), None);
+        chipset.clock_step_at(base + Duration::from_millis(1), None);
+        chipset.clock_step_at(base + Duration::from_millis(3), None);
+        assert_eq!(elapsed.load(Ordering::SeqCst), 3_000_000);
+        assert_eq!(chipset.clock.lock().0, base + Duration::from_millis(3));
+        let mut bytes = [0; 4];
+        chipset.lpc.lock().read(8, &mut bytes);
+        assert_eq!(u32::from_le_bytes(bytes), 10_738);
     }
 }
