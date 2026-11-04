@@ -13,6 +13,18 @@
 #include <windows.h>
 
 static volatile LONG loading;
+#define LEAD_FRAMES 48000u
+#define SIGNAL_FRAMES 1440000u
+#define TAIL_FRAMES 12000u
+
+struct Period {
+    unsigned long long timestamp;
+    UINT32 offset, count;
+    BYTE *buffer;
+    HRESULT result;
+};
+static struct Period periods[8192];
+static unsigned period_count;
 
 static DWORD WINAPI cpu_load(void *unused) {
     (void)unused;
@@ -31,17 +43,33 @@ static HRESULT fill(IAudioRenderClient *render, UINT32 count, UINT32 offset) {
         return hr;
     short *samples = (short *)bytes;
     for (UINT32 i = 0; i < count; i++) {
-        UINT32 position = offset + i;
-        samples[2 * i] = position >= 1440000
-                             ? 0
-                             : (short)(6000 * sin(2 * 3.141592653589793 * 997 * position / 48000));
+        UINT32 absolute = offset + i;
+        UINT32 position = absolute - LEAD_FRAMES;
+        int signal = absolute >= LEAD_FRAMES && position < SIGNAL_FRAMES;
+        samples[2 * i] =
+            !signal ? 0 : (short)(6000 * sin(2 * 3.141592653589793 * 997 * position / 48000));
         samples[2 * i + 1] =
-            position < 1440000 && position % 48000 >= 12000 && position % 48000 < 12048 ? 6000 : 0;
+            signal && position % 48000 >= 12000 && position % 48000 < 12048 ? 6000 : 0;
     }
-    return IAudioRenderClient_ReleaseBuffer(render, count, 0);
+    FILETIME now;
+    GetSystemTimePreciseAsFileTime(&now);
+    unsigned long long timestamp =
+        ((unsigned long long)now.dwHighDateTime << 32) | now.dwLowDateTime;
+    hr = IAudioRenderClient_ReleaseBuffer(render, count, 0);
+    if (period_count == sizeof(periods) / sizeof(periods[0]))
+        return E_OUTOFMEMORY;
+    periods[period_count++] = (struct Period){timestamp, offset, count, bytes, hr};
+    return hr;
 }
 
 static int tone(void) {
+    char log_path[MAX_PATH];
+    DWORD path_length = GetTempPathA(MAX_PATH, log_path);
+    if (!path_length || path_length + 24 >= MAX_PATH)
+        return 1;
+    strcat(log_path, "hda-tone-periods.csv");
+    memset(periods, 0, sizeof(periods));
+    period_count = 0;
     IMMDeviceEnumerator *enumerator = NULL;
     IMMDevice *device = NULL;
     IAudioClient *client = NULL;
@@ -73,11 +101,16 @@ static int tone(void) {
     CHECK(IAudioClient_GetService(client, &IID_IAudioRenderClient, (void **)&render));
     DWORD task = 0;
     HANDLE scheduling = AvSetMmThreadCharacteristicsA("Pro Audio", &task);
-    if (!scheduling)
+    if (!scheduling || !AvSetMmThreadPriority(scheduling, AVRT_PRIORITY_CRITICAL))
         return 1;
     SYSTEM_INFO system;
     GetSystemInfo(&system);
+    if (system.dwNumberOfProcessors > sizeof(DWORD_PTR) * 8)
+        return 1;
     unsigned workers = system.dwNumberOfProcessors > 1 ? system.dwNumberOfProcessors - 1 : 1;
+    unsigned audio_cpu = system.dwNumberOfProcessors - 1;
+    if (!SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << audio_cpu))
+        return 1;
     HANDLE *threads = calloc(workers, sizeof(HANDLE));
     if (!threads)
         return 1;
@@ -86,6 +119,8 @@ static int tone(void) {
         threads[i] = CreateThread(NULL, 0, cpu_load, NULL, CREATE_SUSPENDED, NULL);
         if (!threads[i])
             return 1;
+        if (!SetThreadAffinityMask(threads[i], (DWORD_PTR)1 << i))
+            return 1;
         SetThreadPriority(threads[i], THREAD_PRIORITY_BELOW_NORMAL);
         ResumeThread(threads[i]);
     }
@@ -93,7 +128,7 @@ static int tone(void) {
     UINT32 written = capacity;
     CHECK(IAudioClient_Start(client));
     ULONGLONG start = GetTickCount64(), previous = start, max_gap = 0;
-    while (written < 1452000) {
+    while (written < LEAD_FRAMES + SIGNAL_FRAMES + TAIL_FRAMES) {
         if (WaitForSingleObject(event, 2000) != WAIT_OBJECT_0)
             return 1;
         ULONGLONG now = GetTickCount64();
@@ -105,9 +140,20 @@ static int tone(void) {
     }
     if (WaitForSingleObject(event, 2000) != WAIT_OBJECT_0)
         return 1;
-    printf("Native WASAPI capacity=%u frames, workers=%u, elapsed=%llu ms, max gap=%llu ms\n",
-           capacity, workers, GetTickCount64() - start, max_gap);
+    printf("Native WASAPI capacity=%u frames, workers=%u, audio_cpu=%u, elapsed=%llu ms, max "
+           "gap=%llu ms\n",
+           capacity, workers, audio_cpu, GetTickCount64() - start, max_gap);
     CHECK(IAudioClient_Stop(client));
+    FILE *period_log = fopen(log_path, "w");
+    if (!period_log)
+        return 1;
+    for (unsigned i = 0; i < period_count; i++) {
+        const struct Period *p = &periods[i];
+        fprintf(period_log, "%llu,%u,%u,%p,%08lx\n", p->timestamp, p->offset, p->count, p->buffer,
+                (unsigned long)p->result);
+    }
+    if (fclose(period_log) != 0)
+        return 1;
     InterlockedExchange(&loading, 0);
     for (unsigned i = 0; i < workers; i++) {
         WaitForSingleObject(threads[i], INFINITE);

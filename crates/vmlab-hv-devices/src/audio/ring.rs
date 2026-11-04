@@ -60,11 +60,13 @@ impl SpscRing {
 
     /// Push `data` as the newest period, dropping the oldest buffered periods
     /// first when there is not enough room. A period larger than the whole
-    /// ring is dropped: the ring is sized for whole periods.
-    pub fn push_drop_oldest(&self, data: &[u8]) {
+    /// ring is dropped: the ring is sized for whole periods. Returns the
+    /// number of old or incoming bytes discarded by this push.
+    pub fn push_drop_oldest(&self, data: &[u8]) -> usize {
         if data.len() > self.capacity() {
-            return;
+            return data.len();
         }
+        let mut dropped = 0;
         let mut tail = self.tail.0.load(Ordering::Relaxed);
         loop {
             let head = self.head.0.load(Ordering::Acquire);
@@ -79,7 +81,7 @@ impl SpscRing {
                 self.tail
                     .0
                     .store(tail.wrapping_add(data.len()), Ordering::SeqCst);
-                return;
+                return dropped;
             }
             // Each live byte records its period's end, so dropping never
             // leaves a partial old period behind. The CAS
@@ -92,6 +94,7 @@ impl SpscRing {
                 .compare_exchange_weak(head, next, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
             {
+                dropped += next.wrapping_sub(head);
                 tail = self.tail.0.load(Ordering::Relaxed);
             }
         }
@@ -158,8 +161,8 @@ mod tests {
     #[test]
     fn overrun_drops_the_oldest_bytes() {
         let ring = SpscRing::with_capacity_bytes(64);
-        ring.push_drop_oldest(&[1u8; 48]);
-        ring.push_drop_oldest(&[2u8; 48]);
+        assert_eq!(ring.push_drop_oldest(&[1u8; 48]), 0);
+        assert_eq!(ring.push_drop_oldest(&[2u8; 48]), 48);
         assert_eq!(ring.used_bytes(), 48);
         let mut out = [0u8; 64];
         assert_eq!(ring.pop_max(&mut out), 48);
@@ -188,7 +191,7 @@ mod tests {
     #[test]
     fn a_period_larger_than_the_ring_is_dropped() {
         let ring = SpscRing::with_capacity_bytes(64);
-        ring.push_drop_oldest(&[7u8; 65]);
+        assert_eq!(ring.push_drop_oldest(&[7u8; 65]), 65);
         assert_eq!(ring.used_bytes(), 0);
     }
 

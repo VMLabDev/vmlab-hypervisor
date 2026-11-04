@@ -1,23 +1,28 @@
 # HDA playback under load
 
-The 30-second Windows load acceptance test still fails. The changes described
-here do not resolve the owner's music-playback report. Do not treat the passing
-idle tests as load qualification.
+The isolated 30-second Windows CPU/D3D11 load acceptance passes through both
+the paced backend and a private PipeWire null sink. Three consecutive traced
+PipeWire repeats also pass. Each full tone has zero discontinuities, zero gaps,
+30 correctly spaced clicks, and -75.85 dB THD+N.
 
 ## Reproduction
 
 The opt-in S1 tests boot disposable Windows 11 win3d overlays. A native WASAPI
 client generates a 997 Hz left-channel sine and right-channel clicks once per
 second. Exclusive event-driven playback requests 480-frame periods at 48 kHz.
-MMCSS schedules the audio thread. Three below-normal-priority native workers
+MMCSS schedules the audio thread at critical Pro Audio priority on guest CPU 3.
+Three below-normal-priority native workers, pinned to guest CPUs 0 through 2,
 keep all but one of the four guest CPUs busy. A separate D3D11 hardware process
 repeatedly clears a 1920 by 1080 render target and waits for GPU completion.
 The test requires an explicitly selected render node and a win3d template.
 
-The signal lasts 30 seconds, followed by 250 ms of silence. The native client
-avoids managed allocations and records its capacity, callback gaps, and elapsed
-time. GPU readiness and completed batch counts are checked. All work runs inside
-the disposable guest. No PCI or USB device is claimed.
+One second of silent preroll lets the driver fill its cyclic buffer before the
+full 30-second signal starts. A 250 ms silent tail follows. The analyser does
+not trim any tone samples. This test does not qualify cold-start playback.
+The native client records every fill's FILETIME, source offset, frame count,
+buffer pointer, and HRESULT in memory. It writes CSV only after stopping audio,
+so diagnostic disk I/O cannot delay the real-time source. GPU readiness and
+completed batch counts are checked. No PCI or USB device is claimed.
 
 The file-backed test tap forwards PCM and queue measurements to the real
 backend when `VMLAB_HV_TEST_AUDIO_TEE=1`. A private PipeWire daemon and a
@@ -43,12 +48,15 @@ saved timestamp backward. The sequence 2 ms, 1 ms, 3 ms advances audio by 4 ms.
 Clamping each timestamp to the previous timestamp makes the same test advance
 exactly 3 ms. The regression also checks the ACPI PM timer.
 
-F2. HDA waits for downstream playback before exposing IOC completion. Intel
+F2. HDA waited for downstream playback before exposing IOC completion. Intel
 HDA 1.0a specifies playback BCIS after the descriptor's last byte is fetched
-into the DMA FIFO. Completion now follows DMA submission. LPIB reports progress
-across the emulated codec link instead of subtracting sound-server buffering.
-Backend queue occupancy still throttles submission, and deferred frame time
-remains bounded. The `HDA1` snapshot layout and shared traits are unchanged.
+into the DMA FIFO. Completion now follows DMA submission. LPIB follows the
+local FIFO consumer, with lag limited to the advertised SDFIFOS+1 bytes.
+Reporting the fetch cursor caused Windows to refill the active period.
+Subtracting the entire staging queue also failed because that queue can exceed
+the controller FIFO. Downstream graph delay belongs to neither IOC nor LPIB.
+Queue occupancy still throttles submission, and deferred frame time remains
+bounded. The `HDA1` snapshot layout and shared traits are unchanged.
 
 The controller reference is Intel HDA 1.0a, SDnSTS.BCIS and SDLPIB:
 https://www.intel.com/content/dam/www/public/us/en/documents/product-specifications/high-definition-audio-specification.pdf
@@ -56,44 +64,66 @@ https://www.intel.com/content/dam/www/public/us/en/documents/product-specificati
 Microsoft describes link position here:
 https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/wall-clock-and-link-position-registers
 
-F3. These fixes do not explain or eliminate the remaining repeats. A native
-source with CPU and hardware D3D11 load still takes about 56 seconds to submit
-30.25 seconds of requested audio. Spikes cluster around 480- and 960-frame
-distances, with adjacent spike pairs. Host delivery itself remains near 48 kHz.
-Further work must distinguish driver notification loss from late guest refill.
+F3. PCI MMIO held the global PCI-root lock throughout device service. Address
+decode also locked unrelated PCI functions to read their command registers.
+Slow BAR service blocked HDA register reads and interrupt acknowledgements.
+The failing trace has 6,576 playback IOCs but only 3,026 acknowledgements.
+The controller kept fetching stale guest periods while Windows could not refill
+them. Host pulls stayed near 48 kHz, with no ring overwrite. This explains the
+480- and 960-frame spacing behind the original 3,883 submitted spikes.
+
+MMIO now resolves an owned target under the root lock, then releases that lock
+before servicing the selected function. Command bits are cached and refreshed
+after config writes and snapshot restore. A regression blocks a GPU BAR and
+proves another PCI function remains accessible. It failed before this change.
+
+F4. Slot-specific latency logs then identified virtio-blk notifications doing
+synchronous disk I/O on the vCPU. A `QueueWorker` now services block queues on
+a worker thread. Notifications coalesce per queue without losing queue indices.
+Snapshot quiesce waits for prior work, pauses service, and resumes pending kicks
+afterward. Capability reads are cached to avoid a transport interrupt-lock
+inversion. The block state bytes and snapshot identifiers remain unchanged.
+Tests cover blocked I/O, quiesce, resume, reset, and coalesced multi-queue kicks.
+The PCI and block changes are separate commits because they fix blocking
+defects outside the HDA model.
 
 ## Measured results
 
-The latest clock-fixed load run, before cosmetic harness cleanup, reports:
+The final matched-source comparison retains the timer/completion changes in
+the baseline but excludes the PCI, block-worker, and local-FIFO corrections:
 
-| Measurement | Submitted | Private PipeWire monitor |
-| --- | ---: | ---: |
-| Active duration, s | 30.000, bounded measurement window | 55.670 |
-| Frequency, Hz | 999.937 | 999.515 |
-| Speed error relative to 997 Hz | +0.2946% | +0.2523% |
-| Discontinuity spikes | 3,883 | 7,122 |
-| Silent gaps of at least 1 ms | 0 | 2 |
-| THD+N | +42.20 dB | +44.27 dB |
+| Measurement | Baseline submitted | Baseline monitor | Fixed submitted and monitor |
+| --- | ---: | ---: | ---: |
+| Active duration, s | 30.000, bounded window | 61.010 | 30.000 |
+| Frequency, Hz | 1000.939 | 1000.279 | 997.000001 |
+| Discontinuity spikes | 4,548 | 9,280 | 0 |
+| Silent gaps of at least 1 ms | 0 | 2 | 0 |
+| THD+N | +46.46 dB | +42.74 dB | -75.85 dB |
 
-Submitted delivery speed error is +0.000136%, but the PCM content repeats.
-The native source reports 480-frame capacity, three CPU workers, 56,032 ms
-elapsed, and a maximum callback gap of 63 ms. These results fail the requested
-zero-discontinuity, 0.1% speed, and below -50 dB THD+N bars.
+The baseline source takes 63,609 ms to submit the preroll, tone, and tail.
+The fixed source takes about 31,234 ms. The same pinned native source,
+silent preroll, and in-memory logging are used in both cases. Fixture changes
+alone do not remove the defect.
 
-The instrumented `91ad438` baseline also fails with the native source and the
-same CPU/GPU workload: 6,416 submitted spikes and 11,898 monitor spikes.
-Independent runs on a shared workstation do not establish the size of any
-improvement. Both revisions fail acceptance.
+Across three consecutive private-PipeWire repeats, absolute wall delivery error
+is at most 0.000379%, below the 0.1% bar. Every repeat passes both captures.
+Each trace has 3,124 playback IOCs and 3,124 acknowledgements, with 5,857 or
+5,858 host pulls. Every pull receives its requested 256 frames. There are no
+short pulls or ring overwrites. A separate traced pass has the same result.
 
-The final paced-backend load check also fails, with 3,989 submitted spikes,
-8,327 rendered spikes, and a 62.400-second rendered signal. This rules out
-PipeWire as a prerequisite for reproducing the failure.
+The paced-backend load test also passes both captures, with zero spikes,
+zero gaps, -75.85 dB THD+N, and +0.000087% wall delivery error.
 
-Idle Windows still passes with zero discontinuities, -76.31 dB THD+N, and
--0.00120% wall delivery error. Linux passes with zero discontinuities,
--81.81 dB THD+N, and -0.00959% wall delivery error. Linux capture,
-microphone-off behavior, and snapshot playback also pass. Those guest results
-include the monotonic-clock correction.
+Final idle Windows and Linux quality tests pass with zero spikes or gaps.
+Windows measures -76.31 dB THD+N and -0.000200% wall delivery error.
+Linux measures -81.81 dB and +0.000548%. Linux capture, microphone-off,
+and snapshot playback pass with the asynchronous block worker enabled.
+
+An earlier candidate run made concurrently with the failing baseline still
+recorded four submitted spikes, ten monitor spikes, and one monitor gap.
+The four subsequent isolated traced runs pass. The cause of that concurrent-run
+failure was not established. These results qualify one loaded guest, not
+simultaneous GPU-loaded guests or real-time host scheduling under arbitrary load.
 
 Shared-mode experiments produced silent PCM in the agent session, including
 after endpoint unmute. They are not acceptance evidence. Replacing the managed
@@ -118,12 +148,18 @@ systemd-run --user --scope -q -p MemoryMax=24G -p MemorySwapMax=0 -- env \
 Replace the filter with `windows_hda_playback_load_quality_via_s1` to measure
 the paced recording backend. Each VM receives its own short temporary XDG
 runtime and state directories. Test children are killed and reaped on failure.
-Artifacts preserve PCM, timing, and diagnostics outside the disposable runtime.
+Artifacts preserve PCM, timing, guest-period CSV, and diagnostics outside the
+disposable runtime.
 `VMLAB_HV_TEST_AUDIO_BINARY` selects an instrumented baseline binary.
 
-Use `VMLAB_HV_LOG=info,vmlab_hv_devices::hda=trace,vmlab_hv_devices::audio::pipewire=trace`
-for per-tick DMA position, descriptor, deferred frames, queue occupancy, IOC,
-and host pull diagnostics. Trace logging adds overhead.
+Set `VMLAB_HV_LOG` to
+`info,vmlab_hv_devices::hda::period=debug,vmlab_hv_devices::hda::dma=debug,vmlab_hv_devices::audio::pipewire::pull=debug`
+for BDL entries, DMA offsets, LPIB, IOC and ACK times, frames requested,
+frames available, delivered frames, and silence decisions. Add
+`vmlab_hv_devices::audio::pipewire::dma=debug` for each ring write and its
+discard count, or `vmlab_hv_vmm::pci::latency=debug` for slow BAR service.
+The broader `vmlab_hv_devices::hda=trace` also records per-tick deferred time.
+Verbose logging adds overhead.
 
 The full hypervisor `just ci::check` gate is intentionally omitted under the
-owner's 2026-11-04 policy. The draft PR lists the exact focused checks.
+owner's 2026-11-04 policy. The PR lists the exact focused checks.

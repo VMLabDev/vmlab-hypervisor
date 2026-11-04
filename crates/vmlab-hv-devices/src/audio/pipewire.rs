@@ -48,6 +48,7 @@ impl PipeWireHost {
             alive: AtomicBool::new(true),
             host_latency: AtomicUsize::new(0),
             transferred: AtomicUsize::new(0),
+            submitted: AtomicUsize::new(0),
         });
         let (tx, rx) = mpsc::channel();
         let name = self.node_name.clone();
@@ -97,6 +98,7 @@ struct Shared {
     alive: AtomicBool,
     host_latency: AtomicUsize,
     transferred: AtomicUsize,
+    submitted: AtomicUsize,
 }
 
 struct Endpoint {
@@ -176,7 +178,20 @@ impl PlaybackSink for Endpoint {
 
     fn write_period(&mut self, pcm: &[u8]) {
         if self.shared.alive.load(Ordering::Acquire) {
-            self.shared.ring.push_drop_oldest(pcm);
+            let available = self.shared.ring.used_bytes();
+            let offset = self
+                .shared
+                .submitted
+                .fetch_add(pcm.len(), Ordering::Relaxed);
+            let dropped = self.shared.ring.push_drop_oldest(pcm);
+            if dropped != 0 {
+                log::warn!("PipeWire overrun dma_offset={offset} dropped_bytes={dropped}");
+            }
+            log::debug!(target: "vmlab_hv_devices::audio::pipewire::dma",
+                "PipeWire write dma_offset={offset} bytes={} available_bytes={available} dropped_bytes={dropped}", pcm.len());
+        } else {
+            log::debug!(target: "vmlab_hv_devices::audio::pipewire::dma",
+                "PipeWire discard bytes={} reason=worker_stopped", pcm.len());
         }
     }
 
@@ -268,15 +283,18 @@ fn run(
                         frames.min(requested)
                     };
                     let size = frames * stride;
+                    let available = shared.ring.used_bytes();
                     let n = shared.ring.pop_max(&mut bytes[..size]);
-                    log::trace!(
-                        "PipeWire pull requested_frames={frames} delivered_frames={} queued_bytes={} silence_frames={}",
+                    let offset = shared.transferred.fetch_add(n, Ordering::Relaxed);
+                    log::debug!(target: "vmlab_hv_devices::audio::pipewire::pull",
+                        "PipeWire pull requested_frames={frames} available_frames={} delivered_frames={} pcm_offset={offset} dma_submitted={} queued_bytes={} silence_frames={}",
+                        available / stride,
                         n / stride,
+                        shared.submitted.load(Ordering::Relaxed),
                         shared.ring.used_bytes(),
                         (size - n) / stride,
                     );
                     bytes[n..size].fill(0);
-                    shared.transferred.fetch_add(n, Ordering::Relaxed);
                     size
                 } else {
                     0
@@ -386,6 +404,7 @@ mod tests {
                 alive: AtomicBool::new(true),
                 host_latency: AtomicUsize::new(8192),
                 transferred: AtomicUsize::new(0),
+                submitted: AtomicUsize::new(0),
             }),
             join: None,
         };

@@ -183,6 +183,10 @@ pub fn report_for(path: &Path, guest: &str, seconds: usize, hz: f64) {
             }
         }
         std::fs::copy(path.with_file_name("hv.log"), root.join("hv.log")).unwrap();
+        let periods = path.with_file_name("guest-periods.csv");
+        if periods.is_file() {
+            std::fs::copy(periods, root.join("guest-periods.csv")).unwrap();
+        }
     }
     let pcm = std::fs::read(path).expect("guest playback PCM");
     let timing = std::fs::read_to_string(path.with_extension("timing")).unwrap();

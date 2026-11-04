@@ -349,6 +349,21 @@ if ($codec.Count -eq 0 -or $codec[0].Status -ne 'OK' -or $endpoints.Count -eq 0)
         );
     } else {
         powershell(&mut agent, tone);
+        if load {
+            let periods = agent
+                .exec(
+                    &[
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-Command",
+                        "Get-Content \"$env:TEMP\\hda-tone-periods.csv\"",
+                    ],
+                    Duration::from_secs(30),
+                )
+                .unwrap();
+            assert_eq!(periods.exit_code, 0, "guest period log: {periods:?}");
+            std::fs::write(path.join("guest-periods.csv"), periods.stdout).unwrap();
+        }
         if quality {
             // Stop closes and joins the paced sink before inspecting its files.
             powershell(&mut agent, "Start-Sleep -Milliseconds 100");
@@ -401,7 +416,13 @@ if ($codec.Count -eq 0 -or $codec[0].Status -ne 'OK' -or $endpoints.Count -eq 0)
         eprintln!(
             "Windows playback: {} PCM bytes, peak={peak}, {} Hz verified",
             pcm.len(),
-            if quality { 1000 } else { 440 }
+            if load {
+                997
+            } else if quality {
+                1000
+            } else {
+                440
+            }
         );
     }
     assert!(matches!(
