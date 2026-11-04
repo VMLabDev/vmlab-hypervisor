@@ -1,3 +1,4 @@
+param([switch]$Quality)
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -36,6 +37,12 @@ interface RenderClient {
 }
 
 public static class HdaTone {
+    [DllImport("avrt.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr AvSetMmThreadCharacteristics(string taskName, out uint taskIndex);
+    [DllImport("avrt.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool AvRevertMmThreadCharacteristics(IntPtr handle);
+
     [StructLayout(LayoutKind.Sequential, Pack = 2)]
     struct WaveFormat {
         public ushort tag, channels;
@@ -43,19 +50,24 @@ public static class HdaTone {
         public ushort alignment, bits, extra;
     }
 
-    static void Fill(RenderClient render, uint frames, uint offset) {
+    static void Fill(RenderClient render, uint frames, uint offset, bool quality) {
         IntPtr destination;
         render.GetBuffer(frames, out destination);
         var samples = new short[frames * 2];
         for (uint frame = 0; frame < frames; frame++) {
-            short sample = (short)(300 * Math.Sin(2 * Math.PI * 440 * (offset + frame) / 48000));
-            samples[frame * 2] = samples[frame * 2 + 1] = sample;
+            uint position = offset + frame;
+            short sample = quality && position >= 480000 ? (short)0
+                : (short)((quality ? 6000 : 300) * Math.Sin(2 * Math.PI * (quality ? 1000 : 440) * position / 48000));
+            samples[frame * 2] = sample;
+            samples[frame * 2 + 1] = quality
+                ? (short)(position < 480000 && position % 48000 >= 12000 && position % 48000 < 12048 ? 6000 : 0)
+                : sample;
         }
         Marshal.Copy(samples, 0, destination, samples.Length);
         render.ReleaseBuffer(frames, 0);
     }
 
-    public static void Play() {
+    public static void Play(bool quality) {
         var enumerator = (DeviceEnumerator)Activator.CreateInstance(Type.GetTypeFromCLSID(
             new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")));
         AudioDevice device;
@@ -64,46 +76,85 @@ public static class HdaTone {
         var iid = typeof(AudioClient).GUID;
         device.Activate(ref iid, 23, IntPtr.Zero, out instance);
         var client = (AudioClient)instance;
+        EventWaitHandle samplesReady = null;
         IntPtr format = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WaveFormat)));
         try {
             Marshal.StructureToPtr(new WaveFormat {
                 tag = 1, channels = 2, rate = 48000, bytesPerSecond = 192000,
                 alignment = 4, bits = 16
             }, format, false);
-            client.Initialize(1, 0, 1000000, 0, format, IntPtr.Zero);
+            long period = 1000000;
+            uint flags = quality ? 0x40000u : 0u;
+            try {
+                client.Initialize(1, flags, period, quality ? period : 0, format, IntPtr.Zero);
+            } catch (COMException error) {
+                if (!quality || error.ErrorCode != unchecked((int)0x88890019)) throw;
+                uint aligned;
+                client.GetBufferSize(out aligned);
+                period = (long)(10000000.0 * aligned / 48000 + 0.5);
+                Marshal.ReleaseComObject(client);
+                iid = typeof(AudioClient).GUID;
+                device.Activate(ref iid, 23, IntPtr.Zero, out instance);
+                client = (AudioClient)instance;
+                client.Initialize(1, flags, period, period, format, IntPtr.Zero);
+            }
+            if (quality) {
+                samplesReady = new EventWaitHandle(false, EventResetMode.AutoReset);
+                client.SetEventHandle(samplesReady.SafeWaitHandle.DangerousGetHandle());
+            }
             uint capacity;
             client.GetBufferSize(out capacity);
             iid = typeof(RenderClient).GUID;
             client.GetService(ref iid, out instance);
             var render = (RenderClient)instance;
-            uint written = Math.Min(capacity, 144000);
-            Fill(render, written, 0);
+            uint total = quality ? 492000u : 144000u;
+            uint written = Math.Min(capacity, total);
+            Fill(render, written, 0, quality);
+            uint taskIndex;
+            IntPtr scheduling = AvSetMmThreadCharacteristics("Pro Audio", out taskIndex);
+            if (scheduling == IntPtr.Zero) throw new Exception("MMCSS audio scheduling unavailable");
             client.Start();
             try {
-                var deadline = DateTime.UtcNow.AddSeconds(15);
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                long previous = 0, maxGap = 0;
+                var deadline = DateTime.UtcNow.AddSeconds(30);
                 while (true) {
+                    if (quality && !samplesReady.WaitOne(2000)) throw new Exception("WASAPI render event timed out");
+                    long now = clock.ElapsedTicks;
+                    maxGap = Math.Max(maxGap, now - previous);
+                    previous = now;
+                    if (quality) {
+                        if (written >= total) break;
+                        Fill(render, capacity, written, true);
+                        written += capacity;
+                        continue;
+                    }
                     uint padding;
                     client.GetCurrentPadding(out padding);
-                    if (written == 144000 && padding == 0) break;
+                    if (written == total && padding == 0) break;
                     if (DateTime.UtcNow > deadline) throw new Exception("WASAPI playback timed out");
-                    uint count = Math.Min(capacity - padding, 144000 - written);
+                    uint count = Math.Min(capacity - padding, total - written);
                     if (count != 0) {
-                        Fill(render, count, written);
+                        Fill(render, count, written, quality);
                         written += count;
                     }
                     Thread.Sleep(5);
                 }
+                Console.WriteLine("WASAPI capacity={0} frames, max service gap={1:F3} ms, elapsed={2:F6} s", capacity,
+                    maxGap * 1000.0 / System.Diagnostics.Stopwatch.Frequency, clock.Elapsed.TotalSeconds);
             } finally {
                 client.Stop();
+                AvRevertMmThreadCharacteristics(scheduling);
                 Marshal.ReleaseComObject(render);
             }
         } finally {
             Marshal.FreeHGlobal(format);
             Marshal.ReleaseComObject(client);
+            if (samplesReady != null) samplesReady.Dispose();
             Marshal.ReleaseComObject(device);
             Marshal.ReleaseComObject(enumerator);
         }
     }
 }
 '@
-[HdaTone]::Play()
+[HdaTone]::Play($Quality.IsPresent)
