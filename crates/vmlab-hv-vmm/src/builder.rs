@@ -52,6 +52,15 @@ pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
         ));
     }
     if let Some(display) = &desc.display {
+        vmlab_hv_proto::machine::validate_gpu_vram_bytes(display.vram_bytes)
+            .map_err(VmmError::InvalidMachine)?;
+        if display.gpu.is_none()
+            && display.vram_bytes != vmlab_hv_proto::machine::default_gpu_vram_bytes()
+        {
+            return Err(VmmError::InvalidMachine(
+                "vram_bytes requires GPU acceleration".into(),
+            ));
+        }
         if display.device != vmlab_hv_proto::machine::DisplayDevice::VirtioVga
             && (display.gpu.is_some() || display.render_node.is_some())
         {
@@ -529,6 +538,17 @@ pub fn build(
         MemLayout::new(desc.memory_mib)
     }
     .map_err(VmmError::InvalidMachine)?;
+    if let Some(display) = &desc.display
+        && display.gpu.is_some()
+    {
+        layout.reserve_gpu_aperture(display.vram_bytes);
+        let bits = kvm.physical_address_bits(desc.cpu_model.as_deref());
+        if layout.mmio64_base + layout.mmio64_size > (1u64 << bits.min(63)) {
+            return Err(VmmError::InvalidMachine(
+                "GPU aperture and RAM exceed the guest physical address width".into(),
+            ));
+        }
+    }
     let physical_low_end = layout.low_ram_top();
     let secure_smm = matches!(
         desc.boot,
@@ -601,6 +621,9 @@ pub fn build(
     } else {
         PciRoot::new(layout.mmio64_base)
     }));
+    pci_root
+        .lock()
+        .set_mmio64_window(layout.mmio64_base, layout.mmio64_size);
     let config_io = Arc::new(Mutex::new(PciConfigIo::new(pci_root.clone())));
     io_bus
         .register(0xCF8, 8, config_io.clone())
@@ -946,6 +969,7 @@ pub fn build(
                 let mapper = Arc::new(crate::gpu::Aperture::new(
                     vm_fd.clone(),
                     kvm.kvm.get_nr_memslots() as u32,
+                    display.vram_bytes,
                 ));
                 vga.lock()
                     .enable_3d(mode, node, mapper)
@@ -1759,6 +1783,49 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("specified together")
+        );
+    }
+
+    #[test]
+    fn gpu_vram_is_validated_and_part_of_snapshot_identity() {
+        let mut machine = desc();
+        machine.display = Some(
+            serde_json::from_value(serde_json::json!({
+                "device": "virtio-vga", "gpu": "venus", "render_node": "/dev/dri/renderD130",
+                "pci": {"bus": 0, "device": 4, "function": 0}, "rom": null,
+            }))
+            .unwrap(),
+        );
+        let original = machine_digest(&machine);
+        machine.display.as_mut().unwrap().vram_bytes = 16 << 30;
+        let selected = machine_digest(&machine);
+        assert_ne!(original, selected);
+        let bytes = crate::snapshot::format::encode_header_sections(
+            crate::snapshot::format::RUN_PAUSED,
+            "test",
+            &original,
+            &[],
+        );
+        let (header, _) = crate::snapshot::format::decode_header(&bytes).unwrap();
+        assert_ne!(header.digest, selected);
+        for size in [0, 128 << 20, 3 << 30, 512 << 30] {
+            machine.display.as_mut().unwrap().vram_bytes = size;
+            assert!(
+                validate(&machine)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("vram_bytes")
+            );
+        }
+        let display = machine.display.as_mut().unwrap();
+        display.vram_bytes = 16 << 30;
+        display.gpu = None;
+        display.render_node = None;
+        assert!(
+            validate(&machine)
+                .unwrap_err()
+                .to_string()
+                .contains("requires GPU acceleration")
         );
     }
 

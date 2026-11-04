@@ -63,6 +63,16 @@ fn template() -> Option<PathBuf> {
 #[test]
 #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn ubuntu_virgl_scanout_and_cpu_copy() {
+    virgl_scanout_and_cpu_copy(4 << 30);
+}
+
+#[test]
+#[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
+fn ubuntu_virgl_16g_aperture_scanout_and_cpu_copy() {
+    virgl_scanout_and_cpu_copy(16 << 30);
+}
+
+fn virgl_scanout_and_cpu_copy(vram_bytes: u64) {
     let Some(node) = render_node() else {
         eprintln!("SKIP GPU S1: no usable /dev/dri render node");
         return;
@@ -87,7 +97,7 @@ fn ubuntu_virgl_scanout_and_cpu_copy() {
         "name": "gpu-s1", "machine": "q35", "arch": "x86_64", "accel": "kvm", "vcpus": 2, "memory_mib": 4096,
         "boot": {"kind": "firmware", "firmware": "seabios", "code": "/usr/share/qemu/bios-256k.bin", "bootorder": ["/pci@i0cf8/scsi@2/disk@0,0"]},
         "console_pci": {"bus": 0, "device": 1, "function": 0},
-        "display": {"device": "virtio-vga", "pci": {"bus": 0, "device": 4, "function": 0}, "rom": null, "gpu": mode, "render_node": node},
+        "display": {"device": "virtio-vga", "pci": {"bus": 0, "device": 4, "function": 0}, "rom": null, "gpu": mode, "render_node": node, "vram_bytes": vram_bytes},
         "disks": [{"id": "root", "path": overlay, "format": "qcow2", "read_only": false, "vmstate": true, "pci": {"bus": 0, "device": 2, "function": 0}}],
         "nics": [], "serial_log": path.join("serial.log"), "ports": [{"name": "vmlab.agent.0", "socket": path.join("agent.sock")}]
     });
@@ -134,6 +144,16 @@ fn ubuntu_virgl_scanout_and_cpu_copy() {
             );
             output.stdout
         };
+        let resource = exec(
+            &mut agent,
+            &["cat", "/sys/bus/pci/devices/0000:00:04.0/resource"],
+        );
+        let text = String::from_utf8(resource).unwrap();
+        let bar: Vec<_> = text.lines().nth(4).unwrap().split_whitespace().collect();
+        let start = u64::from_str_radix(bar[0].trim_start_matches("0x"), 16).unwrap();
+        let end = u64::from_str_radix(bar[1].trim_start_matches("0x"), 16).unwrap();
+        assert_eq!(end - start + 1, vram_bytes, "{text}");
+        assert_eq!(start % vram_bytes, 0, "{text}");
         let kernel = exec(
             &mut agent,
             &[

@@ -374,6 +374,7 @@ fn display_socket_paths_are_optional_and_pinned() {
         &Display {
             device: DisplayDevice::VirtioVga,
             gpu: None,
+            vram_bytes: 4 << 30,
             render_node: None,
             pci: PciAddress {
                 bus: 0,
@@ -391,6 +392,17 @@ fn display_socket_paths_are_optional_and_pinned() {
     )
     .unwrap();
     assert!(old.socket.is_none() && old.vnc_socket.is_none());
+    assert_eq!(old.vram_bytes, 4 << 30);
+    for size in [256 << 20, 4 << 30, 16 << 30, 256 << 30] {
+        let mut display = old.clone();
+        display.vram_bytes = size;
+        let bytes = serde_json::to_vec(&display).unwrap();
+        assert_eq!(serde_json::from_slice::<Display>(&bytes).unwrap(), display);
+        assert!(vmlab_hv_proto::machine::validate_gpu_vram_bytes(size).is_ok());
+    }
+    for size in [0, 128 << 20, 3 << 30, 512 << 30, u64::MAX] {
+        assert!(vmlab_hv_proto::machine::validate_gpu_vram_bytes(size).is_err());
+    }
 }
 
 #[test]
@@ -487,6 +499,7 @@ fn q35_devices_and_policy_wire_contract() {
         &Display {
             device: DisplayDevice::StdVga,
             gpu: None,
+            vram_bytes: 4 << 30,
             render_node: None,
             pci: PciAddress {
                 bus: 0,

@@ -187,6 +187,9 @@ fn system_reset_returns_native_gpu_to_firmware_vga() {
 
 struct ProbeMapper;
 impl crate::virtio::gpu::BlobMapper for ProbeMapper {
+    fn size(&self) -> u64 {
+        16 << 30
+    }
     fn set_base(&self, _: Option<u64>) -> Result<(), DeviceError> {
         Ok(())
     }
@@ -221,7 +224,9 @@ fn accelerated_protocol_fences_transfer_and_immutable_scanout() {
             Arc::new(ProbeMapper),
         )
         .unwrap();
-    assert_eq!(d.dev.bars()[2].size, 1 << 32);
+    assert_eq!(d.dev.bars()[2].size, 16 << 30);
+    assert_eq!(d.dev.config_read(0xb0 / 4), 0);
+    assert_eq!(d.dev.config_read(0xb8 / 4), 4);
     assert_eq!(d.dev.config_read(0xa4 / 4), 0x08189809);
     d.start();
     assert_eq!(code(&d.command(0, 0x108, &[0, 0])), 0x1102);

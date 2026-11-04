@@ -149,6 +149,7 @@ pub struct PciRoot {
     slots: Vec<Option<Function>>,
     alloc: BarAllocator,
     firmware: bool,
+    mmio64_end: u64,
     // Cache decoded targets, never register values. Exact addresses retain
     // ROM/BAR overlap priority until a config or topology change invalidates it.
     mmio_cache: [Option<CachedMmioBar>; 4],
@@ -163,6 +164,14 @@ struct CachedMmioBar {
 }
 
 impl PciRoot {
+    pub(crate) fn set_mmio64_window(&mut self, base: u64, size: u64) {
+        self.mmio64_end = base + size;
+    }
+
+    pub(crate) fn mmio64_end(&self) -> u64 {
+        self.mmio64_end
+    }
+
     pub fn addresses(&self) -> Vec<(u8, u8)> {
         self.slots
             .iter()
@@ -175,6 +184,7 @@ impl PciRoot {
         PciRoot {
             slots: (0..PCI_SLOTS * 8).map(|_| None).collect(),
             alloc: BarAllocator::new(mmio64_base),
+            mmio64_end: mmio64_base + MMIO64_SIZE,
             firmware: false,
             mmio_cache: [None; 4],
         }

@@ -25,7 +25,7 @@ use zerocopy::{Immutable, IntoBytes};
 use crate::error::VmmError;
 use crate::layout::{
     ACPI_TABLES_BASE, ACPI_TABLES_LIMIT, IO_ALLOC_BASE, IOAPIC_BASE, LAPIC_BASE, MMCONFIG_BASE,
-    MMIO32_BASE, MMIO32_SIZE, MMIO64_SIZE, MemLayout,
+    MMIO32_BASE, MMIO32_SIZE, MemLayout,
 };
 use crate::pm::{PM1A_CNT_BASE, PM1A_EVT_BASE, SCI_GSI};
 
@@ -168,7 +168,7 @@ fn dsdt(layout: &MemLayout) -> Sdt {
         aml::AddressSpaceCacheable::NotCacheable,
         true,
         layout.mmio64_base,
-        layout.mmio64_base + MMIO64_SIZE - 1,
+        layout.mmio64_base + layout.mmio64_size - 1,
         None,
     );
     let crs = aml::ResourceTemplate::new(vec![&bus_numbers, &io_window, &mmio32, &mmio64]);

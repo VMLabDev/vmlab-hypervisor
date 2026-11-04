@@ -429,6 +429,12 @@ pub struct Display {
     pub device: DisplayDevice,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuMode>,
+    /// Host-visible virtio-gpu aperture in bytes, not reserved physical VRAM.
+    #[serde(
+        default = "default_gpu_vram_bytes",
+        skip_serializing_if = "is_default_gpu_vram_bytes"
+    )]
+    pub vram_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_node: Option<PathBuf>,
     pub pci: PciAddress,
@@ -439,6 +445,24 @@ pub struct Display {
     /// RFB socket; absent uses vnc.sock beside the control socket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vnc_socket: Option<PathBuf>,
+}
+
+pub const MIN_GPU_VRAM_BYTES: u64 = 256 << 20;
+pub const MAX_GPU_VRAM_BYTES: u64 = 256 << 30;
+
+pub const fn default_gpu_vram_bytes() -> u64 {
+    4 << 30
+}
+
+fn is_default_gpu_vram_bytes(size: &u64) -> bool {
+    *size == default_gpu_vram_bytes()
+}
+
+pub fn validate_gpu_vram_bytes(size: u64) -> Result<(), String> {
+    if !size.is_power_of_two() || !(MIN_GPU_VRAM_BYTES..=MAX_GPU_VRAM_BYTES).contains(&size) {
+        return Err("GPU vram_bytes must be a power of two in 256 MiB..=256 GiB".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
