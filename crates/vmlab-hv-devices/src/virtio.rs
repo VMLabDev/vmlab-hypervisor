@@ -14,6 +14,7 @@ pub mod gpu;
 pub mod net;
 pub mod pci;
 pub mod sound;
+pub mod worker;
 
 /// Test doubles shared by the virtio device and transport tests: an
 /// in-memory [`vmlab_disk::DiskImage`] and interrupt sinks that record what

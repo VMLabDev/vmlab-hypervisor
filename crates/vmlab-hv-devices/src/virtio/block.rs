@@ -1,9 +1,9 @@
 //! virtio-blk over the disk-format seam (VIRTIO 1.2 §5.2).
 //!
 //! [`Block`] runs any `Box<dyn vmlab_disk::DiskImage>` behind the virtio-pci
-//! transport. Requests are processed synchronously when the driver notifies
-//! the virtqueue: the disk seam is blocking, and phase 1 machines do not need
-//! a worker thread. Read-only images advertise `VIRTIO_BLK_F_RO` and fail
+//! transport. Its queue handler uses the blocking disk seam. The binary wraps
+//! it in [`super::worker::QueueWorker`] so disk I/O does not block a vCPU.
+//! Read-only images advertise `VIRTIO_BLK_F_RO` and fail
 //! writes, discards included, as the spec requires.
 
 use std::cell::Cell;

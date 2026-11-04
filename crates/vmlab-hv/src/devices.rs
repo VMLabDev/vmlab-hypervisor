@@ -13,6 +13,7 @@ use vmlab_hv_devices::virtio::console::{Console, PortConfig};
 use vmlab_hv_devices::virtio::fs::{Fs, FsConfig, InProcessFs, InProcessFsConfig};
 use vmlab_hv_devices::virtio::net::{Net, NetBackendRegistry, NetConfig};
 use vmlab_hv_devices::virtio::pci::VirtioPciDevice;
+use vmlab_hv_devices::virtio::worker::QueueWorker;
 use vmlab_hv_devices::{GuestMemory, IrqLine, VirtioDevice};
 use vmlab_hv_proto::machine::{Disk, FsBacking, FsShare, Nic, NicAttachment, SerialPort};
 use vmlab_hv_vmm::DeviceUnavailable;
@@ -110,6 +111,8 @@ impl vmlab_hv_vmm::DeviceFactory for DeviceSet {
         } else {
             block
         };
+        let block = QueueWorker::new(Box::new(block))
+            .map_err(|e| DeviceUnavailable::new("virtio-blk worker", e.to_string()))?;
         let pci = self.wrap(disk.id.clone(), Box::new(block), mem, msi, None)?;
         Ok(BuiltBlk { pci, disk: image })
     }
