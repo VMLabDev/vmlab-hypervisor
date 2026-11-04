@@ -176,6 +176,9 @@ def play(device, rate, channels):
                     written = os.write(fd, data)
                 except OSError as error:
                     if error.errno == errno.EPIPE:
+                        if os.environ.get("ALSA_STRICT"):
+                            pcm_diagnostics()
+                            raise
                         # Underrun: reprepare and keep going.
                         fcntl.ioctl(fd, IOCTL_PREPARE)
                         continue

@@ -45,9 +45,15 @@ mod file_recording {
     //! - `VMLAB_HV_TEST_AUDIO_CAPTURE=<file>`: the file's bytes are served
     //!   as capture PCM, in order, then silence.
 
+    use std::collections::VecDeque;
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::time::{Duration, Instant};
 
     use parking_lot::Mutex;
 
@@ -69,9 +75,12 @@ mod file_recording {
             if let Some(path) = &self.playback {
                 log_event(path, "playback", format);
             }
-            Ok(Box::new(FileSink {
-                path: self.playback.clone(),
-            }))
+            let paced = std::env::var_os("VMLAB_HV_TEST_AUDIO_PACED").is_some();
+            Ok(Box::new(FileSink::new(
+                self.playback.clone(),
+                format,
+                paced,
+            )?))
         }
         fn open_capture(&self, format: AudioFormat) -> Result<Box<dyn CaptureSource>, DeviceError> {
             let mut script = Vec::new();
@@ -89,17 +98,119 @@ mod file_recording {
     }
 
     struct FileSink {
-        path: Option<PathBuf>,
+        file: Option<std::fs::File>,
+        timing: Option<std::fs::File>,
+        start: Instant,
+        offset: usize,
+        queue: Option<Arc<Mutex<VecDeque<u8>>>>,
+        stop: Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FileSink {
+        fn new(
+            path: Option<PathBuf>,
+            format: AudioFormat,
+            paced: bool,
+        ) -> Result<Self, DeviceError> {
+            let open =
+                |path: &std::path::Path| OpenOptions::new().create(true).append(true).open(path);
+            let file = path.as_deref().map(open).transpose()?;
+            let timing = if std::env::var_os("VMLAB_HV_TEST_AUDIO_TIMING").is_some() {
+                path.as_deref()
+                    .map(|path| open(&path.with_extension("timing")))
+                    .transpose()?
+            } else {
+                None
+            };
+            let rendered = if paced {
+                Some(open(
+                    &path
+                        .as_ref()
+                        .ok_or_else(|| {
+                            DeviceError::Other("paced recording requires a playback file".into())
+                        })?
+                        .with_extension("rendered"),
+                )?)
+            } else {
+                None
+            };
+            let stop = Arc::new(AtomicBool::new(false));
+            let queue = paced.then(|| Arc::new(Mutex::new(VecDeque::new())));
+            let worker = queue.as_ref().map(|queue| {
+                let queue = queue.clone();
+                let stop = stop.clone();
+                let mut rendered = rendered.expect("paced file was opened");
+                std::thread::spawn(move || {
+                    let period = Duration::from_secs_f64(256.0 / f64::from(format.rate));
+                    // Prebuffer one callback period, then start the host clock.
+                    while queue.lock().len() < 256 * format.frame_bytes() {
+                        if stop.load(Ordering::Acquire) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    let mut deadline = Instant::now() + period;
+                    while !stop.load(Ordering::Acquire) {
+                        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                        let mut pcm = vec![0; 256 * format.frame_bytes()];
+                        let mut queue = queue.lock();
+                        for byte in &mut pcm {
+                            *byte = queue.pop_front().unwrap_or(0);
+                        }
+                        drop(queue);
+                        rendered.write_all(&pcm).expect("write paced PCM");
+                        deadline += period;
+                    }
+                })
+            });
+            Ok(Self {
+                offset: path
+                    .as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map_or(0, |m| m.len() as usize),
+                file,
+                timing,
+                start: *START,
+                queue,
+                stop,
+                worker,
+            })
+        }
+    }
+
+    static START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+
+    impl Drop for FileSink {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
     }
 
     impl PlaybackSink for FileSink {
         fn write_period(&mut self, pcm: &[u8]) {
-            if let Some(path) = &self.path {
-                append(path, pcm);
+            if let Some(file) = &mut self.file {
+                file.write_all(pcm).expect("write test PCM");
+                if let Some(timing) = &mut self.timing {
+                    let line = serde_json::json!({
+                        "offset": self.offset, "bytes": pcm.len(),
+                        "ns": self.start.elapsed().as_nanos() as u64
+                    })
+                    .to_string()
+                        + "\n";
+                    timing.write_all(line.as_bytes()).expect("write PCM timing");
+                }
+            }
+            self.offset += pcm.len();
+            if let Some(queue) = &self.queue {
+                queue.lock().extend(pcm);
             }
         }
         fn latency_bytes(&self) -> usize {
-            0
+            self.queue.as_ref().map_or(0, |queue| queue.lock().len())
         }
     }
 

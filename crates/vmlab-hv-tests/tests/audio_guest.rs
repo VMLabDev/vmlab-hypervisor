@@ -21,6 +21,9 @@ use vmlab_hv_proto::machine::MachineDescription;
 use vmlab_hv_tests::agent::{AgentClient, ExecOutput};
 use vmlab_hv_tests::process::ManagedChild;
 
+#[path = "support/audio_quality.rs"]
+mod audio_quality;
+
 /// One audio guest: the process, its directory and its control client.
 struct AudioVm {
     child: ManagedChild,
@@ -124,6 +127,10 @@ fn template() -> Option<PathBuf> {
 /// because the recording host reads it when the guest opens its capture
 /// stream.
 fn launch(microphone: bool) -> Option<AudioVm> {
+    launch_with_quality(microphone, false)
+}
+
+fn launch_with_quality(microphone: bool, quality: bool) -> Option<AudioVm> {
     let firmware = Path::new("/usr/share/qemu/bios-256k.bin");
     if !Path::new("/dev/kvm").exists()
         || !firmware.is_file()
@@ -176,13 +183,27 @@ fn launch(microphone: bool) -> Option<AudioVm> {
     )
     .unwrap();
     let log = std::fs::File::create(path.join("hv.log")).unwrap();
+    let mut command = Command::new(
+        std::env::var_os("VMLAB_HV_TEST_AUDIO_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| vmlab_hv_tests::hv_binary_with(&["testing"])),
+    );
+    if quality {
+        command.arg("--paused");
+        command
+            .env("VMLAB_HV_TEST_AUDIO_PACED", "1")
+            .env("VMLAB_HV_TEST_AUDIO_TIMING", "1");
+    }
     let mut child = ManagedChild::spawn(
-        Command::new(vmlab_hv_tests::hv_binary_with(&["testing"]))
+        command
             .arg("--machine")
             .arg(path.join("machine.json"))
             .arg("--control")
             .arg(path.join("control.sock"))
             .env("VMLAB_HV_TEST_AUDIO_PLAYBACK", &playback)
+            .env("XDG_RUNTIME_DIR", path)
+            .env("XDG_STATE_HOME", path)
+            .env("VMLAB_SKIP_UPDATES", "1")
             .env(
                 "VMLAB_HV_TEST_AUDIO_CAPTURE",
                 path.join("capture-script.pcm"),
@@ -192,7 +213,7 @@ fn launch(microphone: bool) -> Option<AudioVm> {
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
-    let control = loop {
+    let mut control = loop {
         if let Ok(control) = Client::connect(path.join("control.sock")) {
             break control;
         }
@@ -206,6 +227,12 @@ fn launch(microphone: bool) -> Option<AudioVm> {
         }
         std::thread::sleep(Duration::from_millis(25));
     };
+    if quality {
+        assert!(matches!(
+            control.call(Ctrl::Resume).unwrap(),
+            Outcome::Ok { .. }
+        ));
+    }
     Some(AudioVm {
         child,
         dir,
@@ -401,6 +428,25 @@ fn microphone_off_opens_no_capture_stream() {
         "a capture stream opened with the microphone off: {}",
         vm.events()
     );
+}
+
+#[test]
+#[ignore = "opt-in 10-second silent Linux HDA quality measurement"]
+fn linux_hda_playback_quality_via_s1() {
+    let Some(mut vm) = launch_with_quality(false, true) else {
+        return;
+    };
+    let mut agent = vm.agent();
+    install_client(&vm, &mut agent);
+    vm.exec(&mut agent, "python3 /tmp/alsa.py unmute");
+    let output = vm.exec(&mut agent, "python3 - <<'EOF'\nimport math, struct\nwith open('/tmp/quality.raw', 'wb') as f:\n    for i in range(480000):\n        sine = int(6000 * math.sin(2 * math.pi * 1000 * i / 48000))\n        click = 6000 if 12000 <= i % 48000 < 12048 else 0\n        f.write(struct.pack('<hh', sine, click))\n    f.write(bytes(12000 * 4))\nEOF\nALSA_STRICT=1 ALSA_BUFFER_FRAMES=8192 python3 /tmp/alsa.py play 48000 2 < /tmp/quality.raw\nsleep 0.1");
+    eprintln!(
+        "Linux quality source: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    audio_quality::report(&vm.dir.path().join("playback.pcm"), "linux");
+    vm.call(Ctrl::Quit);
+    assert!(vm.child.wait().unwrap().success());
 }
 
 /// Standard base64 with padding, as `base64 -w0` emits.

@@ -16,6 +16,9 @@ use vmlab_hv_proto::{
 };
 use vmlab_hv_tests::{agent::AgentClient, process::ManagedChild};
 
+#[path = "support/audio_quality.rs"]
+mod audio_quality;
+
 fn template() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("VMLAB_HV_TEST_WINDOWS_DISK") {
         let path = PathBuf::from(path);
@@ -93,6 +96,16 @@ fn pipewire_node(remote: &Path) -> Option<Value> {
 #[test]
 #[cfg_attr(vmlab_ci_no_kvm, ignore = "requires KVM and/or local guest assets")]
 fn windows_inbox_hda_starts_and_plays_via_s1() {
+    windows_hda(false);
+}
+
+#[test]
+#[ignore = "opt-in 10-second silent Windows HDA quality measurement"]
+fn windows_hda_playback_quality_via_s1() {
+    windows_hda(true);
+}
+
+fn windows_hda(quality: bool) {
     if !Path::new("/dev/kvm").exists() {
         eprintln!("SKIP Windows HDA S1: /dev/kvm unavailable");
         return;
@@ -146,6 +159,10 @@ fn windows_inbox_hda_starts_and_plays_via_s1() {
     )
     .unwrap();
     let pipewire = std::env::var_os("VMLAB_HV_TEST_AUDIO_PIPEWIRE").map(PathBuf::from);
+    assert!(
+        !quality || pipewire.is_none(),
+        "quality uses the silent recording sink"
+    );
     if let Some(remote) = &pipewire {
         assert!(
             remote.is_absolute(),
@@ -153,7 +170,9 @@ fn windows_inbox_hda_starts_and_plays_via_s1() {
         );
         std::os::unix::fs::symlink(remote, path.join("pipewire-0")).unwrap();
     }
-    let binary = if pipewire.is_some() {
+    let binary = if let Some(binary) = std::env::var_os("VMLAB_HV_TEST_AUDIO_BINARY") {
+        PathBuf::from(binary)
+    } else if pipewire.is_some() {
         vmlab_hv_tests::hv_binary()
     } else {
         vmlab_hv_tests::hv_binary_with(&["testing"])
@@ -173,6 +192,11 @@ fn windows_inbox_hda_starts_and_plays_via_s1() {
         .stderr(Stdio::from(log));
     if pipewire.is_none() {
         command.env("VMLAB_HV_TEST_AUDIO_PLAYBACK", path.join("playback.pcm"));
+    }
+    if quality {
+        command
+            .env("VMLAB_HV_TEST_AUDIO_TIMING", "1")
+            .env("VMLAB_HV_TEST_AUDIO_PACED", "1");
     }
     let mut vm = Vm {
         child: ManagedChild::spawn(&mut command).unwrap(),
@@ -211,7 +235,12 @@ if ($codec.Count -eq 0 -or $codec[0].Status -ne 'OK' -or $endpoints.Count -eq 0)
 "#,
     );
 
-    let tone = include_str!("audio_windows.ps1");
+    let quality_tone = format!("& {{ {} }} -Quality", include_str!("audio_windows.ps1"));
+    let tone = if quality {
+        quality_tone.as_str()
+    } else {
+        include_str!("audio_windows.ps1")
+    };
     if let Some(remote) = pipewire {
         let node = std::thread::scope(|scope| {
             let playback = scope.spawn(|| powershell(&mut agent, tone));
@@ -239,6 +268,11 @@ if ($codec.Count -eq 0 -or $codec[0].Status -ne 'OK' -or $endpoints.Count -eq 0)
         );
     } else {
         powershell(&mut agent, tone);
+        if quality {
+            // Stop closes and joins the paced sink before inspecting its files.
+            powershell(&mut agent, "Start-Sleep -Milliseconds 100");
+            audio_quality::report(&path.join("playback.pcm"), "windows");
+        }
         let pcm = std::fs::read(path.join("playback.pcm")).unwrap();
         assert!(
             pcm.len() >= 48000 * 4,
@@ -257,18 +291,20 @@ if ($codec.Count -eq 0 -or $codec[0].Status -ne 'OK' -or $endpoints.Count -eq 0)
             .unwrap();
         assert!(peak > 0, "Windows PCM is silent");
         assert!(
-            samples.windows(48000).step_by(12000).any(|window| {
-                let crossings = window
-                    .windows(2)
-                    .filter(|pair| pair[0] <= 0 && pair[1] > 0)
-                    .count();
-                (430..=450).contains(&crossings)
-            }),
+            quality
+                || samples.windows(48000).step_by(12000).any(|window| {
+                    let crossings = window
+                        .windows(2)
+                        .filter(|pair| pair[0] <= 0 && pair[1] > 0)
+                        .count();
+                    (430..=450).contains(&crossings)
+                }),
             "Windows PCM does not contain the 440 Hz tone; peak={peak}"
         );
         eprintln!(
-            "Windows playback: {} PCM bytes, peak={peak}, 440 Hz verified",
-            pcm.len()
+            "Windows playback: {} PCM bytes, peak={peak}, {} Hz verified",
+            pcm.len(),
+            if quality { 1000 } else { 440 }
         );
     }
     assert!(matches!(
