@@ -60,6 +60,7 @@ impl Pixels {
 pub struct Frame {
     pub flags: FrameFlags,
     /// Increment on reset or same-sized scanout replacement to force configure.
+    /// Stable dma-buf clients instead track allocation identities and layout.
     pub generation: u64,
     pub width: u32,
     pub height: u32,
@@ -584,8 +585,11 @@ impl DisplayServer {
                 }
                 let dma =
                     frame.pixels.dma().is_some() && caps.has(Capabilities::DMABUF_OK) && !cpu_mode;
+                let stable = dma && caps.has(Capabilities::STABLE_BUFFERS);
                 let geom = (
-                    frame.generation,
+                    // Guest scanout flips can change generation while capture keeps
+                    // the same output pool. Its descriptors identify the surface.
+                    if stable { 0 } else { frame.generation },
                     frame.width,
                     frame.height,
                     frame.stride,
@@ -611,27 +615,34 @@ impl DisplayServer {
                 let mut s = local.lock().unwrap();
                 // Old dma-buf Frames stay alive until Release, even after reconfigure.
                 if s.held.len() < 3 {
-                    let stable = caps.has(Capabilities::STABLE_BUFFERS);
-                    let buffers_changed = dma
-                        && frame.pixels.dma().is_some_and(|(buffers, _, _)| {
-                            buffers.len() != dma_buffers.len()
-                                || buffers
-                                    .iter()
-                                    .zip(&dma_buffers)
-                                    .any(|(a, b)| !Arc::ptr_eq(a, b))
-                        });
+                    let mut buffers_changed = false;
+                    if dma {
+                        // Retain compatible allocations across flip-chain changes.
+                        // The v1 descriptor limit bounds each connection's cache.
+                        let buffers = frame.pixels.dma().unwrap().0;
+                        if geometry != Some(geom) || !stable {
+                            dma_buffers.clear();
+                        }
+                        let added: Vec<_> = buffers
+                            .iter()
+                            .filter(|fd| !dma_buffers.iter().any(|old| Arc::ptr_eq(fd, old)))
+                            .map(|fd| (*fd).clone())
+                            .collect();
+                        buffers_changed = !added.is_empty();
+                        if dma_buffers.len() + added.len() > 16 {
+                            dma_buffers = buffers.into_iter().cloned().collect();
+                        } else {
+                            dma_buffers.extend(added);
+                        }
+                    }
                     let reconfigure =
                         geometry != Some(geom) || (dma && (!stable || buffers_changed));
                     if reconfigure {
                         surface += 1;
                         s.surface = surface;
                         ring.clear();
-                        dma_buffers = if dma {
-                            frame.pixels.dma().unwrap().0.into_iter().cloned().collect()
-                        } else {
-                            Vec::new()
-                        };
                         if !dma {
+                            dma_buffers.clear();
                             for _ in 0..3 {
                                 ring.push(memfd(frame.stride as u64 * frame.height as u64)?);
                             }
@@ -640,7 +651,11 @@ impl DisplayServer {
                     }
                     let index = if dma {
                         Some(if stable {
-                            frame.pixels.dma().unwrap().1
+                            let (buffers, buffer, _) = frame.pixels.dma().unwrap();
+                            dma_buffers
+                                .iter()
+                                .position(|fd| Arc::ptr_eq(fd, buffers[buffer as usize]))
+                                .unwrap() as u32
                         } else {
                             0
                         })
@@ -658,7 +673,7 @@ impl DisplayServer {
                             let fds = if dma {
                                 let (buffers, buffer, _) = frame.pixels.dma().unwrap();
                                 if stable {
-                                    buffers.iter().map(|fd| fd.as_raw_fd()).collect()
+                                    dma_buffers.iter().map(|fd| fd.as_raw_fd()).collect()
                                 } else {
                                     vec![buffers[buffer as usize].as_raw_fd()]
                                 }

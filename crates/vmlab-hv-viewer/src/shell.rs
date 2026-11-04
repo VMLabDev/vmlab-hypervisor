@@ -33,6 +33,7 @@ struct App {
     fallback_cursor: crate::Cursor,
     wheel: f64,
     last_title: String,
+    shown_frame: bool,
     generation: u64,
     pending_releases: Vec<Message>,
 }
@@ -84,7 +85,7 @@ impl App {
         let title = format!(
             "{} - {} - release {} - {}",
             self.options.machine.as_deref().unwrap_or("vmlab-hv"),
-            if self.core.as_ref().is_none_or(|core| core.current.is_none()) {
+            if !self.shown_frame {
                 "waiting for display"
             } else if self.core.as_ref().is_some_and(|core| core.input.grabbed) {
                 "keyboard grabbed"
@@ -146,15 +147,11 @@ impl App {
     }
 
     fn display(&mut self, packet: Packet) -> Result<()> {
-        let configure = matches!(packet.message, Message::SurfaceConfigure { .. });
         let frame = self
             .core
             .as_mut()
             .context("display not connected")?
             .receive(packet)?;
-        if configure && let Some(renderer) = &mut self.renderer {
-            renderer.reset_display();
-        }
         self.update_cursor();
         let core = self.core.as_ref().context("display not connected")?;
         if let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer) {
@@ -172,7 +169,7 @@ impl App {
                 // present waits for GPU completion before returning. Failed imports never submit.
                 core.release(&frame)?;
                 match result {
-                    Ok(()) => {}
+                    Ok(()) => self.shown_frame = true,
                     Err(error) if surface.kind == SurfaceKind::Dmabuf => {
                         eprintln!(
                             "dma-buf import/presentation failed; requesting shared memory: {error:#}"
@@ -491,6 +488,7 @@ pub fn run(options: Options) -> Result<()> {
         },
         wheel: 0.,
         last_title: String::new(),
+        shown_frame: false,
         generation: 0,
         pending_releases: Vec::new(),
     };

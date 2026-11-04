@@ -517,6 +517,143 @@ fn stable_dma_pool_keeps_imports_damage_and_release_tokens() {
 }
 
 #[test]
+fn scanout_flips_keep_the_announced_dma_pool_despite_source_generations() {
+    let (server, source, _) = server();
+    let buffers: Arc<Vec<Arc<OwnedFd>>> = Arc::new(
+        (0..3)
+            .map(|_| Arc::new(File::open("/dev/zero").unwrap().into()))
+            .collect(),
+    );
+    let make = |generation, buffer| {
+        let mut f = frame(9, 4, 3);
+        f.generation = generation;
+        f.pixels = Pixels::Leased {
+            // Capture builds a fresh Vec, but keeps each allocation's Arc.
+            buffers: Arc::new(buffers.as_ref().clone()),
+            buffer,
+            acquire: None,
+            lease: vmlab_hv_display::BufferLease::new(),
+            cpu: None,
+            readback: Arc::new(|| Ok(vec![42; 48])),
+        };
+        f
+    };
+    *source.0.lock().unwrap() = make(1, 0);
+    let (c, h) = client(&server, C::FRAMES | C::DMABUF_OK | C::STABLE_BUFFERS);
+    let configured = c.receive().unwrap();
+    assert!(matches!(
+        configured.message,
+        M::SurfaceConfigure { buffers: 3, .. }
+    ));
+    let first = ready(&c);
+    c.release(first.0, first.1, first.2).unwrap();
+    for generation in 2..30 {
+        *source.0.lock().unwrap() = make(generation, generation as u32 % 3);
+        server.publish().unwrap();
+        let next = ready(&c);
+        assert_eq!(next.0, first.0, "a flip is not a new presentation surface");
+        assert_eq!(next.1, generation as u32 % 3);
+        c.release(next.0, next.1, next.2).unwrap();
+    }
+    // An actual layout change still replaces the configure.
+    let mut resized = make(30, 0);
+    resized.width = 3;
+    *source.0.lock().unwrap() = resized;
+    server.publish().unwrap();
+    assert!(matches!(
+        c.receive().unwrap().message,
+        M::SurfaceConfigure { width: 3, .. }
+    ));
+    let next = ready(&c);
+    c.release(next.0, next.1, next.2).unwrap();
+    for (fourcc, modifier) in [
+        (vmlab_hv_display::protocol::ARGB8888, 0),
+        (vmlab_hv_display::protocol::ARGB8888, 7),
+    ] {
+        let mut changed = make(30, 0);
+        changed.width = 3;
+        changed.drm_fourcc = fourcc;
+        changed.modifier = modifier;
+        *source.0.lock().unwrap() = changed;
+        server.publish().unwrap();
+        assert!(
+            matches!(c.receive().unwrap().message, M::SurfaceConfigure { drm_fourcc, modifier: actual_modifier, .. } if drm_fourcc == fourcc && actual_modifier == modifier)
+        );
+        let next = ready(&c);
+        c.release(next.0, next.1, next.2).unwrap();
+    }
+    drop(c);
+    h.join().unwrap().unwrap();
+}
+
+#[test]
+fn stable_dma_flip_chain_learns_buffers_and_remaps_reordered_slots() {
+    let (server, source, _) = server();
+    let buffers: Vec<Arc<OwnedFd>> = (0..17)
+        .map(|_| Arc::new(File::open("/dev/zero").unwrap().into()))
+        .collect();
+    let make = |indices: &[usize], buffer| {
+        let mut f = frame(9, 4, 3);
+        f.pixels = Pixels::Leased {
+            buffers: Arc::new(indices.iter().map(|i| buffers[*i].clone()).collect()),
+            buffer,
+            acquire: None,
+            lease: vmlab_hv_display::BufferLease::new(),
+            cpu: None,
+            readback: Arc::new(|| Ok(vec![42; 48])),
+        };
+        f
+    };
+    *source.0.lock().unwrap() = make(&[0], 0);
+    let (c, h) = client(&server, C::FRAMES | C::DMABUF_OK | C::STABLE_BUFFERS);
+    assert!(matches!(
+        c.receive().unwrap().message,
+        M::SurfaceConfigure { buffers: 1, .. }
+    ));
+    let held = ready(&c);
+    *source.0.lock().unwrap() = make(&[1, 0], 0);
+    server.publish().unwrap();
+    assert!(matches!(
+        c.receive().unwrap().message,
+        M::SurfaceConfigure { buffers: 2, .. }
+    ));
+    let second = ready(&c);
+    assert_eq!(second.1, 1);
+    c.release(second.0, second.1, second.2).unwrap();
+    // Releasing an old configure's frame must still work after learning a buffer.
+    c.release(held.0, held.1, held.2).unwrap();
+    for i in 0..20 {
+        *source.0.lock().unwrap() = make(&[i % 2], 0);
+        server.publish().unwrap();
+        let next = ready(&c);
+        assert_eq!(next.0, second.0);
+        assert_eq!(next.1, (i % 2) as u32);
+        c.release(next.0, next.1, next.2).unwrap();
+    }
+    // Bound descriptor retention when applications keep creating new swap chains.
+    *source.0.lock().unwrap() = make(&(0..16).collect::<Vec<_>>(), 15);
+    server.publish().unwrap();
+    assert!(matches!(
+        c.receive().unwrap().message,
+        M::SurfaceConfigure { buffers: 16, .. }
+    ));
+    let next = ready(&c);
+    assert_eq!(next.1, 15);
+    c.release(next.0, next.1, next.2).unwrap();
+    *source.0.lock().unwrap() = make(&[16], 0);
+    server.publish().unwrap();
+    assert!(matches!(
+        c.receive().unwrap().message,
+        M::SurfaceConfigure { buffers: 1, .. }
+    ));
+    let next = ready(&c);
+    assert_eq!(next.1, 0);
+    c.release(next.0, next.1, next.2).unwrap();
+    drop(c);
+    h.join().unwrap().unwrap();
+}
+
+#[test]
 fn a_blocked_resize_cannot_prevent_buffer_release() {
     use std::sync::mpsc;
     use vmlab_hv_display::{BufferLease, DisplayServer, InputSink};

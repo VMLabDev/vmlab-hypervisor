@@ -274,9 +274,10 @@ impl Core {
                 {
                     return Err(invalid("invalid shared-memory buffer"));
                 }
-                // Only one monitor is supported. Keep old descriptors alive only until configure.
-                self.surfaces.clear();
-                self.current = None;
+                // Keep the displayed surface until its replacement has pixels.
+                // At most one displayed and one pending surface are retained.
+                let displayed = self.current.as_ref().map(|frame| frame.surface);
+                self.surfaces.retain(|id, _| Some(*id) == displayed);
                 self.surfaces.insert(
                     surface_id,
                     Surface {
@@ -305,6 +306,9 @@ impl Core {
                 damage,
                 ..
             } => {
+                if self.surfaces.keys().max().copied() != Some(surface_id) {
+                    return Err(invalid("frame does not name the latest surface"));
+                }
                 let surface = self
                     .surfaces
                     .get_mut(&surface_id)
@@ -348,6 +352,7 @@ impl Core {
                     damage,
                 };
                 self.current = Some(frame.clone());
+                self.surfaces.retain(|id, _| *id == surface_id);
                 return Ok(Some(frame));
             }
             Message::CursorShape {

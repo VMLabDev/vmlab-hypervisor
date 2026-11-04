@@ -25,30 +25,34 @@ def ioctl(number, data):
 # DRM_VIRTGPU_RESOURCE_CREATE creates a 3D render target and its context.
 pitch = width * 4
 bind = 2 | (1 << 22) if sys.argv[1:] == ['implicit'] else 2 | (1 << 18)
-created = ioctl(0x44, bytearray(struct.pack('14I', 2, 2, bind,
-                width, height, 1, 1, 0, 0, 1, 0, 0, pitch * height, pitch)))
-handle, resource = struct.unpack_from('II', created, 40)
-assert handle and resource
+def target(surface):
+    created = ioctl(0x44, bytearray(struct.pack('14I', 2, 2, bind,
+                    width, height, 1, 1, 0, 0, 1, 0, 0, pitch * height, pitch)))
+    handle, resource = struct.unpack_from('II', created, 40)
+    assert handle and resource
+    # Virgl protocol: CREATE_OBJECT(SURFACE), SET_FRAMEBUFFER_STATE, CLEAR.
+    commands = array.array('I', [
+        (5 << 16) | (8 << 8) | 1, surface, resource, 2, 0, 0,
+        (3 << 16) | 5, 1, 0, surface,
+        (8 << 16) | 7, 4,
+        *struct.unpack('4I', struct.pack('4f', .7, .2, .1, 1.)), 0, 0, 0,
+    ])
+    handles = array.array('I', [handle])
+    execution = bytearray(64)
+    struct.pack_into('IIQQIi', execution, 0, 2, len(commands) * 4,
+                     commands.buffer_info()[0], handles.buffer_info()[0], 1, -1)
+    ioctl(0x42, execution)
+    fence = struct.unpack_from('i', execution, 28)[0]
+    assert fence >= 0
+    poll = select.poll()
+    poll.register(fence, select.POLLIN)
+    assert poll.poll(10000), 'virgl clear fence timed out'
+    os.close(fence)
+    return handle, resource
 
-# Virgl protocol: CREATE_OBJECT(SURFACE), SET_FRAMEBUFFER_STATE, CLEAR.
-# These are the commands Mesa emits for an OpenGL color-buffer clear.
-commands = array.array('I', [
-    (5 << 16) | (8 << 8) | 1, 1, resource, 2, 0, 0,
-    (3 << 16) | 5, 1, 0, 1,
-    (8 << 16) | 7, 4,
-    *struct.unpack('4I', struct.pack('4f', .7, .2, .1, 1.)), 0, 0, 0,
-])
+
+handle, resource = target(1)
 handles = array.array('I', [handle])
-execution = bytearray(64)
-struct.pack_into('IIQQIi', execution, 0, 2, len(commands) * 4,
-                 commands.buffer_info()[0], handles.buffer_info()[0], 1, -1)
-ioctl(0x42, execution)
-fence = struct.unpack_from('i', execution, 28)[0]
-assert fence >= 0
-poll = select.poll()
-poll.register(fence, select.POLLIN)
-assert poll.poll(10000), 'virgl clear fence timed out'
-os.close(fence)
 renderer = 'virgl DRM 3D color-buffer clear'
 
 resources = ioctl(0xa0, bytearray(64))
@@ -84,6 +88,7 @@ ioctl(0xa2, mode)
 Path('/run/gpu-scanout.json').write_text(json.dumps({'renderer': renderer, 'width': width, 'height': height}))
 request_path = Path('/run/gpu-request.json')
 last_request = None
+flip_buffers = [fb_id]
 deadline = time.monotonic() + 180
 while time.monotonic() < deadline:
     if not request_path.exists():
@@ -94,6 +99,14 @@ while time.monotonic() < deadline:
         time.sleep(.002)
         continue
     last_request = request['id']
+    if 'flip' in request:
+        if len(flip_buffers) == 1:
+            second_handle, _ = target(2)
+            second_fb = ioctl(0xae, bytearray(struct.pack('7I', 0, width, height, pitch, 32, 24, second_handle)))
+            flip_buffers.append(struct.unpack_from('I', second_fb)[0])
+        fb_id = flip_buffers[request['flip']]
+        struct.pack_into('I', mode, 16, fb_id)
+        ioctl(0xa2, mode)
     if 'colour' in request:
         clear = array.array('I', [(8 << 16) | 7, 4,
             *struct.unpack('4I', struct.pack('4f', *request['colour'], 1.)), 0, 0, 0])

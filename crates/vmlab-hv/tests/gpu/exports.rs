@@ -107,6 +107,10 @@ fn request(agent: &mut AgentClient, id: u32, colour: Option<[f32; 3]>) {
     if let Some(colour) = colour {
         request["colour"] = json!(colour);
     }
+    publish_request(agent, &request);
+}
+
+fn publish_request(agent: &mut AgentClient, request: &serde_json::Value) {
     let output = agent.exec(&["python3", "-c", "import os,sys; open('/run/gpu-request.tmp','w').write(sys.argv[1]); os.rename('/run/gpu-request.tmp','/run/gpu-request.json')", &request.to_string()], Duration::from_secs(10)).unwrap();
     assert_eq!(
         output.exit_code,
@@ -304,5 +308,37 @@ pub(super) fn exercise(path: &Path, agent: &mut AgentClient) {
         "S1_export {}",
         json!({ "baseline": baseline, "stats": stats, "pooled": pooled, "modifier": modifier,
         "dma_flush_to_client_ns": dma_latency, "shm_flush_to_client_ns": cpu_latency })
+    );
+    drop(cpu);
+    let dma = DisplayClient::connect(
+        path.join("display.sock"),
+        Capabilities(Capabilities::FRAMES | Capabilities::DMABUF_OK | Capabilities::STABLE_BUFFERS),
+    )
+    .unwrap();
+    dma.stream()
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut flips = Frames::default();
+    flips.next(&dma);
+    flips.release(&dma);
+    let started = Instant::now();
+    let duration = std::env::var("VMLAB_HV_TEST_FLIP_SECONDS")
+        .map(|seconds| Duration::from_secs(seconds.parse().unwrap()))
+        .unwrap_or_default();
+    let mut id = 22;
+    while id < 42 || started.elapsed() < duration {
+        std::thread::scope(|scope| {
+            let next = scope.spawn(|| flips.next(&dma));
+            publish_request(agent, &json!({"id": id, "flip": (id + 1) % 2}));
+            next.join().unwrap();
+        });
+        flips.release(&dma);
+        assert_eq!(flips.configures, if pooled { 1 } else { 2 });
+        id += 1;
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    eprintln!(
+        "S1_flip_chain {}",
+        json!({"frames": id - 22, "configures": flips.configures, "seconds": started.elapsed().as_secs_f64(), "pooled": pooled})
     );
 }
