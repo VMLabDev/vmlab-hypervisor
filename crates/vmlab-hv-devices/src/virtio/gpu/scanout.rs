@@ -211,6 +211,12 @@ impl Drop for Current {
         // SAFETY: capture borrows, and never destroys, the previous context and
         // surfaces. Restore the API as well as the context for libepoxy dispatch.
         unsafe {
+            // An originally unbound API has no saved display. Explicitly unbind
+            // the private context before restoring that state or another API.
+            let display = eglGetCurrentDisplay();
+            if !display.is_null() {
+                eglMakeCurrent(display, null_mut(), null_mut(), null_mut());
+            }
             eglBindAPI(self.api);
             if !self.display.is_null() {
                 eglMakeCurrent(self.display, self.draw, self.read, self.context);
@@ -320,13 +326,13 @@ impl Scanout {
         }
     }
     pub fn new(node: &Path) -> Result<Self, u32> {
+        let _current = Current::save();
         let modifiers = super::modifiers::query(node);
         let node = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(node)
             .map_err(|_| 0x1200u32)?;
-        let _current = Current::save();
         // SAFETY: all EGL/GBM objects are created, used and destroyed on the
         // renderer thread. Attribute lists terminate with EGL_NONE.
         unsafe {
@@ -1002,6 +1008,86 @@ impl Drop for Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg_attr(
+        vmlab_ci_no_host_assets,
+        ignore = "requires an owner-selected DRM render node"
+    )]
+    fn scanout_restores_an_unbound_egl_context() {
+        let Some(node) = std::env::var_os("VMLAB_HV_TEST_RENDER_NODE") else {
+            eprintln!("SKIP EGL state restoration: set VMLAB_HV_TEST_RENDER_NODE");
+            return;
+        };
+        // SAFETY: this test thread owns its EGL API binding and starts without a context.
+        unsafe {
+            assert_eq!(eglBindAPI(0x30a0), 1);
+            assert!(eglGetCurrentContext().is_null());
+            let scanout = Scanout::new(Path::new(&node)).unwrap();
+            assert!(
+                eglGetCurrentContext().is_null(),
+                "capture leaked its private GLES context"
+            );
+            drop(scanout);
+            assert!(eglGetCurrentContext().is_null());
+        }
+    }
+
+    #[test]
+    #[cfg_attr(
+        vmlab_ci_no_host_assets,
+        ignore = "requires an owner-selected DRM render node"
+    )]
+    fn scanout_preserves_opengl_state_across_modifier_probing() {
+        let Some(node) = std::env::var_os("VMLAB_HV_TEST_RENDER_NODE") else {
+            eprintln!("SKIP EGL modifier probe restoration: set VMLAB_HV_TEST_RENDER_NODE");
+            return;
+        };
+        let _original = Current::save();
+        let base = Scanout::new(Path::new(&node)).unwrap();
+        // SAFETY: the test owns the context and keeps its display live through destruction.
+        unsafe {
+            assert_eq!(eglBindAPI(0x30a2), 1);
+            let mut config = null_mut();
+            let mut count = 0;
+            assert_eq!(
+                eglChooseConfig(
+                    base.display,
+                    [0x3040, 8, 0x3033, 0, 0x3038].as_ptr(),
+                    &mut config,
+                    1,
+                    &mut count
+                ),
+                1
+            );
+            assert_eq!(count, 1);
+            let context = eglCreateContext(
+                base.display,
+                config,
+                null_mut(),
+                [0x3098, 3, 0x3038].as_ptr(),
+            );
+            assert!(!context.is_null());
+            assert_eq!(
+                eglMakeCurrent(base.display, null_mut(), null_mut(), context),
+                1
+            );
+            let capture = Scanout::new(Path::new(&node)).unwrap();
+            assert_eq!(
+                eglQueryAPI(),
+                0x30a2,
+                "modifier probing changed the OpenGL API binding"
+            );
+            assert_eq!(eglGetCurrentContext(), context);
+            drop(capture);
+            assert_eq!(eglGetCurrentContext(), context);
+            assert_eq!(
+                eglMakeCurrent(base.display, null_mut(), null_mut(), null_mut()),
+                1
+            );
+            assert_eq!(eglDestroyContext(base.display, context), 1);
+        }
+    }
 
     #[test]
     fn scanout_allocation_preserves_special_resource_constraints() {
