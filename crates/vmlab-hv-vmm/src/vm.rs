@@ -188,6 +188,7 @@ impl VmShared {
         sleep_signal: Arc<SleepSignal>,
         mmio64_base: u64,
     ) -> Arc<Self> {
+        let mmio64_end = pci_root.lock().mmio64_end();
         Arc::new(VmShared {
             debugger: crate::debug::Debugger::default(),
             coalesced_vga: std::sync::OnceLock::new(),
@@ -211,7 +212,7 @@ impl VmShared {
             sleep_signal,
             pci_windows: (
                 (MMIO32_BASE, MMIO32_BASE + MMIO32_SIZE),
-                (mmio64_base, mmio64_base + crate::layout::MMIO64_SIZE),
+                (mmio64_base, mmio64_end),
             ),
             state: Mutex::new(RunState::Paused),
             state_cv: Condvar::new(),

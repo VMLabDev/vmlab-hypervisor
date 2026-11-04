@@ -27,6 +27,7 @@ pub struct VirtioVga {
     transport: VirtioPciDevice,
     config: [u8; 256],
     accelerated: bool,
+    aperture_size: u64,
     power_on_config: [u8; 256],
 }
 
@@ -85,6 +86,7 @@ impl VirtioVga {
             transport,
             config,
             accelerated: false,
+            aperture_size: crate::virtio::gpu::APERTURE_SIZE,
             power_on_config: config,
         })
     }
@@ -95,13 +97,17 @@ impl VirtioVga {
         node: std::path::PathBuf,
         mapper: Arc<dyn crate::virtio::gpu::BlobMapper>,
     ) -> Result<(), DeviceError> {
+        let size = mapper.size();
+        vmlab_hv_proto::machine::validate_gpu_vram_bytes(size).map_err(DeviceError::Other)?;
         self.gpu.enable_3d(mode, node, mapper)?;
+        self.aperture_size = size;
         self.accelerated = true;
         self.config[0x34] = 0xa4;
         self.config[0x9c..0xa0].copy_from_slice(&0x4002u32.to_le_bytes());
         self.config[0xa0..0xa4].copy_from_slice(&0x4802u32.to_le_bytes());
         self.config[0xa4..0xac].copy_from_slice(&[9, 0x98, 24, 8, 4, 1, 0, 0]);
-        self.config[0xb8..0xbc].copy_from_slice(&1u32.to_le_bytes());
+        self.config[0xb0..0xb4].copy_from_slice(&(size as u32).to_le_bytes());
+        self.config[0xb8..0xbc].copy_from_slice(&((size >> 32) as u32).to_le_bytes());
         self.power_on_config = self.config;
         Ok(())
     }
@@ -295,7 +301,7 @@ impl PciDevice for VirtioVga {
             bars[1].size = 0x8000;
             bars[2] = BarInfo {
                 index: 4,
-                size: crate::virtio::gpu::APERTURE_SIZE,
+                size: self.aperture_size,
                 kind: BarKind::Mmio64 { prefetchable: true },
             };
         }

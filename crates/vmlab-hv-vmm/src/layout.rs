@@ -41,6 +41,7 @@ pub struct MemLayout {
     pub ram: u64,
     /// Base of the 64-bit MMIO BAR window (top of RAM, 2 MiB aligned).
     pub mmio64_base: u64,
+    pub mmio64_size: u64,
 }
 
 impl MemLayout {
@@ -87,7 +88,14 @@ impl MemLayout {
             regions,
             ram,
             mmio64_base,
+            mmio64_size: MMIO64_SIZE,
         })
+    }
+
+    /// Allow alignment padding, the GPU BAR, and 1 GiB for other BARs.
+    /// At the 256 GiB GPU limit this stays below 2 TiB even with 1 TiB RAM.
+    pub fn reserve_gpu_aperture(&mut self, size: u64) {
+        self.mmio64_size = 2 * size + MMIO64_SIZE;
     }
 
     /// Top of the highest RAM region (address, exclusive).
@@ -169,5 +177,19 @@ mod tests {
         assert_eq!(l.low_ram_top(), 0x80000000);
         assert_eq!(l.ram_top(), 0x280000000);
         assert_eq!(MemLayout::q35(2048).unwrap().regions.len(), 2);
+    }
+
+    #[test]
+    fn gpu_window_fits_aligned_bars_above_small_and_large_ram() {
+        for ram_mib in [2048, 8192, 1 << 20] {
+            for size in [256 << 20, 4 << 30, 16 << 30, 256 << 30] {
+                let mut layout = MemLayout::q35(ram_mib).unwrap();
+                layout.reserve_gpu_aperture(size);
+                let bar = (layout.mmio64_base + GIB).div_ceil(size) * size;
+                assert!(bar >= layout.ram_top());
+                assert!(bar + size <= layout.mmio64_base + layout.mmio64_size);
+                assert!(layout.mmio64_base + layout.mmio64_size < 2 << 40);
+            }
+        }
     }
 }

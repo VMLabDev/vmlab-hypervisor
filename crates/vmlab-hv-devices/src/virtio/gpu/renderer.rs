@@ -18,6 +18,7 @@ pub const APERTURE_SIZE: u64 = 1 << 32;
 /// The VMM keeps each host mapping registered until `unmap` returns.
 /// Addresses and sizes are page aligned and relative to the shared-memory BAR.
 pub trait BlobMapper: Send + Sync {
+    fn size(&self) -> u64;
     fn set_base(&self, base: Option<u64>) -> Result<(), DeviceError>;
     fn map(&self, id: u32, offset: u64, host: u64, size: u64) -> Result<(), DeviceError>;
     fn unmap(&self, id: u32) -> Result<(), DeviceError>;
@@ -1106,7 +1107,7 @@ impl Backend {
                 let size = d.u64()?;
                 if id == 0
                     || size == 0
-                    || size > APERTURE_SIZE
+                    || size > self.mapper.size()
                     || self.resources.len() >= MAX_RESOURCES
                 {
                     return Err(INVALID);
@@ -1213,7 +1214,7 @@ impl Backend {
                     || size & 4095 != 0
                     || offset
                         .checked_add(size)
-                        .is_none_or(|end| end > APERTURE_SIZE)
+                        .is_none_or(|end| end > self.mapper.size())
                 {
                     return Err(INVALID);
                 }

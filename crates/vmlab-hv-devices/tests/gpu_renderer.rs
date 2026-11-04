@@ -7,6 +7,9 @@ use vmlab_hv_devices::{
 
 struct Mapper;
 impl BlobMapper for Mapper {
+    fn size(&self) -> u64 {
+        4 << 30
+    }
     fn set_base(&self, _: Option<u64>) -> Result<(), DeviceError> {
         Ok(())
     }
