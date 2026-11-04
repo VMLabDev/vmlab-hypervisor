@@ -32,6 +32,7 @@ mod reset;
 pub mod smm;
 pub mod snapshot;
 pub mod vcpu;
+mod vdisplay;
 mod vfio;
 pub mod vm;
 
