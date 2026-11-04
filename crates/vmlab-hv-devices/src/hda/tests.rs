@@ -14,7 +14,14 @@ impl MsiSink for Interrupts {
 fn fixture(host: Arc<dyn HostAudio>, microphone: bool) -> (Hda, GuestMemory, Arc<Interrupts>) {
     let memory = GuestMemory::from_ranges(&[(GuestAddress(0), 0x20000)]).unwrap();
     let interrupts = Arc::new(Interrupts::default());
-    let mut hda = Hda::new("hda", memory.clone(), host, interrupts.clone(), microphone);
+    let mut hda = Hda::new(
+        "hda",
+        memory.clone(),
+        host,
+        interrupts.clone(),
+        None,
+        microphone,
+    );
     hda.config_write(1, 0, &[6, 0]);
     write(&mut hda, 8, 1, 4);
     (hda, memory, interrupts)
@@ -97,6 +104,38 @@ fn pci_discovery_reset_and_register_permissions() {
     assert_eq!(read(&mut hda, 0xa0, 1), 0);
     assert_eq!(read(&mut hda, u64::MAX, 4), 0);
     write(&mut hda, u64::MAX, 0, 4);
+}
+
+#[test]
+fn stream_fifo_size_uses_the_readonly_register_at_offset_10() {
+    let (mut hda, _, _) = fixture(Arc::new(RecordingHost::new()), false);
+    for base in [0x80, 0xa0] {
+        assert_eq!(read(&mut hda, base + 0x10, 2), 1023);
+        assert_eq!(read(&mut hda, base + 0xe, 2), 0);
+        write(&mut hda, base + 0x10, 0, 2);
+        assert_eq!(read(&mut hda, base + 0x10, 2), 1023);
+        write(&mut hda, base + 0x12, 0x11, 2);
+        assert_eq!(read(&mut hda, base + 0x10, 2), 1023);
+        write(&mut hda, base, 1, 1);
+        assert_eq!(read(&mut hda, base + 0x10, 2), 1023);
+        write(&mut hda, base, 0, 1);
+    }
+}
+
+#[test]
+fn wall_clock_and_stream_positions_are_visible_at_mmio_aliases() {
+    let (mut hda, mem, _) = fixture(Arc::new(RecordingHost::new()), false);
+    setup_stream(&mut hda, &mem, false, 4096);
+    setup_stream(&mut hda, &mem, true, 4096);
+    interval(&mut hda);
+    for offset in [0x30, 0x84, 0xa4] {
+        let value = read(&mut hda, offset, 4);
+        assert_ne!(value, 0);
+        assert_eq!(read(&mut hda, offset + 0x2000, 4), value);
+        write(&mut hda, offset + 0x2000, u32::MAX, 4);
+        assert_eq!(read(&mut hda, offset + 0x2000, 4), value);
+        assert_eq!(read(&mut hda, offset, 4), value);
+    }
 }
 
 #[test]
@@ -222,6 +261,82 @@ fn corb_rirb_dma_wrap_pointer_reset_and_msi_acknowledgement() {
     );
 }
 
+#[derive(Default)]
+struct LegacyInterrupt(Mutex<bool>);
+
+impl IrqLine for LegacyInterrupt {
+    fn set_level(&self, high: bool) {
+        *self.0.lock() = high;
+    }
+}
+
+#[test]
+fn windows_corb_responses_raise_legacy_intx_and_obey_masks() {
+    let (mut hda, mem, msi) = fixture(Arc::new(RecordingHost::new()), false);
+    let irq = Arc::new(LegacyInterrupt::default());
+    hda.intx = Some(irq.clone());
+    write(&mut hda, 0x20, 0xc000_0000, 4);
+    write(&mut hda, 0x40, 0x1000, 4);
+    write(&mut hda, 0x50, 0x1800, 4);
+    write(&mut hda, 0x5a, 1, 2);
+    write(&mut hda, 0x5c, 3, 1);
+    write(&mut hda, 0x4c, 2, 1);
+
+    // Windows leaves MSI disabled and waits for the AFG power-state reply
+    // through INTx. A valid RIRB entry without an interrupt fails device start.
+    mem.write_slice(&0x001f_0500u32.to_le_bytes(), GuestAddress(0x1004))
+        .unwrap();
+    write(&mut hda, 0x48, 1, 2);
+    let mut response = [0xff; 8];
+    mem.read_slice(&mut response, GuestAddress(0x1808)).unwrap();
+    assert_eq!(response, [0; 8]);
+    assert_eq!(read(&mut hda, 0x58, 2), 1);
+    assert!(msi.0.lock().is_empty());
+    assert!(
+        *irq.0.lock(),
+        "solicited response must assert INTx without MSI"
+    );
+    assert_ne!(hda.config_read(1) & (8 << 16), 0);
+
+    hda.config_write(1, 1, &[4]);
+    assert!(!*irq.0.lock(), "PCI Interrupt Disable masks the line");
+    assert_ne!(hda.config_read(1) & (8 << 16), 0);
+    hda.config_write(1, 1, &[0]);
+    assert!(*irq.0.lock());
+    write(&mut hda, 0x20, 0, 4);
+    assert!(!*irq.0.lock());
+    write(&mut hda, 0x20, 0xc000_0000, 4);
+    assert!(*irq.0.lock());
+
+    hda.config_write(0x60 / 4, 2, &[0x81]);
+    assert!(!*irq.0.lock(), "MSI and INTx cannot both deliver");
+    assert_eq!(msi.0.lock().len(), 1);
+    hda.config_write(0x60 / 4, 2, &[0x80]);
+    assert!(*irq.0.lock());
+    let pending = hda.save_state().unwrap();
+    write(&mut hda, 0x5d, 1, 1);
+    assert!(!*irq.0.lock(), "RIRBSTS acknowledgement lowers INTx");
+    assert_eq!(hda.config_read(1) & (8 << 16), 0);
+    hda.restore_state(&pending).unwrap();
+    assert!(*irq.0.lock(), "restore recomputes the pending line");
+    write(&mut hda, 8, 0, 4);
+    assert!(!*irq.0.lock(), "controller reset lowers INTx");
+}
+
+#[test]
+fn playback_completions_raise_and_clear_legacy_intx() {
+    let (mut hda, mem, msi) = fixture(Arc::new(RecordingHost::new()), false);
+    let irq = Arc::new(LegacyInterrupt::default());
+    hda.intx = Some(irq.clone());
+    write(&mut hda, 0x20, 0x8000_0002, 4);
+    setup_stream(&mut hda, &mem, false, 192);
+    interval(&mut hda);
+    assert!(*irq.0.lock(), "playback completion must assert INTx");
+    assert!(msi.0.lock().is_empty());
+    write(&mut hda, 0xa3, 4, 1);
+    assert!(!*irq.0.lock());
+}
+
 /// Linux opens playback with `bdl_pos_adj`: the first BDL entry is a
 /// one-frame nibble that raises an early completion, so the *second*
 /// entry's buffer address is not 128-byte aligned. The controller must
@@ -310,6 +425,7 @@ fn bdl_duplex_pcm_periods_positions_pause_and_snapshot() {
         mem.clone(),
         Arc::new(host.clone()),
         Arc::new(Interrupts::default()),
+        None,
         true,
     );
     restored.restore_state(&state).unwrap();

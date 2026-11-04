@@ -16,7 +16,8 @@ use vm_memory::{Bytes, GuestAddress};
 
 use crate::audio::{AudioFormat, CaptureSource, HostAudio, PlaybackSink, SampleFormat};
 use crate::{
-    BarInfo, BarKind, BusDevice, DeviceError, GuestMemory, MsiMessage, MsiSink, PciDevice, Snapshot,
+    BarInfo, BarKind, BusDevice, DeviceError, GuestMemory, IrqLine, MsiMessage, MsiSink, PciDevice,
+    Snapshot,
 };
 use codec::Codec;
 
@@ -40,6 +41,7 @@ pub struct Hda {
     memory: GuestMemory,
     host: Arc<dyn HostAudio>,
     msi: Arc<dyn MsiSink>,
+    intx: Option<Arc<dyn IrqLine>>,
     microphone: bool,
     config: [u8; 256],
     regs: [u8; REGS],
@@ -60,6 +62,7 @@ impl Hda {
         memory: GuestMemory,
         host: Arc<dyn HostAudio>,
         msi: Arc<dyn MsiSink>,
+        intx: Option<Arc<dyn IrqLine>>,
         microphone: bool,
     ) -> Self {
         let mut device = Self {
@@ -67,6 +70,7 @@ impl Hda {
             memory,
             host,
             msi,
+            intx,
             microphone,
             config: [0; 256],
             regs: [0; REGS],
@@ -93,6 +97,9 @@ impl Hda {
     }
 
     fn reset_controller(&mut self) {
+        if let Some(irq) = &self.intx {
+            irq.set_level(false);
+        }
         self.regs.fill(0);
         self.put16(0, 0x1101); // one input, one output, 64-bit DMA
         self.regs[2] = 0;
@@ -114,7 +121,7 @@ impl Hda {
     fn reset_stream(&mut self, index: usize) {
         let base = STREAM_BASE + index * 32;
         self.regs[base..base + 32].fill(0);
-        self.put16(base + 0xe, 1023);
+        self.put16(base + 0x10, 1023);
         self.streams[index] = Stream::default();
         if index == 0 {
             self.capture = None;
@@ -511,6 +518,14 @@ impl Hda {
         let enabled = self.get32(0x20);
         let pending = enabled & (1 << 31) != 0 && status & enabled & 0x4000_0003 != 0;
         let msi_enabled = self.config[0x62] & 1 != 0;
+        if let Some(irq) = &self.intx {
+            irq.set_level(pending && !msi_enabled && self.config[5] & 4 == 0);
+        }
+        if pending && !msi_enabled {
+            self.config[6] |= 8;
+        } else {
+            self.config[6] &= !8;
+        }
         if pending && msi_enabled && !self.interrupt_asserted {
             let address = u64::from_le_bytes(self.config[0x64..0x6c].try_into().unwrap());
             let data = u16::from_le_bytes(self.config[0x6c..0x6e].try_into().unwrap()) as u32;
@@ -525,6 +540,10 @@ impl BusDevice for Hda {
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = offset
                 .checked_add(i as u64)
+                .map(|address| match address {
+                    0x2030..=0x2033 | 0x2084..=0x2087 | 0x20a4..=0x20a7 => address - 0x2000,
+                    _ => address,
+                })
                 .and_then(|n| self.regs.get(n as usize))
                 .copied()
                 .unwrap_or(0);
@@ -590,7 +609,7 @@ impl BusDevice for Hda {
                         0 => self.regs[address] = byte & 0x1f,
                         2 => self.regs[address] = byte & 0xf0,
                         3 => self.regs[address] &= !(byte & 0x1c),
-                        8..=0xc | 0x10 | 0x12..=0x13 | 0x18..=0x1f => self.regs[address] = byte,
+                        8..=0xc | 0x12..=0x13 | 0x18..=0x1f => self.regs[address] = byte,
                         _ => {}
                     }
                 }
@@ -649,6 +668,7 @@ impl PciDevice for Hda {
         u32::from_le_bytes(self.config[reg * 4..reg * 4 + 4].try_into().unwrap())
     }
     fn config_write(&mut self, reg: usize, offset: u64, data: &[u8]) {
+        log::trace!("HDA PCI write reg={reg:x} offset={offset:x} data={data:02x?}");
         let Some(start) = (reg as u64)
             .checked_mul(4)
             .and_then(|n| n.checked_add(offset))
