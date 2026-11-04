@@ -97,8 +97,11 @@ fn ubuntu_virgl_scanout_and_cpu_copy() {
     )
     .unwrap();
     let log = File::create(path.join("hv.log")).unwrap();
+    let binary = std::env::var_os("VMLAB_HV_TEST_HV_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_vmlab-hv").into());
     let mut child = ManagedChild::spawn(
-        Command::new(env!("CARGO_BIN_EXE_vmlab-hv"))
+        Command::new(binary)
             .args([
                 "--machine",
                 path.join("machine.json").to_str().unwrap(),

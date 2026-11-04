@@ -835,8 +835,20 @@ fn exercise(mode: &str) {
         &[file.as_raw_fd()],
     )
     .unwrap();
-    wait(host_visible);
-    wait(|| pixel(500, 300)[..3] == [0, 0, 0]);
+    // A configure alone must leave the last good pixels and title intact.
+    send(&writer, &Message::LedState { mask: 0 }, &[]).unwrap();
+    wait(|| {
+        let title = connection
+            .get_property(false, window, title_atom, AtomEnum::ANY, 0, 1024)
+            .unwrap()
+            .reply()
+            .unwrap()
+            .value;
+        let title = String::from_utf8(title).unwrap();
+        title.ends_with(" - ") && !title.contains("waiting for display")
+    });
+    assert_eq!(&pixel(500, 300)[..3], &[0, 0, 255]);
+    assert!(!host_visible());
     send(
         &writer,
         &Message::FrameReady {
@@ -1011,7 +1023,7 @@ fn exercise(mode: &str) {
             .value;
         String::from_utf8(title)
             .unwrap()
-            .contains("waiting for display")
+            .contains("click to grab keyboard")
     });
     wait(|| pixel(500, 300)[..3] == [0, 0, 0]);
     wait(host_visible);

@@ -56,9 +56,14 @@ frames and dmabuf_ok. CpuCopy requires cpu_copy and a configured surface.
 `stable_buffers` is an additive v1 capability. It changes no message layout.
 With frames and dmabuf_ok, it lets the server reuse a dma-buf configure across
 frames. Cache imports by `(surface_id, buffer)`, not by sequence number.
-The configure announces all buffers in a small fallback pool, or one buffer
-for a directly exported guest resource. A resource, geometry, format or pool
-change replaces the configure. A new frame alone does not.
+The configure announces the buffers in a fallback pool or the compatible
+direct allocations encountered on this connection. A new allocation extends
+the announced set and replaces the configure. Known allocations keep their
+announced indices even when the source changes their order or selects a subset.
+Geometry, format, modifier and transport changes also replace the configure.
+A guest resource flip or source generation change alone does not.
+The set holds at most 16 allocations. Adding beyond that limit replaces it
+with the current source's buffer set.
 
 Every FrameReady must be released, including frames without damage. Wait for
 the acquire fence, finish all GPU sampling, then send Release. Release is the
@@ -84,7 +89,8 @@ prevent truncation and growth. Fds support read-only client mmap.
 
 A configure supersedes the previous configure. Surface IDs increase within
 one connection and restart on reconnect. Old held frames remain valid until
-Release. Old buffers are never modified after a replacement configure.
+Release. Stable configures can retain allocations from previous configures.
+The producer cannot modify an allocation while any held frame leases it.
 Shared memory uses XRGB8888 or ARGB8888. Stable dma-bufs also support
 XBGR8888 (`XB24`) and ABGR8888 (`AB24`), with one plane at offset zero.
 Multi-plane formats and nonzero plane offsets are not represented in v1.
@@ -206,6 +212,10 @@ or `Pixels::Leased` reusable descriptors.
 Generation changes on reset or same-sized scanout replacement. Geometry
 changes also force configure. The source increments generation before publishing
 a reset frame, even when the reset does not change dimensions.
+Stable dma-buf clients identify surfaces by layout and allocation Arcs instead
+of generation. A fallback pool can serve several guest scanout resources.
+Its buffers retain their identities across those resource flips. A reset that
+publishes a placeholder or replaces the allocation set still reconfigures.
 
 `FrameSource::readback(&self, frame: &Frame) -> io::Result<Vec<u8>>` supplies
 linear pixels for dma-buf consumers. The backend waits on acquire and performs
@@ -339,3 +349,8 @@ imports, guest flushes, concurrent CPU frames, release backpressure and latency.
 selects a resource that requires the pooled fallback. The default probe uses
 an explicit-layout scanout. Results and hardware limitations are in
 `docs/display-export.md`.
+The same S1 test alternates two scanout resources. A pooled flip chain keeps
+one configure. A direct flip chain adds its second allocation once, then
+keeps the combined configure. `VMLAB_HV_TEST_FLIP_SECONDS=30` extends this
+measurement to at least 30 seconds. `VMLAB_HV_TEST_HV_BINARY` selects a
+baseline executable for comparison.

@@ -172,6 +172,18 @@ fn server_frames_keep_buffers_and_upload_only_damage_across_rotating_slots() {
     receive(&server).unwrap();
     configure(&server, 2, &files[..1], SurfaceKind::Shm);
     process(&mut core);
+    assert_eq!(core.current.as_ref().unwrap().seq, third.seq);
+    assert_eq!(core.surfaces[&1].pixels[0], 7);
+    assert_eq!(core.surfaces.len(), 2);
+    // Superseded pending configures cannot accumulate while the old frame is shown.
+    configure(&server, 3, &files[..1], SurfaceKind::Shm);
+    process(&mut core);
+    assert_eq!(core.surfaces.len(), 2);
+    assert!(!core.surfaces.contains_key(&2));
+    frame(&server, 3, 0, 4, vec![]);
+    let replacement = process(&mut core).unwrap();
+    assert_eq!(replacement.surface, 3);
+    assert_eq!(core.surfaces[&3].pixels[0], 7);
     assert_eq!(core.surfaces.len(), 1);
     assert!(!core.surfaces.contains_key(&1));
 }
@@ -197,6 +209,39 @@ fn dmabuf_import_identity_is_surface_and_slot_not_sequence() {
             }
         );
     }
+}
+
+#[test]
+fn dma_configure_keeps_current_surface_until_the_first_replacement_frame() {
+    let (mut core, server) = pair(false);
+    configure(&server, 1, &[buffer(7)], SurfaceKind::Dmabuf);
+    process(&mut core);
+    frame(&server, 1, 0, 1, vec![]);
+    let first = process(&mut core).unwrap();
+    core.release(&first).unwrap();
+    receive(&server).unwrap();
+    let fd = core.surfaces[&1].buffers[0].as_raw_fd();
+    configure(&server, 2, &[buffer(99)], SurfaceKind::Dmabuf);
+    assert!(process(&mut core).is_none());
+    assert_eq!(core.current.as_ref().unwrap().surface, 1);
+    assert_eq!(core.surfaces[&1].buffers[0].as_raw_fd(), fd);
+    assert!(!core.host_cursor_visible(true));
+    frame(&server, 1, 0, 2, vec![]);
+    assert!(core.receive(core.client.receive().unwrap()).is_err());
+    frame(&server, 2, 0, 3, vec![]);
+    let next = process(&mut core).unwrap();
+    assert_eq!(next.surface, 2);
+    assert_eq!(core.surfaces.len(), 1);
+    assert!(!core.surfaces.contains_key(&1));
+    core.release(&next).unwrap();
+    assert_eq!(
+        receive(&server).unwrap().message,
+        Message::Release {
+            surface_id: 2,
+            buffer: 0,
+            seq: 3
+        }
+    );
 }
 
 #[test]
@@ -676,8 +721,8 @@ fn cursor_fallback_shape_hotspot_move_only_and_visibility() {
     configure(&server, 2, &[buffer(7)], SurfaceKind::Shm);
     process(&mut core);
     assert!(
-        core.host_cursor_visible(true),
-        "replacement configure has no frame yet"
+        !core.host_cursor_visible(true),
+        "the previous frame stays visible until the replacement arrives"
     );
     assert!(!core.use_fallback_cursor());
 }
