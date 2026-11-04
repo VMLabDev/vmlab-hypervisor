@@ -1,3 +1,7 @@
+> **This repository is frozen.** As of 2026-11-04 the hypervisor lives in the vmlab monorepo
+> under [`hv/`](https://github.com/VMLabDev/vmlab/tree/main/hv), with its full history.
+> Open new issues and pull requests there. This repository will be archived.
+
 # vmlab-hypervisor
 
 `vmlab-hv` is a clean-room, MIT-licensed hypervisor written in Rust. vmlab
