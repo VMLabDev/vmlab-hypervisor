@@ -1255,11 +1255,13 @@ pub fn build(
         let host = crate::audio::host(section);
         match section.device {
             vmlab_hv_proto::machine::AudioDevice::Hda => {
+                let interrupt = wiring(section.pci, 1, false)?;
                 let hda = Arc::new(Mutex::new(vmlab_hv_devices::hda::Hda::new(
                     "hda",
                     ram.mem.clone(),
                     host,
-                    msi.clone(),
+                    interrupt.msi,
+                    interrupt.intx,
                     section.microphone,
                 )));
                 place(hda.clone(), section.pci)?;

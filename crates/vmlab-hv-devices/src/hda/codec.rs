@@ -29,6 +29,12 @@ impl Default for Codec {
 
 impl Codec {
     pub fn verb(&mut self, command: u32) -> Option<u32> {
+        let response = self.execute_verb(command);
+        log::trace!("HDA verb {command:08x} -> {response:08x?}");
+        response
+    }
+
+    fn execute_verb(&mut self, command: u32) -> Option<u32> {
         if command >> 28 != 0 || command & (1 << 27) != 0 {
             return None;
         }

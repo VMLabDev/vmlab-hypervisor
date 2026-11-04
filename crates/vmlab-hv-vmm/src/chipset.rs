@@ -907,6 +907,7 @@ mod tests {
             memory,
             Arc::new(SilentHost),
             Arc::new(NoMsi),
+            None,
             false,
         )));
         use vmlab_hv_devices::BusDevice;
