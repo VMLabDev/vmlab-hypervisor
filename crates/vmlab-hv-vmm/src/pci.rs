@@ -13,9 +13,8 @@
 //! root, never forwarded to the device; everything else is forwarded.
 //!
 //! PCI BAR traffic does not go through [`crate::bus`]; the VMM dispatches
-//! accesses inside the BAR windows with [`PciRoot::dispatch_mmio`] and
-//! [`PciRoot::dispatch_io`] directly, so one lock (the root) covers config
-//! and BAR state.
+//! accesses inside the BAR windows directly. MMIO resolution holds the root
+//! lock, but device service holds only the selected function's lock.
 
 use parking_lot::{Mutex, MutexGuard};
 use std::sync::Arc;
@@ -34,12 +33,13 @@ const BAR_REG_END: usize = 10; // exclusive
 /// One registered PCI function.
 struct Function {
     dev: Arc<Mutex<dyn PciDevice>>,
+    command: u16,
     bars: Vec<BarState>,
     rom: Option<OptionRom>,
 }
 
 struct OptionRom {
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     value: u32,
     sizing: bool,
 }
@@ -163,7 +163,100 @@ struct CachedMmioBar {
     offset: u64,
 }
 
+enum MmioTarget {
+    Bar {
+        dev: Arc<Mutex<dyn PciDevice>>,
+        slot: usize,
+        bar: u8,
+        offset: u64,
+    },
+    Rom {
+        bytes: Arc<[u8]>,
+        offset: usize,
+    },
+}
+
+impl MmioTarget {
+    fn location(&self) -> Option<(usize, u8, u64)> {
+        if let Self::Bar {
+            slot, bar, offset, ..
+        } = self
+        {
+            Some((*slot, *bar, *offset))
+        } else {
+            None
+        }
+    }
+    fn read(self, data: &mut [u8]) {
+        match self {
+            Self::Bar {
+                dev, bar, offset, ..
+            } => dev.lock().bar_read(bar, offset, data),
+            Self::Rom { bytes, offset } => {
+                for (i, byte) in data.iter_mut().enumerate() {
+                    *byte = bytes.get(offset + i).copied().unwrap_or(0xff);
+                }
+            }
+        }
+    }
+
+    fn write(self, data: &[u8]) {
+        if let Self::Bar {
+            dev, bar, offset, ..
+        } = self
+        {
+            dev.lock().bar_write(bar, offset, data);
+        }
+    }
+}
+
 impl PciRoot {
+    pub(crate) fn read_mmio(root: &Mutex<Self>, addr: u64, data: &mut [u8]) -> bool {
+        let start = log::log_enabled!(target: "vmlab_hv_vmm::pci::latency", log::Level::Debug)
+            .then(std::time::Instant::now);
+        let target = root.lock().decode_mmio(addr);
+        let resolved = start.map(|_| std::time::Instant::now());
+        if let Some(target) = target {
+            let location = target.location();
+            target.read(data);
+            Self::log_mmio_time(start, resolved, addr, false, location);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn write_mmio(root: &Mutex<Self>, addr: u64, data: &[u8]) -> bool {
+        let start = log::log_enabled!(target: "vmlab_hv_vmm::pci::latency", log::Level::Debug)
+            .then(std::time::Instant::now);
+        let target = root.lock().decode_mmio(addr);
+        let resolved = start.map(|_| std::time::Instant::now());
+        if let Some(target) = target {
+            let location = target.location();
+            target.write(data);
+            Self::log_mmio_time(start, resolved, addr, true, location);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn log_mmio_time(
+        start: Option<std::time::Instant>,
+        resolved: Option<std::time::Instant>,
+        addr: u64,
+        write: bool,
+        location: Option<(usize, u8, u64)>,
+    ) {
+        if let (Some(start), Some(resolved)) = (start, resolved) {
+            let service = resolved.elapsed();
+            let decode = resolved.duration_since(start);
+            if service + decode > std::time::Duration::from_millis(1) {
+                log::debug!(target: "vmlab_hv_vmm::pci::latency", "PCI MMIO addr={addr:x} write={write} location={location:?} decode_ns={} service_ns={}", decode.as_nanos(), service.as_nanos());
+            }
+        }
+    }
+
     pub(crate) fn set_mmio64_window(&mut self, base: u64, size: u64) {
         self.mmio64_end = base + size;
     }
@@ -241,7 +334,7 @@ impl PciRoot {
                 let mut bytes = vec![0xff; info.size as usize];
                 dev.lock().bar_read(6, 0, &mut bytes);
                 rom = Some(OptionRom {
-                    bytes,
+                    bytes: bytes.into(),
                     value: 0,
                     sizing: false,
                 });
@@ -280,7 +373,13 @@ impl PciRoot {
                 sizing: false,
             });
         }
-        self.slots[index] = Some(Function { dev, bars, rom });
+        let command = dev.lock().config_read(1) as u16;
+        self.slots[index] = Some(Function {
+            dev,
+            command,
+            bars,
+            rom,
+        });
         self.mmio_cache.fill(None);
         Ok(())
     }
@@ -308,7 +407,7 @@ impl PciRoot {
         let mut bytes = vec![0xff; image.len().max(2048).next_power_of_two()];
         bytes[..image.len()].copy_from_slice(image);
         func.rom = Some(OptionRom {
-            bytes,
+            bytes: bytes.into(),
             value: 0,
             sizing: false,
         });
@@ -340,7 +439,14 @@ impl PciRoot {
             return bar_high_read(bar);
         }
         let mut dev = func.dev.lock();
+        let start = log::log_enabled!(target: "vmlab_hv_vmm::pci::latency", log::Level::Debug)
+            .then(std::time::Instant::now);
         let mut value = dev.config_read(reg);
+        if let Some(start) =
+            start.filter(|start| start.elapsed() > std::time::Duration::from_millis(1))
+        {
+            log::debug!(target: "vmlab_hv_vmm::pci::latency", "PCI config read slot={slot} function={function} reg={reg} ns={}", start.elapsed().as_nanos());
+        }
         if reg == 3
             && function == 0
             && self.slots[slot as usize * 8 + 1..slot as usize * 8 + 8]
@@ -354,6 +460,8 @@ impl PciRoot {
 
     /// Write config bytes at `offset` (0..256) of `(bus, slot, function)`.
     pub fn config_write(&mut self, bus: u8, slot: u8, function: u8, offset: usize, data: &[u8]) {
+        let start = log::log_enabled!(target: "vmlab_hv_vmm::pci::latency", log::Level::Debug)
+            .then(std::time::Instant::now);
         self.mmio_cache.fill(None);
         if bus != 0
             || function >= 8
@@ -409,11 +517,17 @@ impl PciRoot {
             data = &data[n..];
         }
         let mut dev = func.dev.lock();
+        func.command = dev.config_read(1) as u16;
         for bar in &func.bars {
             dev.set_bar_address(
                 bar.info.index,
                 (bar.addr != 0 && !bar.sizing).then_some(bar.addr),
             );
+        }
+        if let Some(start) =
+            start.filter(|start| start.elapsed() > std::time::Duration::from_millis(1))
+        {
+            log::debug!(target: "vmlab_hv_vmm::pci::latency", "PCI config write slot={slot} function={function} offset={offset} ns={}", start.elapsed().as_nanos());
         }
     }
 
@@ -466,29 +580,8 @@ impl PciRoot {
     /// Dispatch an MMIO read inside a BAR window. Returns whether a BAR
     /// covered it.
     pub fn dispatch_mmio_read(&mut self, addr: u64, data: &mut [u8]) -> bool {
-        if let Some((mut dev, bar, offset)) = self.cached_mmio_bar(addr) {
-            dev.bar_read(bar, offset, data);
-            return true;
-        }
-        if let Some((rom, offset)) = self.find_rom(addr) {
-            for (i, byte) in data.iter_mut().enumerate() {
-                *byte = rom.get(offset + i).copied().unwrap_or(0xff);
-            }
-            return true;
-        }
-        let decoded = self
-            .find_bar(addr, false)
-            .map(|(mut dev, bar, offset, slot)| {
-                dev.bar_read(bar, offset, data);
-                CachedMmioBar {
-                    address: addr,
-                    slot,
-                    bar,
-                    offset,
-                }
-            });
-        if let Some(decoded) = decoded {
-            self.mmio_cache[(addr >> 2) as usize & 3] = Some(decoded);
+        if let Some(target) = self.decode_mmio(addr) {
+            target.read(data);
             true
         } else {
             false
@@ -497,52 +590,67 @@ impl PciRoot {
 
     /// Dispatch an MMIO write inside a BAR window.
     pub fn dispatch_mmio_write(&mut self, addr: u64, data: &[u8]) -> bool {
-        if let Some((mut dev, bar, offset)) = self.cached_mmio_bar(addr) {
-            dev.bar_write(bar, offset, data);
-            return true;
-        }
-        if self.find_rom(addr).is_some() {
-            return true;
-        }
-        let decoded = self
-            .find_bar(addr, false)
-            .map(|(mut dev, bar, offset, slot)| {
-                dev.bar_write(bar, offset, data);
-                CachedMmioBar {
-                    address: addr,
-                    slot,
-                    bar,
-                    offset,
-                }
-            });
-        if let Some(decoded) = decoded {
-            self.mmio_cache[(addr >> 2) as usize & 3] = Some(decoded);
+        if let Some(target) = self.decode_mmio(addr) {
+            target.write(data);
             true
         } else {
             false
         }
     }
 
-    fn cached_mmio_bar(&self, addr: u64) -> Option<(MutexGuard<'_, dyn PciDevice>, u8, u64)> {
-        let cached = self.mmio_cache[(addr >> 2) as usize & 3]?;
-        if cached.address != addr {
-            return None;
+    fn decode_mmio(&mut self, addr: u64) -> Option<MmioTarget> {
+        let cache_index = (addr >> 2) as usize & 3;
+        if let Some(cached) = self.mmio_cache[cache_index].filter(|cached| cached.address == addr) {
+            let function = self.slots[cached.slot].as_ref()?;
+            return Some(MmioTarget::Bar {
+                dev: function.dev.clone(),
+                slot: cached.slot,
+                bar: cached.bar,
+                offset: cached.offset,
+            });
         }
-        let function = self.slots[cached.slot].as_ref()?;
-        Some((function.dev.lock(), cached.bar, cached.offset))
-    }
-
-    fn find_rom(&self, addr: u64) -> Option<(&[u8], usize)> {
         for func in self.slots.iter().flatten() {
             let Some(rom) = &func.rom else { continue };
             let base = (rom.value & !0x7ff) as u64;
             if rom.value & 1 != 0
                 && !rom.sizing
-                && func.dev.lock().config_read(1) & 2 != 0
+                && func.command & 2 != 0
                 && addr >= base
                 && addr - base < rom.bytes.len() as u64
             {
-                return Some((&rom.bytes, (addr - base) as usize));
+                return Some(MmioTarget::Rom {
+                    bytes: rom.bytes.clone(),
+                    offset: (addr - base) as usize,
+                });
+            }
+        }
+        for (slot, function) in self.slots.iter().enumerate() {
+            let Some(func) = function.as_ref() else {
+                continue;
+            };
+            if self.firmware && func.command & 2 == 0 {
+                continue;
+            }
+            if let Some(bar) = func.bars.iter().find(|bar| {
+                !matches!(bar.info.kind, BarKind::Io)
+                    && !bar.sizing
+                    && bar.addr != 0
+                    && bar.addr <= addr
+                    && addr - bar.addr < bar.info.size
+            }) {
+                let offset = addr - bar.addr;
+                self.mmio_cache[cache_index] = Some(CachedMmioBar {
+                    address: addr,
+                    slot,
+                    bar: bar.info.index,
+                    offset,
+                });
+                return Some(MmioTarget::Bar {
+                    dev: func.dev.clone(),
+                    slot,
+                    bar: bar.info.index,
+                    offset,
+                });
             }
         }
         None
@@ -572,7 +680,7 @@ impl PciRoot {
             let Some(func) = function.as_mut() else {
                 continue;
             };
-            if self.firmware && func.dev.lock().config_read(1) & if io { 1 } else { 2 } == 0 {
+            if self.firmware && func.command & if io { 1 } else { 2 } == 0 {
                 continue;
             }
             for bar in &func.bars {
@@ -648,6 +756,7 @@ impl PciRoot {
                 rom.value = *value as u32;
                 rom.sizing = *sizing;
             }
+            func.command = func.dev.lock().config_read(1) as u16;
         }
         Ok(())
     }
@@ -825,6 +934,7 @@ mod tests {
         config_reads: usize,
         bar_log: Mutex<Vec<Access>>,
         config_log: Mutex<Vec<(usize, u64, Vec<u8>)>>,
+        bar_gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     }
 
     impl FakePci {
@@ -835,6 +945,7 @@ mod tests {
                 config_reads: 0,
                 bar_log: Mutex::new(Vec::new()),
                 config_log: Mutex::new(Vec::new()),
+                bar_gate: None,
             }))
         }
     }
@@ -872,6 +983,10 @@ mod tests {
         }
 
         fn bar_write(&mut self, bar: u8, offset: u64, data: &[u8]) {
+            if let Some((started, release)) = self.bar_gate.take() {
+                started.send(()).unwrap();
+                release.recv().unwrap();
+            }
             self.bar_log.lock().push((bar, offset, data.to_vec(), true));
         }
     }
@@ -898,6 +1013,47 @@ mod tests {
         let mut root = PciRoot::new(0x1_0000_0000);
         root.add_device(dev.clone()).unwrap();
         (Arc::new(Mutex::new(root)), dev)
+    }
+
+    #[test]
+    fn blocked_gpu_bar_does_not_delay_another_pci_function() {
+        let gpu = FakePci::new(test_bars());
+        let audio = FakePci::new(test_bars());
+        let mut root = PciRoot::q35(1 << 32);
+        for (slot, device, address) in [(3, gpu.clone(), 0xc200_0000u32), (27, audio, 0xc300_0000)]
+        {
+            root.add_device_at(slot, 0, device).unwrap();
+            root.config_write(0, slot, 0, 16, &address.to_le_bytes());
+            root.config_write(0, slot, 0, 4, &2u16.to_le_bytes());
+        }
+        let root = Arc::new(Mutex::new(root));
+        let (started, entered) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        gpu.lock().bar_gate = Some((started, released));
+        let gpu_worker = {
+            let root = root.clone();
+            std::thread::spawn(move || assert!(PciRoot::write_mmio(&root, 0xc200_0040, &[1])))
+        };
+        entered
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let (finished, done) = std::sync::mpsc::channel();
+        let audio_worker = {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let mut bytes = [0; 4];
+                assert!(PciRoot::read_mmio(&root, 0xc300_0040, &mut bytes));
+                finished.send(bytes).unwrap();
+            })
+        };
+        let result = done.recv_timeout(std::time::Duration::from_millis(100));
+        release.send(()).unwrap();
+        gpu_worker.join().unwrap();
+        audio_worker.join().unwrap();
+        assert_eq!(
+            result.expect("GPU BAR service blocked HDA register access"),
+            [0xaa; 4]
+        );
     }
 
     #[test]

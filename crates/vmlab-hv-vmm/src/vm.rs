@@ -916,11 +916,8 @@ impl VmShared {
             crate::pci::PciEcam::new(self.pci_root.clone()).read(offset, data);
             return;
         }
-        if self.in_pci_window(addr) {
-            let mut root = self.pci_root.lock();
-            if root.dispatch_mmio_read(addr, data) {
-                return;
-            }
+        if self.in_pci_window(addr) && PciRoot::read_mmio(&self.pci_root, addr, data) {
+            return;
         }
         self.mmio_bus.lock().read(addr, data);
     }
@@ -956,20 +953,16 @@ impl VmShared {
             }
             return;
         }
-        if self.in_pci_window(addr) {
-            let mut root = self.pci_root.lock();
-            if root.dispatch_mmio_write(addr, data) {
-                let error = if self.vfio.lock().is_empty() {
-                    None
-                } else {
-                    root.take_error()
-                };
-                drop(root);
-                if let Some(error) = error {
-                    self.request_exit(ExitReason::Error(error));
-                }
-                return;
+        if self.in_pci_window(addr) && PciRoot::write_mmio(&self.pci_root, addr, data) {
+            let error = if self.vfio.lock().is_empty() {
+                None
+            } else {
+                self.pci_root.lock().take_error()
+            };
+            if let Some(error) = error {
+                self.request_exit(ExitReason::Error(error));
             }
+            return;
         }
         self.mmio_bus.lock().write(addr, data);
     }
