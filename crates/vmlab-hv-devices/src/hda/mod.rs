@@ -1,8 +1,8 @@
 //! Intel HDA 1.0a controller (chapters 3-4) and duplex codec (chapter 7).
 //!
 //! The machine timer calls [`Hda::advance`] with unpaused virtual time.
-//! DMA is bounded to 256-frame periods; playback position follows bytes no
-//! longer buffered by the host. No host audio calls block the vCPU.
+//! DMA is bounded to 256-frame periods. Playback position follows samples
+//! handed to the codec's host backend. No host audio calls block the vCPU.
 
 mod codec;
 #[cfg(test)]
@@ -239,11 +239,25 @@ impl Hda {
             self.streams[index].fraction = frames
                 .min(u128::from(MAX_PENDING_FRAMES) * 1_000_000_000 + frames % 1_000_000_000)
                 as u64;
+            log::trace!(
+                "HDA tick stream={index} elapsed_ns={} submitted={} consumed={} deferred_frames={} queued={} latency={} descriptor={} offset={}",
+                elapsed.as_nanos(),
+                self.streams[index].submitted,
+                self.streams[index].consumed,
+                self.streams[index].fraction / 1_000_000_000,
+                self.playback.as_ref().map_or(0, |sink| sink.queued_bytes()),
+                self.playback
+                    .as_ref()
+                    .map_or(0, |sink| sink.latency_bytes()),
+                self.streams[index].descriptor,
+                self.streams[index].offset,
+            );
             let mut bytes =
                 (self.streams[index].fraction / 1_000_000_000) as usize * format.frame_bytes();
             while bytes != 0 {
                 let latency = self.playback.as_ref().map_or(0, |sink| sink.queued_bytes());
                 if index == 1 && latency >= PLAYBACK_QUEUE_FRAMES * format.frame_bytes() {
+                    log::trace!("HDA defer queued={latency} remaining_bytes={bytes}");
                     break;
                 }
                 let mut count = bytes.min(PERIOD_FRAMES * format.frame_bytes());
@@ -352,6 +366,12 @@ impl Hda {
             if stream.offset == length {
                 if flags & 1 != 0 {
                     stream.completions.push_back(stream.submitted);
+                    log::debug!(
+                        "HDA IOC DMA stream={index} descriptor={} submitted={} consumed={}",
+                        stream.descriptor,
+                        stream.submitted,
+                        stream.consumed,
+                    );
                 }
                 stream.offset = 0;
                 stream.descriptor = if stream.descriptor == lvi {
@@ -378,23 +398,22 @@ impl Hda {
     }
 
     fn update_position(&mut self, index: usize) {
-        let latency = if index == 1 {
-            self.playback.as_ref().map_or(0, |s| s.latency_bytes())
-        } else {
-            0
-        };
         let stream = &mut self.streams[index];
-        stream.consumed = stream
-            .consumed
-            .max(stream.submitted.saturating_sub(latency as u64));
+        // Submission passes PCM over the emulated link to the codec's
+        // backend. All host buffering is downstream of that link. Delaying
+        // LPIB by it makes the driver recycle periods after DMA revisits them.
+        stream.consumed = stream.submitted;
         let mut completed = false;
         while stream
             .completions
             .front()
-            .is_some_and(|end| *end <= stream.consumed)
+            // HDA 1.0a, SDnSTS.BCIS: playback completes when the last
+            // byte has been fetched into the FIFO, not when it is audible.
+            .is_some_and(|end| *end <= stream.submitted)
         {
             stream.completions.pop_front();
             completed = true;
+            log::debug!("HDA IOC retire stream={index} consumed={}", stream.consumed);
         }
         let consumed = stream.consumed;
         let base = STREAM_BASE + index * 32;

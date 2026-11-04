@@ -540,7 +540,7 @@ impl HostAudio for BufferedHost {
 }
 
 #[test]
-fn position_and_completion_interrupt_follow_host_consumption_not_submission() {
+fn link_position_and_ioc_do_not_wait_for_backend_playback() {
     let latency = Arc::new(AtomicUsize::new(0));
     let periods = Arc::new(Mutex::new(vec![]));
     let host = BufferedHost {
@@ -554,18 +554,18 @@ fn position_and_completion_interrupt_follow_host_consumption_not_submission() {
     hda.advance(Duration::from_millis(30)).unwrap();
     assert_eq!(latency.load(Ordering::SeqCst), 2048);
     assert_eq!(read(&mut hda, 0xa4, 4), 0);
-    assert_eq!(read(&mut hda, 0xa3, 1) & 4, 0);
-    assert!(interrupts.0.lock().is_empty());
+    assert_eq!(read(&mut hda, 0xa3, 1) & 4, 4);
+    assert_eq!(interrupts.0.lock().len(), 1);
     hda.advance(Duration::from_millis(10)).unwrap();
     assert_eq!(periods.lock().len(), 2);
     latency.store(1536, Ordering::SeqCst);
     hda.update_position(1);
     hda.update_irq();
-    assert_eq!(read(&mut hda, 0xa4, 4), 512);
+    assert_eq!(read(&mut hda, 0xa4, 4), 0);
     latency.store(1900, Ordering::SeqCst);
     hda.update_position(1);
     hda.update_irq();
-    assert_eq!(read(&mut hda, 0xa4, 4), 512);
+    assert_eq!(read(&mut hda, 0xa4, 4), 0);
     latency.store(0, Ordering::SeqCst);
     hda.update_position(1);
     hda.update_irq();
@@ -684,7 +684,22 @@ impl PlaybackSink for GraphSink {
 }
 
 #[test]
-fn fixed_downstream_graph_latency_does_not_stall_submission() {
+fn playback_ioc_reports_dma_completion_before_host_consumption() {
+    let queued = Arc::new(AtomicUsize::new(0));
+    let (mut hda, mem, _) = fixture(Arc::new(GraphHost(queued.clone())), false);
+    setup_stream(&mut hda, &mem, false, 480 * 4);
+    hda.advance(Duration::from_millis(10)).unwrap();
+    assert_eq!(hda.streams[1].submitted, 480 * 4);
+    assert_eq!(queued.load(Ordering::SeqCst), 480 * 4);
+    assert_eq!(
+        read(&mut hda, 0xa3, 1) & 4,
+        4,
+        "IOC must release the guest buffer when DMA has fetched it, not when the host plays it"
+    );
+}
+
+#[test]
+fn downstream_graph_latency_does_not_delay_link_position() {
     let queued = Arc::new(AtomicUsize::new(0));
     let (mut hda, mem, _) = fixture(Arc::new(GraphHost(queued.clone())), false);
     setup_stream(&mut hda, &mem, false, 8192);
@@ -693,9 +708,73 @@ fn fixed_downstream_graph_latency_does_not_stall_submission() {
         assert_eq!(queued.swap(0, Ordering::SeqCst), 192);
     }
     hda.advance(Duration::ZERO).unwrap();
-    assert_eq!(read(&mut hda, 0xa4, 4), 12 * 192 - 2048);
+    assert_eq!(read(&mut hda, 0xa4, 4), 12 * 192);
     let snapshot = hda.save_state().unwrap();
     hda.restore_state(&snapshot).unwrap();
+}
+
+#[test]
+fn ten_millisecond_guest_refills_survive_jitter_and_256_frame_host_pulls() {
+    const PERIOD: usize = 480 * 4;
+    let latency = Arc::new(AtomicUsize::new(0));
+    let periods = Arc::new(Mutex::new(vec![]));
+    let host = BufferedHost {
+        latency: latency.clone(),
+        periods: periods.clone(),
+    };
+    let (mut hda, mem, _) = fixture(Arc::new(host), false);
+    setup_stream(&mut hda, &mem, false, (2 * PERIOD) as u32);
+    write(&mut hda, 0xa0, 0, 1);
+    for index in 0..2u64 {
+        let mut descriptor = [0; 16];
+        descriptor[..8].copy_from_slice(&(0x4000 + index * PERIOD as u64).to_le_bytes());
+        descriptor[8..12].copy_from_slice(&(PERIOD as u32).to_le_bytes());
+        descriptor[12..].copy_from_slice(&1u32.to_le_bytes());
+        mem.write_slice(&descriptor, GuestAddress(0x2000 + index * 16))
+            .unwrap();
+    }
+    write(&mut hda, 0xac, 1, 2);
+    let source: Vec<_> = (0..48000 * 30 + 960)
+        .flat_map(|i| samples(i as i16, !(i as i16), 1))
+        .collect();
+    mem.write_slice(&source[..2 * PERIOD], GuestAddress(0x4000))
+        .unwrap();
+    write(&mut hda, 0xa0, 0x1e, 1);
+    let mut completed = 0;
+    let mut elapsed = 0;
+    let mut host_due = 0;
+    let mut refills = VecDeque::new();
+    for _ in 0..7500 {
+        for micros in [100, 300, 2100, 1500] {
+            elapsed += micros;
+            hda.advance(Duration::from_micros(micros)).unwrap();
+            if read(&mut hda, 0xa3, 1) & 4 != 0 {
+                let position = read(&mut hda, 0xa4, 4) as usize;
+                let buffer = (position / PERIOD + 1) % 2;
+                refills.push_back((elapsed + 2000, buffer, completed + 2));
+                completed += 1;
+                write(&mut hda, 0xa3, 4, 1);
+            }
+            while refills.front().is_some_and(|(due, _, _)| *due <= elapsed) {
+                let (_, buffer, period) = refills.pop_front().unwrap();
+                mem.write_slice(
+                    &source[period * PERIOD..(period + 1) * PERIOD],
+                    GuestAddress(0x4000 + (buffer * PERIOD) as u64),
+                )
+                .unwrap();
+            }
+            host_due += micros * 48000;
+            if host_due >= 256 * 1_000_000 {
+                host_due -= 256 * 1_000_000;
+                let available = latency.load(Ordering::SeqCst).min(1024);
+                latency.fetch_sub(available, Ordering::SeqCst);
+                assert_eq!(available, 1024, "host short pull at {elapsed} us");
+            }
+        }
+    }
+    let delivered = periods.lock().concat();
+    assert_eq!(delivered.len(), 48000 * 30 * 4);
+    assert_eq!(delivered, source[..delivered.len()]);
 }
 
 #[test]

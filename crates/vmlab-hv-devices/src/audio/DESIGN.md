@@ -58,7 +58,8 @@ bytes. PulseAudio converts its positive stream latency from microseconds to
 PCM bytes and adds playback ring occupancy.
 
 `PlaybackSink::queued_bytes()` reports only ring occupancy. HDA uses it to
-limit DMA submission, while position uses `latency_bytes()`. Graph latency can
+limit DMA submission. HDA link position advances when PCM reaches the backend,
+independently of its downstream latency. Graph latency can
 remain nonzero with an empty ring, so using it to throttle submission would
 stall playback.
 

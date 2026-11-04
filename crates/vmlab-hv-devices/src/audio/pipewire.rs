@@ -269,6 +269,12 @@ fn run(
                     };
                     let size = frames * stride;
                     let n = shared.ring.pop_max(&mut bytes[..size]);
+                    log::trace!(
+                        "PipeWire pull requested_frames={frames} delivered_frames={} queued_bytes={} silence_frames={}",
+                        n / stride,
+                        shared.ring.used_bytes(),
+                        (size - n) / stride,
+                    );
                     bytes[n..size].fill(0);
                     shared.transferred.fetch_add(n, Ordering::Relaxed);
                     size
