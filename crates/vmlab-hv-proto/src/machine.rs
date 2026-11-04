@@ -45,6 +45,9 @@ pub struct MachineDescription {
     pub hyperv: Vec<HyperV>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<Display>,
+    /// Optional shared-memory virtual monitor. Absent means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_display: Option<VirtualDisplay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tablet: Option<PciAddress>,
     /// The xHCI controller for host USB passthrough (the VM's `usb = true`):
@@ -164,6 +167,32 @@ pub struct VfioDevice {
     /// Canonical domain:bus:device.function, e.g. `0000:65:00.0`.
     pub host: String,
     pub pci: PciAddress,
+}
+
+/// Version-one VMLABDSP ivshmem device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualDisplay {
+    pub pci: PciAddress,
+    #[serde(default = "VirtualDisplay::default_memory_bytes")]
+    pub memory_bytes: u64,
+}
+
+impl VirtualDisplay {
+    pub const MAX_WIDTH: u32 = 3840;
+    pub const MAX_HEIGHT: u32 = 2160;
+    pub const BUFFERS_OFFSET: u64 = 4096 + 256 * 256 * 4;
+    pub const BUFFER_STRIDE: u64 =
+        (Self::MAX_WIDTH as u64 * Self::MAX_HEIGHT as u64 * 4 + 4095) & !4095;
+    pub const MIN_MEMORY_BYTES: u64 = Self::BUFFERS_OFFSET + 3 * Self::BUFFER_STRIDE;
+
+    pub const fn default_memory_bytes() -> u64 {
+        128 << 20
+    }
+
+    pub fn valid_memory_bytes(size: u64) -> bool {
+        size.is_power_of_two() && size >= Self::MIN_MEMORY_BYTES && size <= isize::MAX as u64
+    }
 }
 
 /// The guest audio device and the host streams it plays into.

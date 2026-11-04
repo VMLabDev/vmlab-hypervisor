@@ -9,6 +9,30 @@
 use std::path::PathBuf;
 
 #[test]
+fn virtual_display_defaults_off_and_preserves_explicit_configuration() {
+    use vmlab_hv_proto::machine::VirtualDisplay;
+    let mut value = serde_json::to_value(sample_machine()).unwrap();
+    assert!(value.get("virtual_display").is_none());
+    assert!(
+        serde_json::from_value::<MachineDescription>(value.clone())
+            .unwrap()
+            .virtual_display
+            .is_none()
+    );
+    value["virtual_display"] = serde_json::json!({"pci":{"bus":0,"device":7,"function":0}});
+    let machine: MachineDescription = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        machine.virtual_display.as_ref().unwrap().memory_bytes,
+        128 << 20
+    );
+    round_trip(&machine);
+    assert!(VirtualDisplay::valid_memory_bytes(128 << 20));
+    for size in [0, 64 << 20, 192 << 20, u64::MAX] {
+        assert!(!VirtualDisplay::valid_memory_bytes(size));
+    }
+}
+
+#[test]
 fn macos_launch_serialization_and_description_redaction_are_separate() {
     let description: vmlab_hv_proto::MachineDescription =
         serde_json::from_value(serde_json::json!({
@@ -149,6 +173,7 @@ fn fs_share_socket_and_path_are_alternatives() {
 
 fn sample_machine() -> MachineDescription {
     MachineDescription {
+        virtual_display: None,
         fw_cfg: vec![],
         exit_on_reset: false,
         vfio: vec![],

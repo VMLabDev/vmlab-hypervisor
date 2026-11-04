@@ -25,6 +25,13 @@ use crate::vm::{Vm, VmShared};
 /// Static checks that do not need KVM; each error names what is wrong.
 pub fn validate(desc: &MachineDescription) -> Result<(), VmmError> {
     validate_fw_cfg(desc)?;
+    if let Some(display) = &desc.virtual_display
+        && (desc.machine != Machine::Q35
+            || !vmlab_hv_proto::machine::VirtualDisplay::valid_memory_bytes(display.memory_bytes)
+            || desc.display.as_ref().is_some_and(|d| d.gpu.is_some()))
+    {
+        return Err(VmmError::InvalidMachine("virtual_display requires q35, power-of-two memory sufficient for three 3840x2160 frames, and no virgl/Venus acceleration".into()));
+    }
     let mut hosts = std::collections::BTreeSet::new();
     for device in &desc.vfio {
         crate::vfio::validate_address(&device.host).map_err(VmmError::InvalidMachine)?;
@@ -304,6 +311,9 @@ fn validate_q35_devices(desc: &MachineDescription) -> Result<(), VmmError> {
     }
     if let Some(display) = &desc.display {
         add(Some(display.pci), "display")?;
+    }
+    if let Some(display) = &desc.virtual_display {
+        add(Some(display.pci), "virtual_display")?;
     }
     if let Some(tablet) = desc.tablet {
         add(Some(tablet), "tablet")?;
@@ -906,6 +916,21 @@ pub fn build(
         serials.push(serial);
     }
 
+    let virtual_display = if let Some(config) = &desc.virtual_display {
+        let mut device = vmlab_hv_devices::vdisplay::Device::new(config.memory_bytes)
+            .map_err(|e| VmmError::Other(format!("creating virtual display: {e}")))?;
+        device.set_mapper(Box::new(crate::vdisplay::Mapping::new(
+            vm_fd.clone(),
+            device.region.clone(),
+            device.doorbell.clone(),
+        )));
+        let device = Arc::new(Mutex::new(device));
+        place(device.clone(), Some(config.pci))?;
+        snap_nodes.push(DeviceNode::Resettable(device.clone()));
+        Some(device)
+    } else {
+        None
+    };
     let vga = if let Some(display) = &desc.display {
         let virtio = display.device == vmlab_hv_proto::machine::DisplayDevice::VirtioVga;
         let path = display.rom.as_deref().unwrap_or(std::path::Path::new(
@@ -1446,6 +1471,7 @@ pub fn build(
     *shared.vfio.lock() = vfio;
     *shared.chipset.lock() = chipset;
     *shared.vga.lock() = vga;
+    *shared.virtual_display.lock() = virtual_display;
     *shared.xhci.lock() = xhci;
     shared
         .usb_hotplug
@@ -1684,6 +1710,7 @@ mod tests {
 
     fn desc() -> MachineDescription {
         MachineDescription {
+            virtual_display: None,
             fw_cfg: vec![],
             exit_on_reset: false,
             vfio: vec![],

@@ -282,6 +282,7 @@ fn appended_cpio_is_aligned_after_every_compressed_image_length() {
 /// One machine description with a single in-process share on `path`.
 fn machine(dir: &Dir, share: &Path, initrd: &Path, read_only: bool) -> MachineDescription {
     MachineDescription {
+        virtual_display: None,
         fw_cfg: vec![],
         exit_on_reset: false,
         vfio: vec![],

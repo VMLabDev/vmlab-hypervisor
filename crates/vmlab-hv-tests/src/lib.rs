@@ -408,6 +408,7 @@ pub fn launch(spec: &MachineSpec, assets: &Assets) -> Guest {
     };
 
     let mut desc = MachineDescription {
+        virtual_display: None,
         fw_cfg: vec![],
         exit_on_reset: false,
         vfio: vec![],

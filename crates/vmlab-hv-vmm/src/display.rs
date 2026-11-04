@@ -144,11 +144,142 @@ struct Source {
     latest: Mutex<Option<Frame>>,
     placeholder: Arc<Vec<u8>>,
 }
+
+impl Source {
+    fn queue_frame(&self, frame: &Frame, deferred: bool) {
+        let mut cached = frame.clone();
+        let mut latest = self.latest.lock();
+        if !deferred {
+            cached.damage.clear();
+        } else if latest
+            .as_ref()
+            .is_some_and(|frame| !frame.damage.is_empty())
+        {
+            cached.damage = vec![cached.full()];
+        }
+        *latest = Some(cached);
+    }
+}
+
+struct VirtualState {
+    reader: vmlab_hv_devices::vdisplay::Reader,
+    latest: Option<(u32, Frame)>,
+    active: bool,
+    generation: u64,
+}
+
+/// Selects a monitor without changing the clients' transport or capture paths.
+struct VirtualSource {
+    emulated: Arc<dyn FrameSource>,
+    emulated_cursor: Arc<dyn Fn() -> vmlab_hv_display::Cursor + Send + Sync>,
+    device: Arc<Mutex<vmlab_hv_devices::vdisplay::Device>>,
+    state: Mutex<VirtualState>,
+    server: std::sync::OnceLock<Weak<DisplayServer>>,
+}
+
+impl VirtualSource {
+    fn new(
+        emulated: Arc<dyn FrameSource>,
+        emulated_cursor: Arc<dyn Fn() -> vmlab_hv_display::Cursor + Send + Sync>,
+        device: Arc<Mutex<vmlab_hv_devices::vdisplay::Device>>,
+    ) -> Self {
+        let reader = vmlab_hv_devices::vdisplay::Reader::new(device.lock().region.clone());
+        Self {
+            emulated,
+            emulated_cursor,
+            device,
+            state: Mutex::new(VirtualState {
+                reader,
+                latest: None,
+                active: false,
+                generation: 0,
+            }),
+            server: Default::default(),
+        }
+    }
+
+    fn select(&self, now: std::time::Instant) -> io::Result<(Frame, vmlab_hv_display::Cursor)> {
+        let mut state = self.state.lock();
+        // Drain the ioeventfd as well as polling, so cursor-only updates and a
+        // lost or coalesced doorbell follow the same bounded publication path.
+        let _ = self.device.lock().doorbell.read();
+        let active = state.reader.active(now);
+        let seq = state.reader.sequence();
+        if active && seq.is_some() {
+            if state.latest.as_ref().map(|(seq, _)| *seq) != seq {
+                if let Some(published) = state.reader.frame()? {
+                    let generation = state.generation;
+                    let damage = if state
+                        .latest
+                        .as_ref()
+                        .is_some_and(|(seq, _)| published.seq != seq.wrapping_add(1))
+                    {
+                        vec![Rect {
+                            x: 0,
+                            y: 0,
+                            width: published.width,
+                            height: published.height,
+                        }]
+                    } else {
+                        published.damage
+                    };
+                    state.latest = Some((
+                        published.seq,
+                        Frame {
+                            flags: Default::default(),
+                            generation,
+                            width: published.width,
+                            height: published.height,
+                            stride: published.stride,
+                            drm_fourcc: vmlab_hv_display::protocol::XRGB8888,
+                            modifier: 0,
+                            timestamp_ns: crate::chipset::host_monotonic_ns(),
+                            damage,
+                            pixels: Pixels::Shm(Arc::new(published.pixels)),
+                        },
+                    ));
+                }
+            } else if let Some((_, latest)) = &mut state.latest {
+                latest.damage.clear();
+            }
+            if let Some((_, frame)) = &state.latest {
+                let mut frame = frame.clone();
+                if !state.active {
+                    state.generation = state.generation.wrapping_add(1);
+                    frame.damage = vec![frame.full()];
+                }
+                state.active = true;
+                frame.generation = (1 << 63) | state.generation;
+                let cursor = state.reader.cursor()?.unwrap_or_default();
+                return Ok((frame, cursor));
+            }
+        }
+        state.active = false;
+        state.latest = None;
+        drop(state);
+        Ok((self.emulated.frame()?, (self.emulated_cursor)()))
+    }
+}
+
+impl FrameSource for VirtualSource {
+    fn frame(&self) -> io::Result<Frame> {
+        let (frame, cursor) = self.select(std::time::Instant::now())?;
+        if let Some(server) = self.server.get().and_then(Weak::upgrade) {
+            server.set_cursor(cursor)?;
+        }
+        Ok(frame)
+    }
+    fn readback(&self, frame: &Frame) -> io::Result<Vec<u8>> {
+        self.emulated.readback(frame)
+    }
+}
+
 impl FrameSource for Source {
     fn frame(&self) -> io::Result<Frame> {
-        if let Some(mut frame) = self.latest.lock().clone() {
+        if let Some(frame) = self.latest.lock().as_mut() {
+            let published = frame.clone();
             frame.damage.clear();
-            return Ok(frame);
+            return Ok(published);
         }
         let shared = self
             .shared
@@ -309,7 +440,15 @@ impl vmlab_hv_devices::virtio::gpu::DisplaySink for GpuSink {
             }
             ScanoutPixels::Inactive | ScanoutPixels::Vga => {}
         }
-        *self.source.latest.lock() = Some(frame.clone());
+        let virtual_display = self
+            .source
+            .shared
+            .upgrade()
+            .is_some_and(|shared| shared.virtual_display.lock().is_some());
+        self.source.queue_frame(&frame, virtual_display);
+        if virtual_display {
+            return;
+        }
         if let Err(error) = server.publish_frame(frame) {
             log::warn!("display flush: {error}");
         }
@@ -378,6 +517,9 @@ impl InputSink for Input {
                 }
             }
             Message::RequestSize { width, height } => {
+                if let Some(device) = shared.virtual_display.lock().as_ref() {
+                    device.lock().region.request_size(width, height);
+                }
                 if let Some(vga) = shared.vga.lock().as_ref() {
                     vga.request_size(width, height);
                 }
@@ -454,9 +596,25 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
         latest: Mutex::new(None),
         placeholder: Arc::new(placeholder_pixels()),
     });
+    let virtual_source = shared.virtual_display.lock().clone().map(|device| {
+        let weak = Arc::downgrade(shared);
+        Arc::new(VirtualSource::new(
+            source.clone(),
+            Arc::new(move || {
+                weak.upgrade()
+                    .and_then(|shared| shared.vga.lock().clone())
+                    .map_or_else(Default::default, |vga| vga.cursor())
+            }),
+            device,
+        ))
+    });
+    let selected: Arc<dyn FrameSource> = virtual_source.as_ref().map_or_else(
+        || source.clone() as Arc<dyn FrameSource>,
+        |source| source.clone(),
+    );
     let server = Arc::new(
         DisplayServer::new(
-            source.clone(),
+            selected,
             Arc::new(Input {
                 shared: Arc::downgrade(shared),
                 pointer: Mutex::new(vmlab_hv_devices::usb::PointerEvent {
@@ -470,6 +628,9 @@ pub(crate) fn serve(shared: &Arc<VmShared>, native: &Path, rfb: &Path) -> Result
         )
         .map_err(|e| VmmError::Other(format!("creating display server: {e}")))?,
     );
+    if let Some(source) = virtual_source {
+        let _ = source.server.set(Arc::downgrade(&server));
+    }
     if let Some(Video::Virtio(device)) = shared.vga.lock().as_ref() {
         device.lock().set_display_sink(Arc::new(GpuSink {
             source,
@@ -552,6 +713,249 @@ fn placeholder_pixels() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_emulated_damage_is_consumed_once() {
+        let frame = Frame {
+            flags: Default::default(),
+            generation: 1,
+            width: 4,
+            height: 1,
+            stride: 16,
+            drm_fourcc: vmlab_hv_display::protocol::XRGB8888,
+            modifier: 0,
+            timestamp_ns: 1,
+            damage: vec![Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            }],
+            pixels: Pixels::Shm(Arc::new(vec![1; 16])),
+        };
+        let source = Source {
+            shared: Weak::new(),
+            generation: Mutex::new(((0, 0), 0)),
+            latest: Mutex::new(None),
+            placeholder: Arc::new(Vec::new()),
+        };
+        source.queue_frame(&frame, true);
+        assert_eq!(source.frame().unwrap().damage.len(), 1);
+        assert!(source.frame().unwrap().damage.is_empty());
+        source.queue_frame(&frame, true);
+        let mut second = frame.clone();
+        second.damage[0].x = 3;
+        source.queue_frame(&second, true);
+        assert_eq!(source.frame().unwrap().damage, vec![frame.full()]);
+    }
+
+    #[test]
+    fn virtual_display_publishes_stable_surfaces_cursor_and_fallback() {
+        use std::fs::File;
+        use std::os::unix::{fs::FileExt, net::UnixStream};
+        use std::time::{Duration, Instant};
+        use vmlab_hv_devices::vdisplay::{Device, FRAME_SEQ, XRGB8888};
+        use vmlab_hv_display::{Capabilities, Client};
+        use vmlab_hv_proto::machine::VirtualDisplay;
+
+        struct Emulated;
+        impl FrameSource for Emulated {
+            fn frame(&self) -> io::Result<Frame> {
+                Ok(Frame {
+                    flags: Default::default(),
+                    generation: 17,
+                    width: 2,
+                    height: 1,
+                    stride: 8,
+                    drm_fourcc: XRGB8888,
+                    modifier: 0,
+                    timestamp_ns: 0,
+                    damage: vec![Rect {
+                        x: 0,
+                        y: 0,
+                        width: 2,
+                        height: 1,
+                    }],
+                    pixels: Pixels::Shm(Arc::new(vec![9; 8])),
+                })
+            }
+            fn readback(&self, frame: &Frame) -> io::Result<Vec<u8>> {
+                let Pixels::Shm(bytes) = &frame.pixels else {
+                    unreachable!()
+                };
+                Ok(bytes.as_ref().clone())
+            }
+        }
+        struct ModeInput(Arc<vmlab_hv_devices::vdisplay::Region>);
+        impl InputSink for ModeInput {
+            fn input(&self, message: Message) {
+                if let Message::RequestSize { width, height } = message {
+                    self.0.request_size(width, height);
+                }
+            }
+        }
+        let device = Arc::new(Mutex::new(
+            Device::new(VirtualDisplay::default_memory_bytes()).unwrap(),
+        ));
+        let region = device.lock().region.clone();
+        let guest = region.file().unwrap();
+        let source = Arc::new(VirtualSource::new(
+            Arc::new(Emulated),
+            Arc::new(Default::default),
+            device,
+        ));
+        let server = Arc::new(
+            DisplayServer::new(source.clone(), Arc::new(ModeInput(region.clone()))).unwrap(),
+        );
+        source.server.set(Arc::downgrade(&server)).unwrap();
+        let (a, b) = UnixStream::pair().unwrap();
+        b.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let serving = server.clone();
+        let worker = std::thread::spawn(move || serving.serve_native(a));
+        let client =
+            Client::from_stream(b, Capabilities(Capabilities::FRAMES | Capabilities::INPUT))
+                .unwrap();
+        assert!(matches!(
+            client.receive().unwrap().message,
+            Message::LedState { .. }
+        ));
+        let Message::SurfaceConfigure {
+            surface_id: emulated_surface,
+            ..
+        } = client.receive().unwrap().message
+        else {
+            panic!("configure");
+        };
+        let Message::FrameReady {
+            surface_id,
+            buffer,
+            seq,
+            ..
+        } = client.receive().unwrap().message
+        else {
+            panic!("frame");
+        };
+        client.release(surface_id, buffer, seq).unwrap();
+
+        for (offset, value) in [
+            (0x100, 1u32),
+            (0x118, 2),
+            (0x11c, 1),
+            (0x120, 8),
+            (0x124, XRGB8888),
+            (0x204, (-3i32) as u32),
+            (0x208, 42),
+            (0x20c, 1),
+            (0x210, 1),
+            (0x214, 1),
+            (0x218, 1),
+        ] {
+            guest.write_all_at(&value.to_le_bytes(), offset).unwrap();
+        }
+        guest.write_all_at(&[3, 4, 5, 255], 0x1000).unwrap();
+        guest.write_all_at(&1u32.to_le_bytes(), 0x200).unwrap();
+        let now = Instant::now();
+        let mut shared_surface = 0;
+        for frame_number in 1..=3u32 {
+            let index = (frame_number - 1) % 3;
+            guest
+                .write_all_at(
+                    &[frame_number as u8; 8],
+                    VirtualDisplay::BUFFERS_OFFSET + index as u64 * VirtualDisplay::BUFFER_STRIDE,
+                )
+                .unwrap();
+            guest.write_all_at(&index.to_le_bytes(), 0x114).unwrap();
+            region.store_u32(FRAME_SEQ, frame_number);
+            server.publish().unwrap();
+            if frame_number == 1 {
+                let packet = client.receive().unwrap();
+                let Message::SurfaceConfigure { surface_id, .. } = packet.message else {
+                    panic!("source switch must configure");
+                };
+                assert_ne!(surface_id, emulated_surface);
+                shared_surface = surface_id;
+                let Message::FrameReady {
+                    surface_id,
+                    buffer,
+                    seq,
+                    ..
+                } = client.receive().unwrap().message
+                else {
+                    panic!("frame");
+                };
+                let mut pixels = [0; 8];
+                File::from(packet.fds[buffer as usize].try_clone().unwrap())
+                    .read_exact_at(&mut pixels, 0)
+                    .unwrap();
+                assert_eq!(pixels, [1; 8]);
+                client.release(surface_id, buffer, seq).unwrap();
+            } else {
+                let Message::FrameReady {
+                    surface_id,
+                    buffer,
+                    seq,
+                    ..
+                } = client.receive().unwrap().message
+                else {
+                    panic!("steady source reconfigured");
+                };
+                assert_eq!(surface_id, shared_surface);
+                client.release(surface_id, buffer, seq).unwrap();
+            }
+        }
+        let (frame, cursor) = source.select(now).unwrap();
+        assert!(frame.damage.is_empty());
+        assert_eq!(
+            (cursor.x, cursor.y, cursor.visible, cursor.argb),
+            (-3, 42, true, vec![3, 4, 5, 255])
+        );
+        client
+            .send(&Message::RequestSize {
+                width: 9000,
+                height: 1200,
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while region.load_u32(0x3c) == 0 {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!((region.load_u32(0x34), region.load_u32(0x38)), (3840, 1200));
+        for (offset, value) in [(0x128, 1), (0x130, 1), (0x134, 1), (FRAME_SEQ, 5)] {
+            region.store_u32(offset, value);
+        }
+        let (skipped, _) = source.select(now).unwrap();
+        assert_eq!(skipped.damage, vec![skipped.full()]);
+        let (fallback, cursor) = source.select(now + Duration::from_secs(4)).unwrap();
+        assert_eq!(fallback.generation, 17);
+        assert!(!cursor.visible);
+        server.publish_frame(fallback).unwrap();
+        let Message::SurfaceConfigure { surface_id, .. } = client.receive().unwrap().message else {
+            panic!("fallback configure");
+        };
+        assert_ne!(surface_id, shared_surface);
+        guest.write_all_at(&9u64.to_le_bytes(), 0x108).unwrap();
+        assert_ne!(
+            source
+                .select(now + Duration::from_secs(5))
+                .unwrap()
+                .0
+                .generation,
+            17
+        );
+        region.store_u32(0x100, 2);
+        assert_eq!(
+            source
+                .select(now + Duration::from_secs(5))
+                .unwrap()
+                .0
+                .generation,
+            17
+        );
+        server.shutdown();
+        drop(client);
+        let _ = worker.join().unwrap();
+    }
 
     #[test]
     fn vga_restore_defers_to_legacy_poll_without_a_false_placeholder() {

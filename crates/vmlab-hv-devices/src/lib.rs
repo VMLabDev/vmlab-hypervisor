@@ -21,6 +21,7 @@ pub mod pflash;
 pub mod serial;
 pub mod tpm;
 pub mod usb;
+pub mod vdisplay;
 pub mod vfio;
 pub mod virtio;
 

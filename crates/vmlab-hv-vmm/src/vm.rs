@@ -160,6 +160,7 @@ pub struct VmShared {
     serial_clock: Mutex<(std::time::Instant, bool)>,
     pub(crate) chipset: Mutex<Option<Arc<crate::chipset::Chipset>>>,
     pub(crate) vga: Mutex<Option<crate::display::Video>>,
+    pub(crate) virtual_display: Mutex<Option<Arc<Mutex<vmlab_hv_devices::vdisplay::Device>>>>,
     pub(crate) xhci: Mutex<Option<Arc<Mutex<vmlab_hv_devices::usb::XhciController>>>>,
     /// Whether the machine's description asked for the `usbx` passthrough
     /// controller (`usb = true`): only such machines accept hot-plug.
@@ -231,6 +232,7 @@ impl VmShared {
             serial_clock: Mutex::new((std::time::Instant::now(), false)),
             chipset: Mutex::new(None),
             vga: Mutex::new(None),
+            virtual_display: Mutex::new(None),
             xhci: Mutex::new(None),
             usb_hotplug: std::sync::atomic::AtomicBool::new(false),
             usb_attachments: Mutex::new(Vec::new()),
@@ -860,7 +862,8 @@ impl VmShared {
         if port >= IO_ALLOC_BASE {
             let mut root = self.pci_root.lock();
             if root.dispatch_io_write(port, data) {
-                let error = if self.vfio.lock().is_empty() {
+                let error = if self.vfio.lock().is_empty() && self.virtual_display.lock().is_none()
+                {
                     None
                 } else {
                     root.take_error()
@@ -874,7 +877,7 @@ impl VmShared {
             }
         }
         self.io_bus.lock().write(port, data);
-        if !self.vfio.lock().is_empty()
+        if (!self.vfio.lock().is_empty() || self.virtual_display.lock().is_some())
             && let Some(error) = self.pci_root.lock().take_error()
         {
             self.request_exit(ExitReason::Error(error));
@@ -937,7 +940,7 @@ impl VmShared {
             let _memory_update = (!indirect).then(|| self.memory_update());
             use vmlab_hv_devices::BusDevice;
             crate::pci::PciEcam::new(self.pci_root.clone()).write(offset, data);
-            if !self.vfio.lock().is_empty()
+            if (!self.vfio.lock().is_empty() || self.virtual_display.lock().is_some())
                 && let Some(error) = self.pci_root.lock().take_error()
             {
                 self.request_exit(ExitReason::Error(error));
@@ -1156,15 +1159,17 @@ impl VmShared {
             return;
         }
         if let Some(display) = self.display.lock().as_ref() {
-            let poll = self
-                .vga
-                .lock()
-                .as_ref()
-                .is_none_or(|vga| vga.poll_scanout());
+            let poll = self.virtual_display.lock().is_some()
+                || self
+                    .vga
+                    .lock()
+                    .as_ref()
+                    .is_none_or(|vga| vga.poll_scanout());
             if poll && let Err(e) = display.publish() {
                 log::warn!("display frame: {e}");
             }
-            if let Some(vga) = self.vga.lock().as_ref()
+            if self.virtual_display.lock().is_none()
+                && let Some(vga) = self.vga.lock().as_ref()
                 && let Err(e) = display.set_cursor(vga.cursor())
             {
                 log::warn!("display cursor: {e}");
@@ -1410,7 +1415,10 @@ impl Vm {
         // Rendering a frame can exceed the guest's PCM I/O timeout. Keep
         // it off the thread that advances audio and the platform timers.
         // The binary attaches the display server after constructing the VM.
-        if machine.shared.vga.lock().is_some() || machine.shared.display.lock().is_some() {
+        if machine.shared.vga.lock().is_some()
+            || machine.shared.virtual_display.lock().is_some()
+            || machine.shared.display.lock().is_some()
+        {
             let weak = Arc::downgrade(&machine.shared);
             machine.display_worker = Some(
                 std::thread::Builder::new()

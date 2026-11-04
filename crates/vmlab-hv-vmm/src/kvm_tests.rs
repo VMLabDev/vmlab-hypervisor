@@ -1020,6 +1020,7 @@ fn real_kernel_boots_and_resets() {
     let (factory, serial) = TestFactory::new();
     let dir = tempfile::tempdir().unwrap();
     let desc = MachineDescription {
+        virtual_display: None,
         fw_cfg: vec![],
         exit_on_reset: true,
         vfio: vec![],
