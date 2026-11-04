@@ -540,7 +540,7 @@ impl HostAudio for BufferedHost {
 }
 
 #[test]
-fn link_position_and_ioc_do_not_wait_for_backend_playback() {
+fn link_position_follows_local_fifo_but_ioc_follows_dma() {
     let latency = Arc::new(AtomicUsize::new(0));
     let periods = Arc::new(Mutex::new(vec![]));
     let host = BufferedHost {
@@ -553,19 +553,23 @@ fn link_position_and_ioc_do_not_wait_for_backend_playback() {
     write(&mut hda, 0x20, 0x80000002, 4);
     hda.advance(Duration::from_millis(30)).unwrap();
     assert_eq!(latency.load(Ordering::SeqCst), 2048);
+    assert_eq!(
+        hda.streams[1].consumed, 1024,
+        "FIFO lag is at most SDFIFOS+1"
+    );
     assert_eq!(read(&mut hda, 0xa4, 4), 0);
     assert_eq!(read(&mut hda, 0xa3, 1) & 4, 4);
     assert_eq!(interrupts.0.lock().len(), 1);
     hda.advance(Duration::from_millis(10)).unwrap();
     assert_eq!(periods.lock().len(), 2);
-    latency.store(1536, Ordering::SeqCst);
+    latency.store(512, Ordering::SeqCst);
     hda.update_position(1);
     hda.update_irq();
-    assert_eq!(read(&mut hda, 0xa4, 4), 0);
+    assert_eq!(read(&mut hda, 0xa4, 4), 512);
     latency.store(1900, Ordering::SeqCst);
     hda.update_position(1);
     hda.update_irq();
-    assert_eq!(read(&mut hda, 0xa4, 4), 0);
+    assert_eq!(read(&mut hda, 0xa4, 4), 512);
     latency.store(0, Ordering::SeqCst);
     hda.update_position(1);
     hda.update_irq();
@@ -750,7 +754,7 @@ fn ten_millisecond_guest_refills_survive_jitter_and_256_frame_host_pulls() {
             hda.advance(Duration::from_micros(micros)).unwrap();
             if read(&mut hda, 0xa3, 1) & 4 != 0 {
                 let position = read(&mut hda, 0xa4, 4) as usize;
-                let buffer = (position / PERIOD + 1) % 2;
+                let buffer = position / PERIOD;
                 refills.push_back((elapsed + 2000, buffer, completed + 2));
                 completed += 1;
                 write(&mut hda, 0xa3, 4, 1);

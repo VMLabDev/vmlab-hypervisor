@@ -58,15 +58,14 @@ bytes. PulseAudio converts its positive stream latency from microseconds to
 PCM bytes and adds playback ring occupancy.
 
 `PlaybackSink::queued_bytes()` reports only ring occupancy. HDA uses it to
-limit DMA submission. HDA link position advances when PCM reaches the backend,
-independently of its downstream latency. Graph latency can
+limit DMA submission. HDA link position excludes at most the advertised
+controller FIFO depth from that queue, independently of downstream graph
+latency. IOC reports when DMA has fetched the descriptor. Graph latency can
 remain nonzero with an empty ring, so using it to throttle submission would
 stall playback.
 
-`queued_bytes()` reports only playback ring occupancy, or zero after the worker
-exits. Device submission throttling uses this count rather than total latency.
-Graph latency can exceed one period even with an empty ring. Tests pin this
-distinction for both backends.
+After the worker exits, `queued_bytes()` returns zero. Tests pin the distinction
+between ring occupancy and graph latency for both backends.
 
 ## Startup, failure, and teardown
 
