@@ -204,6 +204,45 @@ fn exercise(mode: &str) {
             .unwrap()
             .contains("waiting for display")
     });
+    let class = connection
+        .get_property(
+            false,
+            startup_window,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            0,
+            1024,
+        )
+        .unwrap()
+        .reply()
+        .unwrap()
+        .value;
+    assert_eq!(class, b"dev.vmlab.viewer\0dev.vmlab.viewer\0");
+    let icon_atom = connection
+        .intern_atom(false, b"_NET_WM_ICON")
+        .unwrap()
+        .reply()
+        .unwrap()
+        .atom;
+    let icon = connection
+        .get_property(
+            false,
+            startup_window,
+            icon_atom,
+            AtomEnum::CARDINAL,
+            0,
+            64 * 64 + 2,
+        )
+        .unwrap()
+        .reply()
+        .unwrap();
+    let pixels: Vec<_> = icon.value32().expect("32-bit window icon").collect();
+    assert_eq!(&pixels[..2], &[64, 64]);
+    let expected: Vec<_> = include_bytes!("../assets/icon.rgba")
+        .chunks_exact(4)
+        .map(|rgba| u32::from_be_bytes([rgba[3], rgba[0], rgba[1], rgba[2]]))
+        .collect();
+    assert_eq!(&pixels[2..], expected);
     wait(|| {
         let pixels = connection
             .get_image(

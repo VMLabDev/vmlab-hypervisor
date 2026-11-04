@@ -15,8 +15,8 @@ use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    platform::scancode::PhysicalKeyExtScancode,
-    window::{Window, WindowId},
+    platform::{scancode::PhysicalKeyExtScancode, wayland::WindowAttributesExtWayland},
+    window::{Icon, Window, WindowId},
 };
 
 struct App {
@@ -376,6 +376,14 @@ impl ApplicationHandler<Event> for App {
         let result = (|| -> Result<()> {
             let window = event_loop.create_window(
                 Window::default_attributes()
+                    // winit shares this name with X11's WM_CLASS. Wayland uses
+                    // the desktop entry because winit 0.30 ignores window icons there.
+                    .with_name("dev.vmlab.viewer", "dev.vmlab.viewer")
+                    .with_window_icon(Some(Icon::from_rgba(
+                        include_bytes!("../assets/icon.rgba").to_vec(),
+                        64,
+                        64,
+                    )?))
                     .with_title("vmlab-hv-viewer")
                     .with_inner_size(winit::dpi::PhysicalSize::new(1024, 768)),
             )?;
